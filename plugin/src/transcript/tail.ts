@@ -98,16 +98,22 @@ function fileSize(path: string): number | undefined {
   }
 }
 
+export type Titles = { custom?: string; agent?: string; ai?: string }
+
 // Session name for the topic: /rename (custom-title, then agent-name) beats the
 // automatic ai-title; within each kind the last record wins.
-export function readSessionTitle(path: string): string | undefined {
+export function effectiveTitle(t: Titles): string | undefined {
+  return t.custom ?? t.agent ?? t.ai
+}
+
+export function readSessionTitles(path: string): Titles {
+  const last: Titles = {}
   let text: string
   try {
     text = readFileSync(path, 'utf8')
   } catch {
-    return undefined
+    return last
   }
-  const last: Record<string, string> = {}
   for (const l of text.split('\n')) {
     if (!l.includes('-title"') && !l.includes('"agent-name"')) continue
     let rec: unknown
@@ -118,5 +124,9 @@ export function readSessionTitle(path: string): string | undefined {
     }
     for (const ev of parseRecord(rec)) if (ev.kind === 'title') last[ev.source] = ev.title
   }
-  return last.custom ?? last.agent ?? last.ai
+  return last
+}
+
+export function readSessionTitle(path: string): string | undefined {
+  return effectiveTitle(readSessionTitles(path))
 }
