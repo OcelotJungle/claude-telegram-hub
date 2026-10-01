@@ -93,6 +93,10 @@ export class TelegramApi {
     return body.result as T
   }
 
+  getMe(signal?: AbortSignal): Promise<{ id: number; username?: string }> {
+    return this.call('getMe', {}, { signal })
+  }
+
   getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<Update[]> {
     return this.call<Update[]>('getUpdates', { offset, timeout: timeoutSec, allowed_updates: ['message'] }, { signal, retry: false })
   }

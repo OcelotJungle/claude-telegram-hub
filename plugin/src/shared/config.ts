@@ -29,10 +29,20 @@ export function idleMs(): number {
   return Number(process.env.TG_HUB_IDLE_MS) || 5 * 60 * 1000
 }
 
+// Hand-edited files on Windows come in whatever encoding the editor picked:
+// Windows PowerShell 5.1 `>` writes UTF-16LE, Notepad may add a UTF-8 BOM.
+export function readText(file: string): string {
+  const b = readFileSync(file)
+  if (b[0] === 0xff && b[1] === 0xfe) return b.subarray(2).toString('utf16le')
+  if (b[0] === 0xfe && b[1] === 0xff) return Buffer.from(b.subarray(2)).swap16().toString('utf16le')
+  if (b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf) return b.subarray(3).toString('utf8')
+  return b.toString('utf8')
+}
+
 export function loadToken(): string | undefined {
   if (process.env.TELEGRAM_BOT_TOKEN) return process.env.TELEGRAM_BOT_TOKEN
   try {
-    for (const line of readFileSync(paths().envFile, 'utf8').split(/\r?\n/)) {
+    for (const line of readText(paths().envFile).split(/\r?\n/)) {
       const m = line.match(/^\s*TELEGRAM_BOT_TOKEN\s*=\s*(.*?)\s*$/)
       if (m && m[1]) return m[1]
     }
@@ -45,7 +55,7 @@ export type Config = { groupId?: string; allowFrom: string[] }
 export function loadConfig(): Config {
   let raw: unknown
   try {
-    raw = JSON.parse(readFileSync(paths().configFile, 'utf8'))
+    raw = JSON.parse(readText(paths().configFile))
   } catch {
     return { allowFrom: [] }
   }

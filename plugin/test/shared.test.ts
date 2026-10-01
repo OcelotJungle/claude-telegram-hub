@@ -65,6 +65,25 @@ describe('config', () => {
     expect(loadToken()).toBe('123:abc')
   })
 
+  // Windows PowerShell 5.1 `>` / Out-File writes UTF-16LE with a BOM; Notepad may add a UTF-8 BOM.
+  const utf16le = (s: string) => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(s, 'utf16le')])
+  const utf16be = (s: string) => Buffer.from(utf16le(s).swap16())
+  const utf8bom = (s: string) => Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(s, 'utf8')])
+
+  test('token is read from .env saved as UTF-16 or with a BOM', () => {
+    for (const enc of [utf16le, utf16be, utf8bom]) {
+      writeFileSync(join(dir, '.env'), enc('TELEGRAM_BOT_TOKEN=123:abc\r\n'))
+      expect(loadToken()).toBe('123:abc')
+    }
+  })
+
+  test('config.json saved as UTF-16 or with a BOM is read', () => {
+    for (const enc of [utf16le, utf8bom]) {
+      writeFileSync(join(dir, 'config.json'), enc('{ "groupId": "-1001", "allowFrom": ["1"] }'))
+      expect(loadConfig()).toEqual({ groupId: '-1001', allowFrom: ['1'] })
+    }
+  })
+
   test('real env token wins over .env', () => {
     writeFileSync(join(dir, '.env'), 'TELEGRAM_BOT_TOKEN=123:abc\n')
     process.env.TELEGRAM_BOT_TOKEN = '999:zzz'

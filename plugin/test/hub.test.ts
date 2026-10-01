@@ -22,13 +22,13 @@ let log: ReturnType<typeof memLogger>
 let exited: boolean
 const clients: { close(): void }[] = []
 
-async function startHub(o: { idleMs?: number; token?: boolean } = {}) {
+async function startHub(o: { idleMs?: number; token?: boolean | string } = {}) {
   port = await freePort()
   hub = new Hub({
     port,
     sessionsFile: join(dir, 'sessions.json'),
     inboxDir: join(dir, 'inbox'),
-    api: o.token === false ? undefined : new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2 }),
+    api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === 'string' ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2 }),
     config: () => config,
     idleMs: o.idleMs ?? 60_000,
     pollTimeoutSec: 1,
@@ -354,6 +354,24 @@ describe('hooks and transport', () => {
     await startHub()
     const second = new Hub({ port, sessionsFile: join(dir, 's2.json'), inboxDir: dir, api: undefined, config: () => config, idleMs: 1000, log, onExit() {} })
     expect(second.start()).toBe(false)
+  })
+})
+
+describe('polling', () => {
+  test('the log says which bot is polled', async () => {
+    await startHub()
+    await waitFor(() => log.lines.some(l => l.includes('polling Telegram as @test_bot')), 3000, 'bot name in log')
+  })
+
+  test('recovery after failed polls is logged', async () => {
+    fake.failNext('getUpdates', { code: 502, description: 'Bad Gateway' })
+    await startHub()
+    await waitFor(() => log.lines.some(l => l.includes('Telegram polling works again')), 3000, 'recovery in log')
+  })
+
+  test('a wrong token is reported plainly', async () => {
+    await startHub({ token: '1:wrong' })
+    await waitFor(() => log.lines.some(l => l.startsWith('ERROR') && l.includes('bot token rejected')), 3000, 'token error in log')
   })
 })
 

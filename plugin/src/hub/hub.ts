@@ -327,12 +327,24 @@ export class Hub {
   // --- Telegram polling ----------------------------------------------------
 
   private async pollLoop(api: TelegramApi): Promise<void> {
+    try {
+      const me = await api.getMe(this.abort.signal)
+      this.log.info(`polling Telegram as @${me.username ?? me.id}`)
+    } catch (e) {
+      if (!this.running) return
+      if (e instanceof TelegramError && e.code === 401) {
+        this.log.error('bot token rejected by Telegram (401 Unauthorized) — fix TELEGRAM_BOT_TOKEN in .env and restart the hub; not polling')
+        return
+      }
+      this.log.warn(`getMe failed: ${e}; polling anyway`)
+    }
     let offset = 0
     let failures = 0
     while (this.running) {
       let updates: Update[]
       try {
         updates = await api.getUpdates(offset, this.opts.pollTimeoutSec ?? 25, this.abort.signal)
+        if (failures) this.log.info('Telegram polling works again')
         failures = 0
       } catch (e) {
         if (!this.running) return
