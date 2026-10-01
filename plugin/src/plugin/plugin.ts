@@ -25,6 +25,10 @@ export function isOwnTool(name: string): boolean {
 
 // One per Claude Code window: follows the session transcript, relays the
 // agent's text to the hub, delivers inbound topic messages to the session.
+// Requests that make the hub call Telegram. The hub retries a flaky network
+// for up to 2 minutes (TelegramApi deadlineMs), so wait a bit longer than that.
+const HUB_TELEGRAM_TIMEOUT_MS = 150_000
+
 export class PluginCore {
   private sessionId: string
   private cwd: string
@@ -71,7 +75,10 @@ export class PluginCore {
   async enable(): Promise<string> {
     this.tailer?.pollNow()
     this.titles = readSessionTitles(this.transcriptPath)
-    const res = (await this.client.request('enable', { title: effectiveTitle(this.titles) ?? '' })) as { topicTitle: string; created: boolean }
+    const res = (await this.client.request('enable', { title: effectiveTitle(this.titles) ?? '' }, HUB_TELEGRAM_TIMEOUT_MS)) as {
+      topicTitle: string
+      created: boolean
+    }
     return `Telegram mode is on. Topic «${res.topicTitle}»${res.created ? ' was created' : ''}. Your text output is now relayed to it.`
   }
 
@@ -87,7 +94,7 @@ export class PluginCore {
   }
 
   async download(fileId: string): Promise<string> {
-    return String(await this.client.request('download', { fileId }, 60_000))
+    return String(await this.client.request('download', { fileId }, HUB_TELEGRAM_TIMEOUT_MS))
   }
 
   permissionRequest(p: { tool_name: string; description: string }): void {
