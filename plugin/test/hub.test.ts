@@ -369,6 +369,13 @@ describe('polling', () => {
     await waitFor(() => log.lines.some(l => l.includes('Telegram polling works again')), 3000, 'recovery in log')
   })
 
+  test('polling that starts working after a failed getMe is logged', async () => {
+    fake.failNext('getMe', { code: 502, description: 'Bad Gateway' })
+    fake.failNext('getMe', { code: 502, description: 'Bad Gateway' })
+    await startHub()
+    await waitFor(() => log.lines.some(l => l.includes('Telegram polling works again')), 3000, 'recovery in log')
+  })
+
   test('a wrong token is reported plainly', async () => {
     await startHub({ token: '1:wrong' })
     await waitFor(() => log.lines.some(l => l.startsWith('ERROR') && l.includes('bot token rejected')), 3000, 'token error in log')

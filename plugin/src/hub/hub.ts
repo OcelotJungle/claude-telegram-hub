@@ -327,6 +327,7 @@ export class Hub {
   // --- Telegram polling ----------------------------------------------------
 
   private async pollLoop(api: TelegramApi): Promise<void> {
+    let failures = 0
     try {
       const me = await api.getMe(this.abort.signal)
       this.log.info(`polling Telegram as @${me.username ?? me.id}`)
@@ -337,9 +338,9 @@ export class Hub {
         return
       }
       this.log.warn(`getMe failed: ${e}; polling anyway`)
+      failures = 1
     }
     let offset = 0
-    let failures = 0
     while (this.running) {
       let updates: Update[]
       try {
