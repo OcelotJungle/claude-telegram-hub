@@ -85,6 +85,12 @@ export class HubClient {
     this.send({ type: 'send', ...item })
   }
 
+  // Resolves once every queued text is acked by the hub, or after timeoutMs.
+  async drain(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (this.outbox.length > 0 && Date.now() < deadline) await Bun.sleep(25)
+  }
+
   async request(op: string, extra: Record<string, unknown> = {}, timeoutMs = 15_000): Promise<unknown> {
     const deadline = Date.now() + timeoutMs
     if (!this.ws) await this.waitConnected(timeoutMs)

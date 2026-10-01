@@ -60,6 +60,14 @@ export class PluginCore {
     this.client.stop()
   }
 
+  // The window is closing: relay what was written last, then stop.
+  async shutdown(timeoutMs: number): Promise<void> {
+    this.tailer?.pollNow()
+    this.flush(this.relay.idle())
+    await this.client.drain(timeoutMs)
+    this.stop()
+  }
+
   async enable(): Promise<string> {
     this.tailer?.pollNow()
     this.titles = readSessionTitles(this.transcriptPath)

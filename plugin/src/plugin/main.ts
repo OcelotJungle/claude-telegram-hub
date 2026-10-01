@@ -135,8 +135,8 @@ let shuttingDown = false
 function shutdown(): void {
   if (shuttingDown) return
   shuttingDown = true
-  core?.stop()
-  setTimeout(() => process.exit(0), 200)
+  setTimeout(() => process.exit(0), 3000)
+  void (core ? core.shutdown(2000) : Promise.resolve()).finally(() => process.exit(0))
 }
 process.stdin.on('end', shutdown)
 process.stdin.on('close', shutdown)

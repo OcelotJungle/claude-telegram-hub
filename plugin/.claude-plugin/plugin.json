@@ -1,0 +1,13 @@
+{
+  "name": "tg-hub",
+  "version": "0.1.0",
+  "description": "One Telegram bot for every Claude Code window: a forum topic per session, routed through a shared local hub.",
+  "keywords": [
+    "telegram",
+    "channel",
+    "mcp"
+  ],
+  "author": {
+    "name": "OcelotJungle"
+  }
+}

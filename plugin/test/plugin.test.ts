@@ -195,6 +195,14 @@ describe('PluginCore', () => {
     expect(sent()).toEqual([{ text: 'в новой сессии', silent: true, topic: 101 }])
   })
 
+  test('shutdown sends text written just before the window closed', async () => {
+    const c = await enabledCore()
+    append(assistantText('последнее слово', 'end_turn', 'z1'))
+    await c.shutdown(2000)
+    core = undefined
+    expect(sent()).toEqual([{ text: 'последнее слово', silent: true, topic: 100 }])
+  })
+
   test('tg_notify while the mode is off says so', () => {
     const c = makeCore()
     expect(c.notify('done')).toContain('off')
