@@ -97,7 +97,12 @@ export class PluginCore {
   // /clear or /resume inside the window changed the session (from the
   // SessionStart hook, via the hub).
   switchSession(sessionId: string, transcriptPath: string, cwd: string): void {
-    if (sessionId === this.sessionId && transcriptPath === this.transcriptPath) return
+    this.tailer?.pollNow()
+    if (sessionId === this.sessionId) {
+      // startup/compact: same session, maybe a differently spelled path.
+      if (transcriptPath !== this.transcriptPath) this.follow(transcriptPath)
+      return
+    }
     this.log.info(`session ${this.sessionId} → ${sessionId}`)
     this.flush(this.relay.idle())
     this.sessionId = sessionId

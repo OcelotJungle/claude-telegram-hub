@@ -231,6 +231,17 @@ describe('send', () => {
     expect(fake.callsOf('sendMessage').length).toBe(0)
   })
 
+  test('text queued while enabled is delivered even if terminal input follows while an earlier send is retrying', async () => {
+    await startHub()
+    const a = await enabled('a')
+    fake.failNext('sendMessage', { code: 429, description: 'Too Many Requests', retry_after: 1 })
+    a.send({ type: 'send', id: 'x1', text: 'first', notify: false })
+    a.send({ type: 'send', id: 'x2', text: 'final', notify: false })
+    a.send({ type: 'terminalInput' })
+    await a.next(m => m.type === 'ack' && m.id === 'x2', 5000)
+    expect(fake.callsOf('sendMessage').map(p => p.text)).toEqual(['first', 'first', 'final'])
+  })
+
   test('terminal input disables the session', async () => {
     await startHub()
     const a = await enabled('a')

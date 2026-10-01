@@ -203,6 +203,15 @@ describe('PluginCore', () => {
     expect(sent()).toEqual([{ text: 'последнее слово', silent: true, topic: 100 }])
   })
 
+  test('a SessionStart hook for the same session keeps relaying', async () => {
+    const c = await enabledCore()
+    // same file, path spelled differently (drive letter case)
+    c.switchSession(SID, transcript.replace(/^([A-Za-z]):/, (_, d) => d.toLowerCase() + ":"), CWD)
+    expect(c.enabled).toBe(true)
+    append(assistantText('после компакта', 'end_turn'))
+    await waitFor(() => sent().length === 1, 3000, 'message')
+  })
+
   test('tg_notify while the mode is off says so', () => {
     const c = makeCore()
     expect(c.notify('done')).toContain('off')

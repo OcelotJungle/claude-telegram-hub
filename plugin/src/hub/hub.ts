@@ -193,12 +193,15 @@ export class Hub {
       case 'req':
         void this.handleRequest(ws, msg)
         return
+      // The mode is checked when the text arrives, not when its turn in the
+      // queue comes: text produced while enabled is delivered even if the user
+      // types in the terminal meanwhile.
       case 'send':
-        if (!sid) return this.send(ws, { type: 'ack', id: msg.id })
+        if (!sid || !this.store.get(sid)?.enabled) return this.send(ws, { type: 'ack', id: msg.id })
         void this.chain(sid, () => this.deliver(sid, msg.text, msg.notify)).finally(() => this.send(ws, { type: 'ack', id: msg.id }))
         return
       case 'permission':
-        if (sid) void this.chain(sid, () => this.deliver(sid, `🔐 Нужно подтверждение: ${msg.toolName} — ${msg.description}`, true))
+        if (sid && this.store.get(sid)?.enabled) void this.chain(sid, () => this.deliver(sid, `🔐 Нужно подтверждение: ${msg.toolName} — ${msg.description}`, true))
         return
       case 'title':
         if (sid) void this.chain(sid, () => this.retitle(sid, msg.title))
@@ -291,11 +294,10 @@ export class Hub {
     this.send(ws, { type: 'state', enabled: rec?.enabled ?? false, ...(rec ? { topicTitle: topicName(rec.project, rec.title) } : {}) })
   }
 
-  // Sends text to the session's topic if the mode is on. Never throws: a final
-  // failure is logged together with the text so nothing is lost silently.
+  // Sends text to the session's topic. Never throws: a final failure is logged
+  // together with the text so nothing is lost silently.
   private async deliver(sessionId: string, text: string, notify: boolean): Promise<void> {
-    const rec = this.store.get(sessionId)
-    if (!rec?.enabled) return
+    if (!this.store.get(sessionId)) return
     const pieces = chunk(text)
     try {
       const api = this.requireApi()
