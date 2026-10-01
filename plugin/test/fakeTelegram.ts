@@ -65,7 +65,7 @@ export class FakeTelegram {
     const filePrefix = `/file/bot${this.token}/`
     if (url.pathname.startsWith(filePrefix)) {
       const path = url.pathname.slice(filePrefix.length)
-      for (const f of this.files.values()) if (f.path === path) return new Response(f.body)
+      for (const f of this.files.values()) if (f.path === path) return new Response(Buffer.from(f.body))
       return new Response('not found', { status: 404 })
     }
     const m = url.pathname.match(/^\/bot([^/]+)\/(\w+)$/)

@@ -21,6 +21,36 @@ export async function waitFor<T>(
   }
 }
 
+export function memLogger() {
+  const lines: string[] = []
+  return {
+    lines,
+    info: (m: string) => void lines.push(`INFO ${m}`),
+    warn: (m: string) => void lines.push(`WARN ${m}`),
+    error: (m: string) => void lines.push(`ERROR ${m}`),
+  }
+}
+
+// A raw WebSocket "plugin" for hub tests.
+export async function wsClient(port: number, hello?: object) {
+  const messages: any[] = []
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
+  ws.onmessage = e => messages.push(JSON.parse(String(e.data)))
+  await new Promise<void>((resolve, reject) => {
+    ws.onopen = () => resolve()
+    ws.onerror = () => reject(new Error('ws connect failed'))
+  })
+  const client = {
+    ws,
+    messages,
+    send: (o: object) => ws.send(JSON.stringify(o)),
+    next: (pred: (m: any) => boolean, timeoutMs = 3000) => waitFor(() => messages.find(pred), timeoutMs, 'hub message'),
+    close: () => ws.close(),
+  }
+  if (hello) client.send(hello)
+  return client
+}
+
 export function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = createServer()
