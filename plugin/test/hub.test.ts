@@ -28,7 +28,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string } = {}) {
     port,
     sessionsFile: join(dir, 'sessions.json'),
     inboxDir: join(dir, 'inbox'),
-    api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === 'string' ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2 }),
+    api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === 'string' ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, networkRetryMs: 5 }),
     config: () => config,
     idleMs: o.idleMs ?? 60_000,
     pollTimeoutSec: 1,
@@ -369,11 +369,21 @@ describe('polling', () => {
     await waitFor(() => log.lines.some(l => l.includes('Telegram polling works again')), 3000, 'recovery in log')
   })
 
-  test('polling that starts working after a failed getMe is logged', async () => {
-    fake.failNext('getMe', { code: 502, description: 'Bad Gateway' })
-    fake.failNext('getMe', { code: 502, description: 'Bad Gateway' })
+  test('the hub keeps trying until Telegram answers', async () => {
+    for (let i = 0; i < 4; i++) fake.failNext('getMe', { code: 502, description: 'Bad Gateway' })
     await startHub()
-    await waitFor(() => log.lines.some(l => l.includes('Telegram polling works again')), 3000, 'recovery in log')
+    await waitFor(() => log.lines.some(l => l.includes('polling Telegram as @test_bot')), 3000, 'bot name in log')
+    expect(fake.callsOf('getUpdates').length).toBeGreaterThan(0)
+  })
+
+  test('a hung getUpdates warms the connection up with getMe and polls again', async () => {
+    await startHub()
+    await waitFor(() => fake.callsOf('getUpdates').length > 0, 3000, 'first poll')
+    fake.hangNext('getUpdates')
+    await waitFor(() => log.lines.some(l => l.includes('Telegram polling works again')), 5000, 'recovery in log')
+    expect(fake.callsOf('getMe').length).toBe(2)
+    const polls = fake.callsOf('getUpdates').length
+    await waitFor(() => fake.callsOf('getUpdates').length > polls, 5000, 'polling resumed')
   })
 
   test('a wrong token is reported plainly', async () => {

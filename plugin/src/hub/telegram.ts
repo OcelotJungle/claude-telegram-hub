@@ -42,51 +42,84 @@ export function isThreadNotFound(e: unknown): boolean {
 
 const MAX_DELAY_MS = 15_000
 
+type ApiOptions = {
+  token: string
+  base?: string
+  log?: Logger
+  // Telegram API errors (5xx, 429): attempts with exponential backoff.
+  maxAttempts?: number
+  baseDelayMs?: number
+  // Network errors. Some networks let only a fraction of connects to the Bot
+  // API through, while an established connection works fine and is reused. So
+  // an attempt that gets no answer is abandoned quickly instead of waiting for
+  // the OS connect timeout (~21 s on Windows), and retried until the deadline.
+  attemptTimeoutMs?: number
+  networkRetryMs?: number
+  deadlineMs?: number
+}
+
 export class TelegramApi {
   private base: string
   private log: Logger
   private maxAttempts: number
   private baseDelayMs: number
+  private attemptTimeoutMs: number
+  private networkRetryMs: number
+  private deadlineMs: number
 
-  constructor(private opts: { token: string; base?: string; log?: Logger; maxAttempts?: number; baseDelayMs?: number }) {
+  constructor(private opts: ApiOptions) {
     this.base = opts.base ?? 'https://api.telegram.org'
     this.log = opts.log ?? nullLogger
     this.maxAttempts = opts.maxAttempts ?? 5
     this.baseDelayMs = opts.baseDelayMs ?? 1000
+    this.attemptTimeoutMs = opts.attemptTimeoutMs ?? 5000
+    this.networkRetryMs = opts.networkRetryMs ?? 300
+    this.deadlineMs = opts.deadlineMs ?? 120_000
   }
 
-  // Retries network errors, 5xx and 429 (honouring retry_after); other API
-  // errors are thrown at once.
-  async call<T>(method: string, params: object, o: { signal?: AbortSignal; retry?: boolean } = {}): Promise<T> {
-    const attempts = o.retry === false ? 1 : this.maxAttempts
-    for (let attempt = 1; ; attempt++) {
+  // Retries network errors until the deadline, and 5xx and 429 (honouring
+  // retry_after) up to maxAttempts; other API errors are thrown at once.
+  // `waitMs` is how long Telegram may legitimately hold the request (long poll).
+  async call<T>(method: string, params: object, o: { signal?: AbortSignal; retry?: boolean; waitMs?: number } = {}): Promise<T> {
+    const deadline = Date.now() + this.deadlineMs
+    let apiFailures = 0
+    let netFailures = 0
+    for (;;) {
       let wait: number
       try {
-        return await this.callOnce<T>(method, params, o.signal)
+        const result = await this.callOnce<T>(method, params, this.attemptTimeoutMs + (o.waitMs ?? 0), o.signal)
+        if (netFailures) this.log.info(`telegram ${method} got through after ${netFailures} failed attempt(s)`)
+        return result
       } catch (e) {
-        const retryable = !(e instanceof TelegramError) || e.code === 429 || e.code >= 500
-        if (!retryable || attempt >= attempts || o.signal?.aborted) throw e
-        wait =
-          e instanceof TelegramError && e.retryAfter != null
-            ? e.retryAfter * 1000
-            : Math.min(this.baseDelayMs * 2 ** (attempt - 1), MAX_DELAY_MS)
-        this.log.warn(`telegram ${method} failed (${e instanceof Error ? e.message : e}), retry ${attempt}/${attempts - 1} in ${wait}ms`)
+        if (o.retry === false || o.signal?.aborted) throw e
+        if (e instanceof TelegramError) {
+          if (!(e.code === 429 || e.code >= 500) || ++apiFailures >= this.maxAttempts) throw e
+          wait = e.retryAfter != null ? e.retryAfter * 1000 : Math.min(this.baseDelayMs * 2 ** (apiFailures - 1), MAX_DELAY_MS)
+          this.log.warn(`telegram ${method} failed (${e.message}), retry ${apiFailures}/${this.maxAttempts - 1} in ${wait}ms`)
+        } else {
+          if (Date.now() + this.networkRetryMs >= deadline) throw e
+          wait = this.networkRetryMs
+          // One line per streak, not one per attempt.
+          if (++netFailures === 1) this.log.warn(`telegram ${method}: no connection (${e instanceof Error ? e.message : e}), retrying`)
+        }
       }
       await Bun.sleep(wait)
     }
   }
 
-  private async callOnce<T>(method: string, params: object, signal?: AbortSignal): Promise<T> {
+  private async callOnce<T>(method: string, params: object, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+    const timeout = AbortSignal.timeout(timeoutMs)
     const res = await fetch(`${this.base}/bot${this.opts.token}/${method}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(params),
-      signal,
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     })
     let body: any
     try {
       body = await res.json()
-    } catch {
+    } catch (e) {
+      if (timeout.aborted || signal?.aborted) throw e
       throw new TelegramError(res.status, `non-JSON response (HTTP ${res.status})`)
     }
     if (!body.ok) throw new TelegramError(body.error_code ?? res.status, body.description ?? 'unknown error', body.parameters?.retry_after)
@@ -98,7 +131,7 @@ export class TelegramApi {
   }
 
   getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<Update[]> {
-    return this.call<Update[]>('getUpdates', { offset, timeout: timeoutSec, allowed_updates: ['message'] }, { signal, retry: false })
+    return this.call<Update[]>('getUpdates', { offset, timeout: timeoutSec, allowed_updates: ['message'] }, { signal, retry: false, waitMs: timeoutSec * 1000 })
   }
 
   sendMessage(chatId: string, threadId: number, text: string, silent: boolean): Promise<{ message_id: number }> {
@@ -116,7 +149,7 @@ export class TelegramApi {
   async downloadFile(fileId: string, destDir: string): Promise<string> {
     const file = await this.call<{ file_path?: string; file_unique_id?: string }>('getFile', { file_id: fileId })
     if (!file.file_path) throw new Error('Telegram returned no file_path — the file may have expired')
-    const res = await fetch(`${this.base}/file/bot${this.opts.token}/${file.file_path}`)
+    const res = await fetch(`${this.base}/file/bot${this.opts.token}/${file.file_path}`, { signal: AbortSignal.timeout(120_000) })
     if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`)
     const buf = Buffer.from(await res.arrayBuffer())
     const rawExt = file.file_path.includes('.') ? file.file_path.split('.').pop()! : 'bin'

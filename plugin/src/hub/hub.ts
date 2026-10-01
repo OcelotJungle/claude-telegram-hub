@@ -326,22 +326,33 @@ export class Hub {
 
   // --- Telegram polling ----------------------------------------------------
 
+  // getMe is a short request with a quick timeout, so it is what fights its way
+  // through a flaky network; the long poll then reuses the warm connection.
+  // A failed connect inside the long poll would otherwise hang for the whole
+  // poll timeout.
   private async pollLoop(api: TelegramApi): Promise<void> {
-    let failures = 0
-    try {
-      const me = await api.getMe(this.abort.signal)
-      this.log.info(`polling Telegram as @${me.username ?? me.id}`)
-    } catch (e) {
-      if (!this.running) return
-      if (e instanceof TelegramError && e.code === 401) {
-        this.log.error('bot token rejected by Telegram (401 Unauthorized) — fix TELEGRAM_BOT_TOKEN in .env and restart the hub; not polling')
-        return
-      }
-      this.log.warn(`getMe failed: ${e}; polling anyway`)
-      failures = 1
-    }
     let offset = 0
+    let online = false
+    let wasOnline = false
+    let failures = 0
     while (this.running) {
+      if (!online) {
+        try {
+          const me = await api.getMe(this.abort.signal)
+          this.log.info(wasOnline ? 'Telegram polling works again' : `polling Telegram as @${me.username ?? me.id}`)
+          online = wasOnline = true
+          failures = 0
+        } catch (e) {
+          if (!this.running) return
+          if (e instanceof TelegramError && e.code === 401) {
+            this.log.error('bot token rejected by Telegram (401 Unauthorized) — fix TELEGRAM_BOT_TOKEN in .env and restart the hub; not polling')
+            return
+          }
+          this.log.warn(`Telegram unreachable (${e}); still trying`)
+          await Bun.sleep(this.opts.pollRetryBaseMs ?? 1000)
+          continue
+        }
+      }
       let updates: Update[]
       try {
         updates = await api.getUpdates(offset, this.opts.pollTimeoutSec ?? 25, this.abort.signal)
@@ -349,9 +360,14 @@ export class Hub {
         failures = 0
       } catch (e) {
         if (!this.running) return
+        if (!(e instanceof TelegramError)) {
+          this.log.warn(`getUpdates lost the connection (${e}); reconnecting`)
+          online = false
+          continue
+        }
         failures++
         const delay = Math.min((this.opts.pollRetryBaseMs ?? 1000) * failures, MAX_POLL_DELAY_MS)
-        const conflict = e instanceof TelegramError && e.code === 409
+        const conflict = e.code === 409
         this.log.warn(`${conflict ? 'getUpdates 409 Conflict — another poller uses this bot token' : `getUpdates failed: ${e}`}; retry in ${delay}ms`)
         await Bun.sleep(delay)
         continue

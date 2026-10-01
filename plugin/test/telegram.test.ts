@@ -52,9 +52,36 @@ describe('TelegramApi', () => {
     expect(fake.callsOf('sendMessage').length).toBe(3)
   })
 
-  test('network failure is retried and finally thrown', async () => {
-    const dead = new TelegramApi({ token: 'x', base: 'http://127.0.0.1:1', baseDelayMs: 1, maxAttempts: 2 })
-    await expect(dead.sendMessage('-100', 1, 'x', true)).rejects.toThrow()
+  // The Bot API is reachable only now and then from some networks: a connect
+  // attempt hangs, the next one may get through, and then the connection is reused.
+  describe('flaky network', () => {
+    const flaky = (o: object = {}) =>
+      new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 100, networkRetryMs: 5, ...o })
+
+    test('a hung attempt is abandoned quickly and retried', async () => {
+      fake.hangNext('sendMessage')
+      const started = Date.now()
+      await flaky().sendMessage('-100', 7, 'hi', true)
+      expect(Date.now() - started).toBeLessThan(1000)
+      expect(fake.callsOf('sendMessage').length).toBe(2)
+    })
+
+    test('network failures are retried past maxAttempts until the deadline', async () => {
+      fake.hangNext('sendMessage', 4)
+      await flaky({ deadlineMs: 5000 }).sendMessage('-100', 7, 'hi', true)
+      expect(fake.callsOf('sendMessage').length).toBe(5)
+    })
+
+    test('network failures give up at the deadline', async () => {
+      const dead = new TelegramApi({ token: 'x', base: 'http://127.0.0.1:1', attemptTimeoutMs: 100, networkRetryMs: 5, deadlineMs: 300 })
+      const started = Date.now()
+      await expect(dead.sendMessage('-100', 1, 'x', true)).rejects.toThrow()
+      expect(Date.now() - started).toBeLessThan(1500)
+    })
+
+    test('getUpdates may wait for the long poll beyond the attempt timeout', async () => {
+      expect(await flaky().getUpdates(0, 1)).toEqual([])
+    })
   })
 
   test('deleted topic is recognised', async () => {

@@ -19,6 +19,7 @@ export class FakeTelegram {
   private waiting: { resolve: () => void } | undefined
   private activePoll: { abort: (r: Response) => void } | undefined
   private failures = new Map<string, Failure[]>()
+  private hangs = new Map<string, number>()
   private deletedTopics = new Set<number>()
   files = new Map<string, { path: string; body: Uint8Array }>()
 
@@ -52,6 +53,12 @@ export class FakeTelegram {
     this.failures.set(method, list)
   }
 
+  // The next `count` calls of `method` are never answered, like a connection
+  // the network silently drops.
+  hangNext(method: string, count = 1): void {
+    this.hangs.set(method, (this.hangs.get(method) ?? 0) + count)
+  }
+
   deleteTopic(threadId: number): void {
     this.deletedTopics.add(threadId)
   }
@@ -73,6 +80,12 @@ export class FakeTelegram {
     const method = m[2]!
     const params = req.method === 'POST' ? await req.json().catch(() => ({})) : {}
     this.calls.push({ method, params })
+
+    const hang = this.hangs.get(method) ?? 0
+    if (hang > 0) {
+      this.hangs.set(method, hang - 1)
+      return new Promise<Response>(() => {})
+    }
 
     const fail = this.failures.get(method)?.shift()
     if (fail) {
