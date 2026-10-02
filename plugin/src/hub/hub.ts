@@ -5,7 +5,7 @@ import { join } from 'path'
 import { chunk } from '../shared/chunk.ts'
 import type { Config } from '../shared/config.ts'
 import type { Logger } from '../shared/log.ts'
-import { PROTOCOL_VERSION, type ChannelMeta, type HookBody, type HubToPlugin, type PluginToHub, type PromptAnswer, type PromptBody } from '../shared/protocol.ts'
+import { PROTOCOL_VERSION, type ChannelMeta, type HookBody, type HubToPlugin, type PluginToHub } from '../shared/protocol.ts'
 import { Outbox, type OutItem } from './outbox.ts'
 import { routeUpdate } from './router.ts'
 import { SessionStore, topicName, type SessionRecord } from './sessions.ts'
@@ -143,15 +143,6 @@ export class Hub {
       this.onHook(body)
       return new Response('ok')
     }
-    if (url.pathname === '/prompt' && req.method === 'POST') {
-      let body: PromptBody
-      try {
-        body = (await req.json()) as PromptBody
-      } catch {
-        return new Response('bad json', { status: 400 })
-      }
-      return Response.json(this.onTerminalPrompt(body))
-    }
     return new Response('not found', { status: 404 })
   }
 
@@ -221,16 +212,6 @@ export class Hub {
     this.send(ws, { type: 'switchSession', sessionId: body.session_id, transcriptPath: body.transcript_path, cwd: body.cwd })
   }
 
-  // The user typed a prompt in the terminal: the mode goes off at once, and the
-  // hook tells the agent so when it was on.
-  private onTerminalPrompt(body: PromptBody): PromptAnswer {
-    const sid = body?.session_id
-    if (typeof sid !== 'string' || !this.store.get(sid)?.enabled) return { wasEnabled: false }
-    this.setEnabled(sid, false)
-    this.log.info(`terminal prompt in session ${sid} (input_source=${body.input_source ?? 'none'}): Telegram mode off`)
-    return { wasEnabled: true }
-  }
-
   // --- plugin messages -----------------------------------------------------
 
   private onMessage(ws: WS, raw: string): void {
@@ -286,7 +267,9 @@ ${msg.text}`)
         if (sid) void this.chain(sid, () => this.retitle(sid, msg.title))
         return
       case 'terminalInput':
-        if (sid) this.setEnabled(sid, false)
+        if (!sid) return
+        this.log.info(`terminal input in session ${sid}: Telegram mode off`)
+        this.setEnabled(sid, false)
         return
     }
   }

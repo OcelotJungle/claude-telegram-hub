@@ -24,9 +24,6 @@ export type HubToPlugin =
   | { type: 'ack'; id: string }
   | { type: 'switchSession'; sessionId: string; transcriptPath: string; cwd: string }
 
-// Body the UserPromptSubmit hook POSTs to /prompt; the answer is PromptAnswer.
-export type PromptBody = { session_id: string; input_source?: string }
-export type PromptAnswer = { wasEnabled: boolean }
 
 // Body the SessionStart hook POSTs to /hook.
 export type HookBody = {

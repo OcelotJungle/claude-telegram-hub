@@ -27,6 +27,14 @@ export function isOwnTool(name: string): boolean {
   return /(^|__)tg_(enable|disable|notify)$/.test(name)
 }
 
+// Called by our PostToolBatch hook (hooks/hooks.json), not by the agent.
+export const HOOK_NOTE_TOOL = 'tg_hook_note'
+
+const MODE_OFF_NOTE =
+  'tg-hub: Telegram mode is now OFF for this session, because the user typed a message in the terminal. ' +
+  'Your text is no longer relayed to Telegram, and tg_notify is not needed. ' +
+  'If that message asks to continue in Telegram, call tg_enable.'
+
 // One per Claude Code window: follows the session transcript, relays the
 // agent's text to the hub, delivers inbound topic messages to the session.
 // Requests that make the hub call Telegram. The hub retries a flaky network
@@ -43,6 +51,8 @@ export class PluginCore {
   private titles: Titles = {}
   private log: Logger
   private reportedKinds = new Set<string>()
+  // Terminal input turned the mode off and the agent has not been told yet.
+  private noteOwed = false
   enabled = false
 
   constructor(private opts: PluginOptions) {
@@ -116,6 +126,18 @@ export class PluginCore {
     return String(await this.client.request('download', { fileId }, HUB_TELEGRAM_TIMEOUT_MS))
   }
 
+  // Hook output after a batch of tool calls. Only the transcript knows who
+  // wrote a prompt (origin.kind), and Claude Code writes the prompt record
+  // after UserPromptSubmit hooks run, so the agent hears of it here. Catch up
+  // on the transcript first: the hook may come before the tailer's next poll.
+  // A subagent's batch (agentId set) leaves the note for the main agent.
+  hookNote(agentId: string): string {
+    this.tailer?.pollNow()
+    if (agentId || !this.noteOwed) return ''
+    this.noteOwed = false
+    return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolBatch', additionalContext: MODE_OFF_NOTE } })
+  }
+
   permissionRequest(p: { tool_name: string; description: string }): void {
     if (this.enabled) this.client.send({ type: 'permission', toolName: p.tool_name, description: p.description })
   }
@@ -158,6 +180,7 @@ export class PluginCore {
       if (ev.kind === 'terminal_input' && this.enabled) {
         this.client.send({ type: 'terminalInput' })
         this.setEnabled(false)
+        this.noteOwed = true
       } else if (ev.kind === 'unknown_thinking' && !this.reportedKinds.has(ev.blockKind)) {
         this.reportedKinds.add(ev.blockKind)
         this.log.warn(`transcript: thinking block of unknown kind "${ev.blockKind}" with text — not relayed; the transcript format may have changed`)
@@ -177,13 +200,14 @@ export class PluginCore {
   // Turning off still sends what was written while the mode was on.
   private setEnabled(on: boolean): void {
     this.enabled = on
+    if (on) this.noteOwed = false
     this.flush(this.relay.setEnabled(on))
   }
 
   private onHubMessage(m: HubToPlugin): void {
     switch (m.type) {
       case 'state':
-        // Turned off elsewhere (the prompt hook, tg_disable): first relay what
+        // Turned off elsewhere (tg_disable, another window): first relay what
         // the transcript already holds, written while the mode was on.
         if (!m.enabled && this.enabled) this.tailer?.pollNow()
         this.setEnabled(m.enabled)

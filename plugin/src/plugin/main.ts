@@ -9,7 +9,7 @@ import { z } from 'zod'
 import { hubPort, paths } from '../shared/config.ts'
 import { createLogger } from '../shared/log.ts'
 import { spawnHubDetached } from './hubClient.ts'
-import { PluginCore } from './plugin.ts'
+import { HOOK_NOTE_TOOL, PluginCore } from './plugin.ts'
 
 const log = createLogger(paths().logFile, 'plugin')
 process.on('unhandledRejection', e => log.error(`unhandled rejection: ${e}`))
@@ -99,6 +99,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: 'Download a file sent in the Telegram topic (attachment_file_id from the <channel> tag). Returns a local path to Read. Telegram caps bot downloads at 20MB.',
       inputSchema: { type: 'object', properties: { file_id: { type: 'string' } }, required: ['file_id'] },
     },
+    {
+      name: HOOK_NOTE_TOOL,
+      description: 'Internal: called by the tg-hub plugin hook after tool calls. Never call it yourself.',
+      inputSchema: { type: 'object', properties: { agent_id: { type: 'string' } } },
+    },
   ],
 }))
 
@@ -120,6 +125,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       case 'download_attachment':
         if (typeof args.file_id !== 'string') throw new Error('file_id is required')
         return text(await core.download(args.file_id))
+      case HOOK_NOTE_TOOL:
+        return text(core.hookNote(typeof args.agent_id === 'string' ? args.agent_id : ''))
       default:
         return text(`unknown tool: ${req.params.name}`, true)
     }

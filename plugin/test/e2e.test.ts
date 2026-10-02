@@ -82,7 +82,11 @@ test('a window talks to Telegram through a hub it started itself', async () => {
   expect(instructions).toContain('tg_notify')
 
   const { tools } = await client.listTools()
-  expect(tools.map(t => t.name).sort()).toEqual(['download_attachment', 'tg_disable', 'tg_enable', 'tg_notify'])
+  expect(tools.map(t => t.name).sort()).toEqual(['download_attachment', 'tg_disable', 'tg_enable', 'tg_hook_note', 'tg_notify'])
+  // What the PostToolBatch hook gets when there is nothing to tell: no output.
+  const note: any = await client.callTool({ name: 'tg_hook_note', arguments: { agent_id: '' } })
+  expect(note.isError).toBeFalsy()
+  expect(note.content).toEqual([{ type: 'text', text: '' }])
 
   const res: any = await client.callTool({ name: 'tg_enable', arguments: {} })
   expect(res.isError).toBeFalsy()

@@ -3,19 +3,18 @@ import { spawnSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
 import { join, resolve } from 'path'
 import { Hub } from '../src/hub/hub.ts'
-import { SessionStore } from '../src/hub/sessions.ts'
+import { HOOK_NOTE_TOOL } from '../src/plugin/plugin.ts'
 import { PROTOCOL_VERSION } from '../src/shared/protocol.ts'
 import { freePort, memLogger, tempDir, waitFor, wsClient } from './helpers.ts'
 
 const PLUGIN = resolve(import.meta.dir, '..')
 const REPO = resolve(PLUGIN, '..')
 const HOOK = join(PLUGIN, 'src', 'hook', 'sessionStart.ts')
-const PROMPT_HOOK = join(PLUGIN, 'src', 'hook', 'userPromptSubmit.ts')
 
 // Async on purpose: an in-process hub must keep serving while the hook runs.
-async function runHook(port: number, input: object, socket = 'pipe-H', hook = HOOK) {
+async function runHook(port: number, input: object, socket = 'pipe-H') {
   const started = Date.now()
-  const proc = Bun.spawn([process.execPath, hook], {
+  const proc = Bun.spawn([process.execPath, HOOK], {
     stdin: new Blob([JSON.stringify(input)]),
     stdout: 'pipe',
     env: { ...process.env, TG_HUB_PORT: String(port), CLAUDE_CODE_MESSAGING_SOCKET: socket },
@@ -63,65 +62,6 @@ describe('SessionStart hook', () => {
   })
 })
 
-describe('UserPromptSubmit hook', () => {
-  let hub: Hub | undefined
-  let port: number
-  let dir: string
-  afterEach(async () => {
-    await hub?.stop()
-    hub = undefined
-  })
-
-  async function hubWithSession(enabled: boolean) {
-    port = await freePort()
-    dir = tempDir()
-    const sessionsFile = join(dir, 's.json')
-    new SessionStore(sessionsFile).set('s1', { topicId: 7, title: 'T', project: 'p', enabled })
-    hub = new Hub({ port, sessionsFile, outboxFile: join(dir, 'o.json'), inboxDir: dir, api: undefined, config: () => ({ allowFrom: [] }), idleMs: 60_000, log: memLogger(), onExit() {} })
-    hub.start()
-  }
-  const prompt = (input: object) => runHook(port, { session_id: 's1', hook_event_name: 'UserPromptSubmit', ...input }, 'pipe-H', PROMPT_HOOK)
-  const isOn = () => new SessionStore(join(dir, 's.json')).get('s1')?.enabled
-
-  test('a terminal prompt turns the mode off and tells the agent', async () => {
-    await hubWithSession(true)
-    const r = await prompt({ user_input: 'Как успехи?', input_source: 'terminal' })
-    expect(r.status).toBe(0)
-    const out = JSON.parse(r.stdout)
-    expect(out.hookSpecificOutput.hookEventName).toBe('UserPromptSubmit')
-    expect(out.hookSpecificOutput.additionalContext).toContain('tg_notify')
-    expect(isOn()).toBe(false)
-  })
-
-  test('says nothing when the mode was already off', async () => {
-    await hubWithSession(false)
-    const r = await prompt({ prompt: 'hi' })
-    expect(r.status).toBe(0)
-    expect(r.stdout).toBe('')
-  })
-
-  test('a message from the Telegram channel leaves the mode on', async () => {
-    await hubWithSession(true)
-    expect((await prompt({ prompt: '<channel source="plugin:tg-hub:tg-hub" chat_id="-1">hi</channel>' })).stdout).toBe('')
-    expect((await prompt({ user_input: 'hi', input_source: 'channel' })).stdout).toBe('')
-    expect(isOn()).toBe(true)
-  })
-
-  test('exits quietly and quickly when no hub is running', async () => {
-    port = await freePort()
-    const r = await runHook(port, { session_id: 's1', prompt: 'x' }, 'pipe-H', PROMPT_HOOK)
-    expect(r.status).toBe(0)
-    expect(r.stdout).toBe('')
-    expect(r.ms).toBeLessThan(3000)
-  })
-
-  test('survives garbage input', () => {
-    const r = spawnSync(process.execPath, [PROMPT_HOOK], { input: 'not json', env: { ...process.env, TG_HUB_PORT: '1' }, encoding: 'utf8' })
-    expect(r.status).toBe(0)
-    expect(r.stdout).toBe('')
-  })
-})
-
 describe('plugin packaging', () => {
   const json = (p: string) => JSON.parse(readFileSync(p, 'utf8'))
 
@@ -143,8 +83,20 @@ describe('plugin packaging', () => {
     const cmd: string = hooks.hooks.SessionStart[0].hooks[0].command
     expect(cmd).toContain('src/hook/sessionStart.ts')
     expect(existsSync(HOOK)).toBe(true)
-    expect(hooks.hooks.UserPromptSubmit[0].hooks[0].command).toContain('src/hook/userPromptSubmit.ts')
-    expect(existsSync(PROMPT_HOOK)).toBe(true)
+  })
+
+  // The note that the mode went off reaches the agent through our own server.
+  test('the PostToolBatch hook calls the note tool of the plugin server, main agent only', () => {
+    const hooks = json(join(PLUGIN, 'hooks', 'hooks.json'))
+    const pluginName = json(join(PLUGIN, '.claude-plugin', 'plugin.json')).name
+    const serverKey = Object.keys(json(join(PLUGIN, '.mcp.json')).mcpServers)[0]
+    expect(hooks.hooks.PostToolBatch[0].hooks[0]).toMatchObject({
+      type: 'mcp_tool',
+      server: `plugin:${pluginName}:${serverKey}`,
+      tool: HOOK_NOTE_TOOL,
+      input: { agent_id: '${agent_id}' },
+    })
+    expect(hooks.hooks.UserPromptSubmit).toBeUndefined()
   })
 })
 

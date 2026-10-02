@@ -186,16 +186,18 @@ describe('PluginCore', () => {
     expect(sent()).toEqual([{ text: 'Проверяю', silent: true, topic: 100 }])
   })
 
-  test('the prompt hook turning the mode off still sends the text already written', async () => {
+  // Background tasks, Monitor events and subagent reports start turns too.
+  test('prompts Claude Code itself sends leave the mode on', async () => {
     const c = await enabledCore()
-    append(assistantText('Почти готово', 'tool_use', 'h1'))
-    const res = await fetch(`http://127.0.0.1:${port}/prompt`, { method: 'POST', body: JSON.stringify({ session_id: SID, input_source: 'terminal' }) })
-    expect(await res.json()).toEqual({ wasEnabled: true })
-    await waitFor(() => !c.enabled, 3000, 'disabled')
-    append(assistantTool('Bash', 'h1'), assistantText('уже не в Телеграм', 'end_turn', 'h2'))
-    await waitFor(() => sent().length === 1, 3000, 'text written before')
-    await Bun.sleep(200)
-    expect(sent()).toEqual([{ text: 'Почти готово', silent: true, topic: 100 }])
+    append(
+      { type: 'user', isSidechain: false, origin: { kind: 'task-notification', producer: 'session-task' }, message: { role: 'user', content: '<task-notification>\n<status>completed</status>\n</task-notification>' } },
+      { type: 'attachment', isSidechain: false, attachment: { type: 'queued_command', prompt: '<task-notification/>', commandMode: 'task-notification', origin: { kind: 'task-notification' } } },
+      { type: 'user', isSidechain: false, origin: { kind: 'peer', handback: true }, isMeta: true, message: { role: 'user', content: 'Another Claude…' } },
+      assistantText('продолжаю', 'end_turn', 'tn1'),
+    )
+    await waitFor(() => sent().length === 1, 3000, 'turn text')
+    expect(c.enabled).toBe(true)
+    expect(c.hookNote('')).toBe('')
   })
 
   test('the final text of a turn ended right before terminal input is still sent', async () => {
@@ -288,5 +290,53 @@ describe('PluginCore', () => {
     config = { allowFrom: [ME] }
     const c = makeCore()
     await expect(c.enable()).rejects.toThrow(/config\.json/)
+  })
+})
+
+// The PostToolBatch hook asks hookNote after every batch of tool calls.
+describe('note to the agent that the mode went off', () => {
+  const noteOf = (out: string) => JSON.parse(out).hookSpecificOutput
+  const toolBatch = (id: string) => [assistantTool('Bash', id), { type: 'user', isSidechain: false, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'ok' }] } }]
+
+  test('the first tool batch after terminal input tells the agent, once', async () => {
+    const c = await enabledCore()
+    // No wait for the tailer: the hook may come before its next poll.
+    append(humanTyped('Как успехи?'), ...toolBatch('k1'))
+    const note = noteOf(c.hookNote(''))
+    expect(note.hookEventName).toBe('PostToolBatch')
+    expect(note.additionalContext).toContain('OFF')
+    expect(note.additionalContext).toContain('tg_notify')
+    expect(c.enabled).toBe(false)
+    expect(c.hookNote('')).toBe('')
+  })
+
+  test('a message typed mid-turn is noted too', async () => {
+    const c = await enabledCore()
+    append(typedMidTurn('стоп'), ...toolBatch('k2'))
+    expect(noteOf(c.hookNote('')).additionalContext).toContain('OFF')
+  })
+
+  test('a subagent batch leaves the note for the main agent', async () => {
+    const c = await enabledCore()
+    append(humanTyped('сам'))
+    expect(c.hookNote('a3f559a955ec4c710')).toBe('')
+    expect(c.hookNote('')).not.toBe('')
+  })
+
+  test('nothing to say when the agent turned the mode off itself', async () => {
+    const c = await enabledCore()
+    await c.disable()
+    await waitFor(() => !c.enabled)
+    append(humanTyped('ок'))
+    expect(c.hookNote('')).toBe('')
+  })
+
+  test('turning the mode back on drops an undelivered note', async () => {
+    const c = await enabledCore()
+    append(humanTyped('сам'))
+    await waitFor(() => !c.enabled, 3000, 'disabled')
+    await c.enable()
+    await waitFor(() => c.enabled)
+    expect(c.hookNote('')).toBe('')
   })
 })

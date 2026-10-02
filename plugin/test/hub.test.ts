@@ -451,25 +451,6 @@ describe('delivery', () => {
   })
 })
 
-describe('terminal prompt hook', () => {
-  const prompt = (body: object) => fetch(`http://127.0.0.1:${port}/prompt`, { method: 'POST', body: JSON.stringify(body) }).then(r => r.json())
-
-  test('turns the mode off and says it was on', async () => {
-    await startHub()
-    const a = await enabled('a')
-    expect(await prompt({ session_id: 'a', input_source: 'terminal' })).toEqual({ wasEnabled: true })
-    await waitFor(() => a.messages.filter(m => m.type === 'state').at(-1)?.enabled === false, 3000, 'disabled state')
-    expect(new SessionStore(join(dir, 'sessions.json')).get('a')?.enabled).toBe(false)
-    expect(log.lines.some(l => l.includes('input_source=terminal'))).toBe(true)
-    expect(await prompt({ session_id: 'a' })).toEqual({ wasEnabled: false })
-  })
-
-  test('an unknown session was not on', async () => {
-    await startHub()
-    expect(await prompt({ session_id: 'nobody' })).toEqual({ wasEnabled: false })
-  })
-})
-
 describe('hooks and transport', () => {
   test('a SessionStart hook is forwarded to the window with the same messaging socket', async () => {
     await startHub()
