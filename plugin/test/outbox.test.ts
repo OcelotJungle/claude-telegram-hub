@@ -15,6 +15,7 @@ beforeEach(() => {
 })
 
 const piece = (text: string, silent = true) => ({ text, silent })
+const photo = (name: string) => ({ path: `/q/${name}`, name, size: 1, kind: 'photo' as const })
 
 describe('Outbox', () => {
   test('pieces of a session come out in order, sessions apart', () => {
@@ -56,6 +57,46 @@ describe('Outbox', () => {
     o.replaceWithNotice(o.head('a')!.id, '⚠️ notice')
     expect(new Outbox(file, log).head('a')).toMatchObject({ text: '⚠️ notice', silent: false, notice: true })
     expect(o.countOf('a')).toBe(2)
+  })
+
+  test('a notice in place of files carries neither files nor entities', () => {
+    const o = new Outbox(file, log)
+    o.add('m1', 'a', [{ text: 'cap', silent: true, entities: [{ type: 'bold', offset: 0, length: 3 }], files: [photo('x.png')] }])
+    o.replaceWithNotice(o.head('a')!.id, '⚠️ notice')
+    const h = new Outbox(file, log).head('a')!
+    expect(h.files).toBeUndefined()
+    expect(h.entities).toBeUndefined()
+  })
+
+  test('a piece can lose its entities, in place and on disk', () => {
+    const o = new Outbox(file, log)
+    o.add('m1', 'a', [{ text: 'b', silent: true, entities: [{ type: 'bold', offset: 0, length: 1 }] }, piece('next')])
+    o.dropEntities(o.head('a')!.id)
+    expect(new Outbox(file, log).head('a')).toMatchObject({ text: 'b' })
+    expect(new Outbox(file, log).head('a')!.entities).toBeUndefined()
+    expect(o.countOf('a')).toBe(2)
+  })
+
+  test('a piece can be replaced by several, keeping its place and its message', () => {
+    const o = new Outbox(file, log)
+    o.add('m1', 'a', [piece('one'), piece('three')])
+    o.replace(o.head('a')!.id, [piece('one-a'), piece('one-b')])
+    const again = new Outbox(file, log)
+    const seen: string[] = []
+    for (let h = again.head('a'); h; h = again.head('a')) {
+      seen.push(h.text)
+      expect(again.hasMessage('m1')).toBe(true)
+      again.remove(h.id)
+    }
+    expect(seen).toEqual(['one-a', 'one-b', 'three'])
+    expect(again.hasMessage('m1')).toBe(false)
+  })
+
+  test('hasMessage tells pieces of one message from another with a longer id', () => {
+    const o = new Outbox(file, log)
+    o.add('m10', 'a', [piece('x')])
+    expect(o.hasMessage('m1')).toBe(false)
+    expect(o.hasMessage('m10')).toBe(true)
   })
 
   test('a corrupt file is kept aside and reported, not silently dropped', () => {

@@ -1,6 +1,8 @@
 import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { nullLogger, type Logger } from '../shared/log.ts'
+import type { Entity } from '../shared/markdown.ts'
+import type { OutFile } from '../shared/media.ts'
 
 // Only the Bot API fields the hub reads.
 export type User = { id: number; is_bot: boolean; first_name?: string; username?: string }
@@ -41,6 +43,12 @@ export function isThreadNotFound(e: unknown): boolean {
 }
 
 const MAX_DELAY_MS = 15_000
+// An upload attempt may take as long as sending its bytes at this rate
+// (64 KB/s), on top of the usual attempt timeout.
+const UPLOAD_BYTES_PER_MS = 64
+
+// A request body: JSON params, or a multipart form built anew for each attempt.
+type Body = object | (() => FormData)
 
 type ApiOptions = {
   token: string
@@ -80,7 +88,7 @@ export class TelegramApi {
   // Retries network errors until the deadline, and 5xx and 429 (honouring
   // retry_after) up to maxAttempts; other API errors are thrown at once.
   // `waitMs` is how long Telegram may legitimately hold the request (long poll).
-  async call<T>(method: string, params: object, o: { signal?: AbortSignal; retry?: boolean; waitMs?: number } = {}): Promise<T> {
+  async call<T>(method: string, params: Body, o: { signal?: AbortSignal; retry?: boolean; waitMs?: number } = {}): Promise<T> {
     const deadline = Date.now() + this.deadlineMs
     let apiFailures = 0
     let netFailures = 0
@@ -107,12 +115,11 @@ export class TelegramApi {
     }
   }
 
-  private async callOnce<T>(method: string, params: object, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+  private async callOnce<T>(method: string, params: Body, timeoutMs: number, signal?: AbortSignal): Promise<T> {
     const timeout = AbortSignal.timeout(timeoutMs)
     const res = await fetch(`${this.base}/bot${this.opts.token}/${method}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(params),
+      ...(typeof params === 'function' ? { body: params() } : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(params) }),
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     })
     let body: any
@@ -134,8 +141,32 @@ export class TelegramApi {
     return this.call<Update[]>('getUpdates', { offset, timeout: timeoutSec, allowed_updates: ['message'] }, { signal, retry: false, waitMs: timeoutSec * 1000 })
   }
 
-  sendMessage(chatId: string, threadId: number, text: string, silent: boolean): Promise<{ message_id: number }> {
-    return this.call('sendMessage', { chat_id: chatId, message_thread_id: threadId, text, disable_notification: silent })
+  sendMessage(chatId: string, threadId: number, text: string, silent: boolean, entities?: Entity[]): Promise<{ message_id: number }> {
+    return this.call('sendMessage', { chat_id: chatId, message_thread_id: threadId, text, disable_notification: silent, ...(entities?.length ? { entities } : {}) })
+  }
+
+  // One file by the method of its kind, several as a media group with the
+  // caption on the first item (Telegram shows it under the album).
+  sendFiles(chatId: string, threadId: number, files: OutFile[], caption: string, captionEntities: Entity[] | undefined, silent: boolean): Promise<unknown> {
+    const cap = caption ? { caption, ...(captionEntities?.length ? { caption_entities: captionEntities } : {}) } : {}
+    const form = () => {
+      const f = new FormData()
+      f.set('chat_id', chatId)
+      f.set('message_thread_id', String(threadId))
+      f.set('disable_notification', String(silent))
+      if (files.length === 1) {
+        const file = files[0]!
+        f.set(file.kind, Bun.file(file.path), file.name)
+        for (const [k, v] of Object.entries(cap)) f.set(k, typeof v === 'string' ? v : JSON.stringify(v))
+      } else {
+        f.set('media', JSON.stringify(files.map((file, i) => ({ type: file.kind, media: `attach://file${i}`, ...(i === 0 ? cap : {}) }))))
+        files.forEach((file, i) => f.set(`file${i}`, Bun.file(file.path), file.name))
+      }
+      return f
+    }
+    const method = files.length === 1 ? `send${files[0]!.kind[0]!.toUpperCase()}${files[0]!.kind.slice(1)}` : 'sendMediaGroup'
+    const bytes = files.reduce((n, file) => n + file.size, 0)
+    return this.call(method, form, { waitMs: bytes / UPLOAD_BYTES_PER_MS })
   }
 
   createForumTopic(chatId: string, name: string): Promise<{ message_thread_id: number; name: string }> {

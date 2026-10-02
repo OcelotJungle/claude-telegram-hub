@@ -31,6 +31,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string } = {}) {
     outboxFile: join(dir, 'outbox.json'),
     spoolDir: join(dir, 'spool'),
     spoolScanMs: 50,
+    filesDir: join(dir, 'outbox-files'),
     inboxDir: join(dir, 'inbox'),
     api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === 'string' ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500 }),
     config: () => config,
@@ -451,6 +452,210 @@ describe('delivery', () => {
   })
 })
 
+describe('formatting', () => {
+  test('agent markdown goes as plain text with entities', async () => {
+    await startHub()
+    const a = await enabled('a')
+    a.send({ type: 'send', id: 'x1', text: '## Итог\n\n**готово**, см. `hub.ts`', notify: false })
+    await waitFor(() => fake.callsOf('sendMessage').length === 1)
+    expect(fake.callsOf('sendMessage')[0]).toMatchObject({
+      text: 'Итог\n\nготово, см. hub.ts',
+      entities: [
+        { type: 'bold', offset: 0, length: 4 },
+        { type: 'bold', offset: 6, length: 6 },
+        { type: 'code', offset: 18, length: 6 },
+      ],
+    })
+  })
+
+  test('a long formatted text keeps its entities on both sides of the cut', async () => {
+    await startHub()
+    const a = await enabled('a')
+    a.send({ type: 'send', id: 'x1', text: '```\n' + 'z'.repeat(5000) + '\n```', notify: false })
+    await waitFor(() => fake.callsOf('sendMessage').length === 2)
+    expect(fake.callsOf('sendMessage').map(s => s.entities)).toEqual([[{ type: 'pre', offset: 0, length: 4096 }], [{ type: 'pre', offset: 0, length: 904 }]])
+  })
+
+  test('a text Telegram rejects with entities is sent again without them', async () => {
+    await startHub()
+    const a = await enabled('a')
+    fake.failNext('sendMessage', { code: 400, description: "Bad Request: can't parse entities" })
+    a.send({ type: 'send', id: 'x1', text: '**bold**', notify: true })
+    await waitFor(() => fake.callsOf('sendMessage').length === 2)
+    const [first, second] = fake.callsOf('sendMessage')
+    expect(first).toMatchObject({ text: 'bold', entities: [{ type: 'bold', offset: 0, length: 4 }] })
+    expect(second).toEqual({ chat_id: GROUP, message_thread_id: 100, text: 'bold', disable_notification: false })
+    expect(log.lines.some(l => l.startsWith('WARN') && l.includes("can't parse entities"))).toBe(true)
+  })
+
+  test("the hub's own texts are not parsed as markdown", async () => {
+    await startHub()
+    const a = await enabled('a')
+    a.send({ type: 'permission', toolName: 'Bash', description: 'rm *.tmp and *.log' })
+    await waitFor(() => fake.callsOf('sendMessage').length === 1)
+    expect(fake.callsOf('sendMessage')[0].text).toBe('🔐 Нужно подтверждение: Bash — rm *.tmp and *.log')
+    expect(fake.callsOf('sendMessage')[0].entities).toBeUndefined()
+  })
+})
+
+describe('files', () => {
+  let n = 0
+  // A copy the plugin put into outbox-files/<message id>/.
+  const queued = (id: string, name: string, body = `body of ${name}`) => {
+    const d = join(dir, 'outbox-files', id)
+    mkdirSync(d, { recursive: true })
+    const path = join(d, `${n++}-${name}`)
+    writeFileSync(path, body)
+    return { path, name, size: body.length }
+  }
+  const sendFiles = (c: { send(o: object): void }, id: string, files: object[], o: { caption?: string; notify?: boolean; sessionId?: string } = {}) =>
+    c.send({ type: 'sendFiles', id, sessionId: o.sessionId ?? 'a', files, caption: o.caption ?? '', notify: o.notify ?? false })
+  const done = (c: Awaited<ReturnType<typeof plugin>>, id: string) => c.next(m => m.type === 'filesSent' && m.id === id, 5000)
+  const sends = () => fake.calls.filter(c => c.method.startsWith('send')).map(c => c.method)
+
+  test('a photo goes with a formatted caption, the plugin hears it is sent, the copy is removed', async () => {
+    await startHub()
+    const a = await enabled('a')
+    const f = queued('f1', 'shot.png')
+    sendFiles(a, 'f1', [f], { caption: 'see **this**' })
+    await a.next(m => m.type === 'ack' && m.id === 'f1')
+    expect(await done(a, 'f1')).toEqual({ type: 'filesSent', id: 'f1' })
+    expect(fake.callsOf('sendPhoto')).toEqual([
+      {
+        chat_id: GROUP,
+        message_thread_id: '100',
+        disable_notification: 'true',
+        photo: { file: 'shot.png', size: f.size, body: 'body of shot.png' },
+        caption: 'see this',
+        caption_entities: [{ type: 'bold', offset: 4, length: 4 }],
+      },
+    ])
+    expect(existsSync(join(dir, 'outbox-files', 'f1'))).toBe(false)
+  })
+
+  test('albums follow the files, the caption and the sound go with the first send only', async () => {
+    await startHub()
+    const a = await enabled('a')
+    const files = [queued('f1', '1.png'), queued('f1', '2.mp4'), queued('f1', 'a.pdf'), queued('f1', 'b.pdf'), queued('f1', 'clip.gif')]
+    sendFiles(a, 'f1', files, { caption: 'cap', notify: true })
+    await done(a, 'f1')
+    expect(sends()).toEqual(['sendMediaGroup', 'sendMediaGroup', 'sendAnimation'])
+    const [visual, docs] = fake.callsOf('sendMediaGroup')
+    expect(visual.media).toEqual([
+      { type: 'photo', media: 'attach://file0', caption: 'cap' },
+      { type: 'video', media: 'attach://file1' },
+    ])
+    expect(visual.disable_notification).toBe('false')
+    expect(docs.media).toEqual([
+      { type: 'document', media: 'attach://file0' },
+      { type: 'document', media: 'attach://file1' },
+    ])
+    expect(docs.disable_notification).toBe('true')
+    expect(fake.callsOf('sendAnimation')[0]).toMatchObject({ animation: { file: 'clip.gif' }, disable_notification: 'true' })
+  })
+
+  test('files keep their place between texts', async () => {
+    await startHub()
+    const a = await enabled('a')
+    a.send({ type: 'send', id: 'x1', text: 'before', notify: false })
+    sendFiles(a, 'f1', [queued('f1', 'a.txt')])
+    a.send({ type: 'send', id: 'x2', text: 'after', notify: false })
+    await waitFor(() => sends().length === 3)
+    expect(sends()).toEqual(['sendMessage', 'sendDocument', 'sendMessage'])
+    expect(fake.callsOf('sendMessage').map(s => s.text)).toEqual(['before', 'after'])
+  })
+
+  test('files re-sent after a reconnect are not sent twice, and the plugin still hears they are sent', async () => {
+    await startHub()
+    const a = await enabled('a')
+    const f = queued('f1', 'a.txt')
+    sendFiles(a, 'f1', [f])
+    await done(a, 'f1')
+    a.messages.length = 0
+    sendFiles(a, 'f1', [f])
+    expect(await done(a, 'f1')).toEqual({ type: 'filesSent', id: 'f1' })
+    expect(fake.callsOf('sendDocument').length).toBe(1)
+  })
+
+  test('a session without a topic gets an error and the copies are removed', async () => {
+    await startHub()
+    const a = await plugin('a')
+    sendFiles(a, 'f1', [queued('f1', 'a.txt')])
+    expect((await done(a, 'f1')).error).toContain('tg_enable')
+    expect(existsSync(join(dir, 'outbox-files', 'f1'))).toBe(false)
+    expect(sends()).toEqual([])
+  })
+
+  test('a path outside outbox-files is refused and left alone', async () => {
+    await startHub()
+    const a = await enabled('a')
+    const outside = join(dir, 'precious.txt')
+    writeFileSync(outside, 'keep me')
+    sendFiles(a, 'f1', [{ path: outside, name: 'precious.txt', size: 7 }])
+    expect((await done(a, 'f1')).error).toContain('outbox-files')
+    expect(readFileSync(outside, 'utf8')).toBe('keep me')
+    expect(sends()).toEqual([])
+    expect(log.lines.some(l => l.startsWith('ERROR') && l.includes('precious.txt'))).toBe(true)
+  })
+
+  test('photos Telegram rejects go again as documents, other files of the album as they were', async () => {
+    await startHub()
+    const a = await enabled('a')
+    fake.failNext('sendMediaGroup', { code: 400, description: 'Bad Request: PHOTO_INVALID_DIMENSIONS' })
+    sendFiles(a, 'f1', [queued('f1', 'tall.png'), queued('f1', 'clip.mp4')], { caption: 'cap', notify: true })
+    expect(await done(a, 'f1')).toEqual({ type: 'filesSent', id: 'f1' })
+    expect(sends()).toEqual(['sendMediaGroup', 'sendDocument', 'sendVideo'])
+    expect(fake.callsOf('sendDocument')[0]).toMatchObject({ document: { file: 'tall.png' }, caption: 'cap', disable_notification: 'false' })
+    expect(fake.callsOf('sendVideo')[0]).toMatchObject({ video: { file: 'clip.mp4' }, disable_notification: 'true' })
+    expect(fake.callsOf('sendVideo')[0].caption).toBeUndefined()
+    expect(log.lines.some(l => l.startsWith('WARN') && l.includes('as documents'))).toBe(true)
+  })
+
+  test('files Telegram rejects are reported to the plugin and in the topic, and their copies removed', async () => {
+    await startHub()
+    const a = await enabled('a')
+    fake.failNext('sendDocument', { code: 400, description: 'Bad Request: file is too big' })
+    sendFiles(a, 'f1', [queued('f1', 'huge.bin')])
+    expect((await done(a, 'f1')).error).toBe('huge.bin: Bad Request: file is too big')
+    expect(fake.callsOf('sendMessage').map(s => s.text)).toEqual(['⚠️ Telegram не принял файл huge.bin: Bad Request: file is too big'])
+    expect(existsSync(join(dir, 'outbox-files', 'f1'))).toBe(false)
+    expect(log.lines.some(l => l.startsWith('ERROR') && l.includes('huge.bin'))).toBe(true)
+  })
+
+  test('a copy gone from disk is reported like a rejection, not retried forever', async () => {
+    await startHub()
+    const a = await enabled('a')
+    const gone = { path: join(dir, 'outbox-files', 'f1', '0-gone.png'), name: 'gone.png', size: 3 }
+    sendFiles(a, 'f1', [gone])
+    expect((await done(a, 'f1')).error).toContain('gone.png')
+    expect(fake.callsOf('sendMessage')[0].text).toStartWith('⚠️ Telegram не принял файл gone.png')
+    expect(sends()).toEqual(['sendMessage'])
+  })
+
+  test('files a closing window left in spool/ are sent', async () => {
+    await startHub()
+    await enabled('a')
+    const f = queued('f1', 'a.txt')
+    mkdirSync(join(dir, 'spool'), { recursive: true })
+    writeFileSync(join(dir, 'spool', 'a-1.json'), JSON.stringify([{ type: 'sendFiles', id: 'f1', sessionId: 'a', files: [f], caption: '', notify: false }]))
+    await waitFor(() => fake.callsOf('sendDocument').length === 1, 3000, 'document sent')
+  })
+
+  test('a restarted hub sends the files the previous one had queued and tells the plugin', async () => {
+    await startHub()
+    const a = await enabled('a')
+    fake.hangNext('sendDocument', 100)
+    sendFiles(a, 'f1', [queued('f1', 'a.txt')])
+    await a.next(m => m.type === 'ack' && m.id === 'f1')
+    await hub.stop()
+    fake.clearHangs()
+    await startHub()
+    const b = await plugin('a')
+    expect(await done(b, 'f1')).toEqual({ type: 'filesSent', id: 'f1' })
+    expect(existsSync(join(dir, 'outbox-files', 'f1'))).toBe(false)
+  })
+})
+
 describe('hooks and transport', () => {
   test('a SessionStart hook is forwarded to the window with the same messaging socket', async () => {
     await startHub()
@@ -500,7 +705,7 @@ describe('hooks and transport', () => {
 
   test('a second hub on the same port does not start', async () => {
     await startHub()
-    const second = new Hub({ port, sessionsFile: join(dir, 's2.json'), outboxFile: join(dir, 'o2.json'), inboxDir: dir, api: undefined, config: () => config, idleMs: 1000, log, onExit() {} })
+    const second = new Hub({ port, sessionsFile: join(dir, 's2.json'), outboxFile: join(dir, 'o2.json'), filesDir: join(dir, 'f2'), inboxDir: dir, api: undefined, config: () => config, idleMs: 1000, log, onExit() {} })
     expect(second.start()).toBe(false)
   })
 })

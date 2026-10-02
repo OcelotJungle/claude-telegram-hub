@@ -17,6 +17,7 @@ const hub = new Hub({
   sessionsFile: p.sessionsFile,
   outboxFile: p.outboxFile,
   spoolDir: p.spoolDir,
+  filesDir: p.filesDir,
   inboxDir: p.inboxDir,
   api: token ? new TelegramApi({ token, base: apiBase(), log }) : undefined,
   config: loadConfig,

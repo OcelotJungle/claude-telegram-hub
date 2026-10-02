@@ -6,17 +6,20 @@ import { loadConfig, loadToken, paths } from '../src/shared/config.ts'
 import { tempDir } from './helpers.ts'
 
 describe('chunk', () => {
+  const plain = (text: string) => ({ text, entities: [] })
+  const texts = (text: string, limit?: number) => chunk(plain(text), limit).map(p => p.text)
+
   test('short text is one piece', () => {
-    expect(chunk('hello')).toEqual(['hello'])
+    expect(chunk(plain('hello'))).toEqual([plain('hello')])
   })
 
   test('empty text gives no pieces', () => {
-    expect(chunk('')).toEqual([])
+    expect(chunk(plain(''))).toEqual([])
   })
 
   test('long text is split into pieces within the limit', () => {
     const text = 'abcdefghij'.repeat(1000)
-    const pieces = chunk(text, 4096)
+    const pieces = texts(text, 4096)
     expect(pieces.length).toBe(3)
     for (const p of pieces) expect(p.length).toBeLessThanOrEqual(4096)
     expect(pieces.join('')).toBe(text)
@@ -25,17 +28,44 @@ describe('chunk', () => {
   test('prefers a paragraph boundary past half the limit', () => {
     const a = 'a'.repeat(70)
     const b = 'b'.repeat(50)
-    expect(chunk(`${a}\n\n${b}`, 100)).toEqual([a, b])
+    expect(texts(`${a}\n\n${b}`, 100)).toEqual([a, b])
   })
 
   test('falls back to a line break, then a space', () => {
-    expect(chunk(`${'a'.repeat(70)}\n${'b'.repeat(50)}`, 100)).toEqual(['a'.repeat(70), 'b'.repeat(50)])
-    expect(chunk(`${'a'.repeat(70)} ${'b'.repeat(50)}`, 100)).toEqual(['a'.repeat(70), 'b'.repeat(50)])
+    expect(texts(`${'a'.repeat(70)}\n${'b'.repeat(50)}`, 100)).toEqual(['a'.repeat(70), 'b'.repeat(50)])
+    expect(texts(`${'a'.repeat(70)} ${'b'.repeat(50)}`, 100)).toEqual(['a'.repeat(70), 'b'.repeat(50)])
   })
 
   test('never yields whitespace-only pieces', () => {
-    const pieces = chunk(`${'a'.repeat(60)}\n\n\n\n${'b'.repeat(60)}`, 100)
-    expect(pieces).toEqual(['a'.repeat(60), 'b'.repeat(60)])
+    expect(texts(`${'a'.repeat(60)}\n\n\n\n${'b'.repeat(60)}`, 100)).toEqual(['a'.repeat(60), 'b'.repeat(60)])
+  })
+
+  test('never cuts a surrogate pair', () => {
+    const pieces = texts('a' + '😀'.repeat(60), 100)
+    expect(pieces.join('')).toBe('a' + '😀'.repeat(60))
+    for (const p of pieces) expect(p).not.toMatch(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/)
+  })
+
+  test('entities move with their piece; one on the boundary is split', () => {
+    const a = 'a'.repeat(70)
+    const b = 'b'.repeat(50)
+    const text = `${a}\n\n${b}`
+    const pieces = chunk(
+      {
+        text,
+        entities: [
+          { type: 'bold', offset: 0, length: 5 },
+          { type: 'pre', offset: 60, length: 20, language: 'ts' },
+          { type: 'italic', offset: 75, length: 3 },
+        ],
+      },
+      100,
+    )
+    expect(pieces).toEqual([
+      { text: a, entities: [{ type: 'bold', offset: 0, length: 5 }, { type: 'pre', offset: 60, length: 10, language: 'ts' }] },
+      // The cut drops "\n\n"; the pre entity keeps its two b's, the italic its three.
+      { text: b, entities: [{ type: 'pre', offset: 0, length: 8, language: 'ts' }, { type: 'italic', offset: 3, length: 3 }] },
+    ])
   })
 })
 

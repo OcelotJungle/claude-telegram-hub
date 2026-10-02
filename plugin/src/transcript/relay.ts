@@ -66,6 +66,15 @@ export class Relay {
     return out
   }
 
+  // A tool of ours that posts to the topic is about to run: the text written
+  // before the call goes first. A turn that ended before it is finished.
+  textBeforeToolCall(): Outgoing[] {
+    const out = this.ending !== undefined ? this.finishTurn() : []
+    if (this.enabled && this.pending !== undefined) out.push({ text: this.pending, notify: false })
+    this.pending = undefined
+    return out
+  }
+
   idle(): Outgoing[] {
     return this.ending === undefined ? [] : this.finishTurn()
   }

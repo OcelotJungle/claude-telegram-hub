@@ -1,10 +1,14 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'fs'
 import { dirname } from 'path'
 import type { Logger } from '../shared/log.ts'
+import type { Entity } from '../shared/markdown.ts'
+import type { OutFile } from '../shared/media.ts'
 
-// One piece of text for a session's topic, at most one Telegram message long.
+// One Telegram send for a session's topic: a piece of text at most one
+// message long, or files (one file or an album) with text as their caption.
 // notice: it replaced a piece Telegram rejected.
-export type OutItem = { id: string; sessionId: string; text: string; silent: boolean; notice?: boolean }
+export type Piece = { text: string; silent: boolean; entities?: Entity[]; files?: OutFile[]; notice?: boolean }
+export type OutItem = Piece & { id: string; sessionId: string }
 
 type Data = { items: OutItem[]; seen: string[] }
 
@@ -47,9 +51,9 @@ export class Outbox {
 
   // Queues the pieces of one plugin message; false if that message was
   // already queued.
-  add(sourceId: string, sessionId: string, pieces: { text: string; silent: boolean }[]): boolean {
+  add(sourceId: string, sessionId: string, pieces: Piece[]): boolean {
     if (this.data.seen.includes(sourceId)) return false
-    pieces.forEach((p, i) => this.data.items.push({ id: `${sourceId}#${i}`, sessionId, text: p.text, silent: p.silent }))
+    pieces.forEach((p, i) => this.data.items.push({ ...p, id: `${sourceId}#${i}`, sessionId }))
     this.data.seen.push(sourceId)
     if (this.data.seen.length > MAX_SEEN) this.data.seen.splice(0, this.data.seen.length - MAX_SEEN)
     this.save()
@@ -62,6 +66,15 @@ export class Outbox {
 
   head(sessionId: string): OutItem | undefined {
     return this.data.items.find(i => i.sessionId === sessionId)
+  }
+
+  // Pieces of a plugin message are still queued.
+  hasMessage(sourceId: string): boolean {
+    return this.data.items.some(i => i.id.startsWith(`${sourceId}#`))
+  }
+
+  items(): readonly OutItem[] {
+    return this.data.items
   }
 
   sessions(): string[] {
@@ -80,6 +93,24 @@ export class Outbox {
     item.text = text
     item.silent = false
     item.notice = true
+    delete item.entities
+    delete item.files
+    this.save()
+  }
+
+  dropEntities(id: string): void {
+    const item = this.data.items.find(i => i.id === id)
+    if (!item) return
+    delete item.entities
+    this.save()
+  }
+
+  // Puts several pieces in place of one; they stay pieces of its message.
+  replace(id: string, pieces: Piece[]): void {
+    const at = this.data.items.findIndex(i => i.id === id)
+    if (at < 0) return
+    const { sessionId } = this.data.items[at]!
+    this.data.items.splice(at, 1, ...pieces.map((p, j) => ({ ...p, id: `${id}.${j}`, sessionId })))
     this.save()
   }
 

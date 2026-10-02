@@ -1,6 +1,10 @@
-import { mkdirSync, renameSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { randomUUID } from 'crypto'
+import { copyFileSync, mkdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
+import { basename, join, resolve } from 'path'
+import { isInside } from '../shared/config.ts'
 import type { Logger } from '../shared/log.ts'
+import { toTelegram } from '../shared/markdown.ts'
+import { MAX_CAPTION, MAX_UPLOAD } from '../shared/media.ts'
 import { PROTOCOL_VERSION, type ChannelMeta, type HubToPlugin } from '../shared/protocol.ts'
 import { transcriptPathFor } from '../transcript/locate.ts'
 import { parseRecord } from '../transcript/parse.ts'
@@ -16,6 +20,12 @@ export type PluginOptions = {
   port: number
   // Where text the hub never acked goes when the window closes.
   spoolDir: string
+  // tg-hub state: never sent, except inbox/ (what came from Telegram).
+  stateDir: string
+  // Where files to send are copied for the hub.
+  filesDir: string
+  // How long tg_send_file waits for the hub to send the files.
+  fileWaitMs?: number
   spawnHub(): void
   emitChannel(content: string, meta: ChannelMeta): void
   log: Logger
@@ -95,7 +105,7 @@ export class PluginCore {
         this.log.warn(`hub unreachable at shutdown: ${left.length} message(s) left in ${file}`)
         this.client.spawnHubNow()
       } catch (e) {
-        this.log.error(`could not spool ${left.length} message(s): ${e}\n${left.map(o => o.text).join('\n---\n')}`)
+        this.log.error(`could not spool ${left.length} message(s): ${e}\n${left.map(o => (o.type === 'sendFiles' ? `files: ${o.files.map(f => f.path).join(', ')}` : o.text)).join('\n---\n')}`)
       }
     }
     this.stop()
@@ -136,6 +146,59 @@ export class PluginCore {
     if (agentId || !this.noteOwed) return ''
     this.noteOwed = false
     return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolBatch', additionalContext: MODE_OFF_NOTE } })
+  }
+
+  // Checks everything before sending anything, then hands the hub copies:
+  // the agent may change or delete the originals right after the call.
+  async sendFiles(paths: string[], caption = ''): Promise<string> {
+    if (!paths.length) throw new Error('give at least one file path')
+    const files = paths.map(p => this.sendable(p))
+    const shown = toTelegram(caption).text.length
+    if (shown > MAX_CAPTION) throw new Error(`the caption is ${shown} characters, Telegram allows ${MAX_CAPTION} — shorten it or write the text as a normal message`)
+    const id = randomUUID()
+    const dir = join(this.opts.filesDir, id)
+    let queued: { path: string; name: string; size: number }[]
+    try {
+      mkdirSync(dir, { recursive: true })
+      queued = files.map((f, i) => {
+        const path = join(dir, `${i}-${f.name}`)
+        copyFileSync(f.path, path)
+        return { ...f, path }
+      })
+    } catch (e) {
+      rmSync(dir, { recursive: true, force: true })
+      throw new Error(`could not queue the files: ${e instanceof Error ? e.message : e}`)
+    }
+    this.tailer?.pollNow()
+    this.flush(this.relay.textBeforeToolCall())
+    const res = await this.client.sendFiles(
+      { type: 'sendFiles', id, sessionId: this.sessionId, files: queued, caption, notify: !this.enabled },
+      this.opts.fileWaitMs ?? HUB_TELEGRAM_TIMEOUT_MS,
+    )
+    if (!res) return `Telegram is not reachable right now: the ${files.length} file(s) are queued, and the hub will send them when it is.`
+    if (res.error) throw new Error(res.error)
+    return `Sent ${files.length} file(s) to the Telegram topic.`
+  }
+
+  private sendable(p: string): { path: string; name: string; size: number } {
+    const path = resolve(this.cwd, p)
+    let st
+    try {
+      st = statSync(path)
+    } catch {
+      throw new Error(`${p}: no such file`)
+    }
+    if (!st.isFile()) throw new Error(`${p}: not a file`)
+    if (st.size === 0) throw new Error(`${p}: the file is empty, Telegram does not take empty files`)
+    if (st.size > MAX_UPLOAD) throw new Error(`${p}: ${(st.size / 1024 / 1024).toFixed(1)} MB, over the 50 MB a bot may upload`)
+    let real = path
+    let state = this.opts.stateDir
+    try {
+      real = realpathSync(path)
+      state = realpathSync(state)
+    } catch {}
+    if (isInside(state, real) && !isInside(join(state, 'inbox'), real)) throw new Error(`${p}: refusing to send tg-hub state files`)
+    return { path, name: basename(path), size: st.size }
   }
 
   permissionRequest(p: { tool_name: string; description: string }): void {

@@ -35,7 +35,7 @@ describe('SessionStart hook', () => {
   test('tells the hub which session the window now runs', async () => {
     const port = await freePort()
     const dir = tempDir()
-    hub = new Hub({ port, sessionsFile: join(dir, 's.json'), outboxFile: join(dir, 'o.json'), inboxDir: dir, api: undefined, config: () => ({ allowFrom: [] }), idleMs: 60_000, log: memLogger(), onExit() {} })
+    hub = new Hub({ port, sessionsFile: join(dir, 's.json'), outboxFile: join(dir, 'o.json'), filesDir: join(dir, 'files'), inboxDir: dir, api: undefined, config: () => ({ allowFrom: [] }), idleMs: 60_000, log: memLogger(), onExit() {} })
     hub.start()
     const c = await wsClient(port, { type: 'hello', v: PROTOCOL_VERSION, windowKey: 'pipe-H', sessionId: 'old', cwd: 'C:\\p' })
     clients.push(c)

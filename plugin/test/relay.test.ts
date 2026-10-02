@@ -152,6 +152,29 @@ describe('relay', () => {
     expect(r.setEnabled(false)).toEqual([])
   })
 
+  test('a tool of ours posting to the topic takes the text written before it', () => {
+    const r = enabledRelay()
+    r.feed(text('вот скрин'))
+    expect(r.textBeforeToolCall()).toEqual([{ text: 'вот скрин', notify: false }])
+    // The tool_use record read later finds nothing left to send.
+    expect(r.feed(tool('mcp__plugin_tg-hub_tg-hub__tg_send_file'))).toEqual([])
+    expect(r.idle()).toEqual([])
+  })
+
+  test('a tool call after a turn ended finishes that turn first', () => {
+    const r = enabledRelay()
+    r.markNotify()
+    r.feed(text('итог', 'm1'))
+    r.feed(end('m1'))
+    expect(r.textBeforeToolCall()).toEqual([{ text: 'итог', notify: true }])
+  })
+
+  test('with the mode off nothing is taken', () => {
+    const r = new Relay({ isOwnTool: own })
+    r.feed(text('x'))
+    expect(r.textBeforeToolCall()).toEqual([])
+  })
+
   test('title and terminal input alone produce nothing', () => {
     const r = enabledRelay()
     expect(r.feed({ kind: 'title', source: 'ai', title: 'x' })).toEqual([])

@@ -1,6 +1,6 @@
 // In-process fake of the Telegram Bot API, enough for the hub: long-poll
 // getUpdates (with the real "terminated by other getUpdates request" conflict),
-// sendMessage, forum topics, getFile and file download.
+// sendMessage, media uploads (multipart), forum topics, getFile and file download.
 import type { Server } from 'bun'
 import type { Update } from '../src/hub/telegram.ts'
 
@@ -82,7 +82,7 @@ export class FakeTelegram {
     const m = url.pathname.match(/^\/bot([^/]+)\/(\w+)$/)
     if (!m || m[1] !== this.token) return json({ ok: false, error_code: 401, description: 'Unauthorized' }, 401)
     const method = m[2]!
-    const params = req.method === 'POST' ? await req.json().catch(() => ({})) : {}
+    const params = req.method !== 'POST' ? {} : (req.headers.get('content-type') ?? '').startsWith('multipart/') ? await formParams(req) : await req.json().catch(() => ({}))
     this.calls.push({ method, params })
 
     const hang = this.hangs.get(method) ?? 0
@@ -104,12 +104,19 @@ export class FakeTelegram {
         return this.getUpdates(params)
       case 'getMe':
         return ok({ id: 1, is_bot: true, username: 'test_bot' })
-      case 'sendMessage': {
+      case 'sendMessage':
+      case 'sendPhoto':
+      case 'sendVideo':
+      case 'sendAudio':
+      case 'sendAnimation':
+      case 'sendDocument':
+      case 'sendMediaGroup': {
         const thread = params.message_thread_id
-        if (thread != null && this.deletedTopics.has(thread)) {
+        if (thread != null && this.deletedTopics.has(Number(thread))) {
           return json({ ok: false, error_code: 400, description: 'Bad Request: message thread not found' }, 400)
         }
-        return ok({ message_id: this.nextMessageId++, chat: { id: Number(params.chat_id) }, text: params.text })
+        const message = () => ({ message_id: this.nextMessageId++, chat: { id: Number(params.chat_id) }, text: params.text })
+        return ok(method === 'sendMediaGroup' ? params.media.map(message) : message())
       }
       case 'createForumTopic':
         return ok({ message_thread_id: this.nextThreadId++, name: params.name, icon_color: 0 })
@@ -193,4 +200,17 @@ export function topicMsg(o: {
       ...o.extra,
     },
   } as Omit<Update, 'update_id'>
+}
+
+// Multipart fields as the JSON body would carry them: numbers and booleans
+// stay strings as sent, JSON fields (media, entities) are parsed, an uploaded
+// file becomes { file: name, size, body }.
+async function formParams(req: Request): Promise<any> {
+  const out: any = {}
+  for (const [key, value] of (await req.formData()).entries()) {
+    const v: unknown = value
+    if (v instanceof File) out[key] = { file: v.name, size: v.size, body: await v.text() }
+    else out[key] = key === 'media' || key.endsWith('entities') ? JSON.parse(String(v)) : v
+  }
+  return out
 }

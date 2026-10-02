@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, readFileSync } from 'fs'
-import { basename } from 'path'
+import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { basename, join } from 'path'
+import type { OutFile } from '../src/shared/media.ts'
 import { isThreadNotFound, TelegramApi, TelegramError } from '../src/hub/telegram.ts'
 import { FakeTelegram, topicMsg } from './fakeTelegram.ts'
 import { tempDir } from './helpers.ts'
@@ -113,5 +114,63 @@ describe('TelegramApi', () => {
     expect(basename(path)).toMatch(/^\d+-uF1\.jpg$/)
     expect(existsSync(path)).toBe(true)
     expect([...readFileSync(path)]).toEqual([1, 2, 3])
+  })
+})
+
+describe('TelegramApi uploads and formatting', () => {
+  const file = (name: string, kind: OutFile['kind'], body = `body of ${name}`) => {
+    const path = join(tempDir(), name)
+    writeFileSync(path, body)
+    return { path, name, size: body.length, kind }
+  }
+
+  test('sendMessage passes entities only when there are some', async () => {
+    await api.sendMessage('-100', 7, 'hi', true, [{ type: 'bold', offset: 0, length: 2 }])
+    await api.sendMessage('-100', 7, 'plain', true, [])
+    expect(fake.callsOf('sendMessage')).toEqual([
+      { chat_id: '-100', message_thread_id: 7, text: 'hi', disable_notification: true, entities: [{ type: 'bold', offset: 0, length: 2 }] },
+      { chat_id: '-100', message_thread_id: 7, text: 'plain', disable_notification: true },
+    ])
+  })
+
+  test('one file is uploaded with the method and field of its kind, caption and entities included', async () => {
+    const photo = file('shot.png', 'photo')
+    await api.sendFiles('-100', 7, [photo], 'look', [{ type: 'italic', offset: 0, length: 4 }], false)
+    expect(fake.callsOf('sendPhoto')).toEqual([
+      {
+        chat_id: '-100',
+        message_thread_id: '7',
+        disable_notification: 'false',
+        photo: { file: 'shot.png', size: photo.size, body: 'body of shot.png' },
+        caption: 'look',
+        caption_entities: [{ type: 'italic', offset: 0, length: 4 }],
+      },
+    ])
+    for (const kind of ['video', 'audio', 'animation', 'document'] as const) {
+      await api.sendFiles('-100', 7, [file(`f.${kind}`, kind)], '', undefined, true)
+      const method = `send${kind[0]!.toUpperCase()}${kind.slice(1)}`
+      expect(fake.callsOf(method)[0]).toMatchObject({ [kind]: { file: `f.${kind}` }, disable_notification: 'true' })
+      expect(fake.callsOf(method)[0].caption).toBeUndefined()
+    }
+  })
+
+  test('several files go as one media group, the caption on the first item', async () => {
+    const a = file('a.png', 'photo')
+    const b = file('b.mp4', 'video')
+    await api.sendFiles('-100', 7, [a, b], 'both', [{ type: 'bold', offset: 0, length: 4 }], true)
+    const [call] = fake.callsOf('sendMediaGroup')
+    expect(call.media).toEqual([
+      { type: 'photo', media: 'attach://file0', caption: 'both', caption_entities: [{ type: 'bold', offset: 0, length: 4 }] },
+      { type: 'video', media: 'attach://file1' },
+    ])
+    expect(call.file0).toMatchObject({ file: 'a.png', body: 'body of a.png' })
+    expect(call.file1).toMatchObject({ file: 'b.mp4', body: 'body of b.mp4' })
+    expect(call).toMatchObject({ chat_id: '-100', message_thread_id: '7', disable_notification: 'true' })
+  })
+
+  test('an upload Telegram fails with 5xx is retried with the whole file', async () => {
+    fake.failNext('sendDocument', { code: 502, description: 'Bad Gateway' })
+    await api.sendFiles('-100', 7, [file('log.txt', 'document')], '', undefined, true)
+    expect(fake.callsOf('sendDocument').map(c => c.document.body)).toEqual(['body of log.txt', 'body of log.txt'])
   })
 })

@@ -1,12 +1,14 @@
 import type { Server, ServerWebSocket } from 'bun'
 import { randomUUID } from 'crypto'
-import { readdirSync, readFileSync, renameSync, unlinkSync } from 'fs'
-import { join } from 'path'
+import { existsSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, unlinkSync } from 'fs'
+import { dirname, join } from 'path'
 import { chunk } from '../shared/chunk.ts'
-import type { Config } from '../shared/config.ts'
+import { isInside, type Config } from '../shared/config.ts'
 import type { Logger } from '../shared/log.ts'
+import { toTelegram, type Formatted } from '../shared/markdown.ts'
+import { albums, kindOf, type OutFile } from '../shared/media.ts'
 import { PROTOCOL_VERSION, type ChannelMeta, type HookBody, type HubToPlugin, type PluginToHub } from '../shared/protocol.ts'
-import { Outbox, type OutItem } from './outbox.ts'
+import { Outbox, type OutItem, type Piece } from './outbox.ts'
 import { routeUpdate } from './router.ts'
 import { SessionStore, topicName, type SessionRecord } from './sessions.ts'
 import { isThreadNotFound, TelegramError, type Message, type TelegramApi, type Update } from './telegram.ts'
@@ -21,6 +23,8 @@ export type HubOptions = {
   // Where a closing window leaves the text it could not hand to a hub.
   spoolDir?: string
   spoolScanMs?: number
+  // The only place file copies to send are taken from (and removed from).
+  filesDir: string
   inboxDir: string
   api: TelegramApi | undefined
   config: () => Config
@@ -42,10 +46,14 @@ const MAX_POLL_DELAY_MS = 15_000
 // the bot is not in the group or may not write there.
 class SetupError extends Error {}
 
+// A queued file copy vanished from disk: retrying cannot help.
+class LostFileError extends Error {}
+
 type Failure = 'retry' | 'setup' | 'rejected'
 
 function classify(e: unknown): Failure {
   if (e instanceof SetupError) return 'setup'
+  if (e instanceof LostFileError) return 'rejected'
   if (!(e instanceof TelegramError)) return 'retry'
   if (e.code === 401 || e.code === 403 || e.code === 404) return 'setup'
   if (e.code === 400) {
@@ -63,6 +71,12 @@ export class Hub {
   private chains = new Map<string, Promise<unknown>>()
   private pendingHooks = new Map<string, { body: HookBody; at: number }>()
   private outbox: Outbox
+  // sendFiles messages still in the queue: what failed so far, and the window
+  // that waits for the result.
+  private fileMessages = new Map<string, { errors: string[]; ws?: WS }>()
+  // Results for windows that were not connected when their files went out
+  // (the hub restarted meanwhile), by session; given out on hello.
+  private heldResults = new Map<string, HubToPlugin[]>()
   private pumping = new Set<string>()
   // Sessions whose delivery waits for the user to fix the setup.
   private blocked = new Set<string>()
@@ -99,6 +113,7 @@ export class Hub {
     this.running = true
     this.log.info(`hub listening on 127.0.0.1:${this.opts.port}`)
     if (this.outbox.size) this.log.info(`${this.outbox.size} queued piece(s) left by the previous hub — delivering`)
+    for (const item of this.outbox.items()) if (item.files) this.fileMessages.set(messageOf(item.id), { errors: [] })
     for (const sid of this.outbox.sessions()) void this.pump(sid)
     this.ingestSpool()
     this.spoolTimer = setInterval(() => this.ingestSpool(), this.opts.spoolScanMs ?? 5000)
@@ -236,6 +251,7 @@ export class Hub {
         ws.data = { windowKey: msg.windowKey, sessionId: msg.sessionId, cwd: msg.cwd }
         this.log.info(`window ${msg.windowKey} connected, session ${msg.sessionId}`)
         this.pushState(msg.sessionId)
+        this.giveHeldResults(ws, msg.sessionId)
         const pending = this.pendingHooks.get(msg.windowKey)
         this.pendingHooks.delete(msg.windowKey)
         if (pending && Date.now() - pending.at < HOOK_TTL_MS) this.forwardHook(ws, pending.body)
@@ -260,8 +276,12 @@ ${msg.text}`)
         this.send(ws, { type: 'ack', id: msg.id })
         return
       }
+      case 'sendFiles':
+        this.enqueueFiles(msg, ws)
+        this.send(ws, { type: 'ack', id: msg.id })
+        return
       case 'permission':
-        if (sid && this.store.get(sid)?.enabled) this.enqueue(sid, `perm-${randomUUID()}`, `🔐 Нужно подтверждение: ${msg.toolName} — ${msg.description}`, true)
+        if (sid && this.store.get(sid)?.enabled) this.enqueue(sid, `perm-${randomUUID()}`, `🔐 Нужно подтверждение: ${msg.toolName} — ${msg.description}`, true, false)
         return
       case 'title':
         if (sid) void this.chain(sid, () => this.retitle(sid, msg.title))
@@ -360,14 +380,87 @@ ${msg.text}`)
 
   // Puts text for a session's topic into the queue on disk and starts its
   // delivery. Throws only if the queue cannot be written; then the plugin gets
-  // no ack and sends the text again.
-  private enqueue(sessionId: string, sourceId: string, text: string, notify: boolean): void {
+  // no ack and sends the text again. Agent text is Markdown; the hub's own
+  // texts go as they are.
+  private enqueue(sessionId: string, sourceId: string, text: string, notify: boolean, markdown = true): void {
     if (!this.store.get(sessionId)) {
       this.log.warn(`session ${sessionId} has no topic, text not sent:\n${text}`)
       return
     }
-    const pieces = chunk(text).map((t, i) => ({ text: t, silent: !(notify && i === 0) }))
+    const pieces = chunk(markdown ? toTelegram(text) : { text, entities: [] }).map((p, i) => ({
+      text: p.text,
+      silent: !(notify && i === 0),
+      ...(p.entities.length ? { entities: p.entities } : {}),
+    }))
     if (pieces.length && this.outbox.add(sourceId, sessionId, pieces)) void this.pump(sessionId)
+  }
+
+  // One queue item per Telegram send, so a retry never repeats an album that
+  // already went out. The caption and the sound go with the first send.
+  private enqueueFiles(msg: Extract<PluginToHub, { type: 'sendFiles' }>, ws?: WS): void {
+    const fail = (error: string) => {
+      this.dropFiles(msg.files.filter(f => this.inFilesDir(f.path)))
+      this.filesSent(msg.id, msg.sessionId, [error], ws)
+    }
+    const outside = msg.files.filter(f => !this.inFilesDir(f.path))
+    if (outside.length) {
+      this.log.error(`files outside ${this.opts.filesDir} refused for session ${msg.sessionId}: ${outside.map(f => f.path).join(', ')}`)
+      return fail(`the hub sends only copies from ${this.opts.filesDir}`)
+    }
+    if (!this.store.get(msg.sessionId)) {
+      this.log.warn(`session ${msg.sessionId} has no topic, files not sent: ${msg.files.map(f => f.name).join(', ')}`)
+      return fail('This session has no Telegram topic yet — call tg_enable first.')
+    }
+    const caption = toTelegram(msg.caption)
+    const pieces = albums(msg.files.map(f => ({ ...f, kind: kindOf(f.name, f.size) }))).map((files, i) => filesPiece(files, i === 0 ? caption : undefined, msg.notify && i === 0))
+    if (this.outbox.add(msg.id, msg.sessionId, pieces)) {
+      this.fileMessages.set(msg.id, { errors: [], ws })
+      void this.pump(msg.sessionId)
+    } else if (!this.outbox.hasMessage(msg.id)) {
+      // Sent before; the plugin re-sent it after a reconnect.
+      this.filesSent(msg.id, msg.sessionId, [], ws)
+    } else {
+      const entry = this.fileMessages.get(msg.id)
+      if (entry) entry.ws = ws
+    }
+  }
+
+  private inFilesDir(path: string): boolean {
+    return isInside(this.opts.filesDir, path)
+  }
+
+  // Removes queued copies and the message folder once it is empty.
+  private dropFiles(files: { path: string }[]): void {
+    for (const f of files) {
+      if (!this.inFilesDir(f.path)) continue
+      try {
+        rmSync(f.path, { force: true })
+        rmdirSync(dirname(f.path))
+      } catch {}
+    }
+  }
+
+  private filesSent(id: string, sessionId: string, errors: string[], ws?: WS): void {
+    const msg: HubToPlugin = { type: 'filesSent', id, ...(errors.length ? { error: errors.join('; ') } : {}) }
+    const target = ws && this.conns.has(ws) ? ws : this.connOf(sessionId)
+    if (target) return this.send(target, msg)
+    this.heldResults.set(sessionId, [...(this.heldResults.get(sessionId) ?? []), msg])
+  }
+
+  private giveHeldResults(ws: WS, sessionId: string): void {
+    for (const msg of this.heldResults.get(sessionId) ?? []) this.send(ws, msg)
+    this.heldResults.delete(sessionId)
+  }
+
+  // A piece left the queue: its files are no longer needed, and the window
+  // hears when the last send of its files is done.
+  private settled(item: OutItem): void {
+    if (item.files) this.dropFiles(item.files)
+    const id = messageOf(item.id)
+    const entry = this.fileMessages.get(id)
+    if (!entry || this.outbox.hasMessage(id)) return
+    this.fileMessages.delete(id)
+    this.filesSent(id, item.sessionId, entry.errors, entry.ws)
   }
 
   // Delivers a session's queue strictly in order: a piece leaves the queue
@@ -386,6 +479,7 @@ ${msg.text}`)
         try {
           await this.sendItem(sessionId, item)
           this.outbox.remove(item.id)
+          this.settled(item)
           if (failures) this.log.info(`delivery to session ${sessionId} works again after ${failures} failed attempt(s)`)
           failures = 0
           this.blocked.delete(sessionId)
@@ -394,7 +488,7 @@ ${msg.text}`)
           if (!this.running) break
           const kind = classify(e)
           if (kind === 'rejected') {
-            this.reject(item, e as TelegramError)
+            this.onRejected(item, e)
             continue
           }
           failures++
@@ -422,18 +516,55 @@ ${msg.text}`)
 
   private async sendItem(sessionId: string, item: OutItem): Promise<void> {
     if (!this.store.get(sessionId)) {
-      this.log.error(`session ${sessionId} lost its topic record, text not sent:\n${item.text}`)
+      this.log.error(`session ${sessionId} lost its topic record, ${item.files ? `files not sent: ${names(item.files)}` : `text not sent:\n${item.text}`}`)
       return
     }
-    await this.sendToTopic(this.requireApi(), this.requireGroup(), sessionId, item.text, item.silent)
+    const api = this.requireApi()
+    const groupId = this.requireGroup()
+    const files = item.files
+    if (!files) {
+      await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, item.text, item.silent, item.entities))
+      return
+    }
+    const lost = files.filter(f => !existsSync(f.path))
+    if (lost.length) throw new LostFileError(`the queued copy is gone: ${lost.map(f => f.path).join(', ')}`)
+    await this.sendToTopic(api, groupId, sessionId, thread => api.sendFiles(groupId, thread, files, item.text, item.entities, item.silent))
+  }
+
+  // Before giving a piece up: photos Telegram cannot take go as documents,
+  // and formatting Telegram cannot take is dropped.
+  private onRejected(item: OutItem, e: unknown): void {
+    const why = e instanceof TelegramError ? e.message : e instanceof Error ? e.message : String(e)
+    if (item.files?.some(f => f.kind === 'photo') && e instanceof TelegramError && /PHOTO_|IMAGE_PROCESS_FAILED/i.test(e.description)) {
+      this.log.warn(`Telegram rejected photos for session ${item.sessionId} (${why}); sending them as documents`)
+      const files = item.files.map(f => (f.kind === 'photo' ? { ...f, kind: 'document' as const } : f))
+      const caption = { text: item.text, entities: item.entities ?? [] }
+      this.outbox.replace(item.id, albums(files).map((g, i) => filesPiece(g, i === 0 ? caption : undefined, !item.silent && i === 0)))
+      return
+    }
+    if (item.entities?.length) {
+      this.log.warn(`Telegram rejected a formatted message for session ${item.sessionId} (${why}); sending it without formatting`)
+      this.outbox.dropEntities(item.id)
+      return
+    }
+    this.reject(item, e instanceof TelegramError ? e.description : why)
   }
 
   // Explicit beats silent: the topic learns that a message is missing, the
   // log keeps its text.
-  private reject(item: OutItem, e: TelegramError): void {
-    this.log.error(`Telegram rejected a message for session ${item.sessionId}: ${e.message}\n--- text ---\n${item.text}\n--- end ---`)
-    if (item.notice) this.outbox.remove(item.id)
-    else this.outbox.replaceWithNotice(item.id, `⚠️ Telegram не принял сообщение: ${e.description}. Текст в hub.log.`)
+  private reject(item: OutItem, reason: string): void {
+    if (item.files) {
+      this.log.error(`Telegram did not take files for session ${item.sessionId}: ${reason}\n--- files ---\n${names(item.files)}\n--- end ---`)
+      this.fileMessages.get(messageOf(item.id))?.errors.push(`${names(item.files)}: ${reason}`)
+      this.dropFiles(item.files)
+      this.outbox.replaceWithNotice(item.id, `⚠️ Telegram не принял ${item.files.length === 1 ? 'файл' : 'файлы'} ${names(item.files)}: ${reason}`)
+      return
+    }
+    this.log.error(`Telegram rejected a message for session ${item.sessionId}: ${reason}\n--- text ---\n${item.text}\n--- end ---`)
+    if (item.notice) {
+      this.outbox.remove(item.id)
+      this.settled(item)
+    } else this.outbox.replaceWithNotice(item.id, `⚠️ Telegram не принял сообщение: ${reason}. Текст в hub.log.`)
   }
 
   private sleep(ms: number): Promise<void> {
@@ -463,9 +594,13 @@ ${msg.text}`)
     for (const f of files) {
       const path = join(dir, f)
       try {
-        const items = JSON.parse(readFileSync(path, 'utf8')) as { id: string; sessionId: string; text: string; notify: boolean }[]
+        // Older plugins wrote text items without a type.
+        const items = JSON.parse(readFileSync(path, 'utf8')) as (Extract<PluginToHub, { type: 'sendFiles' }> | { type?: 'send'; id: string; sessionId: string; text: string; notify: boolean })[]
         if (!Array.isArray(items)) throw new Error('not a list')
-        for (const it of items) this.enqueue(it.sessionId, it.id, it.text, it.notify)
+        for (const it of items) {
+          if (it.type === 'sendFiles') this.enqueueFiles(it)
+          else this.enqueue(it.sessionId, it.id, it.text, it.notify)
+        }
         unlinkSync(path)
         this.log.info(`took ${items.length} message(s) from ${path}`)
       } catch (e) {
@@ -478,17 +613,17 @@ ${msg.text}`)
     }
   }
 
-  private async sendToTopic(api: TelegramApi, groupId: string, sessionId: string, text: string, silent: boolean): Promise<void> {
+  private async sendToTopic(api: TelegramApi, groupId: string, sessionId: string, send: (threadId: number) => Promise<unknown>): Promise<void> {
     const rec = this.store.get(sessionId)!
     try {
-      await api.sendMessage(groupId, rec.topicId, text, silent)
+      await send(rec.topicId)
     } catch (e) {
       if (!isThreadNotFound(e)) throw e
       // The topic was deleted by hand: give the session a new one.
       const topic = await api.createForumTopic(groupId, topicName(rec.project, rec.title))
       this.store.set(sessionId, { ...rec, topicId: topic.message_thread_id })
       this.log.warn(`topic ${rec.topicId} of session ${sessionId} is gone, created ${topic.message_thread_id}`)
-      await api.sendMessage(groupId, topic.message_thread_id, text, silent)
+      await send(topic.message_thread_id)
     }
   }
 
@@ -618,6 +753,24 @@ ${msg.text}`)
       attach('sticker', m.sticker)
     }
     return { content: content ?? '', meta }
+  }
+}
+
+// Queue item ids are `<plugin message id>#<n>`, replacements add `.<m>`.
+function messageOf(itemId: string): string {
+  return itemId.slice(0, itemId.lastIndexOf('#'))
+}
+
+function names(files: OutFile[]): string {
+  return files.map(f => f.name).join(', ')
+}
+
+function filesPiece(files: OutFile[], caption: Formatted | undefined, loud: boolean): Piece {
+  return {
+    text: caption?.text ?? '',
+    silent: !loud,
+    files,
+    ...(caption?.entities.length ? { entities: caption.entities } : {}),
   }
 }
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, truncateSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { Hub } from '../src/hub/hub.ts'
 import { TelegramApi } from '../src/hub/telegram.ts'
@@ -23,6 +23,7 @@ let config: Config
 let core: PluginCore | undefined
 let channel: { content: string; meta: Record<string, string> }[]
 let spoolDir: string
+let state: string
 let spawned: number
 let pluginLog: ReturnType<typeof memLogger>
 
@@ -60,6 +61,9 @@ function makeCore(sessionId = SID) {
     windowKey: 'pipe-1',
     port,
     spoolDir,
+    stateDir: state,
+    filesDir: join(state, 'outbox-files'),
+    fileWaitMs: 3000,
     spawnHub: () => void spawned++,
     emitChannel: (content, meta) => channel.push({ content, meta }),
     log: pluginLog,
@@ -72,12 +76,13 @@ function makeCore(sessionId = SID) {
 beforeEach(async () => {
   fake = new FakeTelegram()
   port = await freePort()
-  const state = tempDir()
+  state = tempDir()
   config = { groupId: GROUP, allowFrom: [ME] }
   hub = new Hub({
     port,
     sessionsFile: join(state, 'sessions.json'),
     outboxFile: join(state, 'outbox.json'),
+    filesDir: join(state, 'outbox-files'),
     inboxDir: join(state, 'inbox'),
     api: new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2 }),
     config: () => config,
@@ -338,5 +343,95 @@ describe('note to the agent that the mode went off', () => {
     await c.enable()
     await waitFor(() => c.enabled)
     expect(c.hookNote('')).toBe('')
+  })
+})
+
+describe('tg_send_file', () => {
+  const file = (name: string, body = `body of ${name}`, d = tempDir()) => {
+    const path = join(d, name)
+    writeFileSync(path, body)
+    return path
+  }
+  const sends = () => fake.calls.filter(c => c.method.startsWith('send')).map(c => c.method)
+  const leftCopies = () => (existsSync(join(state, 'outbox-files')) ? readdirSync(join(state, 'outbox-files')) : [])
+
+  test('a file reaches the topic, the original stays, the queued copy goes', async () => {
+    const c = await enabledCore()
+    const path = file('shot.png')
+    expect(await c.sendFiles([path], 'see **this**')).toBe('Sent 1 file(s) to the Telegram topic.')
+    expect(fake.callsOf('sendPhoto')[0]).toMatchObject({ photo: { file: 'shot.png', body: 'body of shot.png' }, caption: 'see this' })
+    expect(readFileSync(path, 'utf8')).toBe('body of shot.png')
+    expect(leftCopies()).toEqual([])
+  })
+
+  test('text written before the call reaches the topic first', async () => {
+    const c = await enabledCore()
+    // The tool_use record is not in the file yet: only the text before it.
+    append(assistantText('вот скрин', 'tool_use', 's1'))
+    await c.sendFiles([file('a.png')])
+    expect(sends()).toEqual(['sendMessage', 'sendPhoto'])
+    expect(sent()).toEqual([{ text: 'вот скрин', silent: true, topic: 100 }])
+  })
+
+  test('silent while the mode is on, with sound while it is off', async () => {
+    const c = await enabledCore()
+    await c.sendFiles([file('a.txt')])
+    await c.disable()
+    await waitFor(() => !c.enabled)
+    await c.sendFiles([file('b.txt')])
+    expect(fake.callsOf('sendDocument').map(p => p.disable_notification)).toEqual(['true', 'false'])
+  })
+
+  test('several files go as an album', async () => {
+    const c = await enabledCore()
+    const d = tempDir()
+    expect(await c.sendFiles([file('1.png', 'x', d), file('2.jpg', 'y', d)])).toBe('Sent 2 file(s) to the Telegram topic.')
+    expect(fake.callsOf('sendMediaGroup')[0].media.map((m: any) => m.type)).toEqual(['photo', 'photo'])
+  })
+
+  test('nothing is sent if any file is wrong, and the reason names it', async () => {
+    const c = await enabledCore()
+    const ok = file('ok.txt')
+    const big = file('big.bin', '')
+    truncateSync(big, 50 * 1024 * 1024 + 1)
+    const cases: [string[], string][] = [
+      [[], 'at least one'],
+      [[ok, join(tempDir(), 'missing.png')], 'missing.png: no such file'],
+      [[tempDir()], 'not a file'],
+      [[file('empty.txt', '')], 'empty'],
+      [[big], '50 MB'],
+      [[file('sessions.json', '{}', state)], 'tg-hub state'],
+    ]
+    for (const [paths, why] of cases) await expect(c.sendFiles(paths)).rejects.toThrow(why)
+    await expect(c.sendFiles([ok], 'я'.repeat(1025))).rejects.toThrow('1024')
+    // Formatting does not count: the caption is measured as Telegram shows it.
+    expect(await c.sendFiles([ok], `**${'я'.repeat(1024)}**`)).toContain('Sent 1')
+    expect(sends()).toEqual(['sendDocument'])
+    expect(leftCopies()).toEqual([])
+  })
+
+  test('a file Telegram sent into the inbox may be sent back', async () => {
+    const c = await enabledCore()
+    mkdirSync(join(state, 'inbox'), { recursive: true })
+    expect(await c.sendFiles([file('photo.jpg', 'x', join(state, 'inbox'))])).toContain('Sent 1')
+  })
+
+  test('a session without a topic gets the error from the hub', async () => {
+    const c = makeCore()
+    await waitFor(() => hub.isConnected(SID), 3000, 'plugin connected')
+    await expect(c.sendFiles([file('a.txt')])).rejects.toThrow('tg_enable')
+  })
+
+  test('a rejection by Telegram comes back as the error', async () => {
+    const c = await enabledCore()
+    fake.failNext('sendDocument', { code: 400, description: 'Bad Request: file is too big' })
+    const why = await c.sendFiles([file('a.txt')]).then(() => 'resolved', (e: Error) => e.message)
+    expect(why).toBe('a.txt: Bad Request: file is too big')
+  })
+
+  test('when Telegram does not answer in time the files stay queued and the agent is told so', async () => {
+    const c = await enabledCore()
+    fake.hangNext('sendDocument', 1000)
+    expect(await c.sendFiles([file('a.txt')])).toContain('queued')
   })
 })

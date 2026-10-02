@@ -1,6 +1,6 @@
 import { readFileSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { isAbsolute, join, relative, resolve } from 'path'
 
 // Shared by every cswap profile, so it never depends on CLAUDE_CONFIG_DIR.
 export function paths() {
@@ -12,9 +12,16 @@ export function paths() {
     sessionsFile: join(stateDir, 'sessions.json'),
     outboxFile: join(stateDir, 'outbox.json'),
     spoolDir: join(stateDir, 'spool'),
+    filesDir: join(stateDir, 'outbox-files'),
     logFile: join(stateDir, 'hub.log'),
     inboxDir: join(stateDir, 'inbox'),
   }
+}
+
+// path lies inside dir (not dir itself).
+export function isInside(dir: string, path: string): boolean {
+  const rel = relative(resolve(dir), resolve(path))
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
 }
 
 export const DEFAULT_PORT = 47613

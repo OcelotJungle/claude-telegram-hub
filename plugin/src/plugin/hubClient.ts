@@ -5,7 +5,9 @@ import type { Logger } from '../shared/log.ts'
 import type { HubToPlugin, PluginToHub } from '../shared/protocol.ts'
 
 type Hello = Extract<PluginToHub, { type: 'hello' }>
-export type Outbox = { id: string; sessionId: string; text: string; notify: boolean }
+export type SendFiles = Extract<PluginToHub, { type: 'sendFiles' }>
+// What the hub must ack: text and files for a topic.
+export type Queued = Extract<PluginToHub, { type: 'send' }> | SendFiles
 type Pending = { resolve(v: unknown): void; reject(e: Error): void; timer: ReturnType<typeof setTimeout> }
 
 const SPAWN_COOLDOWN_MS = 2000
@@ -35,8 +37,9 @@ export class HubClient {
   private attempt = 0
   private lastSpawn = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
-  private outbox: Outbox[] = []
+  private outbox: Queued[] = []
   private pending = new Map<string, Pending>()
+  private fileWaiters = new Map<string, (r: { error?: string }) => void>()
   private waiters: (() => void)[] = []
 
   constructor(
@@ -55,8 +58,8 @@ export class HubClient {
     return this.ws !== undefined
   }
 
-  // Text the hub has not acked yet, oldest first.
-  get unacked(): readonly Outbox[] {
+  // Messages the hub has not acked yet, oldest first.
+  get unacked(): readonly Queued[] {
     return this.outbox
   }
 
@@ -87,9 +90,30 @@ export class HubClient {
   }
 
   enqueue(sessionId: string, text: string, notify: boolean): void {
-    const item = { id: randomUUID(), sessionId, text, notify }
+    this.push({ type: 'send', id: randomUUID(), sessionId, text, notify })
+  }
+
+  // Resolves with the hub's result once every send of the files is done, or
+  // with undefined after timeoutMs; the files stay queued either way.
+  sendFiles(msg: SendFiles, timeoutMs: number): Promise<{ error?: string } | undefined> {
+    const result = new Promise<{ error?: string } | undefined>(resolve => {
+      const timer = setTimeout(() => {
+        this.fileWaiters.delete(msg.id)
+        resolve(undefined)
+      }, timeoutMs)
+      this.fileWaiters.set(msg.id, r => {
+        clearTimeout(timer)
+        this.fileWaiters.delete(msg.id)
+        resolve(r)
+      })
+    })
+    this.push(msg)
+    return result
+  }
+
+  private push(item: Queued): void {
     this.outbox.push(item)
-    this.send({ type: 'send', ...item })
+    this.send(item)
   }
 
   // Resolves once every queued text is acked by the hub, or after timeoutMs.
@@ -137,7 +161,7 @@ export class HubClient {
       this.ws = ws
       this.opts.log.info('connected to hub')
       this.send(this.opts.hello())
-      for (const item of this.outbox) this.send({ type: 'send', ...item })
+      for (const item of this.outbox) this.send(item)
       for (const w of this.waiters.splice(0)) w()
     }
     ws.onmessage = e => this.onMessage(String(e.data))
@@ -186,6 +210,10 @@ export class HubClient {
     }
     if (m.type === 'ack') {
       this.outbox = this.outbox.filter(o => o.id !== m.id)
+      return
+    }
+    if (m.type === 'filesSent') {
+      this.fileWaiters.get(m.id)?.({ ...(m.error ? { error: m.error } : {}) })
       return
     }
     if (m.type === 'res') {
