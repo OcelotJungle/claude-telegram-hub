@@ -7,9 +7,9 @@ import { isInside, type Config } from '../shared/config.ts'
 import type { Logger } from '../shared/log.ts'
 import { toTelegram, type Formatted } from '../shared/markdown.ts'
 import { albums, kindOf, type OutFile } from '../shared/media.ts'
-import { PROTOCOL_VERSION, type ChannelMeta, type HookBody, type HubToPlugin, type PluginToHub } from '../shared/protocol.ts'
+import { PROTOCOL_VERSION, type ChannelMeta, type CommandReply, type HookBody, type HubToPlugin, type PluginToHub, type TopicCommand } from '../shared/protocol.ts'
 import { Outbox, type OutItem, type Piece } from './outbox.ts'
-import { routeUpdate } from './router.ts'
+import { commandOf, routeUpdate } from './router.ts'
 import { SessionStore, topicName, type SessionRecord } from './sessions.ts'
 import { isThreadNotFound, TelegramError, type Message, type TelegramApi, type Update } from './telegram.ts'
 
@@ -29,6 +29,8 @@ export type HubOptions = {
   api: TelegramApi | undefined
   config: () => Config
   idleMs: number
+  // How long a command from the topic waits for the plugin's module to take it.
+  commandPickupMs?: number
   pollTimeoutSec?: number
   pollRetryBaseMs?: number
   // Pause between attempts to deliver the head of a session's queue.
@@ -41,6 +43,11 @@ export type HubOptions = {
 const INACTIVE_TEXT = 'сессия сейчас не активна'
 const HOOK_TTL_MS = 60_000
 const MAX_POLL_DELAY_MS = 15_000
+const COMMAND_PICKUP_MS = 10_000
+const BOT_COMMANDS = [
+  { command: 'info', description: 'Лимиты и контекст сессии' },
+  { command: 'compact', description: 'Сжать контекст; /compact N — окно автокомпакта' },
+]
 
 // Delivery cannot work until the user fixes the setup: no token, no groupId,
 // the bot is not in the group or may not write there.
@@ -77,6 +84,9 @@ export class Hub {
   // Results for windows that were not connected when their files went out
   // (the hub restarted meanwhile), by session; given out on hello.
   private heldResults = new Map<string, HubToPlugin[]>()
+  // Commands from the topic the plugin's module has not taken yet, by session.
+  private commands = new Map<string, { cmd: TopicCommand; timer: ReturnType<typeof setTimeout> }[]>()
+  private botUsername: string | undefined
   private pumping = new Set<string>()
   // Sessions whose delivery waits for the user to fix the setup.
   private blocked = new Set<string>()
@@ -129,6 +139,7 @@ export class Hub {
     this.abort.abort()
     if (this.idleTimer) clearTimeout(this.idleTimer)
     if (this.spoolTimer) clearInterval(this.spoolTimer)
+    for (const queued of this.commands.values()) for (const e of queued) clearTimeout(e.timer)
     this.server?.stop(true)
     this.log.info('hub stopped')
   }
@@ -158,7 +169,51 @@ export class Hub {
       this.onHook(body)
       return new Response('ok')
     }
+    if (url.pathname === '/commands' && req.method === 'GET') return Response.json(this.takeCommands(url.searchParams.get('session') ?? ''))
+    if (url.pathname === '/reply' && req.method === 'POST') {
+      let r: CommandReply
+      try {
+        r = (await req.json()) as CommandReply
+      } catch {
+        return new Response('bad json', { status: 400 })
+      }
+      if (typeof r?.sessionId !== 'string' || typeof r.id !== 'string' || typeof r.text !== 'string') return new Response('bad reply', { status: 400 })
+      this.enqueue(r.sessionId, `cmd-${r.id}`, r.text, r.notify === true)
+      return new Response('ok')
+    }
     return new Response('not found', { status: 404 })
+  }
+
+  // --- commands from the topic ---------------------------------------------
+
+  // Waits for the session's module; a window without one (an older Claude
+  // Code, a window still on the old plugin) never takes it, and the user is
+  // told so.
+  private queueCommand(sessionId: string, c: Omit<TopicCommand, 'id'>): void {
+    const cmd = { id: randomUUID(), ...c }
+    const ms = this.opts.commandPickupMs ?? COMMAND_PICKUP_MS
+    const timer = setTimeout(() => {
+      this.commands.set(sessionId, (this.commands.get(sessionId) ?? []).filter(e => e.cmd !== cmd))
+      this.log.warn(`/${cmd.name} for session ${sessionId} was not taken in ${ms} ms`)
+      this.enqueue(sessionId, `cmd-${cmd.id}-lost`, `⚠️ /${cmd.name} не выполнена: окно не забрало её за ${ms / 1000} с. Команды выполняет модуль плагина — перезапусти окно.`, true, false)
+    }, ms)
+    this.commands.set(sessionId, [...(this.commands.get(sessionId) ?? []), { cmd, timer }])
+    this.log.info(`/${cmd.name} for session ${sessionId}`)
+  }
+
+  private takeCommands(sessionId: string): TopicCommand[] {
+    const queued = this.commands.get(sessionId) ?? []
+    this.commands.delete(sessionId)
+    for (const e of queued) clearTimeout(e.timer)
+    return queued.map(e => e.cmd)
+  }
+
+  private async registerCommands(api: TelegramApi): Promise<void> {
+    try {
+      await api.setMyCommands(BOT_COMMANDS, this.abort.signal)
+    } catch (e) {
+      if (this.running) this.log.warn(`registering bot commands failed: ${e}`)
+    }
   }
 
   private onOpen(ws: WS): void {
@@ -643,6 +698,10 @@ ${msg.text}`)
         try {
           const me = await api.getMe(this.abort.signal)
           this.log.info(wasOnline ? 'Telegram polling works again' : `polling Telegram as @${me.username ?? me.id}`)
+          if (!wasOnline) {
+            this.botUsername = me.username
+            void this.registerCommands(api)
+          }
           online = wasOnline = true
           failures = 0
         } catch (e) {
@@ -700,6 +759,8 @@ ${msg.text}`)
     }
     const ws = this.connOf(route.sessionId)
     if (!ws || !m) return
+    const cmd = m.text !== undefined ? commandOf(m.text, this.botUsername) : undefined
+    if (cmd) return this.queueCommand(route.sessionId, cmd)
     this.setEnabled(route.sessionId, true)
     const { content, meta } = await this.inboundOf(api, m)
     this.send(ws, { type: 'inbound', content, meta })

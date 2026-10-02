@@ -2,6 +2,15 @@
 // over a localhost WebSocket.
 export const PROTOCOL_VERSION = 1
 
+// The hub's localhost port unless TG_HUB_PORT says otherwise. This file has no
+// imports, so the plugin's function hooks module can use it too.
+export const DEFAULT_PORT = 47613
+
+// A command from the topic, which the plugin's function hooks module takes
+// from the hub (GET /commands?session=<id>) and answers (POST /reply).
+export type TopicCommand = { id: string; name: 'info' | 'compact'; args: string }
+export type CommandReply = { sessionId: string; id: string; text: string; notify: boolean }
+
 export type ChannelMeta = Record<string, string>
 
 export type QueuedFile = { path: string; name: string; size: number }

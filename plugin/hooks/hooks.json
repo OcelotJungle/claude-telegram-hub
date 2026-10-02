@@ -24,5 +24,8 @@
         ]
       }
     ]
-  }
+  },
+  "modules": [
+    "../src/mod/register.ts"
+  ]
 }

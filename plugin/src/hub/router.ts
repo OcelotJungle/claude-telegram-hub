@@ -1,4 +1,5 @@
 import type { Config } from '../shared/config.ts'
+import type { TopicCommand } from '../shared/protocol.ts'
 import type { SessionStore } from './sessions.ts'
 import type { Message, Update } from './telegram.ts'
 
@@ -22,6 +23,16 @@ export function routeUpdate(u: Update, cfg: Config, sessions: SessionStore, isCo
   if (!sessionId) return ignore(`topic ${topicId} has no session`)
   if (!isConnected(sessionId)) return { action: 'inactive', topicId }
   return { action: 'deliver', sessionId, topicId }
+}
+
+// A command the plugin's function hooks module runs instead of the agent:
+// `/info` or `/compact`, maybe `@<this bot>`, then arguments. Anything else,
+// a command for another bot included, is a plain message.
+export function commandOf(text: string, botUsername: string | undefined): Omit<TopicCommand, 'id'> | undefined {
+  const m = text.match(/^\/(info|compact)(?:@(\w+))?(?:\s+([\s\S]*))?$/i)
+  if (!m) return undefined
+  if (m[2] && botUsername && m[2].toLowerCase() !== botUsername.toLowerCase()) return undefined
+  return { name: m[1]!.toLowerCase() as TopicCommand['name'], args: (m[3] ?? '').trim() }
 }
 
 function ignore(reason: string): Route {

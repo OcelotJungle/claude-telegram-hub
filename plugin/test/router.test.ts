@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { join } from 'path'
-import { routeUpdate } from '../src/hub/router.ts'
+import { commandOf, routeUpdate } from '../src/hub/router.ts'
 import { SessionStore } from '../src/hub/sessions.ts'
 import type { Update } from '../src/hub/telegram.ts'
 import { topicMsg } from './fakeTelegram.ts'
@@ -90,5 +90,24 @@ describe('routeUpdate', () => {
   test('update without a message is ignored', () => {
     const { route } = setup()
     expect(route({}).action).toBe('ignore')
+  })
+})
+
+describe('commandOf', () => {
+  test('/info and /compact, with arguments', () => {
+    expect(commandOf('/info', 'test_bot')).toEqual({ name: 'info', args: '' })
+    expect(commandOf('/compact', 'test_bot')).toEqual({ name: 'compact', args: '' })
+    expect(commandOf('/compact 333k', 'test_bot')).toEqual({ name: 'compact', args: '333k' })
+    expect(commandOf('/compact  keep the plan\nand the tests ', 'test_bot')).toEqual({ name: 'compact', args: 'keep the plan\nand the tests' })
+  })
+
+  test('addressed to this bot, in any case', () => {
+    expect(commandOf('/info@test_bot', 'test_bot')).toEqual({ name: 'info', args: '' })
+    expect(commandOf('/compact@Test_Bot 200k', 'test_bot')).toEqual({ name: 'compact', args: '200k' })
+    expect(commandOf('/INFO', 'test_bot')).toEqual({ name: 'info', args: '' })
+  })
+
+  test('another bot, another command or text around it is a plain message', () => {
+    for (const text of ['/info@other_bot', '/start', '/compactor', 'see /info', ' /info', '/', '']) expect(commandOf(text, 'test_bot')).toBeUndefined()
   })
 })

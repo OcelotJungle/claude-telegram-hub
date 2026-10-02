@@ -169,6 +169,10 @@ export class TelegramApi {
     return this.call(method, form, { waitMs: bytes / UPLOAD_BYTES_PER_MS })
   }
 
+  setMyCommands(commands: { command: string; description: string }[], signal?: AbortSignal): Promise<true> {
+    return this.call('setMyCommands', { commands }, { signal })
+  }
+
   createForumTopic(chatId: string, name: string): Promise<{ message_thread_id: number; name: string }> {
     return this.call('createForumTopic', { chat_id: chatId, name })
   }

@@ -10,5 +10,8 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  // Imports 'claude-code', whose types only the engine has; checked by
+  // `claude plugin validate`.
+  "exclude": ["src/mod/register.ts"]
 }

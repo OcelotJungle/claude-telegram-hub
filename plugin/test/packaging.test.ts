@@ -83,6 +83,9 @@ describe('plugin packaging', () => {
     const cmd: string = hooks.hooks.SessionStart[0].hooks[0].command
     expect(cmd).toContain('src/hook/sessionStart.ts')
     expect(existsSync(HOOK)).toBe(true)
+    // The function hooks module that runs commands from the topic.
+    expect(hooks.modules).toEqual(['../src/mod/register.ts'])
+    expect(existsSync(join(PLUGIN, 'hooks', hooks.modules[0]))).toBe(true)
   })
 
   // The note that the mode went off reaches the agent through our own server.

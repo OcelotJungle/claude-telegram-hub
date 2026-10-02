@@ -4,6 +4,7 @@ import { join } from 'path'
 import { Hub } from '../src/hub/hub.ts'
 import { SessionStore } from '../src/hub/sessions.ts'
 import { TelegramApi } from '../src/hub/telegram.ts'
+import { Runner, type Usage } from '../src/mod/commands.ts'
 import { PROTOCOL_VERSION } from '../src/shared/protocol.ts'
 import type { Config } from '../src/shared/config.ts'
 import { FakeTelegram, topicMsg } from './fakeTelegram.ts'
@@ -23,7 +24,7 @@ let log: ReturnType<typeof memLogger>
 let exited: boolean
 const clients: { close(): void }[] = []
 
-async function startHub(o: { idleMs?: number; token?: boolean | string } = {}) {
+async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number } = {}) {
   port = await freePort()
   hub = new Hub({
     port,
@@ -36,6 +37,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string } = {}) {
     api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === 'string' ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500 }),
     config: () => config,
     idleMs: o.idleMs ?? 60_000,
+    commandPickupMs: o.commandPickupMs ?? 3000,
     pollTimeoutSec: 1,
     pollRetryBaseMs: 10,
     sendRetryBaseMs: 10,
@@ -758,5 +760,199 @@ describe('idle exit', () => {
   test('a hub nobody connects to exits too', async () => {
     await startHub({ idleMs: 150 })
     await waitFor(() => exited, 2000, 'idle exit')
+  })
+})
+
+describe('commands', () => {
+  const USAGE: Usage = {
+    context: { tokens: 128_400, window: 1_000_000, breakdown: { totalTokens: 130_000, rawMaxTokens: 333_000, autoCompactThreshold: 300_000, isAutoCompactEnabled: true } },
+    rateLimits: [{ kind: 'five_hour', percentUsed: 30 }],
+  }
+
+  // The mod of one window, with the engine faked: what it ran, and what
+  // `run` answers.
+  function mod(sessionId: string, answer: (command: string, args: string) => Promise<{ text?: string }> = async () => ({})) {
+    const ran: [string, string][] = []
+    const runner = new Runner(`http://127.0.0.1:${port}`, {
+      sessionId: async () => sessionId,
+      usage: async () => USAGE,
+      run: (command, args) => {
+        ran.push([command, args])
+        return answer(command, args)
+      },
+      http: async (url, init) => {
+        const r = await fetch(url, init)
+        return { status: r.status, text: await r.text() }
+      },
+      now: () => Date.now(),
+    })
+    return { runner, ran }
+  }
+
+  const command = (text: string, threadId = 100) => fake.pushUpdate(topicMsg({ chatId: GROUP, threadId, fromId: ME, text }))
+  const sentText = (pred: (t: string) => boolean) => fake.callsOf('sendMessage').find(p => pred(p.text))
+  // Polls like the mod's timer until the topic gets the text.
+  const reply = (runner: Runner, pred: (t: string) => boolean) =>
+    waitFor(
+      async () => {
+        await runner.poll()
+        return sentText(pred)
+      },
+      3000,
+      'command reply',
+    )
+
+  test('/info is answered by the mod with sound, never reaches the agent and leaves the mode as it was', async () => {
+    await startHub()
+    const a = await enabled('a')
+    await req(a, { op: 'disable' })
+    const { runner } = mod('a')
+    command('/info')
+    const sent = await reply(runner, t => t.startsWith('Лимиты'))
+    expect(sent).toMatchObject({ message_thread_id: 100, disable_notification: false })
+    expect(sent.text).toContain('Сейчас: 128k токенов')
+    expect(sent.entities[0]).toMatchObject({ type: 'bold', offset: 0, length: 6 })
+    expect(a.messages.some(m => m.type === 'inbound')).toBe(false)
+    expect(new SessionStore(join(dir, 'sessions.json')).get('a')?.enabled).toBe(false)
+  })
+
+  test('a command goes to the mod of its own session only', async () => {
+    await startHub()
+    await enabled('a')
+    await enabled('b')
+    const a = mod('a')
+    const b = mod('b')
+    command('/compact 200k', 101)
+    await waitFor(async () => {
+      await a.runner.poll()
+      await b.runner.poll()
+      return b.ran.length
+    })
+    expect(b.ran).toEqual([['autocompact', '200000']])
+    expect(a.ran).toEqual([])
+  })
+
+  test('a command for another bot and unknown commands reach the agent as text', async () => {
+    await startHub()
+    const a = await enabled('a')
+    command('/info@other_bot')
+    command('/start')
+    await waitFor(() => a.messages.filter(m => m.type === 'inbound').length === 2)
+    expect(a.messages.filter(m => m.type === 'inbound').map(m => m.content)).toEqual(['/info@other_bot', '/start'])
+  })
+
+  test('a command nobody picks up is reported in the topic', async () => {
+    await startHub({ commandPickupMs: 150 })
+    await enabled('a')
+    command('/info')
+    const sent = await waitFor(() => sentText(t => t.startsWith('⚠️')))
+    expect(sent.text).toBe('⚠️ /info не выполнена: окно не забрало её за 0.15 с. Команды выполняет модуль плагина — перезапусти окно.')
+    expect(sent.disable_notification).toBe(false)
+    // Picked up too late, it is not run.
+    const { runner, ran } = mod('a')
+    await runner.poll()
+    expect(ran).toEqual([])
+  })
+
+  test('/compact runs the compact command, says so silently and reports the result from the compaction', async () => {
+    await startHub()
+    await enabled('a')
+    const { runner, ran } = mod('a')
+    command('/compact keep the plan')
+    const started = await reply(runner, t => t.startsWith('🗜'))
+    expect(started.disable_notification).toBe(true)
+    expect(ran).toEqual([['compact', 'keep the plan']])
+    await runner.compacted({ tokensBefore: 180_000, tokensAfter: 24_000 })
+    const done = await reply(runner, t => t.startsWith('✅'))
+    expect(done.text).toBe('✅ Контекст сжат: 180k → 24k токенов.')
+    expect(done.disable_notification).toBe(false)
+    // A later compaction nobody asked for from Telegram is not reported.
+    await runner.compacted({ tokensBefore: 300_000, tokensAfter: 20_000 })
+    await runner.poll()
+    expect(fake.callsOf('sendMessage').filter(p => p.text.startsWith('✅')).length).toBe(1)
+  })
+
+  test('a skipped compaction gives the reason', async () => {
+    await startHub()
+    await enabled('a')
+    const { runner } = mod('a')
+    command('/compact')
+    await reply(runner, t => t.startsWith('🗜'))
+    await runner.compacted({ skip: 'a hook vetoed it' })
+    expect((await reply(runner, t => t.startsWith('⚠️'))).text).toBe('⚠️ Компакт пропущен: a hook vetoed it')
+  })
+
+  test('a compact command that ends with its own text and no compaction reports that text', async () => {
+    await startHub()
+    await enabled('a')
+    const { runner } = mod('a', async () => ({ text: 'Not enough messages to compact.' }))
+    command('/compact')
+    expect((await reply(runner, t => t.startsWith('Компакт:'))).text).toBe('Компакт: Not enough messages to compact.')
+  })
+
+  test('a compact command that fails to start gives the reason', async () => {
+    await startHub()
+    await enabled('a')
+    const { runner } = mod('a', async () => {
+      throw new Error('no session is bound')
+    })
+    command('/compact')
+    expect((await reply(runner, t => t.startsWith('⚠️'))).text).toBe('⚠️ Компакт не запустился: no session is bound')
+  })
+
+  test('/compact N sets the autocompact window and answers with the text of the command', async () => {
+    await startHub()
+    await enabled('a')
+    const { runner, ran } = mod('a', async () => ({ text: 'Auto-compact window set to 333k tokens' }))
+    command('/compact 333k')
+    const sent = await reply(runner, t => t.startsWith('Auto-compact'))
+    expect(ran).toEqual([['autocompact', '333000']])
+    expect(sent.disable_notification).toBe(false)
+  })
+
+  test('a reply the mod could not deliver goes with the next poll, once', async () => {
+    await startHub()
+    await enabled('a')
+    let down = true
+    const ran: string[] = []
+    const runner = new Runner(`http://127.0.0.1:${port}`, {
+      sessionId: async () => 'a',
+      usage: async () => USAGE,
+      run: async () => ({}),
+      http: async (url, init) => {
+        ran.push(`${init?.method ?? 'GET'} ${new URL(url).pathname}`)
+        if (init?.method === 'POST' && down) throw new Error('connection refused')
+        const r = await fetch(url, init)
+        return { status: r.status, text: await r.text() }
+      },
+      now: () => Date.now(),
+    })
+    command('/info')
+    await waitFor(async () => {
+      await runner.poll()
+      return ran.includes('POST /reply')
+    })
+    down = false
+    await reply(runner, t => t.startsWith('Лимиты'))
+    await runner.poll()
+    await runner.poll()
+    expect(fake.callsOf('sendMessage').filter(p => p.text.startsWith('Лимиты')).length).toBe(1)
+  })
+
+  test('the same reply posted twice is sent once', async () => {
+    await startHub()
+    await enabled('a')
+    const post = () => fetch(`http://127.0.0.1:${port}/reply`, { method: 'POST', body: JSON.stringify({ sessionId: 'a', id: 'c1.0', text: 'once', notify: true }) })
+    expect((await post()).status).toBe(200)
+    expect((await post()).status).toBe(200)
+    await waitFor(() => sentText(t => t === 'once'))
+    await Bun.sleep(100)
+    expect(fake.callsOf('sendMessage').filter(p => p.text === 'once').length).toBe(1)
+  })
+
+  test('the hub puts the commands into the bot menu', async () => {
+    await startHub()
+    const call = await waitFor(() => fake.callsOf('setMyCommands')[0])
+    expect(call.commands.map((c: { command: string }) => c.command)).toEqual(['info', 'compact'])
   })
 })

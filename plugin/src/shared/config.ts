@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs'
 import { homedir } from 'os'
 import { isAbsolute, join, relative, resolve } from 'path'
+import { DEFAULT_PORT } from './protocol.ts'
 
 // Shared by every cswap profile, so it never depends on CLAUDE_CONFIG_DIR.
 export function paths() {
@@ -23,8 +24,6 @@ export function isInside(dir: string, path: string): boolean {
   const rel = relative(resolve(dir), resolve(path))
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
 }
-
-export const DEFAULT_PORT = 47613
 
 export function hubPort(): number {
   return Number(process.env.TG_HUB_PORT) || DEFAULT_PORT
