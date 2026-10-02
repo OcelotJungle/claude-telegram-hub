@@ -10,6 +10,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/src/hook/userPromptSubmit.ts\"",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

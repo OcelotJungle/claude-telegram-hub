@@ -5,11 +5,10 @@ import type { Logger } from '../shared/log.ts'
 import type { HubToPlugin, PluginToHub } from '../shared/protocol.ts'
 
 type Hello = Extract<PluginToHub, { type: 'hello' }>
-type Outbox = { id: string; text: string; notify: boolean }
+export type Outbox = { id: string; sessionId: string; text: string; notify: boolean }
 type Pending = { resolve(v: unknown): void; reject(e: Error): void; timer: ReturnType<typeof setTimeout> }
 
 const SPAWN_COOLDOWN_MS = 2000
-const MAX_OUTBOX = 500
 
 // Starts the hub as a detached process: not tied to this window, so closing
 // the window that started it leaves the hub running for the others.
@@ -27,8 +26,9 @@ export function spawnHubDetached(hubMain: string, env?: Record<string, string>):
 
 // The plugin's link to the hub. Reconnects forever with backoff; when nobody
 // listens it starts a hub (losers of a start race exit on EADDRINUSE). Text to
-// send is kept until the hub acks it and is re-sent after a reconnect, so
-// nothing is lost when the hub dies.
+// send is kept until the hub acks it (the hub acks once the text is in its
+// queue on disk) and is re-sent after a reconnect, so nothing is lost when the
+// hub dies.
 export class HubClient {
   private ws: WebSocket | undefined
   private stopped = true
@@ -55,6 +55,17 @@ export class HubClient {
     return this.ws !== undefined
   }
 
+  // Text the hub has not acked yet, oldest first.
+  get unacked(): readonly Outbox[] {
+    return this.outbox
+  }
+
+  // Starts a hub now, for text left behind by a closing window.
+  spawnHubNow(): void {
+    this.lastSpawn = 0
+    this.maybeSpawn()
+  }
+
   start(): void {
     this.stopped = false
     this.connect()
@@ -75,13 +86,9 @@ export class HubClient {
     } catch {}
   }
 
-  enqueue(text: string, notify: boolean): void {
-    const item = { id: randomUUID(), text, notify }
+  enqueue(sessionId: string, text: string, notify: boolean): void {
+    const item = { id: randomUUID(), sessionId, text, notify }
     this.outbox.push(item)
-    if (this.outbox.length > MAX_OUTBOX) {
-      const dropped = this.outbox.shift()!
-      this.opts.log.error(`outbox full, dropping: ${dropped.text}`)
-    }
     this.send({ type: 'send', ...item })
   }
 

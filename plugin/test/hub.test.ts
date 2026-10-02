@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { Hub } from '../src/hub/hub.ts'
 import { SessionStore } from '../src/hub/sessions.ts'
@@ -27,12 +28,17 @@ async function startHub(o: { idleMs?: number; token?: boolean | string } = {}) {
   hub = new Hub({
     port,
     sessionsFile: join(dir, 'sessions.json'),
+    outboxFile: join(dir, 'outbox.json'),
+    spoolDir: join(dir, 'spool'),
+    spoolScanMs: 50,
     inboxDir: join(dir, 'inbox'),
-    api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === 'string' ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, networkRetryMs: 5 }),
+    api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === 'string' ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500 }),
     config: () => config,
     idleMs: o.idleMs ?? 60_000,
     pollTimeoutSec: 1,
     pollRetryBaseMs: 10,
+    sendRetryBaseMs: 10,
+    sendRetryMaxMs: 50,
     log,
     onExit: () => {
       exited = true
@@ -222,13 +228,34 @@ describe('send', () => {
     expect(sent.map(s => s.disable_notification)).toEqual([false, true])
   })
 
-  test('send while disabled is acked without calling Telegram', async () => {
+  // The plugin decides what goes out: only it knows the text was written while
+  // the mode was on, even if the hub turned the mode off meanwhile.
+  test('text sent after the mode was turned off is still delivered', async () => {
     await startHub()
     const a = await enabled('a')
     await req(a, { op: 'disable' })
-    a.send({ type: 'send', id: 'x1', text: 'quiet', notify: false })
+    a.send({ type: 'send', id: 'x1', text: 'written while on', notify: false })
+    await waitFor(() => fake.callsOf('sendMessage').length === 1)
+    expect(fake.callsOf('sendMessage')[0]).toMatchObject({ text: 'written while on' })
+  })
+
+  test('text for a session without a topic is acked, logged and not sent', async () => {
+    await startHub()
+    const a = await plugin('a')
+    a.send({ type: 'send', id: 'x1', text: 'nowhere', notify: false })
     await a.next(m => m.type === 'ack' && m.id === 'x1')
     expect(fake.callsOf('sendMessage').length).toBe(0)
+    expect(log.lines.some(l => l.startsWith('WARN') && l.includes('nowhere'))).toBe(true)
+  })
+
+  test('text carrying a session id goes to that session, not to the current one of the window', async () => {
+    await startHub()
+    const a = await enabled('a')
+    a.send({ type: 'session', sessionId: 'a2', cwd: CWD })
+    await waitFor(() => hub.isConnected('a2'))
+    a.send({ type: 'send', id: 'x1', sessionId: 'a', text: 'old session text', notify: false })
+    await waitFor(() => fake.callsOf('sendMessage').length === 1)
+    expect(fake.callsOf('sendMessage')[0]).toMatchObject({ message_thread_id: 100, text: 'old session text' })
   })
 
   test('text queued while enabled is delivered even if terminal input follows while an earlier send is retrying', async () => {
@@ -238,7 +265,7 @@ describe('send', () => {
     a.send({ type: 'send', id: 'x1', text: 'first', notify: false })
     a.send({ type: 'send', id: 'x2', text: 'final', notify: false })
     a.send({ type: 'terminalInput' })
-    await a.next(m => m.type === 'ack' && m.id === 'x2', 5000)
+    await waitFor(() => fake.callsOf('sendMessage').length === 3, 5000, 'both delivered')
     expect(fake.callsOf('sendMessage').map(p => p.text)).toEqual(['first', 'first', 'final'])
   })
 
@@ -259,15 +286,6 @@ describe('send', () => {
     expect(fake.callsOf('createForumTopic').length).toBe(2)
     expect(fake.callsOf('sendMessage').at(-1)).toMatchObject({ message_thread_id: 101, text: 'still here' })
     expect(new SessionStore(join(dir, 'sessions.json')).get('a')?.topicId).toBe(101)
-  })
-
-  test('a final failure is logged with the message text', async () => {
-    await startHub()
-    const a = await enabled('a')
-    fake.failNext('sendMessage', { code: 400, description: 'Bad Request: chat not found' })
-    a.send({ type: 'send', id: 'x1', text: 'lost words', notify: false })
-    await a.next(m => m.type === 'ack' && m.id === 'x1')
-    expect(log.lines.some(l => l.startsWith('ERROR') && l.includes('lost words'))).toBe(true)
   })
 
   test('a title change renames the topic', async () => {
@@ -300,6 +318,155 @@ describe('send', () => {
     const res = await req(a, { op: 'download', fileId: 'F' })
     expect(res.ok).toBe(true)
     expect(String(res.result).startsWith(join(dir, 'inbox'))).toBe(true)
+  })
+})
+
+describe('delivery', () => {
+  const texts = () => fake.callsOf('sendMessage').map(p => p.text)
+
+  test('the plugin gets its ack once the text is on disk, before Telegram answers', async () => {
+    await startHub()
+    const a = await enabled('a')
+    fake.hangNext('sendMessage', 1000)
+    a.send({ type: 'send', id: 'x1', text: 'kept safe', notify: false })
+    await a.next(m => m.type === 'ack' && m.id === 'x1')
+    expect(readFileSync(join(dir, 'outbox.json'), 'utf8')).toContain('kept safe')
+  })
+
+  test('an outage longer than the API retries delays the text but keeps it and its order', async () => {
+    await startHub()
+    const a = await enabled('a')
+    for (let i = 0; i < 7; i++) fake.failNext('sendMessage', { code: 502, description: 'Bad Gateway' })
+    a.send({ type: 'send', id: 'x1', text: 'first', notify: false })
+    a.send({ type: 'send', id: 'x2', text: 'second', notify: true })
+    await waitFor(() => texts().includes('second'), 5000, 'second delivered')
+    expect(texts()).toEqual([...Array(8).fill('first'), 'second'])
+    expect(fake.callsOf('sendMessage').at(-1)).toMatchObject({ disable_notification: false })
+    expect(log.lines.some(l => l.startsWith('INFO') && l.includes('works again'))).toBe(true)
+  })
+
+  test('a dead network is waited out', async () => {
+    await startHub()
+    const a = await enabled('a')
+    fake.hangNext('sendMessage', 6)
+    a.send({ type: 'send', id: 'x1', text: 'patience', notify: false })
+    await waitFor(() => fake.callsOf('sendMessage').length === 7, 8000, 'delivered after the hangs')
+    await Bun.sleep(100)
+    expect(fake.callsOf('sendMessage').length).toBe(7)
+  })
+
+  test('a restarted hub sends what the previous one had queued', async () => {
+    await startHub()
+    const a = await enabled('a')
+    fake.hangNext('sendMessage', 1000)
+    a.send({ type: 'send', id: 'x1', text: 'survivor', notify: true })
+    await a.next(m => m.type === 'ack' && m.id === 'x1')
+    a.close()
+    await hub.stop()
+    fake.stop()
+    fake = new FakeTelegram()
+    await startHub()
+    await waitFor(() => texts().includes('survivor'), 3000, 'delivery by the new hub')
+    expect(fake.callsOf('sendMessage')[0]).toMatchObject({ message_thread_id: 100, disable_notification: false })
+  })
+
+  test('a text re-sent by a plugin after reconnecting is not delivered twice', async () => {
+    await startHub()
+    const a = await enabled('a')
+    a.send({ type: 'send', id: 'x1', text: 'once', notify: false })
+    await a.next(m => m.type === 'ack' && m.id === 'x1')
+    a.send({ type: 'send', id: 'x1', text: 'once', notify: false })
+    await waitFor(() => a.messages.filter(m => m.type === 'ack' && m.id === 'x1').length === 2)
+    await Bun.sleep(100)
+    expect(texts()).toEqual(['once'])
+  })
+
+  test('a text Telegram rejects is logged and replaced in the topic by a loud notice', async () => {
+    await startHub()
+    const a = await enabled('a')
+    fake.failNext('sendMessage', { code: 400, description: 'Bad Request: message text is empty' })
+    a.send({ type: 'send', id: 'x1', text: 'odd words', notify: false })
+    a.send({ type: 'send', id: 'x2', text: 'after', notify: false })
+    await waitFor(() => texts().includes('after'), 3000)
+    expect(log.lines.some(l => l.startsWith('ERROR') && l.includes('odd words') && l.includes('message text is empty'))).toBe(true)
+    const sent = fake.callsOf('sendMessage')
+    expect(sent.map(p => p.text)).toEqual(['odd words', '⚠️ Telegram не принял сообщение: Bad Request: message text is empty. Текст в hub.log.', 'after'])
+    expect(sent[1].disable_notification).toBe(false)
+  })
+
+  test('a bot thrown out of the group keeps the text queued until it is back', async () => {
+    await startHub()
+    const a = await enabled('a')
+    fake.failNext('sendMessage', { code: 403, description: 'Forbidden: bot was kicked from the supergroup chat' })
+    fake.failNext('sendMessage', { code: 400, description: 'Bad Request: chat not found' })
+    a.send({ type: 'send', id: 'x1', text: 'waiting', notify: false })
+    await waitFor(() => fake.callsOf('sendMessage').length === 3, 3000)
+    expect(texts()).toEqual(['waiting', 'waiting', 'waiting'])
+    expect(log.lines.some(l => l.startsWith('WARN') && l.includes('kicked'))).toBe(true)
+    expect(log.lines.some(l => l.includes('⚠️'))).toBe(false)
+  })
+
+  test('the hub does not exit while its queue is not delivered', async () => {
+    await startHub({ idleMs: 100 })
+    const a = await enabled('a')
+    fake.hangNext('sendMessage', 4)
+    a.send({ type: 'send', id: 'x1', text: 'last words', notify: true })
+    await a.next(m => m.type === 'ack' && m.id === 'x1')
+    a.close()
+    await Bun.sleep(400)
+    expect(exited).toBe(false)
+    await waitFor(() => exited, 8000, 'exit after delivery')
+    expect(texts().at(-1)).toBe('last words')
+    expect(log.lines.some(l => l.includes('queued'))).toBe(true)
+  })
+
+  test('a queue blocked by configuration stays on disk and does not keep the hub alive', async () => {
+    new SessionStore(join(dir, 'sessions.json')).set('a', { topicId: 100, title: 'T', project: 'p', enabled: true })
+    await startHub({ idleMs: 100, token: false })
+    const a = await plugin('a')
+    a.send({ type: 'send', id: 'x1', text: 'for later', notify: false })
+    await a.next(m => m.type === 'ack' && m.id === 'x1')
+    a.close()
+    await waitFor(() => exited, 3000, 'idle exit')
+    expect(readFileSync(join(dir, 'outbox.json'), 'utf8')).toContain('for later')
+  })
+
+  test('text a closing window left in spool/ is delivered and the file removed', async () => {
+    await startHub()
+    await enabled('a')
+    mkdirSync(join(dir, 'spool'), { recursive: true })
+    const file = join(dir, 'spool', 'a-1.json')
+    writeFileSync(file, JSON.stringify([{ id: 's1', sessionId: 'a', text: 'from the grave', notify: true }]))
+    await waitFor(() => texts().includes('from the grave'), 3000)
+    expect(fake.callsOf('sendMessage')[0]).toMatchObject({ disable_notification: false })
+    expect(existsSync(file)).toBe(false)
+  })
+
+  test('an unreadable spool file is set aside and reported', async () => {
+    await startHub()
+    mkdirSync(join(dir, 'spool'), { recursive: true })
+    writeFileSync(join(dir, 'spool', 'bad.json'), '{nope')
+    await waitFor(() => log.lines.some(l => l.startsWith('ERROR') && l.includes('bad.json')), 3000)
+    expect(existsSync(join(dir, 'spool', 'bad.json'))).toBe(false)
+  })
+})
+
+describe('terminal prompt hook', () => {
+  const prompt = (body: object) => fetch(`http://127.0.0.1:${port}/prompt`, { method: 'POST', body: JSON.stringify(body) }).then(r => r.json())
+
+  test('turns the mode off and says it was on', async () => {
+    await startHub()
+    const a = await enabled('a')
+    expect(await prompt({ session_id: 'a', input_source: 'terminal' })).toEqual({ wasEnabled: true })
+    await waitFor(() => a.messages.filter(m => m.type === 'state').at(-1)?.enabled === false, 3000, 'disabled state')
+    expect(new SessionStore(join(dir, 'sessions.json')).get('a')?.enabled).toBe(false)
+    expect(log.lines.some(l => l.includes('input_source=terminal'))).toBe(true)
+    expect(await prompt({ session_id: 'a' })).toEqual({ wasEnabled: false })
+  })
+
+  test('an unknown session was not on', async () => {
+    await startHub()
+    expect(await prompt({ session_id: 'nobody' })).toEqual({ wasEnabled: false })
   })
 })
 
@@ -352,7 +519,7 @@ describe('hooks and transport', () => {
 
   test('a second hub on the same port does not start', async () => {
     await startHub()
-    const second = new Hub({ port, sessionsFile: join(dir, 's2.json'), inboxDir: dir, api: undefined, config: () => config, idleMs: 1000, log, onExit() {} })
+    const second = new Hub({ port, sessionsFile: join(dir, 's2.json'), outboxFile: join(dir, 'o2.json'), inboxDir: dir, api: undefined, config: () => config, idleMs: 1000, log, onExit() {} })
     expect(second.start()).toBe(false)
   })
 })

@@ -26,9 +26,17 @@ export class Relay {
 
   constructor(private opts: { isOwnTool(name: string): boolean }) {}
 
-  setEnabled(on: boolean): void {
+  // Turning off returns the text written while the mode was on and not sent
+  // yet: the final text of a turn that ended, or the latest text mid-turn.
+  setEnabled(on: boolean): Outgoing[] {
+    let out: Outgoing[] = []
+    if (!on && this.enabled) {
+      if (this.ending !== undefined) out = this.finishTurn()
+      else if (this.pending !== undefined) out = [{ text: this.pending, notify: false }]
+    }
     this.enabled = on
     if (!on) this.pending = undefined
+    return out
   }
 
   markNotify(): void {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { appendFileSync, mkdirSync, writeFileSync } from 'fs'
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { Hub } from '../src/hub/hub.ts'
 import { TelegramApi } from '../src/hub/telegram.ts'
@@ -22,6 +22,9 @@ let transcript: string
 let config: Config
 let core: PluginCore | undefined
 let channel: { content: string; meta: Record<string, string> }[]
+let spoolDir: string
+let spawned: number
+let pluginLog: ReturnType<typeof memLogger>
 
 const line = (o: object) => JSON.stringify(o) + '\n'
 const append = (...recs: object[]) => appendFileSync(transcript, recs.map(line).join(''))
@@ -37,6 +40,13 @@ const assistantTool = (name: string, id: string) => ({
   message: { id, role: 'assistant', content: [{ type: 'tool_use', id: 't', name, input: {} }], stop_reason: 'tool_use' },
 })
 const humanTyped = (text: string) => ({ type: 'user', isSidechain: false, origin: { kind: 'human' }, promptSource: 'typed', message: { role: 'user', content: text } })
+const typedMidTurn = (text: string) => ({ type: 'attachment', isSidechain: false, attachment: { type: 'queued_command', prompt: text, commandMode: 'prompt', origin: { kind: 'human' } } })
+const NARRATION_SIG = 'CAQSrgcKEQgSGAI4AUIJbmFycmF0aW9uEgxhMFJuZKXpKQCYxWIaDLo3cuvEnZjRl04uqSIwcikVdFlQ26x5rHo0oYhd4CFFTF+Qg/KbIJ4gkTpHfgPAWqq3'
+const assistantNarration = (text: string, id: string) => ({
+  type: 'assistant',
+  isSidechain: false,
+  message: { id, role: 'assistant', content: [{ type: 'thinking', thinking: text, signature: NARRATION_SIG }], stop_reason: 'tool_use' },
+})
 
 function sent() {
   return fake.callsOf('sendMessage').map(p => ({ text: p.text, silent: p.disable_notification, topic: p.message_thread_id }))
@@ -49,9 +59,10 @@ function makeCore(sessionId = SID) {
     configDir,
     windowKey: 'pipe-1',
     port,
-    spawnHub: () => {},
+    spoolDir,
+    spawnHub: () => void spawned++,
     emitChannel: (content, meta) => channel.push({ content, meta }),
-    log: memLogger(),
+    log: pluginLog,
     tailIntervalMs: 30,
   })
   core.start()
@@ -66,6 +77,7 @@ beforeEach(async () => {
   hub = new Hub({
     port,
     sessionsFile: join(state, 'sessions.json'),
+    outboxFile: join(state, 'outbox.json'),
     inboxDir: join(state, 'inbox'),
     api: new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2 }),
     config: () => config,
@@ -81,6 +93,9 @@ beforeEach(async () => {
   transcript = join(projDir, `${SID}.jsonl`)
   writeFileSync(transcript, line({ type: 'ai-title', aiTitle: 'Старое имя' }) + line(assistantText('old history', 'end_turn')))
   channel = []
+  spoolDir = join(state, 'spool')
+  spawned = 0
+  pluginLog = memLogger()
 })
 
 afterEach(async () => {
@@ -147,6 +162,42 @@ describe('PluginCore', () => {
     expect(sent()).toEqual([])
   })
 
+  test('narration is relayed like text', async () => {
+    await enabledCore()
+    append(assistantNarration('Нашёл момент сбоя.\n\n', 'n1'), assistantTool('Bash', 'n1'))
+    await waitFor(() => sent().length === 1, 3000, 'narration')
+    expect(sent()).toEqual([{ text: 'Нашёл момент сбоя.', silent: true, topic: 100 }])
+  })
+
+  test('thinking text of an unknown kind is reported in the log', async () => {
+    await enabledCore()
+    append({ type: 'assistant', isSidechain: false, message: { id: 'u1', role: 'assistant', content: [{ type: 'thinking', thinking: 'hm', signature: 'zz' }], stop_reason: 'tool_use' } })
+    await waitFor(() => pluginLog.lines.some(l => l.startsWith('WARN') && l.includes('thinking')), 3000, 'warning')
+  })
+
+  // The text written before the message was typed was written in Telegram mode.
+  test('a message typed mid-turn turns the mode off; text written before it still goes', async () => {
+    const c = await enabledCore()
+    append(assistantText('Проверяю', 'tool_use', 'q1'), typedMidTurn('Как успехи?'))
+    await waitFor(() => !c.enabled, 3000, 'disabled')
+    append(assistantTool('Bash', 'q1'), assistantText('ответ в терминал', 'end_turn', 'q2'))
+    await waitFor(() => sent().length === 1, 3000, 'pending text')
+    await Bun.sleep(200)
+    expect(sent()).toEqual([{ text: 'Проверяю', silent: true, topic: 100 }])
+  })
+
+  test('the prompt hook turning the mode off still sends the text already written', async () => {
+    const c = await enabledCore()
+    append(assistantText('Почти готово', 'tool_use', 'h1'))
+    const res = await fetch(`http://127.0.0.1:${port}/prompt`, { method: 'POST', body: JSON.stringify({ session_id: SID, input_source: 'terminal' }) })
+    expect(await res.json()).toEqual({ wasEnabled: true })
+    await waitFor(() => !c.enabled, 3000, 'disabled')
+    append(assistantTool('Bash', 'h1'), assistantText('уже не в Телеграм', 'end_turn', 'h2'))
+    await waitFor(() => sent().length === 1, 3000, 'text written before')
+    await Bun.sleep(200)
+    expect(sent()).toEqual([{ text: 'Почти готово', silent: true, topic: 100 }])
+  })
+
   test('the final text of a turn ended right before terminal input is still sent', async () => {
     const c = await enabledCore()
     append(assistantText('итог', 'end_turn', 'd1'), humanTyped('next'))
@@ -200,7 +251,23 @@ describe('PluginCore', () => {
     append(assistantText('последнее слово', 'end_turn', 'z1'))
     await c.shutdown(2000)
     core = undefined
+    await waitFor(() => sent().length === 1, 3000, 'last words')
     expect(sent()).toEqual([{ text: 'последнее слово', silent: true, topic: 100 }])
+    expect(spawned).toBe(0)
+  })
+
+  test('a window closing while the hub is down leaves its text in spool/ and starts a hub', async () => {
+    const c = await enabledCore()
+    await hub.stop()
+    await waitFor(() => pluginLog.lines.some(l => l.includes('hub connection lost')), 3000, 'connection lost')
+    append(assistantText('без хаба', 'end_turn', 'y1'))
+    await c.shutdown(300)
+    core = undefined
+    const files = readdirSync(spoolDir).filter(f => f.endsWith('.json'))
+    expect(files.length).toBe(1)
+    const items = JSON.parse(readFileSync(join(spoolDir, files[0]!), 'utf8'))
+    expect(items).toMatchObject([{ sessionId: SID, text: 'без хаба', notify: false }])
+    expect(spawned).toBeGreaterThan(0)
   })
 
   test('a SessionStart hook for the same session keeps relaying', async () => {

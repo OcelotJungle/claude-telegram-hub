@@ -59,6 +59,10 @@ export class FakeTelegram {
     this.hangs.set(method, (this.hangs.get(method) ?? 0) + count)
   }
 
+  clearHangs(): void {
+    this.hangs.clear()
+  }
+
   deleteTopic(threadId: number): void {
     this.deletedTopics.add(threadId)
   }

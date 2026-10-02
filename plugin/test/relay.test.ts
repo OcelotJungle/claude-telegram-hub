@@ -128,11 +128,28 @@ describe('relay', () => {
     expect(run(r, [text('after', 'm2'), end('m2')])).toEqual([{ text: 'after', notify: false }])
   })
 
-  test('disabling drops the pending text', () => {
+  // Everything written while the mode was on reaches the topic.
+  test('disabling mid-turn sends the pending text silently, later text is dropped', () => {
     const r = enabledRelay()
+    r.markNotify()
     r.feed(text('pending', 'm1'))
-    r.setEnabled(false)
-    expect(run(r, [end('m1')])).toEqual([])
+    expect(r.setEnabled(false)).toEqual([{ text: 'pending', notify: false }])
+    expect(run(r, [text('after', 'm1'), end('m1')])).toEqual([])
+  })
+
+  test('disabling after a turn ended sends its final text as the turn decided', () => {
+    const r = enabledRelay()
+    r.markNotify()
+    r.feed(text('final', 'm1'))
+    r.feed(end('m1'))
+    expect(r.setEnabled(false)).toEqual([{ text: 'final', notify: true }])
+    expect(r.idle()).toEqual([])
+  })
+
+  test('disabling with nothing pending sends nothing, twice too', () => {
+    const r = enabledRelay()
+    expect(r.setEnabled(false)).toEqual([])
+    expect(r.setEnabled(false)).toEqual([])
   })
 
   test('title and terminal input alone produce nothing', () => {

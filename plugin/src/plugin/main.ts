@@ -20,7 +20,7 @@ const INSTRUCTIONS = [
   '',
   'Call tg_enable when the user asks to be written to in Telegram ("пиши мне в Телеграм", "переходи в телегу", etc.). Call tg_disable when they ask to stop. Typing in the terminal turns the mode off automatically; a message in the topic turns it on automatically.',
   '',
-  'While the mode is on, your text output is relayed to the topic automatically — there is no reply tool, just write as usual. Text before a tool call goes silently; the last text of a turn goes when the turn ends. Tool calls, tool output and thinking are never relayed.',
+  'While the mode is on, your text output is relayed to the topic automatically — there is no reply tool, just write as usual. Text before a tool call goes silently; the last text of a turn goes when the turn ends. Tool calls, tool output and hidden thinking are never relayed.',
   '',
   'When a turn ends with a question to the user or with a finished task (the same decision as the chime), call tg_notify(kind: "ask" | "done") as the very last tool call of the turn, after the chime, and then write the full final message as your last text. That message is sent with a notification. Do not call tg_notify for intermediate progress.',
   '',
@@ -58,6 +58,7 @@ const core = sessionId
       configDir,
       windowKey,
       port: hubPort(),
+      spoolDir: paths().spoolDir,
       spawnHub: () => spawnHubDetached(hubMain),
       emitChannel: (content, meta) => {
         mcp.notification({ method: 'notifications/claude/channel', params: { content, meta } }).catch(e => log.error(`channel notification failed: ${e}`))

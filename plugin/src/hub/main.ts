@@ -15,6 +15,8 @@ const token = loadToken()
 const hub = new Hub({
   port: hubPort(),
   sessionsFile: p.sessionsFile,
+  outboxFile: p.outboxFile,
+  spoolDir: p.spoolDir,
   inboxDir: p.inboxDir,
   api: token ? new TelegramApi({ token, base: apiBase(), log }) : undefined,
   config: loadConfig,

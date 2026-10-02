@@ -1,8 +1,12 @@
 import type { Server, ServerWebSocket } from 'bun'
+import { randomUUID } from 'crypto'
+import { readdirSync, readFileSync, renameSync, unlinkSync } from 'fs'
+import { join } from 'path'
 import { chunk } from '../shared/chunk.ts'
 import type { Config } from '../shared/config.ts'
 import type { Logger } from '../shared/log.ts'
-import { PROTOCOL_VERSION, type ChannelMeta, type HookBody, type HubToPlugin, type PluginToHub } from '../shared/protocol.ts'
+import { PROTOCOL_VERSION, type ChannelMeta, type HookBody, type HubToPlugin, type PluginToHub, type PromptAnswer, type PromptBody } from '../shared/protocol.ts'
+import { Outbox, type OutItem } from './outbox.ts'
 import { routeUpdate } from './router.ts'
 import { SessionStore, topicName, type SessionRecord } from './sessions.ts'
 import { isThreadNotFound, TelegramError, type Message, type TelegramApi, type Update } from './telegram.ts'
@@ -13,12 +17,19 @@ type WS = ServerWebSocket<Conn>
 export type HubOptions = {
   port: number
   sessionsFile: string
+  outboxFile: string
+  // Where a closing window leaves the text it could not hand to a hub.
+  spoolDir?: string
+  spoolScanMs?: number
   inboxDir: string
   api: TelegramApi | undefined
   config: () => Config
   idleMs: number
   pollTimeoutSec?: number
   pollRetryBaseMs?: number
+  // Pause between attempts to deliver the head of a session's queue.
+  sendRetryBaseMs?: number
+  sendRetryMaxMs?: number
   log: Logger
   onExit(): void
 }
@@ -26,6 +37,22 @@ export type HubOptions = {
 const INACTIVE_TEXT = 'сессия сейчас не активна'
 const HOOK_TTL_MS = 60_000
 const MAX_POLL_DELAY_MS = 15_000
+
+// Delivery cannot work until the user fixes the setup: no token, no groupId,
+// the bot is not in the group or may not write there.
+class SetupError extends Error {}
+
+type Failure = 'retry' | 'setup' | 'rejected'
+
+function classify(e: unknown): Failure {
+  if (e instanceof SetupError) return 'setup'
+  if (!(e instanceof TelegramError)) return 'retry'
+  if (e.code === 401 || e.code === 403 || e.code === 404) return 'setup'
+  if (e.code === 400) {
+    return /chat not found|not enough rights|have no rights|CHAT_WRITE_FORBIDDEN|CHAT_ADMIN_REQUIRED|bot was kicked|upgraded to a supergroup/i.test(e.description) ? 'setup' : 'rejected'
+  }
+  return 'retry'
+}
 
 // The single Telegram poller on the machine. Plugins (one per Claude Code
 // window) connect over a localhost WebSocket; whoever binds the port is the hub.
@@ -35,7 +62,14 @@ export class Hub {
   private store: SessionStore
   private chains = new Map<string, Promise<unknown>>()
   private pendingHooks = new Map<string, { body: HookBody; at: number }>()
+  private outbox: Outbox
+  private pumping = new Set<string>()
+  // Sessions whose delivery waits for the user to fix the setup.
+  private blocked = new Set<string>()
   private idleTimer: ReturnType<typeof setTimeout> | undefined
+  // Idle time is up, but the queue is still being delivered.
+  private idleExpired = false
+  private spoolTimer: ReturnType<typeof setInterval> | undefined
   private abort = new AbortController()
   private running = false
   private log: Logger
@@ -43,6 +77,7 @@ export class Hub {
   constructor(private opts: HubOptions) {
     this.store = new SessionStore(opts.sessionsFile)
     this.log = opts.log
+    this.outbox = new Outbox(opts.outboxFile, opts.log)
   }
 
   start(): boolean {
@@ -63,6 +98,10 @@ export class Hub {
     }
     this.running = true
     this.log.info(`hub listening on 127.0.0.1:${this.opts.port}`)
+    if (this.outbox.size) this.log.info(`${this.outbox.size} queued piece(s) left by the previous hub — delivering`)
+    for (const sid of this.outbox.sessions()) void this.pump(sid)
+    this.ingestSpool()
+    this.spoolTimer = setInterval(() => this.ingestSpool(), this.opts.spoolScanMs ?? 5000)
     this.armIdle()
     if (this.opts.api) void this.pollLoop(this.opts.api)
     else this.log.error('no TELEGRAM_BOT_TOKEN — not polling Telegram')
@@ -74,6 +113,7 @@ export class Hub {
     this.running = false
     this.abort.abort()
     if (this.idleTimer) clearTimeout(this.idleTimer)
+    if (this.spoolTimer) clearInterval(this.spoolTimer)
     this.server?.stop(true)
     this.log.info('hub stopped')
   }
@@ -103,6 +143,15 @@ export class Hub {
       this.onHook(body)
       return new Response('ok')
     }
+    if (url.pathname === '/prompt' && req.method === 'POST') {
+      let body: PromptBody
+      try {
+        body = (await req.json()) as PromptBody
+      } catch {
+        return new Response('bad json', { status: 400 })
+      }
+      return Response.json(this.onTerminalPrompt(body))
+    }
     return new Response('not found', { status: 404 })
   }
 
@@ -110,6 +159,7 @@ export class Hub {
     this.conns.add(ws)
     if (this.idleTimer) clearTimeout(this.idleTimer)
     this.idleTimer = undefined
+    this.idleExpired = false
   }
 
   private onClose(ws: WS): void {
@@ -123,9 +173,25 @@ export class Hub {
     if (this.idleTimer) clearTimeout(this.idleTimer)
     this.idleTimer = setTimeout(() => {
       if (this.conns.size > 0) return
-      this.log.info('no plugins connected — exiting')
-      void this.stop().then(() => this.opts.onExit())
+      this.idleExpired = true
+      if (this.deliverable() > 0) this.log.info(`no plugins connected — exiting once ${this.deliverable()} queued piece(s) reach Telegram`)
+      this.maybeExit()
     }, this.opts.idleMs)
+  }
+
+  // Queued pieces that can still go out without the user fixing anything.
+  private deliverable(): number {
+    return this.outbox
+      .sessions()
+      .filter(s => !this.blocked.has(s))
+      .reduce((n, s) => n + this.outbox.countOf(s), 0)
+  }
+
+  private maybeExit(): void {
+    if (!this.idleExpired || !this.running || this.conns.size > 0 || this.deliverable() > 0) return
+    if (this.outbox.size) this.log.info(`no plugins connected — exiting; ${this.outbox.size} queued piece(s) wait on disk until the setup is fixed`)
+    else this.log.info('no plugins connected — exiting')
+    void this.stop().then(() => this.opts.onExit())
   }
 
   private send(ws: WS, msg: HubToPlugin): void {
@@ -153,6 +219,16 @@ export class Hub {
 
   private forwardHook(ws: WS, body: HookBody): void {
     this.send(ws, { type: 'switchSession', sessionId: body.session_id, transcriptPath: body.transcript_path, cwd: body.cwd })
+  }
+
+  // The user typed a prompt in the terminal: the mode goes off at once, and the
+  // hook tells the agent so when it was on.
+  private onTerminalPrompt(body: PromptBody): PromptAnswer {
+    const sid = body?.session_id
+    if (typeof sid !== 'string' || !this.store.get(sid)?.enabled) return { wasEnabled: false }
+    this.setEnabled(sid, false)
+    this.log.info(`terminal prompt in session ${sid} (input_source=${body.input_source ?? 'none'}): Telegram mode off`)
+    return { wasEnabled: true }
   }
 
   // --- plugin messages -----------------------------------------------------
@@ -193,15 +269,18 @@ export class Hub {
       case 'req':
         void this.handleRequest(ws, msg)
         return
-      // The mode is checked when the text arrives, not when its turn in the
-      // queue comes: text produced while enabled is delivered even if the user
-      // types in the terminal meanwhile.
-      case 'send':
-        if (!sid || !this.store.get(sid)?.enabled) return this.send(ws, { type: 'ack', id: msg.id })
-        void this.chain(sid, () => this.deliver(sid, msg.text, msg.notify)).finally(() => this.send(ws, { type: 'ack', id: msg.id }))
+      // The plugin sends only text written while the mode was on, so it is
+      // delivered whatever the mode is now. The ack goes once it is on disk.
+      case 'send': {
+        const target = msg.sessionId ?? sid
+        if (target) this.enqueue(target, msg.id, msg.text, msg.notify)
+        else this.log.warn(`text from a window that has not said hello, not sent:
+${msg.text}`)
+        this.send(ws, { type: 'ack', id: msg.id })
         return
+      }
       case 'permission':
-        if (sid && this.store.get(sid)?.enabled) void this.chain(sid, () => this.deliver(sid, `🔐 Нужно подтверждение: ${msg.toolName} — ${msg.description}`, true))
+        if (sid && this.store.get(sid)?.enabled) this.enqueue(sid, `perm-${randomUUID()}`, `🔐 Нужно подтверждение: ${msg.toolName} — ${msg.description}`, true)
         return
       case 'title':
         if (sid) void this.chain(sid, () => this.retitle(sid, msg.title))
@@ -235,14 +314,14 @@ export class Hub {
   }
 
   private requireApi(): TelegramApi {
-    if (!this.opts.api) throw new Error('TELEGRAM_BOT_TOKEN is not set — put it into .env in the tg-hub state dir and restart the hub')
+    if (!this.opts.api) throw new SetupError('TELEGRAM_BOT_TOKEN is not set — put it into .env in the tg-hub state dir and restart the hub')
     return this.opts.api
   }
 
   private requireGroup(): string {
     const groupId = this.opts.config().groupId
     if (!groupId) {
-      throw new Error('groupId is not configured — set "groupId" in config.json in the tg-hub state dir; hub.log lists the ids of chats the bot receives messages from')
+      throw new SetupError('groupId is not configured — set "groupId" in config.json in the tg-hub state dir; hub.log lists the ids of chats the bot receives messages from')
     }
     return groupId
   }
@@ -294,19 +373,125 @@ export class Hub {
     this.send(ws, { type: 'state', enabled: rec?.enabled ?? false, ...(rec ? { topicTitle: topicName(rec.project, rec.title) } : {}) })
   }
 
-  // Sends text to the session's topic. Never throws: a final failure is logged
-  // together with the text so nothing is lost silently.
-  private async deliver(sessionId: string, text: string, notify: boolean): Promise<void> {
-    if (!this.store.get(sessionId)) return
-    const pieces = chunk(text)
+  // --- delivery -------------------------------------------------------------
+
+  // Puts text for a session's topic into the queue on disk and starts its
+  // delivery. Throws only if the queue cannot be written; then the plugin gets
+  // no ack and sends the text again.
+  private enqueue(sessionId: string, sourceId: string, text: string, notify: boolean): void {
+    if (!this.store.get(sessionId)) {
+      this.log.warn(`session ${sessionId} has no topic, text not sent:\n${text}`)
+      return
+    }
+    const pieces = chunk(text).map((t, i) => ({ text: t, silent: !(notify && i === 0) }))
+    if (pieces.length && this.outbox.add(sourceId, sessionId, pieces)) void this.pump(sessionId)
+  }
+
+  // Delivers a session's queue strictly in order: a piece leaves the queue
+  // only after Telegram accepted it. Network and server failures are retried
+  // for as long as it takes; a piece Telegram rejects is replaced by a notice.
+  private async pump(sessionId: string): Promise<void> {
+    if (this.pumping.has(sessionId)) return
+    this.pumping.add(sessionId)
+    const base = this.opts.sendRetryBaseMs ?? 1000
+    const max = this.opts.sendRetryMaxMs ?? 30_000
+    let failures = 0
     try {
-      const api = this.requireApi()
-      const groupId = this.requireGroup()
-      for (let i = 0; i < pieces.length; i++) {
-        await this.sendToTopic(api, groupId, sessionId, pieces[i]!, !(notify && i === 0))
+      while (this.running) {
+        const item = this.outbox.head(sessionId)
+        if (!item) break
+        try {
+          await this.sendItem(sessionId, item)
+          this.outbox.remove(item.id)
+          if (failures) this.log.info(`delivery to session ${sessionId} works again after ${failures} failed attempt(s)`)
+          failures = 0
+          this.blocked.delete(sessionId)
+          continue
+        } catch (e) {
+          if (!this.running) break
+          const kind = classify(e)
+          if (kind === 'rejected') {
+            this.reject(item, e as TelegramError)
+            continue
+          }
+          failures++
+          if (failures === 1) {
+            const waiting = `${this.outbox.countOf(sessionId)} piece(s) wait`
+            this.log.warn(
+              kind === 'setup'
+                ? `delivery to session ${sessionId} is blocked: ${e instanceof Error ? e.message : e} — fix the bot or group setup; ${waiting}, retrying every ${max / 1000} s`
+                : `delivery to session ${sessionId} failed (${e instanceof Error ? e.message : e}); ${waiting}, retrying`,
+            )
+          }
+          if (kind === 'setup') {
+            this.blocked.add(sessionId)
+            this.maybeExit()
+          }
+          await this.sleep(kind === 'setup' ? max : Math.min(base * 2 ** (failures - 1), max))
+        }
       }
-    } catch (e) {
-      this.log.error(`failed to deliver to session ${sessionId}: ${e}\n--- undelivered text ---\n${text}\n--- end ---`)
+    } finally {
+      this.pumping.delete(sessionId)
+      if (!this.outbox.head(sessionId)) this.blocked.delete(sessionId)
+      this.maybeExit()
+    }
+  }
+
+  private async sendItem(sessionId: string, item: OutItem): Promise<void> {
+    if (!this.store.get(sessionId)) {
+      this.log.error(`session ${sessionId} lost its topic record, text not sent:\n${item.text}`)
+      return
+    }
+    await this.sendToTopic(this.requireApi(), this.requireGroup(), sessionId, item.text, item.silent)
+  }
+
+  // Explicit beats silent: the topic learns that a message is missing, the
+  // log keeps its text.
+  private reject(item: OutItem, e: TelegramError): void {
+    this.log.error(`Telegram rejected a message for session ${item.sessionId}: ${e.message}\n--- text ---\n${item.text}\n--- end ---`)
+    if (item.notice) this.outbox.remove(item.id)
+    else this.outbox.replaceWithNotice(item.id, `⚠️ Telegram не принял сообщение: ${e.description}. Текст в hub.log.`)
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => {
+      const onAbort = () => {
+        clearTimeout(timer)
+        resolve()
+      }
+      const timer = setTimeout(() => {
+        this.abort.signal.removeEventListener('abort', onAbort)
+        resolve()
+      }, ms)
+      this.abort.signal.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+
+  // Text a window could not hand to a hub before it closed.
+  private ingestSpool(): void {
+    const dir = this.opts.spoolDir
+    if (!dir) return
+    let files: string[]
+    try {
+      files = readdirSync(dir).filter(f => f.endsWith('.json'))
+    } catch {
+      return
+    }
+    for (const f of files) {
+      const path = join(dir, f)
+      try {
+        const items = JSON.parse(readFileSync(path, 'utf8')) as { id: string; sessionId: string; text: string; notify: boolean }[]
+        if (!Array.isArray(items)) throw new Error('not a list')
+        for (const it of items) this.enqueue(it.sessionId, it.id, it.text, it.notify)
+        unlinkSync(path)
+        this.log.info(`took ${items.length} message(s) from ${path}`)
+      } catch (e) {
+        const aside = `${path}.corrupt-${Date.now()}`
+        try {
+          renameSync(path, aside)
+        } catch {}
+        this.log.error(`spool file ${path} is unreadable (${e}); kept as ${aside}`)
+      }
     }
   }
 

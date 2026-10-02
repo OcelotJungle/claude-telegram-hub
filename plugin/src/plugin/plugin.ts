@@ -1,3 +1,5 @@
+import { mkdirSync, renameSync, writeFileSync } from 'fs'
+import { join } from 'path'
 import type { Logger } from '../shared/log.ts'
 import { PROTOCOL_VERSION, type ChannelMeta, type HubToPlugin } from '../shared/protocol.ts'
 import { transcriptPathFor } from '../transcript/locate.ts'
@@ -12,6 +14,8 @@ export type PluginOptions = {
   configDir: string
   windowKey: string
   port: number
+  // Where text the hub never acked goes when the window closes.
+  spoolDir: string
   spawnHub(): void
   emitChannel(content: string, meta: ChannelMeta): void
   log: Logger
@@ -38,6 +42,7 @@ export class PluginCore {
   private client: HubClient
   private titles: Titles = {}
   private log: Logger
+  private reportedKinds = new Set<string>()
   enabled = false
 
   constructor(private opts: PluginOptions) {
@@ -64,11 +69,25 @@ export class PluginCore {
     this.client.stop()
   }
 
-  // The window is closing: relay what was written last, then stop.
+  // The window is closing: relay what was written last, then stop. Text no
+  // hub took goes to the spool directory, and a hub is started to send it.
   async shutdown(timeoutMs: number): Promise<void> {
     this.tailer?.pollNow()
     this.flush(this.relay.idle())
     await this.client.drain(timeoutMs)
+    const left = this.client.unacked
+    if (left.length) {
+      try {
+        mkdirSync(this.opts.spoolDir, { recursive: true })
+        const file = join(this.opts.spoolDir, `${this.sessionId}-${process.pid}-${Date.now()}.json`)
+        writeFileSync(`${file}.tmp`, JSON.stringify(left))
+        renameSync(`${file}.tmp`, file)
+        this.log.warn(`hub unreachable at shutdown: ${left.length} message(s) left in ${file}`)
+        this.client.spawnHubNow()
+      } catch (e) {
+        this.log.error(`could not spool ${left.length} message(s): ${e}\n${left.map(o => o.text).join('\n---\n')}`)
+      }
+    }
     this.stop()
   }
 
@@ -112,9 +131,9 @@ export class PluginCore {
     }
     this.log.info(`session ${this.sessionId} → ${sessionId}`)
     this.flush(this.relay.idle())
+    this.setEnabled(false)
     this.sessionId = sessionId
     this.cwd = cwd || this.cwd
-    this.setEnabled(false)
     this.follow(transcriptPath)
     this.client.send({ type: 'session', sessionId, cwd: this.cwd })
   }
@@ -139,6 +158,9 @@ export class PluginCore {
       if (ev.kind === 'terminal_input' && this.enabled) {
         this.client.send({ type: 'terminalInput' })
         this.setEnabled(false)
+      } else if (ev.kind === 'unknown_thinking' && !this.reportedKinds.has(ev.blockKind)) {
+        this.reportedKinds.add(ev.blockKind)
+        this.log.warn(`transcript: thinking block of unknown kind "${ev.blockKind}" with text — not relayed; the transcript format may have changed`)
       } else if (ev.kind === 'title') {
         const before = effectiveTitle(this.titles)
         this.titles[ev.source] = ev.title
@@ -149,17 +171,21 @@ export class PluginCore {
   }
 
   private flush(out: Outgoing[]): void {
-    for (const o of out) this.client.enqueue(o.text, o.notify)
+    for (const o of out) this.client.enqueue(this.sessionId, o.text, o.notify)
   }
 
+  // Turning off still sends what was written while the mode was on.
   private setEnabled(on: boolean): void {
     this.enabled = on
-    this.relay.setEnabled(on)
+    this.flush(this.relay.setEnabled(on))
   }
 
   private onHubMessage(m: HubToPlugin): void {
     switch (m.type) {
       case 'state':
+        // Turned off elsewhere (the prompt hook, tg_disable): first relay what
+        // the transcript already holds, written while the mode was on.
+        if (!m.enabled && this.enabled) this.tailer?.pollNow()
         this.setEnabled(m.enabled)
         return
       case 'inbound':

@@ -10,6 +10,8 @@ export function paths() {
     envFile: join(stateDir, '.env'),
     configFile: join(stateDir, 'config.json'),
     sessionsFile: join(stateDir, 'sessions.json'),
+    outboxFile: join(stateDir, 'outbox.json'),
+    spoolDir: join(stateDir, 'spool'),
     logFile: join(stateDir, 'hub.log'),
     inboxDir: join(stateDir, 'inbox'),
   }

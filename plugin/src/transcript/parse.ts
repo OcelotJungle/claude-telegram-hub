@@ -7,6 +7,9 @@ export type TranscriptEvent =
   | { kind: 'turn_end'; messageId: string }
   | { kind: 'terminal_input' }
   | { kind: 'title'; source: 'custom' | 'agent' | 'ai'; title: string }
+  // A thinking block with text whose kind is neither thinking nor narration:
+  // the record format changed, and visible text may be going unrelayed.
+  | { kind: 'unknown_thinking'; blockKind: string }
 
 type Rec = Record<string, any>
 
@@ -19,6 +22,9 @@ export function parseRecord(rec: unknown): TranscriptEvent[] {
       return parseAssistant(r)
     case 'user':
       return isTerminalInput(r) ? [{ kind: 'terminal_input' }] : []
+    // A message typed while the agent works is absorbed into the running turn.
+    case 'attachment':
+      return r.attachment?.type === 'queued_command' && r.attachment.origin?.kind === 'human' ? [{ kind: 'terminal_input' }] : []
     case 'custom-title':
       return title('custom', r.customTitle)
     case 'agent-name':
@@ -38,6 +44,12 @@ function parseAssistant(r: Rec): TranscriptEvent[] {
   for (const block of msg.content) {
     if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
       out.push({ kind: 'text', text: block.text, messageId })
+    } else if (block?.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.trim()) {
+      // Narration is shown in the terminal as ordinary text; hidden thinking is
+      // written empty, or as a summary when the user turned summaries on.
+      const kind = thinkingKind(block.signature)
+      if (kind === 'narration') out.push({ kind: 'text', text: block.thinking.trimEnd(), messageId })
+      else if (kind !== 'thinking') out.push({ kind: 'unknown_thinking', blockKind: kind ?? '?' })
     } else if (block?.type === 'tool_use' && typeof block.name === 'string') {
       out.push({ kind: 'tool_use', name: block.name, messageId })
     }
@@ -48,6 +60,15 @@ function parseAssistant(r: Rec): TranscriptEvent[] {
     out.push({ kind: 'turn_end', messageId })
   }
   return out
+}
+
+// The signature is a base64 protobuf whose field 8 names the block kind
+// ("thinking" or "narration"); observed in Claude Code with the model.
+export function thinkingKind(signature: unknown): string | undefined {
+  if (typeof signature !== 'string') return undefined
+  const head = Buffer.from(signature.slice(0, 64), 'base64').toString('latin1')
+  const m = head.match(/\x42([\x01-\x20])([a-z_]+)/)
+  return m && m[2]!.length === m[1]!.charCodeAt(0) ? m[2] : undefined
 }
 
 function isTerminalInput(r: Rec): boolean {

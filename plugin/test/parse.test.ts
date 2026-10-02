@@ -12,7 +12,11 @@ const assistant = (id: string, stop: string | null, block: object) => ({
 })
 const text = (t: string) => ({ type: 'text', text: t })
 const toolUse = (name: string) => ({ type: 'tool_use', id: 'toolu_1', name, input: {} })
-const thinking = { type: 'thinking', thinking: 'hmm', signature: 'x' }
+// Real signature heads (the model): base64 protobuf naming the block kind.
+const THINKING_SIG = 'CAQS2AYKEAgSGAI4AUIIdGhpbmtpbmcSDMAEHc8RVkFCljXlqhoM4s16bwLW5yY0xreFIjD1gFVyB/I6V96xQnh/Zkc5R853AaR0CaLRbcgfelAoZBntTXsv'
+const NARRATION_SIG = 'CAQSrgcKEQgSGAI4AUIJbmFycmF0aW9uEgxhMFJuZKXpKQCYxWIaDLo3cuvEnZjRl04uqSIwcikVdFlQ26x5rHo0oYhd4CFFTF+Qg/KbIJ4gkTpHfgPAWqq3'
+const thinking = { type: 'thinking', thinking: '', signature: THINKING_SIG }
+const narration = (t: string) => ({ type: 'thinking', thinking: t, signature: NARRATION_SIG })
 
 const userBase = { parentUuid: 'p', isSidechain: false, type: 'user', uuid: 'u', sessionId: 's' }
 
@@ -31,6 +35,35 @@ describe('assistant records', () => {
 
   test('thinking is ignored', () => {
     expect(parseRecord(assistant('m1', 'tool_use', thinking))).toEqual([])
+  })
+
+  test('shown thinking summaries are not text', () => {
+    expect(parseRecord(assistant('m1', 'tool_use', { ...thinking, thinking: 'weighing options' }))).toEqual([])
+  })
+
+  // Claude Code shows narration in the terminal as ordinary assistant text.
+  test('narration is text', () => {
+    expect(parseRecord(assistant('m1', 'tool_use', narration('Проверяю тесты.\n\n')))).toEqual([
+      { kind: 'text', text: 'Проверяю тесты.', messageId: 'm1' },
+    ])
+  })
+
+  test('narration of an end_turn message is text then turn_end', () => {
+    expect(parseRecord(assistant('m2', 'end_turn', narration('Готово.')))).toEqual([
+      { kind: 'text', text: 'Готово.', messageId: 'm2' },
+      { kind: 'turn_end', messageId: 'm2' },
+    ])
+  })
+
+  test('thinking with text and an unknown kind is reported, not relayed', () => {
+    const head = [0x08, 0x04, 0x12, 0x10, 0x0a, 0x10, 0x08, 0x12, 0x18, 0x02, 0x38, 0x01, 0x42, 0x07]
+    const sig = Buffer.concat([Buffer.from(head), Buffer.from('musings'), Buffer.from([0x12, 0x0c, 1, 2, 3])]).toString('base64')
+    expect(parseRecord(assistant('m1', 'tool_use', { type: 'thinking', thinking: 'hm', signature: sig }))).toEqual([
+      { kind: 'unknown_thinking', blockKind: 'musings' },
+    ])
+    expect(parseRecord(assistant('m1', 'tool_use', { type: 'thinking', thinking: 'hm', signature: 'garbage' }))).toEqual([
+      { kind: 'unknown_thinking', blockKind: '?' },
+    ])
   })
 
   test('end_turn text gives text then turn_end', () => {
@@ -93,6 +126,27 @@ describe('user records', () => {
   test('meta caveat is not terminal input even with human origin', () => {
     const rec = { ...userBase, isMeta: true, origin: { kind: 'human' }, message: { role: 'user', content: '<local-command-caveat>' } }
     expect(parseRecord(rec)).toEqual([])
+  })
+
+  // A message typed while the agent works is absorbed into the running turn.
+  test('message typed mid-turn is terminal input', () => {
+    const rec = {
+      parentUuid: 'p',
+      isSidechain: false,
+      type: 'attachment',
+      attachment: { type: 'queued_command', prompt: 'Как успехи?', commandMode: 'prompt', origin: { kind: 'human' }, humanTurn: true },
+    }
+    expect(parseRecord(rec)).toEqual([{ kind: 'terminal_input' }])
+  })
+
+  test('task notification absorbed mid-turn is not terminal input', () => {
+    const rec = { type: 'attachment', attachment: { type: 'queued_command', prompt: '<task-notification>', commandMode: 'task-notification', origin: { kind: 'task-notification' } } }
+    expect(parseRecord(rec)).toEqual([])
+  })
+
+  test('other attachments are not terminal input', () => {
+    expect(parseRecord({ type: 'attachment', attachment: { type: 'edited_text_file', origin: { kind: 'human' } } })).toEqual([])
+    expect(parseRecord({ type: 'attachment' })).toEqual([])
   })
 
   test('task notification is not terminal input', () => {

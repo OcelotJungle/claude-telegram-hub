@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { writeFileSync } from 'fs'
+import { readFileSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
 import { HubClient, spawnHubDetached } from '../src/plugin/hubClient.ts'
 import { PROTOCOL_VERSION, type HubToPlugin } from '../src/shared/protocol.ts'
@@ -100,8 +100,8 @@ describe('hub election', () => {
     const old = (await health())!.pid
     process.kill(old)
     await waitFor(() => !a.c.connected, 5000, 'disconnect')
-    a.c.enqueue('first', false)
-    a.c.enqueue('second', true)
+    a.c.enqueue('a', 'first', false)
+    a.c.enqueue('a', 'second', true)
     await waitFor(() => fake.callsOf('sendMessage').length >= 2, 10_000, 'messages delivered')
     await Bun.sleep(300)
     expect(fake.callsOf('sendMessage').map(p => [p.text, p.disable_notification])).toEqual([
@@ -109,6 +109,24 @@ describe('hub election', () => {
       ['second', false],
     ])
   }, 20_000)
+
+  // A real hub process killed with text it acked but Telegram never got.
+  test('text a killed hub had queued is sent by the next hub', async () => {
+    const a = client('a')
+    a.c.start()
+    await waitFor(() => a.c.connected, 10_000, 'connected')
+    await a.c.request('enable', { title: 'T' })
+    fake.hangNext('sendMessage', 1000)
+    a.c.enqueue('a', 'in the queue', true)
+    await waitFor(() => a.c.unacked.length === 0, 5000, 'acked')
+    const old = (await health())!.pid
+    process.kill(old)
+    fake.clearHangs()
+    const queue = join(env.TG_HUB_STATE_DIR!, 'outbox.json')
+    await waitFor(() => JSON.parse(readFileSync(queue, 'utf8')).items.length === 0, 15_000, 'delivered by the next hub')
+    expect(fake.callsOf('sendMessage').filter(p => p.text === 'in the queue').length).toBeGreaterThanOrEqual(2)
+    expect((await health())!.pid).not.toBe(old)
+  }, 30_000)
 
   test('the hub exits after the last plugin stops', async () => {
     const a = client('a')
