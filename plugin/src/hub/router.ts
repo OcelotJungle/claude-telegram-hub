@@ -13,7 +13,7 @@ const ENVELOPE = new Set([
 
 export type Route =
   | { action: "ignore"; reason: string }
-  | { action: "inactive"; topicId: number }
+  | { action: "inactive"; sessionId: string; topicId: number }
   | { action: "deliver"; sessionId: string; topicId: number };
 
 // Only topic messages from allowed senders in the configured group reach a
@@ -29,7 +29,7 @@ export function routeUpdate(u: Update, cfg: Config, sessions: SessionStore, isCo
   const topicId = m.message_thread_id;
   const sessionId = sessions.findByTopic(topicId);
   if (!sessionId) return ignore(`topic ${topicId} has no session`);
-  if (!isConnected(sessionId)) return { action: "inactive", topicId };
+  if (!isConnected(sessionId)) return { action: "inactive", sessionId, topicId };
   return { action: "deliver", sessionId, topicId };
 }
 
@@ -61,12 +61,24 @@ export function routeCallback(u: Update, cfg: Config): CallbackRoute | undefined
 // `/info` or `/compact`, maybe `@<this bot>`, then arguments. Anything else,
 // a command for another bot included, is a plain message.
 export function commandOf(text: string, botUsername: string | undefined): Omit<TopicCommand, "id"> | undefined {
-  const m = text.match(/^\/(info|compact)(?:@(\w+))?(?:\s+([\s\S]*))?$/i);
-  if (!m) return undefined;
+  const c = parseCommand(text, botUsername);
+  return c && (c.name === "info" || c.name === "compact") ? { name: c.name, args: c.args } : undefined;
+}
+
+// A command the hub runs itself: `/run [account]` starts the topic's session,
+// `/stop` ends it.
+export type HubCommand = { name: "run" | "stop"; args: string };
+
+export function hubCommandOf(text: string, botUsername: string | undefined): HubCommand | undefined {
+  const c = parseCommand(text, botUsername);
+  return c && (c.name === "run" || c.name === "stop") ? { name: c.name, args: c.args } : undefined;
+}
+
+function parseCommand(text: string, botUsername: string | undefined): { name: string; args: string } | undefined {
+  const m = text.match(/^\/(\w+)(?:@(\w+))?(?:\s+([\s\S]*))?$/);
+  if (!m?.[1]) return undefined;
   if (m[2] && botUsername && m[2].toLowerCase() !== botUsername.toLowerCase()) return undefined;
-  const name = m[1]?.toLowerCase();
-  if (name !== "info" && name !== "compact") return undefined;
-  return { name, args: (m[3] ?? "").trim() };
+  return { name: m[1].toLowerCase(), args: (m[3] ?? "").trim() };
 }
 
 function ignore(reason: string): Route {

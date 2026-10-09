@@ -1,5 +1,7 @@
 // Hub entry point. Started detached by a plugin that found no hub; exits at
 // once if another hub already holds the port.
+import { homedir } from "os";
+import { join } from "path";
 import { apiBase, hubPort, idleMs, loadConfig, loadToken, paths } from "../shared/config.ts";
 import { createLogger } from "../shared/log.ts";
 import { Hub } from "./hub.ts";
@@ -19,6 +21,8 @@ const hub = new Hub({
   spoolDir: p.spoolDir,
   filesDir: p.filesDir,
   inboxDir: p.inboxDir,
+  // Every cswap profile links its projects/ here.
+  projectsDir: join(homedir(), ".claude", "projects"),
   api: token ? new TelegramApi({ token, base: apiBase(), log }) : undefined,
   config: loadConfig,
   // --always-on: started by the Task Scheduler (scripts/install-hub-task.ps1).

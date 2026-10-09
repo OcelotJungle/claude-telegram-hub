@@ -2,7 +2,7 @@ import type { Update } from "../src/hub/telegram.ts";
 
 import { describe, expect, test } from "bun:test";
 import { join } from "path";
-import { commandOf, routeUpdate } from "../src/hub/router.ts";
+import { commandOf, hubCommandOf, routeUpdate } from "../src/hub/router.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
 import { topicMsg } from "./fake-telegram.ts";
 import { tempDir } from "./helpers.ts";
@@ -28,7 +28,7 @@ describe("routeUpdate", () => {
 
   test('message in the topic of a session without a window is "inactive"', () => {
     const { route } = setup();
-    expect(route(topicMsg({ chatId: GROUP, threadId: 20, fromId: ME, text: "hi" }))).toEqual({ action: "inactive", topicId: 20 });
+    expect(route(topicMsg({ chatId: GROUP, threadId: 20, fromId: ME, text: "hi" }))).toEqual({ action: "inactive", sessionId: "closed", topicId: 20 });
   });
 
   test("unknown topic is ignored", () => {
@@ -119,6 +119,19 @@ describe("commandOf", () => {
   });
 
   test("another bot, another command or text around it is a plain message", () => {
-    for (const text of ["/info@other_bot", "/start", "/compactor", "see /info", " /info", "/", ""]) expect(commandOf(text, "test_bot")).toBeUndefined();
+    for (const text of ["/info@other_bot", "/start", "/compactor", "see /info", " /info", "/", "", "/run"]) expect(commandOf(text, "test_bot")).toBeUndefined();
+  });
+});
+
+describe("hubCommandOf", () => {
+  test("/run with or without an account, /stop", () => {
+    expect(hubCommandOf("/run", "test_bot")).toEqual({ name: "run", args: "" });
+    expect(hubCommandOf("/run 2", "test_bot")).toEqual({ name: "run", args: "2" });
+    expect(hubCommandOf("/Run@test_bot me@mail.com", "test_bot")).toEqual({ name: "run", args: "me@mail.com" });
+    expect(hubCommandOf("/stop", "test_bot")).toEqual({ name: "stop", args: "" });
+  });
+
+  test("other commands, other bots and text are not hub commands", () => {
+    for (const text of ["/info", "/stop@other_bot", "/runner", "please /run", ""]) expect(hubCommandOf(text, "test_bot")).toBeUndefined();
   });
 });

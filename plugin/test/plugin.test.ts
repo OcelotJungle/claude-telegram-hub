@@ -26,6 +26,7 @@ let config: Config;
 let core: PluginCore | undefined;
 let channel: { content: string; meta: Record<string, string> }[];
 let answers: { requestId: string; behavior: string }[];
+let terminated: number;
 let spoolDir: string;
 let state: string;
 let spawned: number;
@@ -71,6 +72,7 @@ function makeCore(sessionId = SID) {
     spawnHub: () => void spawned++,
     emitChannel: (content, meta) => channel.push({ content, meta }),
     answerPermission: (requestId, behavior) => answers.push({ requestId, behavior }),
+    terminate: () => void terminated++,
     log: pluginLog,
     tailIntervalMs: 30,
     cardEveryMs: 30,
@@ -106,6 +108,7 @@ beforeEach(async () => {
   writeFileSync(transcript, line({ type: "ai-title", aiTitle: "Старое имя" }) + line(assistantText("old history", "end_turn")));
   channel = [];
   answers = [];
+  terminated = 0;
   spoolDir = join(state, "spool");
   spawned = 0;
   pluginLog = memLogger();
@@ -255,6 +258,12 @@ describe("PluginCore", () => {
     appendFileSync(join(dir, "agent-a1.jsonl"), line({ ...assistantText("Looking", "end_turn", "s1"), isSidechain: true }));
     await Bun.sleep(200);
     expect(sent()).toEqual([]);
+  });
+
+  test("/stop in the topic ends Claude Code", async () => {
+    await enabledCore();
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "/stop" }));
+    await waitFor(() => terminated === 1, 3000, "terminate");
   });
 
   test("a permission request is sent loudly while enabled", async () => {

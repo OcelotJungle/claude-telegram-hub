@@ -8,6 +8,7 @@ import { join, resolve } from "path";
 import { z } from "zod";
 import { hubPort, paths } from "../shared/config.ts";
 import { createLogger } from "../shared/log.ts";
+import { findClaudePid, windowsProcessInfo } from "./claude-process.ts";
 import { spawnHubDetached } from "./hub-client.ts";
 import { HOOK_NOTE_TOOL, PluginCore } from "./plugin.ts";
 
@@ -74,6 +75,16 @@ const core = sessionId
       },
       answerPermission: (requestId, behavior) => {
         mcp.notification({ method: "notifications/claude/channel/permission", params: { request_id: requestId, behavior } }).catch(e => log.error(`permission answer failed: ${e}`));
+      },
+      terminate: () => {
+        const pid = findClaudePid(process.ppid, windowsProcessInfo, process.env.CLAUDE_PID);
+        if (!pid) return log.error("terminate: no claude.exe among the parents of this plugin");
+        log.info(`terminate: ending claude.exe ${pid}`);
+        try {
+          process.kill(pid);
+        } catch (e) {
+          log.error(`terminate: could not end ${pid}: ${e}`);
+        }
       },
       log,
     })

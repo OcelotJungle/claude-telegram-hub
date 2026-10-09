@@ -12,7 +12,7 @@ import { Runner } from "../src/mod/commands.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
-import { freePort, hasFfmpeg, makeVideo, memLogger, tempDir, waitFor, wsClient } from "./helpers.ts";
+import { freePort, hasFfmpeg, makeVideo, memLogger, must, tempDir, waitFor, wsClient } from "./helpers.ts";
 
 const GROUP = "-1001";
 const ME = "123456789";
@@ -28,7 +28,9 @@ let log: ReturnType<typeof memLogger>;
 let exited: boolean;
 const clients: { close(): void }[] = [];
 
-async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number } = {}) {
+type HubExtras = { spawn?(command: string[]): void; projectsDir?: string; stopTimeoutMs?: number };
+
+async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number } & HubExtras = {}) {
   port = await freePort();
   hub = new Hub({
     port,
@@ -48,6 +50,10 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     sendRetryBaseMs: 10,
     sendRetryMaxMs: 50,
     cardEditMs: o.cardEditMs ?? 50,
+    readyDelayMs: 50,
+    ...(o.spawn ? { spawn: o.spawn } : {}),
+    ...(o.projectsDir ? { projectsDir: o.projectsDir } : {}),
+    ...(o.stopTimeoutMs ? { stopTimeoutMs: o.stopTimeoutMs } : {}),
     log,
     onExit: () => {
       exited = true;
@@ -1035,6 +1041,116 @@ describe("subagent cards", () => {
   });
 });
 
+describe("starting and stopping sessions", () => {
+  const SID = "11111111-2222-3333-4444-555555555555";
+  const COMMAND = ["wt.exe", "-d", "{cwd}", "cswap.exe", "run", "{account}", "--", "--resume", "{session}"];
+  const msg = (text: string) => topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text });
+  const texts = () => fake.texts().map(t => t.text);
+
+  // A session with a topic and no window; started commands are recorded.
+  async function closedSession(o: { timeoutSec?: number } & HubExtras = {}) {
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: COMMAND, timeoutSec: o.timeoutSec ?? 30 } };
+    await startHub({ spawn: c => void spawned.push(c), ...o });
+    const a = await enabled(SID);
+    a.close();
+    await waitFor(() => !hub.isConnected(SID));
+    return spawned;
+  }
+
+  test("a message to a closed session starts it and reaches it once it connects", async () => {
+    const spawned = await closedSession();
+    fake.pushUpdate(msg("first"));
+    await waitFor(() => texts().includes("🚀 Запускаю сессию (аккаунт 2)…"));
+    fake.pushUpdate(msg("second"));
+    await Bun.sleep(150);
+    expect(spawned).toEqual([["wt.exe", "-d", CWD, "cswap.exe", "run", "2", "--", "--resume", SID]]);
+    const w = await plugin(SID);
+    expect((await w.next("inbound")).content).toBe("first");
+    expect((await w.next("inbound", m => m.content === "second")).content).toBe("second");
+    await waitFor(() => texts().includes("✅ Сессия запущена"));
+    expect(spawned.length).toBe(1);
+  });
+
+  test("a session that does not connect in time is reported", async () => {
+    await closedSession({ timeoutSec: 0.2 });
+    fake.pushUpdate(msg("hello?"));
+    await waitFor(() => texts().includes("⚠️ Сессия не запустилась за 0.2 с"), 3000);
+    expect(fake.texts().at(-1)).toMatchObject({ disable_notification: false });
+  });
+
+  test("/run starts on the account given, and not twice", async () => {
+    const spawned = await closedSession();
+    fake.pushUpdate(msg("/run 1"));
+    await waitFor(() => spawned.length === 1);
+    expect(spawned[0]?.[5]).toBe("1");
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => texts().includes("Сессия уже запускается"));
+    await plugin(SID);
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => texts().includes("Сессия уже работает"));
+    expect(spawned.length).toBe(1);
+  });
+
+  test("a bad account is refused before anything runs", async () => {
+    const spawned = await closedSession();
+    fake.pushUpdate(msg("/run 1&calc"));
+    await waitFor(() => texts().some(t => t.startsWith("⚠️ Не могу запустить сессию: странный аккаунт")));
+    expect(spawned).toEqual([]);
+  });
+
+  test("without a recorded cwd the session's transcript tells it", async () => {
+    const projects = tempDir();
+    mkdirSync(join(projects, "C--x"), { recursive: true });
+    writeFileSync(join(projects, "C--x", `${SID}.jsonl`), JSON.stringify({ type: "user", cwd: dir }) + "\n");
+    const spawned = await closedSession({ projectsDir: projects });
+    const store = new SessionStore(join(dir, "sessions.json"));
+    const rec = must(store.get(SID));
+    await hub.stop();
+    store.set(SID, { topicId: rec.topicId, title: rec.title, project: rec.project, enabled: rec.enabled, account: "1" });
+    await startHub({ spawn: c => void spawned.push(c), projectsDir: projects });
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => spawned.length === 1);
+    expect(spawned[0]?.[2]).toBe(dir);
+  });
+
+  test("without launch in the config a closed session is just inactive", async () => {
+    await startHub();
+    const a = await enabled(SID);
+    a.close();
+    await waitFor(() => !hub.isConnected(SID));
+    fake.pushUpdate(msg("hi"));
+    await waitFor(() => texts().includes("сессия сейчас не активна"));
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => texts().some(t => t.startsWith("⚠️ Автозапуск не настроен")));
+  });
+
+  test("/stop ends the session's window", async () => {
+    await startHub();
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("/stop"));
+    await a.next("terminate");
+    a.close();
+    await waitFor(() => texts().includes("⏹ Сессия завершена"));
+  });
+
+  test("/stop that does not end the window is reported", async () => {
+    await startHub({ stopTimeoutMs: 200 });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("/stop"));
+    await a.next("terminate");
+    await waitFor(() => texts().includes("⚠️ Не удалось завершить сессию за 0.2 с"), 3000);
+    fake.pushUpdate(msg("/stop"));
+    await a.next("terminate");
+  });
+
+  test("/stop of a closed session says so", async () => {
+    await closedSession();
+    fake.pushUpdate(msg("/stop"));
+    await waitFor(() => texts().includes("Сессия не запущена"));
+  });
+});
+
 describe("idle exit", () => {
   test("the hub exits after the last plugin disconnects", async () => {
     await startHub({ idleMs: 200 });
@@ -1254,6 +1370,6 @@ describe("commands", () => {
   test("the hub puts the commands into the bot menu", async () => {
     await startHub();
     const call = await waitFor(() => fake.callsOf("setMyCommands")[0]);
-    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact"]);
+    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "run", "stop"]);
   });
 });

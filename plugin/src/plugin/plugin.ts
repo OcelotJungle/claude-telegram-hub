@@ -58,6 +58,8 @@ export type PluginOptions = {
   emitChannel(content: string, meta: ChannelMeta): void;
   // Answers a permission prompt of Claude Code.
   answerPermission(requestId: string, behavior: PermissionBehavior): void;
+  // Ends the Claude Code process of this window (/stop in the topic).
+  terminate(): void;
   log: Logger;
   tailIntervalMs?: number;
   // How often a subagent card may change; the watcher's own default if unset.
@@ -344,6 +346,12 @@ export class PluginCore {
       case "permissionReply":
         this.log.info(`permission ${m.requestId}: ${m.behavior} from the topic`);
         this.opts.answerPermission(m.requestId, m.behavior);
+        return;
+      case "terminate":
+        this.log.info(`session ${this.sessionId}: /stop from the topic, ending Claude Code`);
+        this.tailer?.pollNow();
+        this.flush(this.relay.idle());
+        this.opts.terminate();
         return;
     }
   }

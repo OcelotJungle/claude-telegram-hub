@@ -8,8 +8,10 @@ import type { OutItem, Piece } from "./outbox.ts";
 import type { SessionRecord } from "./sessions.ts";
 import type { Message, TelegramApi, Update } from "./telegram.ts";
 import type { RichMessage } from "./rich.ts";
+import type { HubCommand } from "./router.ts";
 import type { VideoTools } from "./video.ts";
 
+import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { existsSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, unlinkSync } from "fs";
 import { dirname, join } from "path";
@@ -23,7 +25,8 @@ import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { commandReply, hookBody, pluginToHub, sendFilesMessage, sendMessage } from "../shared/protocol-schema.ts";
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
-import { commandOf, routeCallback, routeUpdate } from "./router.ts";
+import { launchCommand, LaunchError, sessionCwd } from "./launch.ts";
+import { commandOf, hubCommandOf, routeCallback, routeUpdate } from "./router.ts";
 import { accountOf, SessionStore, topicName } from "./sessions.ts";
 import { isThreadNotFound, TelegramError } from "./telegram.ts";
 import { richPhotos, richToMarkdown } from "./rich.ts";
@@ -31,6 +34,12 @@ import { richPieces } from "./rich-out.ts";
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath } from "./video.ts";
 
 const INACTIVE_TEXT = "сессия сейчас не активна";
+// After a launched session says hello, Claude Code still registers the
+// channel; messages sent sooner are lost.
+const READY_DELAY_MS = 1500;
+const STOP_TIMEOUT_MS = 15_000;
+// Messages a starting session holds; more are dropped.
+const MAX_HELD = 50;
 const MS_PER_SECOND = 1000;
 const HOOK_TTL_MS = 60_000;
 const SPOOL_SCAN_MS = 5000;
@@ -56,6 +65,8 @@ const TOO_MANY_REQUESTS = 429;
 const BOT_COMMANDS = [
   { command: "info", description: "Лимиты и контекст сессии" },
   { command: "compact", description: "Сжать контекст; /compact N — окно автокомпакта" },
+  { command: "run", description: "Запустить сессию; /run N — на аккаунте N" },
+  { command: "stop", description: "Завершить сессию" },
 ];
 
 type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string };
@@ -95,6 +106,13 @@ export type HubOptions = {
   sendRetryBaseMs?: number;
   sendRetryMaxMs?: number;
   cardEditMs?: number;
+  // Where Claude Code keeps transcripts, to find the cwd of a session the hub
+  // has not recorded one for.
+  projectsDir?: string;
+  // Runs a launch command; by default a detached process.
+  spawn?(command: string[]): void;
+  readyDelayMs?: number;
+  stopTimeoutMs?: number;
   log: Logger;
   onExit(): void;
 };
@@ -147,6 +165,11 @@ export class Hub {
   // version, shown what the message holds now (undefined until it is sent).
   private cards = new Map<string, Card>();
   private pumping = new Set<string>();
+  // Sessions being started from the topic, with the messages they will get.
+  private launches = new Map<string, { held: Message[]; timer: ReturnType<typeof setTimeout> }>();
+  // Sessions told to end, until their window goes.
+  private stops = new Map<string, ReturnType<typeof setTimeout>>();
+  private readyTimers = new Set<ReturnType<typeof setTimeout>>();
   // Sessions whose delivery waits for the user to fix the setup.
   private blocked = new Set<string>();
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -200,6 +223,9 @@ export class Hub {
     if (this.spoolTimer) clearInterval(this.spoolTimer);
     for (const queued of this.commands.values()) for (const e of queued) clearTimeout(e.timer);
     for (const card of this.cards.values()) clearTimeout(card.timer);
+    for (const l of this.launches.values()) clearTimeout(l.timer);
+    for (const t of this.stops.values()) clearTimeout(t);
+    for (const t of this.readyTimers) clearTimeout(t);
     this.server?.stop(true);
     this.log.info("hub stopped");
   }
@@ -276,7 +302,14 @@ export class Hub {
 
   private onClose(ws: WS): void {
     this.conns.delete(ws);
-    if (ws.data.sessionId) this.log.info(`window for session ${ws.data.sessionId} disconnected`);
+    const sid = ws.data.sessionId;
+    if (sid) this.log.info(`window for session ${sid} disconnected`);
+    const stop = sid ? this.stops.get(sid) : undefined;
+    if (sid && stop && !this.connOf(sid)) {
+      clearTimeout(stop);
+      this.stops.delete(sid);
+      this.notice(sid, "⏹ Сессия завершена", false);
+    }
     this.armIdle();
   }
 
@@ -374,6 +407,7 @@ export class Hub {
         const pending = this.pendingHooks.get(msg.windowKey);
         this.pendingHooks.delete(msg.windowKey);
         if (pending && Date.now() - pending.at < HOOK_TTL_MS) this.forwardHook(ws, pending.body);
+        this.launched(msg.sessionId);
         return;
       }
       case "session":
@@ -383,6 +417,7 @@ export class Hub {
         this.store.setWhere(msg.sessionId, msg.cwd, ws.data.account);
         this.log.info(`window ${ws.data.windowKey} switched to session ${msg.sessionId}`);
         this.pushState(msg.sessionId);
+        this.launched(msg.sessionId);
         return;
       case "req":
         void this.handleRequest(ws, msg);
@@ -974,18 +1009,125 @@ ${msg.text}`);
       if (m) this.log.info(`ignored update from chat ${m.chat.id} (${m.chat.type}${m.chat.title ? ` "${m.chat.title}"` : ""}), sender ${m.from?.id}: ${route.reason}`);
       return;
     }
+    if (!m) return;
+    const hubCmd = m.text !== undefined ? hubCommandOf(m.text, this.botUsername) : undefined;
+    if (hubCmd) return this.onHubCommand(route.sessionId, hubCmd);
     if (route.action === "inactive") {
-      if (cfg.groupId) await api.sendMessage(cfg.groupId, route.topicId, INACTIVE_TEXT, false).catch(e => this.log.warn(`inactive notice failed: ${e}`));
+      const pending = this.launches.get(route.sessionId);
+      if (pending) {
+        if (pending.held.length < MAX_HELD) pending.held.push(m);
+        else this.log.warn(`session ${route.sessionId} is starting and holds ${MAX_HELD} messages; message ${m.message_id} dropped`);
+        return;
+      }
+      if (cfg.launch) return this.launch(route.sessionId, undefined, [m]);
+      const text = cfg.launchError ? `${INACTIVE_TEXT}; автозапуск не работает: секция launch в config.json с ошибкой` : INACTIVE_TEXT;
+      if (cfg.groupId) await api.sendMessage(cfg.groupId, route.topicId, text, false).catch(e => this.log.warn(`inactive notice failed: ${e}`));
       return;
     }
-    const ws = this.connOf(route.sessionId);
-    if (!ws || !m) return;
+    await this.deliver(api, route.sessionId, m);
+  }
+
+  private async deliver(api: TelegramApi, sessionId: string, m: Message): Promise<void> {
+    const ws = this.connOf(sessionId);
+    if (!ws) {
+      this.log.warn(`session ${sessionId} has no window, message ${m.message_id} not delivered`);
+      return;
+    }
     const cmd = m.text !== undefined ? commandOf(m.text, this.botUsername) : undefined;
-    if (cmd) return this.queueCommand(route.sessionId, cmd);
-    this.setEnabled(route.sessionId, true);
+    if (cmd) return this.queueCommand(sessionId, cmd);
+    this.setEnabled(sessionId, true);
     const { content, meta } = await this.inboundOf(api, m);
     this.send(ws, { type: "inbound", content, meta });
-    this.log.info(`message ${m.message_id} in topic ${route.topicId} → session ${route.sessionId}: ${shapeOf(m, content)}`);
+    this.log.info(`message ${m.message_id} in topic ${m.message_thread_id} → session ${sessionId}: ${shapeOf(m, content)}`);
+  }
+
+  // --- starting and stopping sessions --------------------------------------
+
+  private onHubCommand(sessionId: string, cmd: HubCommand): void {
+    if (cmd.name === "run") {
+      if (this.connOf(sessionId)) return this.notice(sessionId, "Сессия уже работает", false);
+      if (this.launches.has(sessionId)) return this.notice(sessionId, "Сессия уже запускается", false);
+      return this.launch(sessionId, cmd.args || undefined, []);
+    }
+    const ws = this.connOf(sessionId);
+    if (!ws) return this.notice(sessionId, "Сессия не запущена", false);
+    if (this.stops.has(sessionId)) return;
+    this.log.info(`stopping session ${sessionId} from the topic`);
+    this.send(ws, { type: "terminate" });
+    const ms = this.opts.stopTimeoutMs ?? STOP_TIMEOUT_MS;
+    this.stops.set(
+      sessionId,
+      setTimeout(() => {
+        this.stops.delete(sessionId);
+        this.notice(sessionId, `⚠️ Не удалось завершить сессию за ${ms / MS_PER_SECOND} с`, true);
+      }, ms),
+    );
+  }
+
+  // Runs the configured command for a session without a window: the account
+  // given, else the one it ran on last, else the default one. The messages
+  // wait until the session connects; one start at a time.
+  private launch(sessionId: string, account: string | undefined, held: Message[]): void {
+    const cfg = this.opts.config();
+    const rec = this.store.get(sessionId);
+    if (!rec) return;
+    if (!cfg.launch) {
+      const why = cfg.launchError ? `секция launch в config.json с ошибкой: ${cfg.launchError}` : "в config.json нет секции launch";
+      return this.notice(sessionId, `⚠️ Автозапуск не настроен: ${why}`, true);
+    }
+    const acc = account ?? rec.account ?? cfg.launch.defaultAccount;
+    if (!acc) return this.notice(sessionId, "⚠️ Не знаю, на каком аккаунте запускать сессию. Напиши /run N", true);
+    const cwd = rec.cwd ?? (this.opts.projectsDir ? sessionCwd(sessionId, this.opts.projectsDir) : undefined);
+    if (!cwd) return this.notice(sessionId, "⚠️ Не знаю, в какой папке запускать сессию: её нет ни в записи хаба, ни в транскрипте", true);
+    let command: string[];
+    try {
+      command = launchCommand(cfg.launch, { cwd, account: acc, session: sessionId });
+      this.log.info(`starting session ${sessionId} on account ${acc}: ${JSON.stringify(command)}`);
+      (this.opts.spawn ?? spawnDetached)(command);
+    } catch (e) {
+      const why = e instanceof LaunchError ? e.message : `команда не запустилась (${e instanceof Error ? e.message : e})`;
+      this.log.warn(`starting session ${sessionId} failed: ${why}`);
+      return this.notice(sessionId, `⚠️ Не могу запустить сессию: ${why}`, true);
+    }
+    const sec = cfg.launch.timeoutSec;
+    const timer = setTimeout(() => {
+      const l = this.launches.get(sessionId);
+      this.launches.delete(sessionId);
+      this.log.warn(`session ${sessionId} did not connect in ${sec} s; ${l?.held.length ?? 0} held message(s) dropped`);
+      this.notice(sessionId, `⚠️ Сессия не запустилась за ${sec} с`, true);
+    }, sec * MS_PER_SECOND);
+    this.launches.set(sessionId, { held, timer });
+    this.notice(sessionId, `🚀 Запускаю сессию (аккаунт ${acc})…`, false);
+  }
+
+  // A window of the session connected: a start it waited for is done, and
+  // the held messages go once Claude Code is ready for them.
+  private launched(sessionId: string): void {
+    const l = this.launches.get(sessionId);
+    if (!l) return;
+    clearTimeout(l.timer);
+    this.launches.delete(sessionId);
+    this.log.info(`session ${sessionId} started, ${l.held.length} held message(s) to deliver`);
+    this.notice(sessionId, "✅ Сессия запущена", false);
+    if (!l.held.length) return;
+    const t = setTimeout(() => {
+      this.readyTimers.delete(t);
+      void (async () => {
+        for (const m of l.held) {
+          try {
+            await this.deliver(this.requireApi(), sessionId, m);
+          } catch (e) {
+            this.log.error(`delivering held message ${m.message_id} to session ${sessionId} failed: ${e}`);
+          }
+        }
+      })();
+    }, this.opts.readyDelayMs ?? READY_DELAY_MS);
+    this.readyTimers.add(t);
+  }
+
+  // The hub's own word in a session's topic, in order with the rest.
+  private notice(sessionId: string, text: string, loud: boolean): void {
+    this.enqueue(sessionId, `hub-${randomUUID()}`, text, loud, false);
   }
 
   // Photos inside are downloaded like a photo message; a photo that fails keeps
@@ -1051,6 +1193,14 @@ ${msg.text}`);
     }
     return { content: content ?? "", meta };
   }
+}
+
+function spawnDetached(command: string[]): void {
+  const [exe, ...args] = command;
+  if (!exe) throw new LaunchError("пустая команда запуска");
+  const child = spawn(exe, args, { detached: true, stdio: "ignore" });
+  child.on("error", () => {});
+  child.unref();
 }
 
 // Queue item ids are `<plugin message id>#<n>`, replacements add `.<m>`.

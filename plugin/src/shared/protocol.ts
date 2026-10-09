@@ -50,7 +50,9 @@ export type HubToPlugin =
   | { type: "filesSent"; id: string; error?: string }
   | { type: "switchSession"; sessionId: string; transcriptPath: string; cwd: string }
   // The answer to a permission prompt, given in the topic.
-  | { type: "permissionReply"; requestId: string; behavior: PermissionBehavior };
+  | { type: "permissionReply"; requestId: string; behavior: PermissionBehavior }
+  // /stop in the topic: end the Claude Code process of this window.
+  | { type: "terminate" };
 
 export type PermissionBehavior = "allow" | "deny";
 
