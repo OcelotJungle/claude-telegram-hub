@@ -420,7 +420,7 @@ describe("tg_send_file", () => {
     // The tool_use record is not in the file yet: only the text before it.
     append(assistantText("вот скрин", "tool_use", "s1"));
     await c.sendFiles([file("a.png")]);
-    expect(sends()).toEqual(["sendRichMessage", "sendPhoto"]);
+    expect(sends()).toEqual(["sendMessage", "sendPhoto"]);
     expect(sent()).toEqual([{ text: "вот скрин", silent: true, topic: 100 }]);
   });
 

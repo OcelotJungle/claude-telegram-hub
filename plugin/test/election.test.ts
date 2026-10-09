@@ -113,7 +113,7 @@ describe("hub election", () => {
     a.c.start();
     await waitFor(() => a.c.connected, 10_000, "connected");
     await a.c.request({ op: "enable", title: "T" });
-    fake.hangNext("sendRichMessage", 1000);
+    fake.hangNext("sendMessage", 1000);
     a.c.enqueue("a", "in the queue", true);
     await waitFor(() => a.c.unacked.length === 0, 5000, "acked");
     const old = must(await health()).pid;

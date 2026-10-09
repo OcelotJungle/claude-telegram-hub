@@ -270,20 +270,31 @@ describe("send", () => {
     a.send({ type: "send", id: "x2", text: "done", notify: true });
     await a.next("ack", m => m.id === "x2");
     expect(a.messages.some(m => m.type === "ack" && m.id === "x1")).toBe(true);
-    expect(fake.callsOf("sendRichMessage")).toEqual([
-      { chat_id: GROUP, message_thread_id: 100, rich_message: { blocks: [{ type: "paragraph", text: "working" }] }, disable_notification: true },
-      { chat_id: GROUP, message_thread_id: 100, rich_message: { blocks: [{ type: "paragraph", text: "done" }] }, disable_notification: false },
+    expect(fake.callsOf("sendMessage")).toEqual([
+      { chat_id: GROUP, message_thread_id: 100, text: "working", disable_notification: true },
+      { chat_id: GROUP, message_thread_id: 100, text: "done", disable_notification: false },
     ]);
   });
 
-  test("long text goes in several rich messages and only the first notifies", async () => {
+  test("long text goes in several messages and only the first notifies", async () => {
     await startHub();
     const a = await enabled("a");
-    a.send({ type: "send", id: "x1", text: `${"z".repeat(20000)}\n\n${"y".repeat(20000)}`, notify: true });
-    await waitFor(() => fake.texts().length === 2);
+    a.send({ type: "send", id: "x1", text: "z".repeat(10000), notify: true });
+    await waitFor(() => fake.texts().length === 3);
     const sent = fake.texts();
-    expect(sent.map(s => s.text)).toEqual(["z".repeat(20000), "y".repeat(20000)]);
-    expect(sent.map(s => s.disable_notification)).toEqual([false, true]);
+    expect(fake.callsOf("sendRichMessage")).toEqual([]);
+    expect(sent.map(s => s.text).join("")).toBe("z".repeat(10000));
+    expect(sent.map(s => s.disable_notification)).toEqual([false, true, true]);
+  });
+
+  test("long formatted text goes in several rich messages and only the first notifies", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send({ type: "send", id: "x1", text: `## z\n\n${"z".repeat(20000)}\n\n${"y".repeat(20000)}`, notify: true });
+    await waitFor(() => fake.texts().length === 2);
+    expect(fake.callsOf("sendMessage")).toEqual([]);
+    expect(fake.texts().map(s => s.text.endsWith("y".repeat(20000)))).toEqual([false, true]);
+    expect(fake.texts().map(s => s.disable_notification)).toEqual([false, true]);
   });
 
   // The plugin decides what goes out: only it knows the text was written while
@@ -319,7 +330,7 @@ describe("send", () => {
   test("text queued while enabled is delivered even if terminal input follows while an earlier send is retrying", async () => {
     await startHub();
     const a = await enabled("a");
-    fake.failNext("sendRichMessage", { code: 429, description: "Too Many Requests", retry_after: 1 });
+    fake.failNext("sendMessage", { code: 429, description: "Too Many Requests", retry_after: 1 });
     a.send({ type: "send", id: "x1", text: "first", notify: false });
     a.send({ type: "send", id: "x2", text: "final", notify: false });
     a.send({ type: "terminalInput" });
@@ -385,7 +396,7 @@ describe("delivery", () => {
   test("the plugin gets its ack once the text is on disk, before Telegram answers", async () => {
     await startHub();
     const a = await enabled("a");
-    fake.hangNext("sendRichMessage", 1000);
+    fake.hangNext("sendMessage", 1000);
     a.send({ type: "send", id: "x1", text: "kept safe", notify: false });
     await a.next("ack", m => m.id === "x1");
     expect(readFileSync(join(dir, "outbox.json"), "utf8")).toContain("kept safe");
@@ -394,7 +405,7 @@ describe("delivery", () => {
   test("an outage longer than the API retries delays the text but keeps it and its order", async () => {
     await startHub();
     const a = await enabled("a");
-    for (let i = 0; i < 7; i++) fake.failNext("sendRichMessage", { code: 502, description: "Bad Gateway" });
+    for (let i = 0; i < 7; i++) fake.failNext("sendMessage", { code: 502, description: "Bad Gateway" });
     a.send({ type: "send", id: "x1", text: "first", notify: false });
     a.send({ type: "send", id: "x2", text: "second", notify: true });
     await waitFor(() => texts().includes("second"), 5000, "second delivered");
@@ -406,7 +417,7 @@ describe("delivery", () => {
   test("a dead network is waited out", async () => {
     await startHub();
     const a = await enabled("a");
-    fake.hangNext("sendRichMessage", 6);
+    fake.hangNext("sendMessage", 6);
     a.send({ type: "send", id: "x1", text: "patience", notify: false });
     await waitFor(() => fake.texts().length === 7, 8000, "delivered after the hangs");
     await Bun.sleep(100);
@@ -416,7 +427,7 @@ describe("delivery", () => {
   test("a restarted hub sends what the previous one had queued", async () => {
     await startHub();
     const a = await enabled("a");
-    fake.hangNext("sendRichMessage", 1000);
+    fake.hangNext("sendMessage", 1000);
     a.send({ type: "send", id: "x1", text: "survivor", notify: true });
     await a.next("ack", m => m.id === "x1");
     a.close();
@@ -442,22 +453,21 @@ describe("delivery", () => {
   test("a text Telegram rejects is logged and replaced in the topic by a loud notice", async () => {
     await startHub();
     const a = await enabled("a");
-    fake.failNext("sendRichMessage", { code: 400, description: "Bad Request: message text is empty" });
     fake.failNext("sendMessage", { code: 400, description: "Bad Request: message text is empty" });
     a.send({ type: "send", id: "x1", text: "odd words", notify: false });
     a.send({ type: "send", id: "x2", text: "after", notify: false });
     await waitFor(() => texts().includes("after"), 3000);
     expect(log.lines.some(l => l.startsWith("ERROR") && l.includes("odd words") && l.includes("message text is empty"))).toBe(true);
     const sent = fake.texts();
-    expect(sent.map(p => p.text)).toEqual(["odd words", "odd words", "⚠️ Telegram не принял сообщение: Bad Request: message text is empty. Текст в hub.log.", "after"]);
-    expect(sent[2].disable_notification).toBe(false);
+    expect(sent.map(p => p.text)).toEqual(["odd words", "⚠️ Telegram не принял сообщение: Bad Request: message text is empty. Текст в hub.log.", "after"]);
+    expect(sent[1].disable_notification).toBe(false);
   });
 
   test("a bot thrown out of the group keeps the text queued until it is back", async () => {
     await startHub();
     const a = await enabled("a");
-    fake.failNext("sendRichMessage", { code: 403, description: "Forbidden: bot was kicked from the supergroup chat" });
-    fake.failNext("sendRichMessage", { code: 400, description: "Bad Request: chat not found" });
+    fake.failNext("sendMessage", { code: 403, description: "Forbidden: bot was kicked from the supergroup chat" });
+    fake.failNext("sendMessage", { code: 400, description: "Bad Request: chat not found" });
     a.send({ type: "send", id: "x1", text: "waiting", notify: false });
     await waitFor(() => fake.texts().length === 3, 3000);
     expect(texts()).toEqual(["waiting", "waiting", "waiting"]);
@@ -468,7 +478,7 @@ describe("delivery", () => {
   test("the hub does not exit while its queue is not delivered", async () => {
     await startHub({ idleMs: 100 });
     const a = await enabled("a");
-    fake.hangNext("sendRichMessage", 4);
+    fake.hangNext("sendMessage", 4);
     a.send({ type: "send", id: "x1", text: "last words", notify: true });
     await a.next("ack", m => m.id === "x1");
     a.close();
@@ -511,7 +521,22 @@ describe("delivery", () => {
 });
 
 describe("formatting", () => {
-  test("agent markdown goes as a rich message in blocks", async () => {
+  test("short formatted text goes as an ordinary message with entities", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send({ type: "send", id: "x1", text: "## Итог\n\n**готово**", notify: false });
+    await waitFor(() => fake.texts().length === 1);
+    expect(fake.callsOf("sendRichMessage")).toEqual([]);
+    expect(fake.callsOf("sendMessage")[0]).toMatchObject({
+      text: "Итог\n\nготово",
+      entities: [
+        { type: "bold", offset: 0, length: 4 },
+        { type: "bold", offset: 6, length: 6 },
+      ],
+    });
+  });
+
+  test("agent markdown with a table goes as a rich message in blocks", async () => {
     await startHub();
     const a = await enabled("a");
     a.send({ type: "send", id: "x1", text: "## Итог\n\n**готово**, см. `hub.ts`\n\n| a | b |\n|---|---|\n| 1 | 2 |", notify: false });
@@ -554,12 +579,12 @@ describe("formatting", () => {
     const a = await enabled("a");
     fake.failNext("sendRichMessage", { code: 400, description: "Bad Request: RICH_MESSAGE_INVALID" });
     fake.failNext("sendMessage", { code: 400, description: "Bad Request: can't parse entities" });
-    a.send({ type: "send", id: "x1", text: "**bold**", notify: true });
+    a.send({ type: "send", id: "x1", text: "**bold**\n\n1\n\n2\n\n3", notify: true });
     await waitFor(() => fake.texts().length === 3);
     const [rich, formatted, plain] = fake.texts();
-    expect(rich).toMatchObject({ text: "bold", disable_notification: false });
-    expect(formatted).toMatchObject({ text: "bold", entities: [{ type: "bold", offset: 0, length: 4 }], disable_notification: false });
-    expect(plain).toEqual({ chat_id: GROUP, message_thread_id: 100, text: "bold", disable_notification: false });
+    expect(rich).toMatchObject({ text: "bold\n\n1\n\n2\n\n3", disable_notification: false });
+    expect(formatted).toMatchObject({ text: "bold\n\n1\n\n2\n\n3", entities: [{ type: "bold", offset: 0, length: 4 }], disable_notification: false });
+    expect(plain).toEqual({ chat_id: GROUP, message_thread_id: 100, text: "bold\n\n1\n\n2\n\n3", disable_notification: false });
     expect(log.lines.some(l => l.startsWith("WARN") && l.includes("RICH_MESSAGE_INVALID"))).toBe(true);
     expect(log.lines.some(l => l.startsWith("WARN") && l.includes("can't parse entities"))).toBe(true);
   });
@@ -637,7 +662,7 @@ describe("files", () => {
     sendFiles(a, "f1", [queued("f1", "a.txt")]);
     a.send({ type: "send", id: "x2", text: "after", notify: false });
     await waitFor(() => sends().length === 3);
-    expect(sends()).toEqual(["sendRichMessage", "sendDocument", "sendRichMessage"]);
+    expect(sends()).toEqual(["sendMessage", "sendDocument", "sendMessage"]);
     expect(fake.texts().map(s => s.text)).toEqual(["before", "after"]);
   });
 

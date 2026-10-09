@@ -21,6 +21,7 @@ import { toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { commandReply, hookBody, pluginToHub, sendFilesMessage, sendMessage } from "../shared/protocol-schema.ts";
+import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
 import { commandOf, routeUpdate } from "./router.ts";
 import { SessionStore, topicName } from "./sessions.ts";
@@ -462,16 +463,15 @@ ${msg.text}`);
 
   // Puts text for a session's topic into the queue on disk and starts its
   // delivery. Throws only if the queue cannot be written; then the plugin gets
-  // no ack and sends the text again. Agent text is Markdown and goes as rich
-  // messages; the hub's own texts go as they are.
+  // no ack and sends the text again. Agent text is Markdown: long formatted
+  // text and tables go as rich messages, the rest as ordinary ones with
+  // entities. The hub's own texts go as they are.
   private enqueue(sessionId: string, sourceId: string, text: string, notify: boolean, markdown = true): void {
     if (!this.store.get(sessionId)) {
       this.log.warn(`session ${sessionId} has no topic, text not sent:\n${text}`);
       return;
     }
-    const pieces = (markdown ? richPieces(text).flatMap(p => (p.blocks ? [{ text: p.text, silent: true, rich: p.blocks }] : textPieces(p.text, true))) : textPieces(text, false)).map(
-      (p, i) => ({ ...p, silent: !(notify && i === 0) }),
-    );
+    const pieces = (markdown ? markdownPieces(text) : textPieces(text, false)).map((p, i) => ({ ...p, silent: !(notify && i === 0) }));
     if (pieces.length && this.outbox.add(sourceId, sessionId, pieces)) void this.pump(sessionId);
   }
 
@@ -895,6 +895,11 @@ function names(files: OutFile[]): string {
 // with entities.
 function textPieces(text: string, markdown: boolean): Piece[] {
   return chunk(markdown ? toTelegram(text) : { text, entities: [] }).map(p => ({ text: p.text, silent: true, ...(p.entities.length ? { entities: p.entities } : {}) }));
+}
+
+function markdownPieces(md: string): Piece[] {
+  if (messageKind(md) === "plain") return textPieces(md, true);
+  return richPieces(md).flatMap(p => (p.blocks ? [{ text: p.text, silent: true, rich: p.blocks }] : textPieces(p.text, true)));
 }
 
 function filesPiece(files: OutFile[], caption: Formatted | undefined, loud: boolean): Piece {
