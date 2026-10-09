@@ -66,6 +66,9 @@ const TOO_MANY_REQUESTS = 429;
 // On a topic message from when the hub hands it to the session until it is
 // in the agent's context.
 const TAKEN_REACTION = "✍";
+// It goes on only if the agent has not had the message for this long, so an
+// idle agent's message does not blink with it.
+const REACTION_DELAY_MS = 3000;
 // Telegram shows "typing…" for up to 5 s; it is renewed this often while the
 // agent works.
 const TYPING_EVERY_MS = 4000;
@@ -114,6 +117,7 @@ export type HubOptions = {
   sendRetryMaxMs?: number;
   cardEditMs?: number;
   typingEveryMs?: number;
+  reactionDelayMs?: number;
   // Where Claude Code keeps transcripts, to find the cwd of a session the hub
   // has not recorded one for.
   projectsDir?: string;
@@ -179,6 +183,8 @@ export class Hub {
   private pumping = new Set<string>();
   // The latest reaction change of a topic message, by message id.
   private reactions = new Map<number, Promise<void>>();
+  // Topic messages handed to a session whose ✍ is not on yet, by message id.
+  private reactionTimers = new Map<number, ReturnType<typeof setTimeout>>();
   // Sessions being started from the topic, with the messages they will get.
   private launches = new Map<string, { account: string; held: Message[]; timer: ReturnType<typeof setTimeout> }>();
   // Sessions told to end, until their window goes.
@@ -247,6 +253,7 @@ export class Hub {
     for (const l of this.launches.values()) clearTimeout(l.timer);
     for (const t of this.stops.values()) clearTimeout(t);
     for (const t of this.readyTimers) clearTimeout(t);
+    for (const t of this.reactionTimers.values()) clearTimeout(t);
     this.server?.stop(true);
     this.log.info("hub stopped");
   }
@@ -474,7 +481,7 @@ ${msg.text}`);
         this.onCard(msg);
         return;
       case "seen":
-        for (const id of msg.messageIds) this.react(id, undefined);
+        for (const id of msg.messageIds) this.seen(id);
         return;
       // Shown at once, then renewed by the typing timer.
       case "busy":
@@ -1084,9 +1091,25 @@ ${msg.text}`);
     if (cmd) return this.queueCommand(sessionId, cmd);
     this.setEnabled(sessionId, true);
     const { content, meta } = await this.inboundOf(api, m);
-    if (ws.data.reportsSeen) this.react(m.message_id, TAKEN_REACTION);
+    if (ws.data.reportsSeen) this.reactLater(m.message_id);
     this.send(ws, { type: "inbound", content, meta });
     this.log.info(`message ${m.message_id} in topic ${m.message_thread_id} → session ${sessionId}: ${shapeOf(m, content)}`);
+  }
+
+  private reactLater(messageId: number): void {
+    const timer = setTimeout(() => {
+      this.reactionTimers.delete(messageId);
+      this.react(messageId, TAKEN_REACTION);
+    }, this.opts.reactionDelayMs ?? REACTION_DELAY_MS);
+    this.reactionTimers.set(messageId, timer);
+  }
+
+  // The agent has the message: ✍ comes off, or never goes on.
+  private seen(messageId: number): void {
+    const timer = this.reactionTimers.get(messageId);
+    if (timer === undefined) return this.react(messageId, undefined);
+    clearTimeout(timer);
+    this.reactionTimers.delete(messageId);
   }
 
   // The bot's reaction on a topic message: set, or taken off without an

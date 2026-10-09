@@ -107,6 +107,7 @@ beforeEach(async () => {
     pollTimeoutSec: 1,
     cardEditMs: 50,
     typingEveryMs: 50,
+    reactionDelayMs: 50,
     log: memLogger(),
     onExit() {},
   });

@@ -31,7 +31,7 @@ const clients: { close(): void }[] = [];
 
 type HubExtras = { spawn?(command: string[]): void; projectsDir?: string; stopTimeoutMs?: number; defaultAccount?(): Promise<string | undefined> };
 
-async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number } & HubExtras = {}) {
+async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; reactionDelayMs?: number } & HubExtras = {}) {
   port = await freePort();
   hub = new Hub({
     port,
@@ -52,6 +52,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     sendRetryMaxMs: 50,
     cardEditMs: o.cardEditMs ?? 50,
     typingEveryMs: 50,
+    reactionDelayMs: o.reactionDelayMs ?? 50,
     readyDelayMs: 50,
     ...(o.spawn ? { spawn: o.spawn } : {}),
     ...(o.projectsDir ? { projectsDir: o.projectsDir } : {}),
@@ -194,6 +195,17 @@ describe("inbound", () => {
     expect(a.messages.some(m => m.type === "inbound")).toBe(false);
   });
 
+  test("a message the agent has at once never wears ✍", async () => {
+    await startHub({ reactionDelayMs: 300 });
+    const a = await enabled("a");
+    const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "привет" });
+    fake.pushUpdate(u);
+    await a.next("inbound");
+    a.send({ type: "seen", messageIds: [u.message?.message_id] });
+    await Bun.sleep(500);
+    expect(fake.callsOf("setMessageReaction")).toEqual([]);
+  });
+
   test("a message taken for the agent wears ✍ until the window says the agent has it", async () => {
     await startHub();
     const a = await enabled("a");
@@ -215,6 +227,7 @@ describe("inbound", () => {
     const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "привет" });
     fake.pushUpdate(u);
     await a.next("inbound");
+    await waitFor(() => fake.callsOf("setMessageReaction").length === 1);
     a.send({ type: "seen", messageIds: [u.message?.message_id] });
     await waitFor(() => fake.callsOf("setMessageReaction").length === 3, 3000);
     expect(fake.callsOf("setMessageReaction").map(c => arr(c.reaction).length)).toEqual([1, 1, 0]);
