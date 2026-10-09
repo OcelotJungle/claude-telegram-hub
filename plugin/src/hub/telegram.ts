@@ -1,37 +1,13 @@
 import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import type { TelegramMessage, TelegramUpdate } from '@gramio/types'
 import { nullLogger, type Logger } from '../shared/log.ts'
 import type { Entity } from '../shared/markdown.ts'
 import type { OutFile } from '../shared/media.ts'
-import type { RichMessage } from './rich.ts'
 
-// Only the Bot API fields the hub reads.
-export type User = { id: number; is_bot: boolean; first_name?: string; username?: string }
-export type Chat = { id: number; type: string; title?: string; is_forum?: boolean }
-export type PhotoSize = { file_id: string; file_unique_id: string; file_size?: number }
-export type FileRef = { file_id: string; file_unique_id?: string; file_size?: number; mime_type?: string; file_name?: string }
-export type Message = {
-  message_id: number
-  date: number
-  chat: Chat
-  from?: User
-  message_thread_id?: number
-  is_topic_message?: boolean
-  text?: string
-  caption?: string
-  entities?: { type: string }[]
-  caption_entities?: { type: string }[]
-  // A pasted document: blocks instead of text (Bot API 10.1).
-  rich_message?: RichMessage
-  photo?: PhotoSize[]
-  document?: FileRef
-  voice?: FileRef
-  audio?: FileRef & { title?: string }
-  video?: FileRef
-  video_note?: FileRef
-  sticker?: FileRef & { emoji?: string }
-}
-export type Update = { update_id: number; message?: Message }
+// Bot API types, generated from its documentation.
+export type Message = TelegramMessage
+export type Update = TelegramUpdate
 
 export class TelegramError extends Error {
   constructor(

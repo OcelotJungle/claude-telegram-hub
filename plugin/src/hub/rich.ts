@@ -2,8 +2,9 @@
 // for the agent. Telegram sends a pasted document this way: a tree of blocks
 // (paragraphs, headings, lists, tables, media) instead of text and entities.
 // Kinds of block or text this file does not know show what text they carry.
+import type { TelegramRichMessage } from '@gramio/types'
 
-export type RichMessage = { blocks: RichBlock[]; is_rtl?: boolean }
+export type RichMessage = TelegramRichMessage
 
 // A string, an array of rich texts, or an object with a type.
 export type RichText = string | RichText[] | ({ type: string } & Record<string, unknown>)
