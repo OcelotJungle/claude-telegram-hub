@@ -190,6 +190,27 @@ describe('inbound', () => {
     expect(log.lines).toContain(`INFO message ${u.message!.message_id} in topic 100 → session a: rich_message, 25 chars`)
   })
 
+  test('photos of a rich message are downloaded into the inbox, other files keep their file_id', async () => {
+    await startHub()
+    const a = await enabled('a')
+    fake.files.set('P2', { path: 'photos/p.jpg', body: new Uint8Array([9]) })
+    const rich_message = {
+      blocks: [
+        { type: 'photo', photo: [{ file_id: 'P1' }, { file_id: 'P2' }] },
+        { type: 'photo', photo: [{ file_id: 'GONE' }] },
+        { type: 'document', document: { file_id: 'D1', file_name: 'plan.pdf' } },
+      ],
+    }
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, extra: { rich_message } }))
+    const msg = await a.next(m => m.type === 'inbound')
+    const [photo, gone, doc] = msg.content.split('\n\n')
+    expect(photo.startsWith(`(photo: ${join(dir, 'inbox')}`)).toBe(true)
+    expect(gone).toBe('(photo, file_id: GONE)')
+    expect(doc).toBe('(document: plan.pdf, file_id: D1)')
+    expect(msg.meta.image_path).toBeUndefined()
+    expect(log.lines.some(l => l.startsWith('WARN photo download failed'))).toBe(true)
+  })
+
   test('a topic of a session without a window gets "сессия сейчас не активна"', async () => {
     await startHub()
     const a = await enabled('a')

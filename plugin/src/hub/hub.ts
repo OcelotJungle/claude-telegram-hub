@@ -12,7 +12,7 @@ import { Outbox, type OutItem, type Piece } from './outbox.ts'
 import { commandOf, routeUpdate } from './router.ts'
 import { SessionStore, topicName, type SessionRecord } from './sessions.ts'
 import { isThreadNotFound, TelegramError, type Message, type TelegramApi, type Update } from './telegram.ts'
-import { richToMarkdown } from './rich.ts'
+import { richPhotos, richToMarkdown, type RichMessage } from './rich.ts'
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath, type VideoTools } from './video.ts'
 
 type Conn = { windowKey?: string; sessionId?: string; cwd?: string }
@@ -786,6 +786,20 @@ ${msg.text}`)
     this.log.info(`message ${m.message_id} in topic ${route.topicId} → session ${route.sessionId}: ${shapeOf(m, content)}`)
   }
 
+  // Photos inside are downloaded like a photo message; a photo that fails keeps
+  // its file_id in the text, as other files do.
+  private async richContent(api: TelegramApi, rich: RichMessage): Promise<string> {
+    const paths = new Map<string, string>()
+    for (const id of richPhotos(rich)) {
+      try {
+        paths.set(id, await api.downloadFile(id, this.opts.inboxDir))
+      } catch (e) {
+        this.log.warn(`photo download failed: ${e}`)
+      }
+    }
+    return richToMarkdown(rich, paths)
+  }
+
   // Same meta shape as the official telegram plugin.
   private async inboundOf(api: TelegramApi, m: Message): Promise<{ content: string; meta: ChannelMeta }> {
     const meta: ChannelMeta = {
@@ -802,7 +816,7 @@ ${msg.text}`)
       if (f.mime_type) meta.attachment_mime = f.mime_type
       if (name) meta.attachment_name = name
     }
-    let content = m.text ?? m.caption ?? (m.rich_message ? richToMarkdown(m.rich_message) : undefined)
+    let content = m.text ?? m.caption ?? (m.rich_message ? await this.richContent(api, m.rich_message) : undefined)
     if (m.photo?.length) {
       content ??= '(photo)'
       const best = m.photo[m.photo.length - 1]!

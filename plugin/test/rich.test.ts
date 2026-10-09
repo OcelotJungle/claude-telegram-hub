@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { richToMarkdown, type RichMessage } from '../src/hub/rich.ts'
+import { richPhotos, richToMarkdown, type RichMessage } from '../src/hub/rich.ts'
 
 const md = (...blocks: unknown[]) => richToMarkdown({ blocks } as RichMessage)
 
@@ -78,15 +78,46 @@ describe('rich message to Markdown', () => {
     ).toBe(['• [x] сделано', '• [ ] нет', '', '| A | B\\|C |', '| --- | --- |', '| 1 |  |', '', '**Подробнее**', '', 'скрыто', '', '$$\n\\int x\n$$'].join('\n'))
   })
 
-  test('media become placeholders with their captions', () => {
+  test('media name their file_id for download_attachment, with their captions', () => {
     expect(
       md(
-        { type: 'photo', photo: [{ file_id: 'p' }], caption: { text: 'схема' } },
+        { type: 'photo', photo: [{ file_id: 'p1' }, { file_id: 'p2' }], caption: { text: 'схема' } },
         { type: 'document', document: { file_id: 'd', file_name: 'plan.pdf' } },
         { type: 'collage', blocks: [{ type: 'video', video: { file_id: 'v' } }, { type: 'animation', animation: { file_id: 'a' } }] },
+        { type: 'audio', audio: { file_id: 'au', title: 'Гимн' } },
+        { type: 'voice_note', voice_note: { file_id: 'vn' } },
         { type: 'map', location: { latitude: 55.75, longitude: 37.62 }, zoom: 10, width: 1, height: 1 },
       ),
-    ).toBe(['(photo) схема', '', '(document: plan.pdf)', '', '(video)', '', '(animation)', '', '(map: 55.75, 37.62)'].join('\n'))
+    ).toBe(
+      [
+        '(photo, file_id: p2) схема',
+        '(document: plan.pdf, file_id: d)',
+        '(video, file_id: v)',
+        '(animation, file_id: a)',
+        '(audio: Гимн, file_id: au)',
+        '(voice note, file_id: vn)',
+        '(map: 55.75, 37.62)',
+      ].join('\n\n'),
+    )
+  })
+
+  test('a downloaded photo is named by its local path', () => {
+    const photo = { type: 'photo', photo: [{ file_id: 'p1' }, { file_id: 'p2' }] }
+    expect(richToMarkdown({ blocks: [photo] } as RichMessage, new Map([['p2', 'C:\\inbox\\p.jpg']]))).toBe('(photo: C:\\inbox\\p.jpg)')
+  })
+
+  test('the photos to download: the largest size of each, wherever it sits', () => {
+    const photo = (id: string) => ({ type: 'photo', photo: [{ file_id: `${id}-small` }, { file_id: id }] })
+    const m = {
+      blocks: [
+        photo('a'),
+        { type: 'slideshow', blocks: [photo('b'), { type: 'video', video: { file_id: 'v' } }] },
+        { type: 'list', items: [{ label: '•', blocks: [photo('c')] }] },
+        { type: 'details', summary: 'x', blocks: [{ type: 'blockquote', blocks: [photo('d')] }] },
+        { type: 'photo', photo: [] },
+      ],
+    } as RichMessage
+    expect(richPhotos(m)).toEqual(['a', 'b', 'c', 'd'])
   })
 
   test('a kind of block or text Telegram adds later still shows its text', () => {

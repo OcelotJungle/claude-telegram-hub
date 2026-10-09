@@ -12,18 +12,41 @@ type RichBlock = { type: string } & Record<string, unknown>
 type ListItem = { label?: string; blocks?: RichBlock[]; has_checkbox?: true; is_checked?: true }
 type TableCell = { text?: RichText }
 
-export function richToMarkdown(m: RichMessage): string {
-  return blocks(m.blocks)
+// Local paths of the photos the hub downloaded, by file_id.
+type Paths = ReadonlyMap<string, string>
+type Media = { file_id?: string; file_name?: string; title?: string }
+
+// A photo found in `paths` is named by its local path, any other file by its
+// file_id, which download_attachment takes.
+export function richToMarkdown(m: RichMessage, paths: Paths = new Map()): string {
+  return blocks(m.blocks, paths)
 }
 
-function blocks(list: unknown): string {
+// The file_id of the largest size of every photo, for the hub to download.
+export function richPhotos(m: RichMessage): string[] {
+  const found: string[] = []
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) return v.forEach(walk)
+    if (!v || typeof v !== 'object') return
+    const o = v as Record<string, unknown>
+    if (o.type === 'photo' && Array.isArray(o.photo)) {
+      const best = (o.photo.at(-1) as Media | undefined)?.file_id
+      if (best) found.push(best)
+    }
+    Object.values(o).forEach(walk)
+  }
+  walk(m.blocks)
+  return found
+}
+
+function blocks(list: unknown, paths: Paths): string {
   return (Array.isArray(list) ? list : [])
-    .map(b => block(b as RichBlock))
+    .map(b => block(b as RichBlock, paths))
     .filter(s => s !== '')
     .join('\n\n')
 }
 
-function block(b: RichBlock): string {
+function block(b: RichBlock, paths: Paths): string {
   const t = (key = 'text') => text(b[key] as RichText)
   switch (b.type) {
     case 'paragraph':
@@ -41,48 +64,55 @@ function block(b: RichBlock): string {
     case 'thinking':
       return ''
     case 'list':
-      return ((b.items as ListItem[]) ?? []).map(listItem).join('\n')
+      return ((b.items as ListItem[]) ?? []).map(i => listItem(i, paths)).join('\n')
     case 'blockquote':
-      return quote(blocks(b.blocks), b.credit)
+      return quote(blocks(b.blocks, paths), b.credit)
     case 'expandable_blockquote':
     case 'pullquote':
       return quote(t(), b.credit)
     case 'collage':
     case 'slideshow':
-      return withCaption(blocks(b.blocks), b.caption)
+      return withCaption(blocks(b.blocks, paths), b.caption)
     case 'table':
       return table(b.cells as TableCell[][])
     case 'details':
-      return [`**${t('summary')}**`, blocks(b.blocks)].filter(Boolean).join('\n\n')
+      return [`**${t('summary')}**`, blocks(b.blocks, paths)].filter(Boolean).join('\n\n')
     case 'map': {
       const l = b.location as { latitude?: number; longitude?: number } | undefined
       return withCaption(`(map: ${l?.latitude}, ${l?.longitude})`, b.caption)
     }
     case 'buttons':
       return ((b.buttons as { text?: RichText; url?: string }[]) ?? []).map(button).join(' · ')
-    case 'photo':
+    case 'photo': {
+      const id = ((b.photo as Media[] | undefined) ?? []).at(-1)?.file_id
+      const path = id === undefined ? undefined : paths.get(id)
+      return withCaption(path ? `(photo: ${path})` : media('photo', undefined, id), b.caption)
+    }
     case 'video':
     case 'animation':
     case 'audio':
     case 'voice_note':
-      return withCaption(`(${b.type.replace('_', ' ')})`, b.caption)
     case 'document': {
-      const name = (b.document as { file_name?: string } | undefined)?.file_name
-      return withCaption(`(document${name ? `: ${name}` : ''})`, b.caption)
+      const f = b[b.type] as Media | undefined
+      return withCaption(media(b.type.replace('_', ' '), f?.title ?? f?.file_name, f?.file_id), b.caption)
     }
     default:
-      return 'text' in b ? t() : blocks(b.blocks)
+      return 'text' in b ? t() : blocks(b.blocks, paths)
   }
 }
 
 // The label comes from Telegram ("1.", "•", "a)"); what follows it is indented
 // to line up under the first line.
-function listItem(item: ListItem): string {
+function listItem(item: ListItem, paths: Paths): string {
   const label = item.label || '-'
   const box = item.has_checkbox ? (item.is_checked ? '[x] ' : '[ ] ') : ''
-  const body = (item.blocks ?? []).map(block).filter(s => s !== '').join('\n')
+  const body = (item.blocks ?? []).map(b => block(b, paths)).filter(s => s !== '').join('\n')
   const pad = ' '.repeat(label.length + 1)
   return `${label} ${box}${body.split('\n').join(`\n${pad}`)}`
+}
+
+function media(kind: string, name: string | undefined, fileId: string | undefined): string {
+  return `(${kind}${name ? `: ${name}` : ''}${fileId ? `, file_id: ${fileId}` : ''})`
 }
 
 function quote(body: string, credit: unknown): string {
