@@ -92,6 +92,32 @@ describe('assistant records', () => {
   })
 })
 
+describe('API errors', () => {
+  // Observed in Claude Code: a synthetic message ends the turn.
+  const apiError = (o: object = {}) => ({
+    ...assistant('e1', 'stop_sequence', text('API Error: Connection lost mid-response. The response above may be incomplete.')),
+    error: 'server_error',
+    truncatedAfterOutput: true,
+    isApiErrorMessage: true,
+    ...o,
+  })
+
+  test('a response cut mid-way is its text, then a turn end marked cut', () => {
+    expect(parseRecord(apiError())).toEqual([
+      { kind: 'text', text: 'API Error: Connection lost mid-response. The response above may be incomplete.', messageId: 'e1' },
+      { kind: 'turn_end', messageId: 'e1', cut: true },
+    ])
+  })
+
+  test('other API errors just end the turn', () => {
+    expect(parseRecord(apiError({ truncatedAfterOutput: undefined, error: 'rate_limit' }))[1]).toEqual({ kind: 'turn_end', messageId: 'e1' })
+  })
+
+  test("a subagent's cut response is ignored", () => {
+    expect(parseRecord(apiError({ isSidechain: true }))).toEqual([])
+  })
+})
+
 describe('user records', () => {
   test('typed message from the terminal is terminal input', () => {
     const rec = { ...userBase, message: { role: 'user', content: 'hi' }, origin: { kind: 'human' }, promptSource: 'typed', turnOrigin: 'human' }

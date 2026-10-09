@@ -45,6 +45,17 @@ const MODE_OFF_NOTE =
   'Your text is no longer relayed to Telegram, and tg_notify is not needed. ' +
   'If that message asks to continue in Telegram, call tg_enable.'
 
+// A response cut by a lost connection: the agent is told to go on, as the
+// person would, while the mode is on and the person is away.
+export const CONTINUE_PROMPT =
+  'tg-hub: the connection to the API was lost mid-response (API Error: Connection lost mid-response), ' +
+  'so your last response may be incomplete. Continue from where you stopped.'
+export const CUT_NOTE = '🔁 Связь с API оборвалась посреди ответа — агент продолжает сам.'
+// Cuts in a row, with no turn ending normally in between, before it stops
+// and calls the person: the network may be down for good.
+export const MAX_AUTO_CONTINUES = 10
+export const CUT_LIMIT_NOTE = `⚠️ Связь с API оборвалась посреди ответа ${MAX_AUTO_CONTINUES} раз подряд — сам больше не продолжаю, жду тебя.`
+
 // One per Claude Code window: follows the session transcript, relays the
 // agent's text to the hub, delivers inbound topic messages to the session.
 // Requests that make the hub call Telegram. The hub retries a flaky network
@@ -63,6 +74,8 @@ export class PluginCore {
   private reportedKinds = new Set<string>()
   // Terminal input turned the mode off and the agent has not been told yet.
   private noteOwed = false
+  // Responses cut since a turn last ended normally.
+  private cuts = 0
   enabled = false
 
   constructor(private opts: PluginOptions) {
@@ -252,8 +265,24 @@ export class PluginCore {
         this.titles[ev.source] = ev.title
         const after = effectiveTitle(this.titles)
         if (after && after !== before) this.client.send({ type: 'title', title: after })
+      } else if (ev.kind === 'turn_end') {
+        if (ev.cut) this.responseCut()
+        else this.cuts = 0
       }
     }
+  }
+
+  private responseCut(): void {
+    const before = this.cuts++
+    if (!this.enabled) return
+    // The error text ended the turn: it goes before the note.
+    this.flush(this.relay.idle())
+    if (before >= MAX_AUTO_CONTINUES) {
+      if (before === MAX_AUTO_CONTINUES) this.client.enqueue(this.sessionId, CUT_LIMIT_NOTE, true)
+      return
+    }
+    this.client.enqueue(this.sessionId, CUT_NOTE, false)
+    this.opts.emitChannel(CONTINUE_PROMPT, { user: 'tg-hub', reason: 'response_cut' })
   }
 
   private flush(out: Outgoing[]): void {

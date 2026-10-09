@@ -4,7 +4,9 @@
 export type TranscriptEvent =
   | { kind: 'text'; text: string; messageId: string }
   | { kind: 'tool_use'; name: string; messageId: string }
-  | { kind: 'turn_end'; messageId: string }
+  // cut: the connection to the API was lost mid-response, the turn ended on
+  // it and the answer may be incomplete.
+  | { kind: 'turn_end'; messageId: string; cut?: true }
   | { kind: 'terminal_input' }
   | { kind: 'title'; source: 'custom' | 'agent' | 'ai'; title: string }
   // A thinking block with text whose kind is neither thinking nor narration:
@@ -57,7 +59,10 @@ function parseAssistant(r: Rec): TranscriptEvent[] {
   // Every record of a split message carries the final stop_reason; the relay
   // de-duplicates turn_end by messageId.
   if (typeof msg.stop_reason === 'string' && msg.stop_reason !== 'tool_use') {
-    out.push({ kind: 'turn_end', messageId })
+    // Claude Code's own message for a lost connection, "API Error: Connection
+    // lost mid-response…"; it retries other errors itself.
+    const cut = r.isApiErrorMessage === true && r.truncatedAfterOutput === true
+    out.push(cut ? { kind: 'turn_end', messageId, cut } : { kind: 'turn_end', messageId })
   }
   return out
 }

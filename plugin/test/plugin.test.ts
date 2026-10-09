@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, trunc
 import { join } from 'path'
 import { Hub } from '../src/hub/hub.ts'
 import { TelegramApi } from '../src/hub/telegram.ts'
-import { PluginCore } from '../src/plugin/plugin.ts'
+import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, MAX_AUTO_CONTINUES, PluginCore } from '../src/plugin/plugin.ts'
 import { NOTIFY_MARKER } from '../src/transcript/relay.ts'
 import type { Config } from '../src/shared/config.ts'
 import { FakeTelegram, topicMsg } from './fakeTelegram.ts'
@@ -30,7 +30,7 @@ let pluginLog: ReturnType<typeof memLogger>
 const line = (o: object) => JSON.stringify(o) + '\n'
 const append = (...recs: object[]) => appendFileSync(transcript, recs.map(line).join(''))
 let msgN = 0
-const assistantText = (text: string, stop: 'tool_use' | 'end_turn', id = `m${++msgN}`) => ({
+const assistantText = (text: string, stop: 'tool_use' | 'end_turn' | 'stop_sequence', id = `m${++msgN}`) => ({
   type: 'assistant',
   isSidechain: false,
   message: { id, role: 'assistant', content: [{ type: 'text', text }], stop_reason: stop },
@@ -343,6 +343,53 @@ describe('note to the agent that the mode went off', () => {
     await c.enable()
     await waitFor(() => c.enabled)
     expect(c.hookNote('')).toBe('')
+  })
+})
+
+describe('a response cut by a lost connection', () => {
+  const ERROR = 'API Error: Connection lost mid-response. The response above may be incomplete.'
+  const cut = () => ({ ...assistantText(ERROR, 'stop_sequence'), error: 'server_error', truncatedAfterOutput: true, isApiErrorMessage: true })
+
+  test('the agent is told to continue, and the topic is told it does', async () => {
+    await enabledCore()
+    append(assistantText('Правлю тест', 'tool_use', 'r1'), assistantTool('Edit', 'r1'), cut())
+    await waitFor(() => channel.length === 1, 3000, 'continue prompt')
+    expect(channel[0]).toEqual({ content: CONTINUE_PROMPT, meta: { user: 'tg-hub', reason: 'response_cut' } })
+    await waitFor(() => sent().length === 3, 3000, 'three messages')
+    expect(sent()).toEqual([
+      { text: 'Правлю тест', silent: true, topic: 100 },
+      { text: ERROR, silent: true, topic: 100 },
+      { text: CUT_NOTE, silent: true, topic: 100 },
+    ])
+  })
+
+  test('with the mode off the person at the terminal decides', async () => {
+    const c = makeCore()
+    await waitFor(() => hub.isConnected(SID), 3000, 'plugin connected')
+    append(cut())
+    await Bun.sleep(300)
+    expect(c.enabled).toBe(false)
+    expect(channel).toEqual([])
+  })
+
+  test(`after ${MAX_AUTO_CONTINUES} cuts in a row it stops and calls the person; a normal turn end starts the count over`, async () => {
+    await enabledCore()
+    for (let i = 0; i < MAX_AUTO_CONTINUES; i++) append(cut())
+    await waitFor(() => channel.length === MAX_AUTO_CONTINUES, 3000, 'continue prompts')
+    append(cut())
+    await waitFor(() => sent().some(s => s.text === CUT_LIMIT_NOTE), 3000, 'limit note')
+    expect(sent().find(s => s.text === CUT_LIMIT_NOTE)!.silent).toBe(false)
+    expect(channel.length).toBe(MAX_AUTO_CONTINUES)
+    append(assistantText('дальше сам', 'end_turn'), cut())
+    await waitFor(() => channel.length === MAX_AUTO_CONTINUES + 1, 3000, 'continue after a normal turn')
+  })
+
+  test('a cut written before the window started is history', async () => {
+    appendFileSync(transcript, line(cut()))
+    await enabledCore()
+    append(assistantText('новый ход', 'end_turn'))
+    await waitFor(() => sent().length === 1, 3000, 'new turn')
+    expect(channel).toEqual([])
   })
 })
 
