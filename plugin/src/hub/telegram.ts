@@ -4,6 +4,7 @@ import type { TelegramMessage, TelegramUpdate } from '@gramio/types'
 import { nullLogger, type Logger } from '../shared/log.ts'
 import type { Entity } from '../shared/markdown.ts'
 import type { OutFile } from '../shared/media.ts'
+import type { Block } from './richOut.ts'
 
 // Bot API types, generated from its documentation.
 export type Message = TelegramMessage
@@ -124,6 +125,10 @@ export class TelegramApi {
 
   sendMessage(chatId: string, threadId: number, text: string, silent: boolean, entities?: Entity[]): Promise<{ message_id: number }> {
     return this.call('sendMessage', { chat_id: chatId, message_thread_id: threadId, text, disable_notification: silent, ...(entities?.length ? { entities } : {}) })
+  }
+
+  sendRichMessage(chatId: string, threadId: number, blocks: Block[], silent: boolean): Promise<{ message_id: number }> {
+    return this.call('sendRichMessage', { chat_id: chatId, message_thread_id: threadId, rich_message: { blocks }, disable_notification: silent })
   }
 
   // One file by the method of its kind, several as a media group with the

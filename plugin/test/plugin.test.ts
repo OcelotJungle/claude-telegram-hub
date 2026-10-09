@@ -50,7 +50,7 @@ const assistantNarration = (text: string, id: string) => ({
 })
 
 function sent() {
-  return fake.callsOf('sendMessage').map(p => ({ text: p.text, silent: p.disable_notification, topic: p.message_thread_id }))
+  return fake.texts().map(p => ({ text: p.text, silent: p.disable_notification, topic: p.message_thread_id }))
 }
 
 function makeCore(sessionId = SID) {
@@ -416,7 +416,7 @@ describe('tg_send_file', () => {
     // The tool_use record is not in the file yet: only the text before it.
     append(assistantText('вот скрин', 'tool_use', 's1'))
     await c.sendFiles([file('a.png')])
-    expect(sends()).toEqual(['sendMessage', 'sendPhoto'])
+    expect(sends()).toEqual(['sendRichMessage', 'sendPhoto'])
     expect(sent()).toEqual([{ text: 'вот скрин', silent: true, topic: 100 }])
   })
 

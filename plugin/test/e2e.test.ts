@@ -99,15 +99,15 @@ test('a window talks to Telegram through a hub it started itself', async () => {
     transcript,
     JSON.stringify({ type: 'assistant', message: { id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'Готово!' }], stop_reason: 'end_turn' } }) + '\n',
   )
-  await waitFor(() => fake.callsOf('sendMessage').length === 1, 5000, 'final message')
-  expect(fake.callsOf('sendMessage')[0]).toMatchObject({ message_thread_id: 100, text: 'Готово!', disable_notification: false })
+  await waitFor(() => fake.texts().length === 1, 5000, 'final message')
+  expect(fake.texts()[0]).toMatchObject({ message_thread_id: 100, text: 'Готово!', disable_notification: false })
 
   await client.notification({
     method: 'notifications/claude/channel/permission_request',
     params: { request_id: 'abcde', tool_name: 'Bash', description: 'rm build', input_preview: '{}' },
   })
-  await waitFor(() => fake.callsOf('sendMessage').length === 2, 5000, 'permission message')
-  expect(fake.callsOf('sendMessage')[1]).toMatchObject({ text: '🔐 Нужно подтверждение: Bash — rm build', disable_notification: false })
+  await waitFor(() => fake.texts().length === 2, 5000, 'permission message')
+  expect(fake.texts()[1]).toMatchObject({ text: '🔐 Нужно подтверждение: Bash — rm build', disable_notification: false })
 
   fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: 'ответ с телефона' }))
   await waitFor(() => channel.length === 1, 5000, 'channel notification')

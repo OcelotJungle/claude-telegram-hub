@@ -3,11 +3,13 @@ import { dirname } from 'path'
 import type { Logger } from '../shared/log.ts'
 import type { Entity } from '../shared/markdown.ts'
 import type { OutFile } from '../shared/media.ts'
+import type { Block } from './richOut.ts'
 
 // One Telegram send for a session's topic: a piece of text at most one
 // message long, or files (one file or an album) with text as their caption.
+// rich: the piece goes as a rich message, text is its Markdown source.
 // notice: it replaced a piece Telegram rejected.
-export type Piece = { text: string; silent: boolean; entities?: Entity[]; files?: OutFile[]; notice?: boolean }
+export type Piece = { text: string; silent: boolean; entities?: Entity[]; rich?: Block[]; files?: OutFile[]; notice?: boolean }
 export type OutItem = Piece & { id: string; sessionId: string }
 
 type Data = { items: OutItem[]; seen: string[] }
@@ -94,6 +96,7 @@ export class Outbox {
     item.silent = false
     item.notice = true
     delete item.entities
+    delete item.rich
     delete item.files
     this.save()
   }

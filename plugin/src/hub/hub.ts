@@ -13,6 +13,7 @@ import { commandOf, routeUpdate } from './router.ts'
 import { SessionStore, topicName, type SessionRecord } from './sessions.ts'
 import { isThreadNotFound, TelegramError, type Message, type TelegramApi, type Update } from './telegram.ts'
 import { richPhotos, richToMarkdown, type RichMessage } from './rich.ts'
+import { richPieces } from './richOut.ts'
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath, type VideoTools } from './video.ts'
 
 type Conn = { windowKey?: string; sessionId?: string; cwd?: string }
@@ -439,18 +440,16 @@ ${msg.text}`)
 
   // Puts text for a session's topic into the queue on disk and starts its
   // delivery. Throws only if the queue cannot be written; then the plugin gets
-  // no ack and sends the text again. Agent text is Markdown; the hub's own
-  // texts go as they are.
+  // no ack and sends the text again. Agent text is Markdown and goes as rich
+  // messages; the hub's own texts go as they are.
   private enqueue(sessionId: string, sourceId: string, text: string, notify: boolean, markdown = true): void {
     if (!this.store.get(sessionId)) {
       this.log.warn(`session ${sessionId} has no topic, text not sent:\n${text}`)
       return
     }
-    const pieces = chunk(markdown ? toTelegram(text) : { text, entities: [] }).map((p, i) => ({
-      text: p.text,
-      silent: !(notify && i === 0),
-      ...(p.entities.length ? { entities: p.entities } : {}),
-    }))
+    const pieces = (markdown ? richPieces(text).flatMap(p => (p.blocks ? [{ text: p.text, silent: true, rich: p.blocks }] : textPieces(p.text, true))) : textPieces(text, false)).map(
+      (p, i) => ({ ...p, silent: !(notify && i === 0) }),
+    )
     if (pieces.length && this.outbox.add(sourceId, sessionId, pieces)) void this.pump(sessionId)
   }
 
@@ -581,6 +580,10 @@ ${msg.text}`)
     }
     const api = this.requireApi()
     const groupId = this.requireGroup()
+    if (item.rich) {
+      await this.sendToTopic(api, groupId, sessionId, thread => api.sendRichMessage(groupId, thread, item.rich!, item.silent))
+      return
+    }
     if (!item.files) {
       await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, item.text, item.silent, item.entities))
       return
@@ -605,10 +608,16 @@ ${msg.text}`)
     return files.map(f => (f.video?.thumb && !existsSync(f.video.thumb) ? { ...f, video: { ...f.video, thumb: undefined } } : f))
   }
 
-  // Before giving a piece up: photos Telegram cannot take go as documents,
-  // and formatting Telegram cannot take is dropped.
+  // Before giving a piece up: a rich message Telegram cannot take goes as
+  // plain text with entities, photos as documents, and formatting Telegram
+  // cannot take is dropped.
   private onRejected(item: OutItem, e: unknown): void {
     const why = e instanceof TelegramError ? e.message : e instanceof Error ? e.message : String(e)
+    if (item.rich) {
+      this.log.warn(`Telegram rejected a rich message for session ${item.sessionId} (${why}); sending it as plain formatted text`)
+      this.outbox.replace(item.id, textPieces(item.text, true).map((p, i) => ({ ...p, silent: item.silent || i > 0 })))
+      return
+    }
     if (item.files?.some(f => f.kind === 'photo') && e instanceof TelegramError && /PHOTO_|IMAGE_PROCESS_FAILED/i.test(e.description)) {
       this.log.warn(`Telegram rejected photos for session ${item.sessionId} (${why}); sending them as documents`)
       const files = item.files.map(f => (f.kind === 'photo' ? { ...f, kind: 'document' as const } : f))
@@ -858,6 +867,12 @@ function messageOf(itemId: string): string {
 
 function names(files: OutFile[]): string {
   return files.map(f => f.name).join(', ')
+}
+
+// Text in pieces of at most one plain message, silent; markdown: formatted
+// with entities.
+function textPieces(text: string, markdown: boolean): Piece[] {
+  return chunk(markdown ? toTelegram(text) : { text, entities: [] }).map(p => ({ text: p.text, silent: true, ...(p.entities.length ? { entities: p.entities } : {}) }))
 }
 
 function filesPiece(files: OutFile[], caption: Formatted | undefined, loud: boolean): Piece {

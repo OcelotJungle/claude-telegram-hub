@@ -217,7 +217,7 @@ describe('inbound', () => {
     a.close()
     await waitFor(() => !hub.isConnected('a'), 3000, 'disconnect')
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: 'hello?' }))
-    const sent = await waitFor(() => fake.callsOf('sendMessage').find(p => p.text === 'сессия сейчас не активна'))
+    const sent = await waitFor(() => fake.texts().find(p => p.text === 'сессия сейчас не активна'))
     expect(sent).toMatchObject({ chat_id: GROUP, message_thread_id: 100, disable_notification: false })
   })
 
@@ -232,7 +232,7 @@ describe('inbound', () => {
     expect(msg.content).toBe('mine')
     expect(a.messages.filter(m => m.type === 'inbound').length).toBe(1)
     expect(log.lines.some(l => l.includes('-555'))).toBe(true)
-    expect(fake.callsOf('sendMessage').length).toBe(0)
+    expect(fake.texts().length).toBe(0)
   })
 
   test('a photo is downloaded into the inbox and passed as image_path', async () => {
@@ -267,19 +267,19 @@ describe('send', () => {
     a.send({ type: 'send', id: 'x2', text: 'done', notify: true })
     await a.next(m => m.type === 'ack' && m.id === 'x2')
     expect(a.messages.some(m => m.type === 'ack' && m.id === 'x1')).toBe(true)
-    expect(fake.callsOf('sendMessage')).toEqual([
-      { chat_id: GROUP, message_thread_id: 100, text: 'working', disable_notification: true },
-      { chat_id: GROUP, message_thread_id: 100, text: 'done', disable_notification: false },
+    expect(fake.callsOf('sendRichMessage')).toEqual([
+      { chat_id: GROUP, message_thread_id: 100, rich_message: { blocks: [{ type: 'paragraph', text: 'working' }] }, disable_notification: true },
+      { chat_id: GROUP, message_thread_id: 100, rich_message: { blocks: [{ type: 'paragraph', text: 'done' }] }, disable_notification: false },
     ])
   })
 
-  test('long text is chunked and only the first chunk notifies', async () => {
+  test('long text goes in several rich messages and only the first notifies', async () => {
     await startHub()
     const a = await enabled('a')
-    a.send({ type: 'send', id: 'x1', text: 'z'.repeat(5000), notify: true })
-    await a.next(m => m.type === 'ack' && m.id === 'x1')
-    const sent = fake.callsOf('sendMessage')
-    expect(sent.map(s => s.text.length)).toEqual([4096, 904])
+    a.send({ type: 'send', id: 'x1', text: `${'z'.repeat(20000)}\n\n${'y'.repeat(20000)}`, notify: true })
+    await waitFor(() => fake.texts().length === 2)
+    const sent = fake.texts()
+    expect(sent.map(s => s.text)).toEqual(['z'.repeat(20000), 'y'.repeat(20000)])
     expect(sent.map(s => s.disable_notification)).toEqual([false, true])
   })
 
@@ -290,8 +290,8 @@ describe('send', () => {
     const a = await enabled('a')
     await req(a, { op: 'disable' })
     a.send({ type: 'send', id: 'x1', text: 'written while on', notify: false })
-    await waitFor(() => fake.callsOf('sendMessage').length === 1)
-    expect(fake.callsOf('sendMessage')[0]).toMatchObject({ text: 'written while on' })
+    await waitFor(() => fake.texts().length === 1)
+    expect(fake.texts()[0]).toMatchObject({ text: 'written while on' })
   })
 
   test('text for a session without a topic is acked, logged and not sent', async () => {
@@ -299,7 +299,7 @@ describe('send', () => {
     const a = await plugin('a')
     a.send({ type: 'send', id: 'x1', text: 'nowhere', notify: false })
     await a.next(m => m.type === 'ack' && m.id === 'x1')
-    expect(fake.callsOf('sendMessage').length).toBe(0)
+    expect(fake.texts().length).toBe(0)
     expect(log.lines.some(l => l.startsWith('WARN') && l.includes('nowhere'))).toBe(true)
   })
 
@@ -309,19 +309,19 @@ describe('send', () => {
     a.send({ type: 'session', sessionId: 'a2', cwd: CWD })
     await waitFor(() => hub.isConnected('a2'))
     a.send({ type: 'send', id: 'x1', sessionId: 'a', text: 'old session text', notify: false })
-    await waitFor(() => fake.callsOf('sendMessage').length === 1)
-    expect(fake.callsOf('sendMessage')[0]).toMatchObject({ message_thread_id: 100, text: 'old session text' })
+    await waitFor(() => fake.texts().length === 1)
+    expect(fake.texts()[0]).toMatchObject({ message_thread_id: 100, text: 'old session text' })
   })
 
   test('text queued while enabled is delivered even if terminal input follows while an earlier send is retrying', async () => {
     await startHub()
     const a = await enabled('a')
-    fake.failNext('sendMessage', { code: 429, description: 'Too Many Requests', retry_after: 1 })
+    fake.failNext('sendRichMessage', { code: 429, description: 'Too Many Requests', retry_after: 1 })
     a.send({ type: 'send', id: 'x1', text: 'first', notify: false })
     a.send({ type: 'send', id: 'x2', text: 'final', notify: false })
     a.send({ type: 'terminalInput' })
-    await waitFor(() => fake.callsOf('sendMessage').length === 3, 5000, 'both delivered')
-    expect(fake.callsOf('sendMessage').map(p => p.text)).toEqual(['first', 'first', 'final'])
+    await waitFor(() => fake.texts().length === 3, 5000, 'both delivered')
+    expect(fake.texts().map(p => p.text)).toEqual(['first', 'first', 'final'])
   })
 
   test('terminal input disables the session', async () => {
@@ -339,7 +339,7 @@ describe('send', () => {
     a.send({ type: 'send', id: 'x1', text: 'still here', notify: false })
     await a.next(m => m.type === 'ack' && m.id === 'x1')
     expect(fake.callsOf('createForumTopic').length).toBe(2)
-    expect(fake.callsOf('sendMessage').at(-1)).toMatchObject({ message_thread_id: 101, text: 'still here' })
+    expect(fake.texts().at(-1)).toMatchObject({ message_thread_id: 101, text: 'still here' })
     expect(new SessionStore(join(dir, 'sessions.json')).get('a')?.topicId).toBe(101)
   })
 
@@ -358,12 +358,12 @@ describe('send', () => {
     await startHub()
     const a = await enabled('a')
     a.send({ type: 'permission', toolName: 'Bash', description: 'rm -rf build' })
-    await waitFor(() => fake.callsOf('sendMessage').length === 1)
-    expect(fake.callsOf('sendMessage')[0]).toMatchObject({ text: '🔐 Нужно подтверждение: Bash — rm -rf build', disable_notification: false })
+    await waitFor(() => fake.texts().length === 1)
+    expect(fake.texts()[0]).toMatchObject({ text: '🔐 Нужно подтверждение: Bash — rm -rf build', disable_notification: false })
     await req(a, { op: 'disable' })
     a.send({ type: 'permission', toolName: 'Bash', description: 'again' })
     await Bun.sleep(100)
-    expect(fake.callsOf('sendMessage').length).toBe(1)
+    expect(fake.texts().length).toBe(1)
   })
 
   test('download saves the file into the inbox', async () => {
@@ -377,12 +377,12 @@ describe('send', () => {
 })
 
 describe('delivery', () => {
-  const texts = () => fake.callsOf('sendMessage').map(p => p.text)
+  const texts = () => fake.texts().map(p => p.text)
 
   test('the plugin gets its ack once the text is on disk, before Telegram answers', async () => {
     await startHub()
     const a = await enabled('a')
-    fake.hangNext('sendMessage', 1000)
+    fake.hangNext('sendRichMessage', 1000)
     a.send({ type: 'send', id: 'x1', text: 'kept safe', notify: false })
     await a.next(m => m.type === 'ack' && m.id === 'x1')
     expect(readFileSync(join(dir, 'outbox.json'), 'utf8')).toContain('kept safe')
@@ -391,29 +391,29 @@ describe('delivery', () => {
   test('an outage longer than the API retries delays the text but keeps it and its order', async () => {
     await startHub()
     const a = await enabled('a')
-    for (let i = 0; i < 7; i++) fake.failNext('sendMessage', { code: 502, description: 'Bad Gateway' })
+    for (let i = 0; i < 7; i++) fake.failNext('sendRichMessage', { code: 502, description: 'Bad Gateway' })
     a.send({ type: 'send', id: 'x1', text: 'first', notify: false })
     a.send({ type: 'send', id: 'x2', text: 'second', notify: true })
     await waitFor(() => texts().includes('second'), 5000, 'second delivered')
     expect(texts()).toEqual([...Array(8).fill('first'), 'second'])
-    expect(fake.callsOf('sendMessage').at(-1)).toMatchObject({ disable_notification: false })
+    expect(fake.texts().at(-1)).toMatchObject({ disable_notification: false })
     expect(log.lines.some(l => l.startsWith('INFO') && l.includes('works again'))).toBe(true)
   })
 
   test('a dead network is waited out', async () => {
     await startHub()
     const a = await enabled('a')
-    fake.hangNext('sendMessage', 6)
+    fake.hangNext('sendRichMessage', 6)
     a.send({ type: 'send', id: 'x1', text: 'patience', notify: false })
-    await waitFor(() => fake.callsOf('sendMessage').length === 7, 8000, 'delivered after the hangs')
+    await waitFor(() => fake.texts().length === 7, 8000, 'delivered after the hangs')
     await Bun.sleep(100)
-    expect(fake.callsOf('sendMessage').length).toBe(7)
+    expect(fake.texts().length).toBe(7)
   })
 
   test('a restarted hub sends what the previous one had queued', async () => {
     await startHub()
     const a = await enabled('a')
-    fake.hangNext('sendMessage', 1000)
+    fake.hangNext('sendRichMessage', 1000)
     a.send({ type: 'send', id: 'x1', text: 'survivor', notify: true })
     await a.next(m => m.type === 'ack' && m.id === 'x1')
     a.close()
@@ -422,7 +422,7 @@ describe('delivery', () => {
     fake = new FakeTelegram()
     await startHub()
     await waitFor(() => texts().includes('survivor'), 3000, 'delivery by the new hub')
-    expect(fake.callsOf('sendMessage')[0]).toMatchObject({ message_thread_id: 100, disable_notification: false })
+    expect(fake.texts()[0]).toMatchObject({ message_thread_id: 100, disable_notification: false })
   })
 
   test('a text re-sent by a plugin after reconnecting is not delivered twice', async () => {
@@ -439,23 +439,24 @@ describe('delivery', () => {
   test('a text Telegram rejects is logged and replaced in the topic by a loud notice', async () => {
     await startHub()
     const a = await enabled('a')
+    fake.failNext('sendRichMessage', { code: 400, description: 'Bad Request: message text is empty' })
     fake.failNext('sendMessage', { code: 400, description: 'Bad Request: message text is empty' })
     a.send({ type: 'send', id: 'x1', text: 'odd words', notify: false })
     a.send({ type: 'send', id: 'x2', text: 'after', notify: false })
     await waitFor(() => texts().includes('after'), 3000)
     expect(log.lines.some(l => l.startsWith('ERROR') && l.includes('odd words') && l.includes('message text is empty'))).toBe(true)
-    const sent = fake.callsOf('sendMessage')
-    expect(sent.map(p => p.text)).toEqual(['odd words', '⚠️ Telegram не принял сообщение: Bad Request: message text is empty. Текст в hub.log.', 'after'])
-    expect(sent[1].disable_notification).toBe(false)
+    const sent = fake.texts()
+    expect(sent.map(p => p.text)).toEqual(['odd words', 'odd words', '⚠️ Telegram не принял сообщение: Bad Request: message text is empty. Текст в hub.log.', 'after'])
+    expect(sent[2].disable_notification).toBe(false)
   })
 
   test('a bot thrown out of the group keeps the text queued until it is back', async () => {
     await startHub()
     const a = await enabled('a')
-    fake.failNext('sendMessage', { code: 403, description: 'Forbidden: bot was kicked from the supergroup chat' })
-    fake.failNext('sendMessage', { code: 400, description: 'Bad Request: chat not found' })
+    fake.failNext('sendRichMessage', { code: 403, description: 'Forbidden: bot was kicked from the supergroup chat' })
+    fake.failNext('sendRichMessage', { code: 400, description: 'Bad Request: chat not found' })
     a.send({ type: 'send', id: 'x1', text: 'waiting', notify: false })
-    await waitFor(() => fake.callsOf('sendMessage').length === 3, 3000)
+    await waitFor(() => fake.texts().length === 3, 3000)
     expect(texts()).toEqual(['waiting', 'waiting', 'waiting'])
     expect(log.lines.some(l => l.startsWith('WARN') && l.includes('kicked'))).toBe(true)
     expect(log.lines.some(l => l.includes('⚠️'))).toBe(false)
@@ -464,7 +465,7 @@ describe('delivery', () => {
   test('the hub does not exit while its queue is not delivered', async () => {
     await startHub({ idleMs: 100 })
     const a = await enabled('a')
-    fake.hangNext('sendMessage', 4)
+    fake.hangNext('sendRichMessage', 4)
     a.send({ type: 'send', id: 'x1', text: 'last words', notify: true })
     await a.next(m => m.type === 'ack' && m.id === 'x1')
     a.close()
@@ -493,7 +494,7 @@ describe('delivery', () => {
     const file = join(dir, 'spool', 'a-1.json')
     writeFileSync(file, JSON.stringify([{ id: 's1', sessionId: 'a', text: 'from the grave', notify: true }]))
     await waitFor(() => texts().includes('from the grave'), 3000)
-    expect(fake.callsOf('sendMessage')[0]).toMatchObject({ disable_notification: false })
+    expect(fake.texts()[0]).toMatchObject({ disable_notification: false })
     expect(existsSync(file)).toBe(false)
   })
 
@@ -507,38 +508,56 @@ describe('delivery', () => {
 })
 
 describe('formatting', () => {
-  test('agent markdown goes as plain text with entities', async () => {
+  test('agent markdown goes as a rich message in blocks', async () => {
     await startHub()
     const a = await enabled('a')
-    a.send({ type: 'send', id: 'x1', text: '## Итог\n\n**готово**, см. `hub.ts`', notify: false })
-    await waitFor(() => fake.callsOf('sendMessage').length === 1)
-    expect(fake.callsOf('sendMessage')[0]).toMatchObject({
-      text: 'Итог\n\nготово, см. hub.ts',
-      entities: [
-        { type: 'bold', offset: 0, length: 4 },
-        { type: 'bold', offset: 6, length: 6 },
-        { type: 'code', offset: 18, length: 6 },
-      ],
-    })
+    a.send({ type: 'send', id: 'x1', text: '## Итог\n\n**готово**, см. `hub.ts`\n\n| a | b |\n|---|---|\n| 1 | 2 |', notify: false })
+    await waitFor(() => fake.texts().length === 1)
+    expect(fake.callsOf('sendMessage')).toEqual([])
+    expect(fake.callsOf('sendRichMessage')[0].rich_message.blocks).toEqual([
+      { type: 'heading', size: 2, text: 'Итог' },
+      { type: 'paragraph', text: [{ type: 'bold', text: 'готово' }, ', см. ', { type: 'code', text: 'hub.ts' }] },
+      {
+        type: 'table',
+        cells: [
+          [
+            { text: 'a', is_header: true, align: 'center', valign: 'middle' },
+            { text: 'b', is_header: true, align: 'center', valign: 'middle' },
+          ],
+          [
+            { text: '1', align: 'left', valign: 'middle' },
+            { text: '2', align: 'left', valign: 'middle' },
+          ],
+        ],
+        is_bordered: true,
+        is_striped: true,
+      },
+    ])
   })
 
-  test('a long formatted text keeps its entities on both sides of the cut', async () => {
+  test('a block too big for a rich message goes as plain text with entities, cut in pieces', async () => {
     await startHub()
     const a = await enabled('a')
-    a.send({ type: 'send', id: 'x1', text: '```\n' + 'z'.repeat(5000) + '\n```', notify: false })
-    await waitFor(() => fake.callsOf('sendMessage').length === 2)
-    expect(fake.callsOf('sendMessage').map(s => s.entities)).toEqual([[{ type: 'pre', offset: 0, length: 4096 }], [{ type: 'pre', offset: 0, length: 904 }]])
+    a.send({ type: 'send', id: 'x1', text: 'до\n\n```\n' + 'z'.repeat(31000) + '\n```', notify: true })
+    await waitFor(() => fake.texts().length === 9)
+    const [first, ...rest] = fake.texts()
+    expect(first).toMatchObject({ text: 'до', disable_notification: false })
+    expect(rest.map(s => s.text).join('')).toBe('z'.repeat(31000))
+    expect(rest.every(s => s.entities[0].type === 'pre' && s.disable_notification)).toBe(true)
   })
 
-  test('a text Telegram rejects with entities is sent again without them', async () => {
+  test('a rich message Telegram rejects goes as plain text with entities, then without them', async () => {
     await startHub()
     const a = await enabled('a')
+    fake.failNext('sendRichMessage', { code: 400, description: 'Bad Request: RICH_MESSAGE_INVALID' })
     fake.failNext('sendMessage', { code: 400, description: "Bad Request: can't parse entities" })
     a.send({ type: 'send', id: 'x1', text: '**bold**', notify: true })
-    await waitFor(() => fake.callsOf('sendMessage').length === 2)
-    const [first, second] = fake.callsOf('sendMessage')
-    expect(first).toMatchObject({ text: 'bold', entities: [{ type: 'bold', offset: 0, length: 4 }] })
-    expect(second).toEqual({ chat_id: GROUP, message_thread_id: 100, text: 'bold', disable_notification: false })
+    await waitFor(() => fake.texts().length === 3)
+    const [rich, formatted, plain] = fake.texts()
+    expect(rich).toMatchObject({ text: 'bold', disable_notification: false })
+    expect(formatted).toMatchObject({ text: 'bold', entities: [{ type: 'bold', offset: 0, length: 4 }], disable_notification: false })
+    expect(plain).toEqual({ chat_id: GROUP, message_thread_id: 100, text: 'bold', disable_notification: false })
+    expect(log.lines.some(l => l.startsWith('WARN') && l.includes('RICH_MESSAGE_INVALID'))).toBe(true)
     expect(log.lines.some(l => l.startsWith('WARN') && l.includes("can't parse entities"))).toBe(true)
   })
 
@@ -546,9 +565,9 @@ describe('formatting', () => {
     await startHub()
     const a = await enabled('a')
     a.send({ type: 'permission', toolName: 'Bash', description: 'rm *.tmp and *.log' })
-    await waitFor(() => fake.callsOf('sendMessage').length === 1)
-    expect(fake.callsOf('sendMessage')[0].text).toBe('🔐 Нужно подтверждение: Bash — rm *.tmp and *.log')
-    expect(fake.callsOf('sendMessage')[0].entities).toBeUndefined()
+    await waitFor(() => fake.texts().length === 1)
+    expect(fake.texts()[0].text).toBe('🔐 Нужно подтверждение: Bash — rm *.tmp and *.log')
+    expect(fake.texts()[0].entities).toBeUndefined()
   })
 })
 
@@ -615,8 +634,8 @@ describe('files', () => {
     sendFiles(a, 'f1', [queued('f1', 'a.txt')])
     a.send({ type: 'send', id: 'x2', text: 'after', notify: false })
     await waitFor(() => sends().length === 3)
-    expect(sends()).toEqual(['sendMessage', 'sendDocument', 'sendMessage'])
-    expect(fake.callsOf('sendMessage').map(s => s.text)).toEqual(['before', 'after'])
+    expect(sends()).toEqual(['sendRichMessage', 'sendDocument', 'sendRichMessage'])
+    expect(fake.texts().map(s => s.text)).toEqual(['before', 'after'])
   })
 
   test('files re-sent after a reconnect are not sent twice, and the plugin still hears they are sent', async () => {
@@ -729,7 +748,7 @@ describe('files', () => {
     fake.failNext('sendDocument', { code: 400, description: 'Bad Request: file is too big' })
     sendFiles(a, 'f1', [queued('f1', 'huge.bin')])
     expect((await done(a, 'f1')).error).toBe('huge.bin: Bad Request: file is too big')
-    expect(fake.callsOf('sendMessage').map(s => s.text)).toEqual(['⚠️ Telegram не принял файл huge.bin: Bad Request: file is too big'])
+    expect(fake.texts().map(s => s.text)).toEqual(['⚠️ Telegram не принял файл huge.bin: Bad Request: file is too big'])
     expect(existsSync(join(dir, 'outbox-files', 'f1'))).toBe(false)
     expect(log.lines.some(l => l.startsWith('ERROR') && l.includes('huge.bin'))).toBe(true)
   })
@@ -740,7 +759,7 @@ describe('files', () => {
     const gone = { path: join(dir, 'outbox-files', 'f1', '0-gone.png'), name: 'gone.png', size: 3 }
     sendFiles(a, 'f1', [gone])
     expect((await done(a, 'f1')).error).toContain('gone.png')
-    expect(fake.callsOf('sendMessage')[0].text).toStartWith('⚠️ Telegram не принял файл gone.png')
+    expect(fake.texts()[0].text).toStartWith('⚠️ Telegram не принял файл gone.png')
     expect(sends()).toEqual(['sendMessage'])
   })
 
@@ -901,7 +920,7 @@ describe('commands', () => {
   }
 
   const command = (text: string, threadId = 100) => fake.pushUpdate(topicMsg({ chatId: GROUP, threadId, fromId: ME, text }))
-  const sentText = (pred: (t: string) => boolean) => fake.callsOf('sendMessage').find(p => pred(p.text))
+  const sentText = (pred: (t: string) => boolean) => fake.texts().find(p => pred(p.text))
   // Polls like the mod's timer until the topic gets the text.
   const reply = (runner: Runner, pred: (t: string) => boolean) =>
     waitFor(
@@ -922,7 +941,7 @@ describe('commands', () => {
     const sent = await reply(runner, t => t.startsWith('Лимиты'))
     expect(sent).toMatchObject({ message_thread_id: 100, disable_notification: false })
     expect(sent.text).toContain('Сейчас: 128k токенов')
-    expect(sent.entities[0]).toMatchObject({ type: 'bold', offset: 0, length: 6 })
+    expect(sent.rich_message.blocks[0].text[0]).toEqual({ type: 'bold', text: 'Лимиты' })
     expect(a.messages.some(m => m.type === 'inbound')).toBe(false)
     expect(new SessionStore(join(dir, 'sessions.json')).get('a')?.enabled).toBe(false)
   })
@@ -980,7 +999,7 @@ describe('commands', () => {
     // A later compaction nobody asked for from Telegram is not reported.
     await runner.compacted({ tokensBefore: 300_000, tokensAfter: 20_000 })
     await runner.poll()
-    expect(fake.callsOf('sendMessage').filter(p => p.text.startsWith('✅')).length).toBe(1)
+    expect(fake.texts().filter(p => p.text.startsWith('✅')).length).toBe(1)
   })
 
   test('a skipped compaction gives the reason', async () => {
@@ -1047,7 +1066,7 @@ describe('commands', () => {
     await reply(runner, t => t.startsWith('Лимиты'))
     await runner.poll()
     await runner.poll()
-    expect(fake.callsOf('sendMessage').filter(p => p.text.startsWith('Лимиты')).length).toBe(1)
+    expect(fake.texts().filter(p => p.text.startsWith('Лимиты')).length).toBe(1)
   })
 
   test('the same reply posted twice is sent once', async () => {
@@ -1058,7 +1077,7 @@ describe('commands', () => {
     expect((await post()).status).toBe(200)
     await waitFor(() => sentText(t => t === 'once'))
     await Bun.sleep(100)
-    expect(fake.callsOf('sendMessage').filter(p => p.text === 'once').length).toBe(1)
+    expect(fake.texts().filter(p => p.text === 'once').length).toBe(1)
   })
 
   test('the hub puts the commands into the bot menu', async () => {

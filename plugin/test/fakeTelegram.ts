@@ -1,6 +1,6 @@
 // In-process fake of the Telegram Bot API, enough for the hub: long-poll
 // getUpdates (with the real "terminated by other getUpdates request" conflict),
-// sendMessage, media uploads (multipart), forum topics, getFile and file download.
+// sendMessage, sendRichMessage, media uploads (multipart), forum topics, getFile and file download.
 import type { Server } from 'bun'
 import type { Update } from '../src/hub/telegram.ts'
 
@@ -71,6 +71,14 @@ export class FakeTelegram {
     return this.calls.filter(c => c.method === method).map(c => c.params)
   }
 
+  // Text messages in order, plain and rich; a rich one gets the text of its
+  // blocks as `text`.
+  texts(): any[] {
+    return this.calls
+      .filter(c => c.method === 'sendMessage' || c.method === 'sendRichMessage')
+      .map(c => (c.method === 'sendRichMessage' ? { ...c.params, text: blocksText(c.params.rich_message.blocks) } : c.params))
+  }
+
   private async handle(req: Request): Promise<Response> {
     const url = new URL(req.url)
     const filePrefix = `/file/bot${this.token}/`
@@ -105,6 +113,7 @@ export class FakeTelegram {
       case 'getMe':
         return ok({ id: 1, is_bot: true, username: 'test_bot' })
       case 'sendMessage':
+      case 'sendRichMessage':
       case 'sendPhoto':
       case 'sendVideo':
       case 'sendAudio':
@@ -213,4 +222,17 @@ async function formParams(req: Request): Promise<any> {
     else out[key] = key === 'media' || key.endsWith('entities') ? JSON.parse(String(v)) : v
   }
   return out
+}
+
+function blocksText(blocks: any[]): string {
+  const text = (t: any): string => (typeof t === 'string' ? t : Array.isArray(t) ? t.map(text).join('') : text(t?.text ?? ''))
+  const block = (b: any): string =>
+    b.type === 'list'
+      ? b.items.map((i: any) => blocksText(i.blocks)).join('\n')
+      : b.blocks
+        ? blocksText(b.blocks)
+        : b.cells
+          ? b.cells.map((r: any[]) => r.map(c => text(c.text)).join(' | ')).join('\n')
+          : text(b.text)
+  return blocks.map(block).join('\n\n')
 }
