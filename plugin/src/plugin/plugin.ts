@@ -298,6 +298,8 @@ export class PluginCore {
         if (after && after !== before) this.client.send({ type: "title", title: after });
       } else if (ev.kind === "task_status") {
         this.subagents?.taskStatus(ev.taskId, ev.status);
+      } else if (ev.kind === "channel_seen") {
+        this.client.send({ type: "seen", messageIds: ev.messageIds });
       } else if (ev.kind === "turn_end") {
         if (ev.cut) this.responseCut();
         else this.cuts = 0;

@@ -188,6 +188,11 @@ export class TelegramApi {
     return this.call("answerCallbackQuery", { callback_query_id: id, ...(text ? { text } : {}) }, z.unknown());
   }
 
+  // Without an emoji the bot's reaction comes off.
+  setMessageReaction(chatId: string, messageId: number, emoji?: string): Promise<unknown> {
+    return this.call("setMessageReaction", { chat_id: chatId, message_id: messageId, reaction: emoji ? [{ type: "emoji", emoji }] : [] }, z.unknown());
+  }
+
   sendRichMessage(chatId: string, threadId: number, blocks: Block[], silent: boolean): Promise<{ message_id: number }> {
     return this.call("sendRichMessage", { chat_id: chatId, message_thread_id: threadId, rich_message: { blocks }, disable_notification: silent }, sentSchema);
   }

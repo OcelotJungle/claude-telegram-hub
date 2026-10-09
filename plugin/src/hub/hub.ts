@@ -63,6 +63,9 @@ const CARD_EDIT_MS = 5000;
 // Cards remembered for editing; the oldest are forgotten past this.
 const MAX_CARDS = 200;
 const TOO_MANY_REQUESTS = 429;
+// On a topic message from when the hub hands it to the session until it is
+// in the agent's context.
+const TAKEN_REACTION = "✍";
 const BOT_COMMANDS = [
   { command: "info", description: "Лимиты и контекст сессии" },
   { command: "compact", description: "Сжать контекст; /compact N — окно автокомпакта" },
@@ -170,6 +173,8 @@ export class Hub {
   // version, shown what the message holds now (undefined until it is sent).
   private cards = new Map<string, Card>();
   private pumping = new Set<string>();
+  // The latest reaction change of a topic message, by message id.
+  private reactions = new Map<number, Promise<void>>();
   // Sessions being started from the topic, with the messages they will get.
   private launches = new Map<string, { account: string; held: Message[]; timer: ReturnType<typeof setTimeout> }>();
   // Sessions told to end, until their window goes.
@@ -455,6 +460,9 @@ ${msg.text}`);
         return;
       case "card":
         this.onCard(msg);
+        return;
+      case "seen":
+        for (const id of msg.messageIds) this.react(id, undefined);
         return;
     }
   }
@@ -1043,8 +1051,29 @@ ${msg.text}`);
     if (cmd) return this.queueCommand(sessionId, cmd);
     this.setEnabled(sessionId, true);
     const { content, meta } = await this.inboundOf(api, m);
+    this.react(m.message_id, TAKEN_REACTION);
     this.send(ws, { type: "inbound", content, meta });
     this.log.info(`message ${m.message_id} in topic ${m.message_thread_id} → session ${sessionId}: ${shapeOf(m, content)}`);
+  }
+
+  // The bot's reaction on a topic message: set, or taken off without an
+  // emoji. One message's changes go in the order they were asked for, so a
+  // slow set cannot land after the clear that followed it.
+  private react(messageId: number, emoji: string | undefined): void {
+    const api = this.opts.api;
+    const groupId = this.opts.config().groupId;
+    if (!api || !groupId) return;
+    const prev = this.reactions.get(messageId) ?? Promise.resolve();
+    const next = prev
+      .then(() => api.setMessageReaction(groupId, messageId, emoji))
+      .then(
+        () => {},
+        e => this.log.warn(`${emoji ? "setting" : "clearing"} the reaction on message ${messageId} failed: ${e}`),
+      );
+    this.reactions.set(messageId, next);
+    void next.then(() => {
+      if (this.reactions.get(messageId) === next) this.reactions.delete(messageId);
+    });
   }
 
   // --- starting and stopping sessions --------------------------------------

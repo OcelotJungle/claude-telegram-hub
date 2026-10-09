@@ -10,6 +10,7 @@ const SIGNATURE_HEAD_CHARS = 64;
 const MAX_DETAIL_CHARS = 60;
 // Input fields that tell what a tool call does, best first.
 const DETAIL_FIELDS = ["file_path", "notebook_path", "description", "pattern", "command", "url", "query", "prompt"];
+const CHANNEL_MESSAGE_ID = /<channel\b[^>]*\bmessage_id="(\d+)"/g;
 
 export type TranscriptEvent =
   | { kind: "text"; text: string; messageId: string }
@@ -25,7 +26,9 @@ export type TranscriptEvent =
   | { kind: "unknown_thinking"; blockKind: string }
   // A background task (a subagent among them) stopped: completed, failed or
   // killed. taskId of a subagent is its agent id.
-  | { kind: "task_status"; taskId: string; status: string };
+  | { kind: "task_status"; taskId: string; status: string }
+  // Topic messages that reached the agent's context: Telegram message ids.
+  | { kind: "channel_seen"; messageIds: number[] };
 
 type Rec = Record<string, unknown>;
 
@@ -36,10 +39,16 @@ export function parseRecord(r: unknown): TranscriptEvent[] {
     case "assistant":
       return parseAssistant(r);
     case "user":
-      return isTerminalInput(r) ? [{ kind: "terminal_input" }] : taskStatus(r);
+      if (isTerminalInput(r)) return [{ kind: "terminal_input" }];
+      return isOurChannel(r.origin) ? channelSeen(contentText(r)) : taskStatus(r);
     // A message typed while the agent works is absorbed into the running turn.
-    case "attachment":
-      return field(r.attachment, "type") === "queued_command" && field(field(r.attachment, "origin"), "kind") === "human" ? [{ kind: "terminal_input" }] : [];
+    case "attachment": {
+      const a = r.attachment;
+      if (field(a, "type") !== "queued_command") return [];
+      if (field(field(a, "origin"), "kind") === "human") return [{ kind: "terminal_input" }];
+      const prompt = field(a, "prompt");
+      return isOurChannel(field(a, "origin")) && typeof prompt === "string" ? channelSeen(prompt) : [];
+    }
     case "custom-title":
       return title("custom", r.customTitle);
     case "agent-name":
@@ -111,12 +120,28 @@ function toolDetail(input: unknown): string | undefined {
 // Claude Code tells the agent a background task stopped with a prompt
 // holding a <task-notification>.
 function taskStatus(r: Rec): TranscriptEvent[] {
-  const content = field(r.message, "content");
-  const text = typeof content === "string" ? content : arr(content).map(b => field(b, "text")).filter(t => typeof t === "string").join("\n");
+  const text = contentText(r);
   if (!text.includes("<task-notification>")) return [];
   const taskId = text.match(/<task-id>([^<]+)<\/task-id>/)?.[1];
   const status = text.match(/<status>([^<]+)<\/status>/)?.[1];
   return taskId && status ? [{ kind: "task_status", taskId: taskId.trim(), status: status.trim() }] : [];
+}
+
+function contentText(r: Rec): string {
+  const content = field(r.message, "content");
+  return typeof content === "string" ? content : arr(content).map(b => field(b, "text")).filter(t => typeof t === "string").join("\n");
+}
+
+// Claude Code names a plugin's channel "plugin:<plugin>:<server>".
+function isOurChannel(origin: unknown): boolean {
+  const server = field(origin, "server");
+  return field(origin, "kind") === "channel" && typeof server === "string" && server.endsWith(":tg-hub");
+}
+
+// Claude Code wraps each channel message in a <channel …> tag carrying its meta.
+function channelSeen(text: string): TranscriptEvent[] {
+  const messageIds = [...text.matchAll(CHANNEL_MESSAGE_ID)].map(m => Number(m[1]));
+  return messageIds.length ? [{ kind: "channel_seen", messageIds }] : [];
 }
 
 function isTerminalInput(r: Rec): boolean {

@@ -189,6 +189,29 @@ describe("user records", () => {
   });
 });
 
+describe("topic messages reaching the agent", () => {
+  const TG = { kind: "channel", server: "plugin:tg-hub:tg-hub" };
+  const tag = (id: number, body: string) => `<channel source="plugin:tg-hub:tg-hub" chat_id="-1001" message_id="${id}" user="me" user_id="1" ts="2026-01-01T16:08:37.000Z">\n${body}\n</channel>`;
+
+  test("a channel prompt names the messages the agent got", () => {
+    const rec = { ...userBase, isMeta: true, origin: TG, message: { role: "user", content: tag(4951, "привет") } };
+    expect(parseRecord(rec)).toEqual([{ kind: "channel_seen", messageIds: [4951] }]);
+    const blocks = { ...rec, message: { role: "user", content: [{ type: "text", text: `${tag(7, "a")}\n${tag(8, "b")}` }] } };
+    expect(parseRecord(blocks)).toEqual([{ kind: "channel_seen", messageIds: [7, 8] }]);
+  });
+
+  test("a channel message absorbed mid-turn is seen too", () => {
+    const rec = { type: "attachment", isSidechain: false, attachment: { type: "queued_command", prompt: tag(4841, "и ещё"), commandMode: "prompt", origin: TG } };
+    expect(parseRecord(rec)).toEqual([{ kind: "channel_seen", messageIds: [4841] }]);
+  });
+
+  test("another channel's messages and quoted tags are not ours", () => {
+    const other = { kind: "channel", server: "plugin:telegram:telegram" };
+    expect(parseRecord({ ...userBase, isMeta: true, origin: other, message: { role: "user", content: tag(5, "x") } })).toEqual([]);
+    expect(parseRecord({ ...userBase, origin: { kind: "human" }, message: { role: "user", content: `see ${tag(6, "x")}` } })).toEqual([{ kind: "terminal_input" }]);
+  });
+});
+
 describe("tool call details", () => {
   const call = (input: object) => parseRecord(assistant("m1", "tool_use", { type: "tool_use", id: "t", name: "X", input }));
 

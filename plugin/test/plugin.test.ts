@@ -235,6 +235,27 @@ describe("PluginCore", () => {
     await waitFor(() => c.enabled, 3000, "re-enabled");
   });
 
+  test("a topic message wears ✍ from when the hub takes it until it is in the agent's context", async () => {
+    await enabledCore();
+    const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "как дела?" });
+    fake.pushUpdate(u);
+    await waitFor(() => channel.length === 1, 3000, "channel message");
+    const id = u.message?.message_id;
+    await waitFor(() => fake.callsOf("setMessageReaction").length === 1, 3000, "reaction set");
+    append({
+      type: "user",
+      isSidechain: false,
+      isMeta: true,
+      origin: { kind: "channel", server: "plugin:tg-hub:tg-hub" },
+      message: { role: "user", content: `<channel source="plugin:tg-hub:tg-hub" chat_id="${GROUP}" message_id="${id}">\nкак дела?\n</channel>` },
+    });
+    await waitFor(() => fake.callsOf("setMessageReaction").length === 2, 3000, "reaction cleared");
+    expect(fake.callsOf("setMessageReaction")).toEqual([
+      { chat_id: GROUP, message_id: id, reaction: [{ type: "emoji", emoji: "✍" }] },
+      { chat_id: GROUP, message_id: id, reaction: [] },
+    ]);
+  });
+
   test("a subagent shows as one card that is edited until it is done", async () => {
     await enabledCore();
     const dir = join(transcript.replace(/\.jsonl$/, ""), "subagents");

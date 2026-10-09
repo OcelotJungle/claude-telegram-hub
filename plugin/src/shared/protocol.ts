@@ -39,7 +39,9 @@ export type PluginToHub =
   | { type: "terminalInput" }
   // A subagent's card as Markdown: one Telegram message, sent once and then
   // edited in place. final: the card will not change any more.
-  | { type: "card"; id: string; sessionId: string; text: string; final: boolean };
+  | { type: "card"; id: string; sessionId: string; text: string; final: boolean }
+  // Topic messages that reached the agent's context, by Telegram message id.
+  | { type: "seen"; messageIds: number[] };
 
 export type HubToPlugin =
   | { type: "state"; enabled: boolean; topicTitle?: string }

@@ -193,6 +193,40 @@ describe("inbound", () => {
     expect(a.messages.some(m => m.type === "inbound")).toBe(false);
   });
 
+  test("a message taken for the agent wears ✍ until the window says the agent has it", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "привет" });
+    const id = u.message?.message_id;
+    fake.pushUpdate(u);
+    await a.next("inbound");
+    await waitFor(() => fake.callsOf("setMessageReaction").length === 1);
+    expect(fake.callsOf("setMessageReaction")[0]).toEqual({ chat_id: GROUP, message_id: id, reaction: [{ type: "emoji", emoji: "✍" }] });
+    a.send({ type: "seen", messageIds: [id] });
+    await waitFor(() => fake.callsOf("setMessageReaction").length === 2);
+    expect(fake.callsOf("setMessageReaction")[1]).toEqual({ chat_id: GROUP, message_id: id, reaction: [] });
+  });
+
+  test("✍ comes off only after it went on, however slow Telegram is", async () => {
+    await startHub();
+    const a = await enabled("a");
+    fake.hangNext("setMessageReaction");
+    const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "привет" });
+    fake.pushUpdate(u);
+    await a.next("inbound");
+    a.send({ type: "seen", messageIds: [u.message?.message_id] });
+    await waitFor(() => fake.callsOf("setMessageReaction").length === 3, 3000);
+    expect(fake.callsOf("setMessageReaction").map(c => arr(c.reaction).length)).toEqual([1, 1, 0]);
+  });
+
+  test("a command for the plugin wears no ✍", async () => {
+    await startHub();
+    await enabled("a");
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "/info" }));
+    await Bun.sleep(200);
+    expect(fake.callsOf("setMessageReaction")).toEqual([]);
+  });
+
   // Rich text pasted into Telegram arrives as text plus entities.
   test("a formatted message is delivered as its text, and the log names it without the text", async () => {
     await startHub();
