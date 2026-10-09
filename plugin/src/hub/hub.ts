@@ -76,7 +76,7 @@ const BOT_COMMANDS = [
   { command: "stop", description: "Завершить сессию" },
 ];
 
-type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; busy?: boolean };
+type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; busy?: boolean; reportsSeen?: boolean };
 type WS = ServerWebSocket<Conn>;
 type Card = {
   text: string;
@@ -420,7 +420,7 @@ export class Hub {
     switch (msg.type) {
       case "hello": {
         if (msg.v !== PROTOCOL_VERSION) this.log.warn(`plugin protocol v${msg.v}, hub v${PROTOCOL_VERSION}`);
-        ws.data = { windowKey: msg.windowKey, sessionId: msg.sessionId, cwd: msg.cwd, account: accountOf(msg.configDir), busy: msg.busy };
+        ws.data = { windowKey: msg.windowKey, sessionId: msg.sessionId, cwd: msg.cwd, account: accountOf(msg.configDir), busy: msg.busy, reportsSeen: msg.reportsSeen };
         this.store.setWhere(msg.sessionId, msg.cwd, ws.data.account);
         this.log.info(`window ${msg.windowKey} connected, session ${msg.sessionId}, account ${ws.data.account ?? "not named"}`);
         this.askDefaultAccount(ws, msg.configDir);
@@ -1084,7 +1084,7 @@ ${msg.text}`);
     if (cmd) return this.queueCommand(sessionId, cmd);
     this.setEnabled(sessionId, true);
     const { content, meta } = await this.inboundOf(api, m);
-    this.react(m.message_id, TAKEN_REACTION);
+    if (ws.data.reportsSeen) this.react(m.message_id, TAKEN_REACTION);
     this.send(ws, { type: "inbound", content, meta });
     this.log.info(`message ${m.message_id} in topic ${m.message_thread_id} → session ${sessionId}: ${shapeOf(m, content)}`);
   }

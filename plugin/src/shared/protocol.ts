@@ -21,9 +21,10 @@ export type HubRequest = { op: "enable"; title: string } | { op: "disable" } | {
 export type EnableResult = { topicTitle: string; created: boolean };
 
 // configDir: the window's CLAUDE_CONFIG_DIR, which names its cswap account
-// (older plugins omit it). busy: the agent is in a turn.
+// (older plugins omit it). busy: the agent is in a turn. reportsSeen: the
+// plugin sends seen, so a reaction put on a message will come off.
 export type PluginToHub =
-  | { type: "hello"; v: number; windowKey: string; sessionId: string; cwd: string; configDir?: string; busy?: boolean }
+  | { type: "hello"; v: number; windowKey: string; sessionId: string; cwd: string; configDir?: string; busy?: boolean; reportsSeen?: boolean }
   | { type: "session"; sessionId: string; cwd: string; configDir?: string }
   | ({ type: "req"; id: string } & HubRequest)
   // sessionId: the session the text was written in (older plugins omit it;

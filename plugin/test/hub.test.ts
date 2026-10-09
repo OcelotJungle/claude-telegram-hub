@@ -67,7 +67,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
 }
 
 const PROFILE = "C:\\Users\\me\\.claude-swap-backup\\sessions\\2-me_gmail.com";
-const hello = (sessionId: string, windowKey = `win-${sessionId}`) => ({ type: "hello", v: PROTOCOL_VERSION, windowKey, sessionId, cwd: CWD, configDir: PROFILE });
+const hello = (sessionId: string, windowKey = `win-${sessionId}`) => ({ type: "hello", v: PROTOCOL_VERSION, windowKey, sessionId, cwd: CWD, configDir: PROFILE, reportsSeen: true });
 
 async function plugin(sessionId: string, windowKey?: string) {
   const c = await wsClient(port, hello(sessionId, windowKey));
@@ -248,6 +248,18 @@ describe("inbound", () => {
     const c = await wsClient(port, { ...hello("a", "w2"), busy: true });
     clients.push(c);
     await waitFor(() => fake.callsOf("sendChatAction").length >= 1);
+  });
+
+  test("a window whose plugin cannot report seen messages gets no ✍ that would never come off", async () => {
+    await startHub();
+    const old = await wsClient(port, { ...hello("a"), reportsSeen: undefined });
+    clients.push(old);
+    await old.next("state");
+    expect((await req(old, { op: "enable", title: "T" })).ok).toBe(true);
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "привет" }));
+    await old.next("inbound");
+    await Bun.sleep(100);
+    expect(fake.callsOf("setMessageReaction")).toEqual([]);
   });
 
   test("a command for the plugin wears no ✍", async () => {
