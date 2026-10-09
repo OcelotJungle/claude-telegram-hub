@@ -8,6 +8,7 @@ import { tempDir } from "./helpers.ts";
 
 const SEND_EVERY_MS = 3000;
 const SECOND = 1000;
+const MINUTE = 60_000;
 
 const line = (o: object) => JSON.stringify(o) + "\n";
 const assistant = (id: string, stop: string, block: object) =>
@@ -78,17 +79,36 @@ describe("SubagentWatcher", () => {
     });
   });
 
-  test("nothing new, nothing sent", () => {
+  test("a running card's time goes on while the agent writes nothing", () => {
     const s = setup();
     s.w.start();
     const write = s.agent("a1");
     write(assistant("m1", "tool_use", tool("Bash", {})));
     s.advance(SEND_EVERY_MS);
+    expect(s.cards.map(c => c.text)).toEqual(["🤖 **Субагент**\n⏳ 0 с · 1 действие · `Bash`"]);
+    s.advance(SECOND);
     expect(s.cards.length).toBe(1);
     s.advance(SEND_EVERY_MS);
+    expect(s.cards.at(-1)?.text).toContain("⏳ 4 с · 1 действие");
+    s.advance(MINUTE);
+    expect(s.cards.at(-1)?.text).toContain("⏳ 1 мин · 1 действие");
+    // Past a minute the time shown changes once a minute.
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.length).toBe(1);
-    expect(s.cards[0]?.text).toStartWith("🤖 **Субагент**\n⏳");
+    s.advance(SEND_EVERY_MS);
+    expect(s.cards.length).toBe(3);
+  });
+
+  test("a finished card is not sent again", () => {
+    const s = setup();
+    s.w.start();
+    const write = s.agent("a1");
+    write(assistant("m1", "end_turn", text("done")));
+    s.advance(SEND_EVERY_MS);
+    s.advance(SECOND);
+    expect(s.cards.at(-1)).toMatchObject({ final: true });
+    const sent = s.cards.length;
+    s.advance(MINUTE);
+    expect(s.cards.length).toBe(sent);
   });
 
   test("agents already there at start are followed from their end", () => {

@@ -61,6 +61,7 @@ class Agent {
   private dirty = false;
   private idle = false;
   private lastSent = 0;
+  private sentText = "";
 
   constructor(
     readonly id: string,
@@ -95,13 +96,19 @@ class Agent {
   tick(): void {
     this.tailer.pollNow();
     this.meta ??= this.readMeta();
-    if (!this.dirty || (!this.shown && !this.env.canStart())) return;
     const final = this.status !== "running";
+    // A running card's time goes on even while the agent writes nothing, as
+    // when it thinks for long, so the card shows it is alive.
+    if (!this.dirty && (final || !this.shown)) return;
+    if (!this.shown && !this.env.canStart()) return;
     // The final message comes in several records: wait until all are read.
     if (final ? !this.idle : this.env.now() - this.lastSent < this.env.sendEveryMs) return;
-    this.env.send({ id: this.cardId(), text: this.render(this.texts, this.statusLine()), final });
-    this.shown = true;
+    const text = this.render(this.texts, this.statusLine());
     this.dirty = false;
+    if (!final && text === this.sentText) return;
+    this.env.send({ id: this.cardId(), text, final });
+    this.shown = true;
+    this.sentText = text;
     this.lastSent = this.env.now();
   }
 
