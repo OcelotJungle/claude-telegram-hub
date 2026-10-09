@@ -1,9 +1,9 @@
-import type { RichMessage } from "../src/hub/rich.ts"
+import type { RichMessage } from "../src/hub/rich.ts";
 
-import { describe, expect, test } from "bun:test"
-import { richPhotos, richToMarkdown } from "../src/hub/rich.ts"
+import { describe, expect, test } from "bun:test";
+import { richPhotos, richToMarkdown } from "../src/hub/rich.ts";
 
-const md = (...blocks: unknown[]) => richToMarkdown({ blocks } as RichMessage)
+const md = (...blocks: unknown[]) => richToMarkdown({ blocks } as RichMessage);
 
 describe("rich message to Markdown", () => {
   // A Markdown file pasted into Telegram, as Bot API 10.1 describes it.
@@ -42,8 +42,8 @@ describe("rich message to Markdown", () => {
         "",
         "конец",
       ].join("\n"),
-    )
-  })
+    );
+  });
 
   test("inline formatting: italic, strikethrough, links, emoji, math; plain text for the rest", () => {
     expect(
@@ -66,8 +66,8 @@ describe("rich message to Markdown", () => {
           { type: "anchor", name: "here" },
         ],
       }),
-    ).toBe("*i* ~~s~~ [docs](https://x.dev) https://y.dev 🔥 $E=mc^2$ @bob")
-  })
+    ).toBe("*i* ~~s~~ [docs](https://x.dev) https://y.dev 🔥 $E=mc^2$ @bob");
+  });
 
   test("checkboxes, a table, details, and a math block", () => {
     expect(
@@ -77,8 +77,8 @@ describe("rich message to Markdown", () => {
         { type: "details", summary: "Подробнее", blocks: [{ type: "paragraph", text: "скрыто" }] },
         { type: "mathematical_expression", expression: "\\int x" },
       ),
-    ).toBe(["• [x] сделано", "• [ ] нет", "", "| A | B\\|C |", "| --- | --- |", "| 1 |  |", "", "**Подробнее**", "", "скрыто", "", "$$\n\\int x\n$$"].join("\n"))
-  })
+    ).toBe(["• [x] сделано", "• [ ] нет", "", "| A | B\\|C |", "| --- | --- |", "| 1 |  |", "", "**Подробнее**", "", "скрыто", "", "$$\n\\int x\n$$"].join("\n"));
+  });
 
   test("media name their file_id for download_attachment, with their captions", () => {
     expect(
@@ -100,16 +100,16 @@ describe("rich message to Markdown", () => {
         "(voice note, file_id: vn)",
         "(map: 55.75, 37.62)",
       ].join("\n\n"),
-    )
-  })
+    );
+  });
 
   test("a downloaded photo is named by its local path", () => {
-    const photo = { type: "photo", photo: [{ file_id: "p1" }, { file_id: "p2" }] }
-    expect(richToMarkdown({ blocks: [photo] } as RichMessage, new Map([["p2", "C:\\inbox\\p.jpg"]]))).toBe("(photo: C:\\inbox\\p.jpg)")
-  })
+    const photo = { type: "photo", photo: [{ file_id: "p1" }, { file_id: "p2" }] };
+    expect(richToMarkdown({ blocks: [photo] } as RichMessage, new Map([["p2", "C:\\inbox\\p.jpg"]]))).toBe("(photo: C:\\inbox\\p.jpg)");
+  });
 
   test("the photos to download: the largest size of each, wherever it sits", () => {
-    const photo = (id: string) => ({ type: "photo", photo: [{ file_id: `${id}-small` }, { file_id: id }] })
+    const photo = (id: string) => ({ type: "photo", photo: [{ file_id: `${id}-small` }, { file_id: id }] });
     const m = {
       blocks: [
         photo("a"),
@@ -118,13 +118,13 @@ describe("rich message to Markdown", () => {
         { type: "details", summary: "x", blocks: [{ type: "blockquote", blocks: [photo("d")] }] },
         { type: "photo", photo: [] },
       ],
-    } as RichMessage
-    expect(richPhotos(m)).toEqual(["a", "b", "c", "d"])
-  })
+    } as RichMessage;
+    expect(richPhotos(m)).toEqual(["a", "b", "c", "d"]);
+  });
 
   test("a kind of block or text Telegram adds later still shows its text", () => {
     expect(md({ type: "poster", text: ["новое ", { type: "glow", text: "слово" }] }, { type: "gallery", blocks: [{ type: "paragraph", text: "внутри" }] }, { type: "void" })).toBe(
       "новое слово\n\nвнутри",
-    )
-  })
-})
+    );
+  });
+});

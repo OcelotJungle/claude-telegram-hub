@@ -1,74 +1,74 @@
 // In-process fake of the Telegram Bot API, enough for the hub: long-poll
 // getUpdates (with the real "terminated by other getUpdates request" conflict),
 // sendMessage, sendRichMessage, media uploads (multipart), forum topics, getFile and file download.
-import type { Server } from "bun"
-import type { Update } from "../src/hub/telegram.ts"
+import type { Server } from "bun";
+import type { Update } from "../src/hub/telegram.ts";
 
-type Call = { method: string; params: any }
-type Failure = { code: number; description: string; retry_after?: number }
+type Call = { method: string; params: any };
+type Failure = { code: number; description: string; retry_after?: number };
 
 export class FakeTelegram {
-  readonly token = "123456:TEST"
-  calls: Call[] = []
-  conflicts = 0
-  private server: Server<undefined>
-  private updates: Update[] = []
-  private nextUpdateId = 1
-  private nextThreadId = 100
-  private nextMessageId = 1000
-  private waiting: { resolve: () => void } | undefined
-  private activePoll: { abort: (r: Response) => void } | undefined
-  private failures = new Map<string, Failure[]>()
-  private hangs = new Map<string, number>()
-  private deletedTopics = new Set<number>()
-  files = new Map<string, { path: string; body: Uint8Array }>()
+  readonly token = "123456:TEST";
+  calls: Call[] = [];
+  conflicts = 0;
+  private server: Server<undefined>;
+  private updates: Update[] = [];
+  private nextUpdateId = 1;
+  private nextThreadId = 100;
+  private nextMessageId = 1000;
+  private waiting: { resolve: () => void } | undefined;
+  private activePoll: { abort: (r: Response) => void } | undefined;
+  private failures = new Map<string, Failure[]>();
+  private hangs = new Map<string, number>();
+  private deletedTopics = new Set<number>();
+  files = new Map<string, { path: string; body: Uint8Array }>();
 
   constructor() {
     this.server = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
       fetch: req => this.handle(req),
-    })
+    });
   }
 
   get url(): string {
-    return `http://127.0.0.1:${this.server.port}`
+    return `http://127.0.0.1:${this.server.port}`;
   }
 
   stop(): void {
-    this.waiting?.resolve()
-    this.server.stop(true)
+    this.waiting?.resolve();
+    this.server.stop(true);
   }
 
   pushUpdate(u: Omit<Update, "update_id">): Update {
-    const full = { update_id: this.nextUpdateId++, ...u } as Update
-    this.updates.push(full)
-    this.waiting?.resolve()
-    return full
+    const full = { update_id: this.nextUpdateId++, ...u } as Update;
+    this.updates.push(full);
+    this.waiting?.resolve();
+    return full;
   }
 
   failNext(method: string, f: Failure): void {
-    const list = this.failures.get(method) ?? []
-    list.push(f)
-    this.failures.set(method, list)
+    const list = this.failures.get(method) ?? [];
+    list.push(f);
+    this.failures.set(method, list);
   }
 
   // The next `count` calls of `method` are never answered, like a connection
   // the network silently drops.
   hangNext(method: string, count = 1): void {
-    this.hangs.set(method, (this.hangs.get(method) ?? 0) + count)
+    this.hangs.set(method, (this.hangs.get(method) ?? 0) + count);
   }
 
   clearHangs(): void {
-    this.hangs.clear()
+    this.hangs.clear();
   }
 
   deleteTopic(threadId: number): void {
-    this.deletedTopics.add(threadId)
+    this.deletedTopics.add(threadId);
   }
 
   callsOf(method: string): any[] {
-    return this.calls.filter(c => c.method === method).map(c => c.params)
+    return this.calls.filter(c => c.method === method).map(c => c.params);
   }
 
   // Text messages in order, plain and rich; a rich one gets the text of its
@@ -76,42 +76,42 @@ export class FakeTelegram {
   texts(): any[] {
     return this.calls
       .filter(c => c.method === "sendMessage" || c.method === "sendRichMessage")
-      .map(c => (c.method === "sendRichMessage" ? { ...c.params, text: blocksText(c.params.rich_message.blocks) } : c.params))
+      .map(c => (c.method === "sendRichMessage" ? { ...c.params, text: blocksText(c.params.rich_message.blocks) } : c.params));
   }
 
   private async handle(req: Request): Promise<Response> {
-    const url = new URL(req.url)
-    const filePrefix = `/file/bot${this.token}/`
+    const url = new URL(req.url);
+    const filePrefix = `/file/bot${this.token}/`;
     if (url.pathname.startsWith(filePrefix)) {
-      const path = url.pathname.slice(filePrefix.length)
-      for (const f of this.files.values()) if (f.path === path) return new Response(Buffer.from(f.body))
-      return new Response("not found", { status: 404 })
+      const path = url.pathname.slice(filePrefix.length);
+      for (const f of this.files.values()) if (f.path === path) return new Response(Buffer.from(f.body));
+      return new Response("not found", { status: 404 });
     }
-    const m = url.pathname.match(/^\/bot([^/]+)\/(\w+)$/)
-    if (!m || m[1] !== this.token) return json({ ok: false, error_code: 401, description: "Unauthorized" }, 401)
-    const method = m[2]!
-    const params = req.method !== "POST" ? {} : (req.headers.get("content-type") ?? "").startsWith("multipart/") ? await formParams(req) : await req.json().catch(() => ({}))
-    this.calls.push({ method, params })
+    const m = url.pathname.match(/^\/bot([^/]+)\/(\w+)$/);
+    if (!m || m[1] !== this.token) return json({ ok: false, error_code: 401, description: "Unauthorized" }, 401);
+    const method = m[2]!;
+    const params = req.method !== "POST" ? {} : (req.headers.get("content-type") ?? "").startsWith("multipart/") ? await formParams(req) : await req.json().catch(() => ({}));
+    this.calls.push({ method, params });
 
-    const hang = this.hangs.get(method) ?? 0
+    const hang = this.hangs.get(method) ?? 0;
     if (hang > 0) {
-      this.hangs.set(method, hang - 1)
-      return new Promise<Response>(() => {})
+      this.hangs.set(method, hang - 1);
+      return new Promise<Response>(() => {});
     }
 
-    const fail = this.failures.get(method)?.shift()
+    const fail = this.failures.get(method)?.shift();
     if (fail) {
       return json(
         { ok: false, error_code: fail.code, description: fail.description, ...(fail.retry_after != null ? { parameters: { retry_after: fail.retry_after } } : {}) },
         fail.code,
-      )
+      );
     }
 
     switch (method) {
       case "getUpdates":
-        return this.getUpdates(params)
+        return this.getUpdates(params);
       case "getMe":
-        return ok({ id: 1, is_bot: true, username: "test_bot" })
+        return ok({ id: 1, is_bot: true, username: "test_bot" });
       case "sendMessage":
       case "sendRichMessage":
       case "sendPhoto":
@@ -120,83 +120,83 @@ export class FakeTelegram {
       case "sendAnimation":
       case "sendDocument":
       case "sendMediaGroup": {
-        const thread = params.message_thread_id
+        const thread = params.message_thread_id;
         if (thread != null && this.deletedTopics.has(Number(thread))) {
-          return json({ ok: false, error_code: 400, description: "Bad Request: message thread not found" }, 400)
+          return json({ ok: false, error_code: 400, description: "Bad Request: message thread not found" }, 400);
         }
-        const message = () => ({ message_id: this.nextMessageId++, chat: { id: Number(params.chat_id) }, text: params.text })
-        return ok(method === "sendMediaGroup" ? params.media.map(message) : message())
+        const message = () => ({ message_id: this.nextMessageId++, chat: { id: Number(params.chat_id) }, text: params.text });
+        return ok(method === "sendMediaGroup" ? params.media.map(message) : message());
       }
       case "createForumTopic":
-        return ok({ message_thread_id: this.nextThreadId++, name: params.name, icon_color: 0 })
+        return ok({ message_thread_id: this.nextThreadId++, name: params.name, icon_color: 0 });
       case "editForumTopic":
-        return ok(true)
+        return ok(true);
       case "getFile": {
-        const f = this.files.get(params.file_id)
-        if (!f) return json({ ok: false, error_code: 400, description: "Bad Request: invalid file_id" }, 400)
-        return ok({ file_id: params.file_id, file_unique_id: `u${params.file_id}`, file_path: f.path })
+        const f = this.files.get(params.file_id);
+        if (!f) return json({ ok: false, error_code: 400, description: "Bad Request: invalid file_id" }, 400);
+        return ok({ file_id: params.file_id, file_unique_id: `u${params.file_id}`, file_path: f.path });
       }
       default:
-        return ok(true)
+        return ok(true);
     }
   }
 
   private async getUpdates(params: any): Promise<Response> {
-    const offset = Number(params.offset ?? 0)
-    if (offset > 0) this.updates = this.updates.filter(u => u.update_id >= offset)
+    const offset = Number(params.offset ?? 0);
+    if (offset > 0) this.updates = this.updates.filter(u => u.update_id >= offset);
     // A newer getUpdates terminates the one in progress, like Telegram does.
     if (this.activePoll) {
-      this.conflicts++
+      this.conflicts++;
       this.activePoll.abort(
         json({ ok: false, error_code: 409, description: "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running" }, 409),
-      )
+      );
     }
-    const timeoutMs = Math.min(Number(params.timeout ?? 0), 2) * 1000
-    const ready = () => this.updates.filter(u => u.update_id >= offset)
+    const timeoutMs = Math.min(Number(params.timeout ?? 0), 2) * 1000;
+    const ready = () => this.updates.filter(u => u.update_id >= offset);
     if (ready().length === 0 && timeoutMs > 0) {
       const res = await new Promise<Response | undefined>(resolve => {
-        const timer = setTimeout(() => resolve(undefined), timeoutMs)
+        const timer = setTimeout(() => resolve(undefined), timeoutMs);
         const poll = {
           abort: (r: Response) => {
-            clearTimeout(timer)
-            resolve(r)
+            clearTimeout(timer);
+            resolve(r);
           },
-        }
-        this.activePoll = poll
+        };
+        this.activePoll = poll;
         this.waiting = {
           resolve: () => {
-            clearTimeout(timer)
-            resolve(undefined)
+            clearTimeout(timer);
+            resolve(undefined);
           },
-        }
-      })
-      this.activePoll = undefined
-      this.waiting = undefined
-      if (res) return res
+        };
+      });
+      this.activePoll = undefined;
+      this.waiting = undefined;
+      if (res) return res;
     }
-    return ok(ready())
+    return ok(ready());
   }
 }
 
 function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
 function ok(result: unknown): Response {
-  return json({ ok: true, result })
+  return json({ ok: true, result });
 }
 
-let messageCounter = 1
+let messageCounter = 1;
 
 export function topicMsg(o: {
-  chatId: number | string
-  threadId?: number
-  fromId: number | string
-  text?: string
-  isTopic?: boolean
-  extra?: Record<string, unknown>
+  chatId: number | string;
+  threadId?: number;
+  fromId: number | string;
+  text?: string;
+  isTopic?: boolean;
+  extra?: Record<string, unknown>;
 }): Omit<Update, "update_id"> {
-  const isTopic = o.isTopic ?? o.threadId != null
+  const isTopic = o.isTopic ?? o.threadId != null;
   return {
     message: {
       message_id: messageCounter++,
@@ -208,24 +208,24 @@ export function topicMsg(o: {
       ...(o.text != null ? { text: o.text } : {}),
       ...o.extra,
     },
-  } as Omit<Update, "update_id">
+  } as Omit<Update, "update_id">;
 }
 
 // Multipart fields as the JSON body would carry them: numbers and booleans
 // stay strings as sent, JSON fields (media, entities) are parsed, an uploaded
 // file becomes { file: name, size, body }.
 async function formParams(req: Request): Promise<any> {
-  const out: any = {}
+  const out: any = {};
   for (const [key, value] of (await req.formData()).entries()) {
-    const v: unknown = value
-    if (v instanceof File) out[key] = { file: v.name, size: v.size, body: await v.text() }
-    else out[key] = key === "media" || key.endsWith("entities") ? JSON.parse(String(v)) : v
+    const v: unknown = value;
+    if (v instanceof File) out[key] = { file: v.name, size: v.size, body: await v.text() };
+    else out[key] = key === "media" || key.endsWith("entities") ? JSON.parse(String(v)) : v;
   }
-  return out
+  return out;
 }
 
 function blocksText(blocks: any[]): string {
-  const text = (t: any): string => (typeof t === "string" ? t : Array.isArray(t) ? t.map(text).join("") : text(t?.text ?? ""))
+  const text = (t: any): string => (typeof t === "string" ? t : Array.isArray(t) ? t.map(text).join("") : text(t?.text ?? ""));
   const block = (b: any): string =>
     b.type === "list"
       ? b.items.map((i: any) => blocksText(i.blocks)).join("\n")
@@ -233,6 +233,6 @@ function blocksText(blocks: any[]): string {
         ? blocksText(b.blocks)
         : b.cells
           ? b.cells.map((r: any[]) => r.map(c => text(c.text)).join(" | ")).join("\n")
-          : text(b.text)
-  return blocks.map(block).join("\n\n")
+          : text(b.text);
+  return blocks.map(block).join("\n\n");
 }
