@@ -1,5 +1,7 @@
+import type { RichMessage } from '../src/hub/rich.ts'
+
 import { describe, expect, test } from 'bun:test'
-import { richPhotos, richToMarkdown, type RichMessage } from '../src/hub/rich.ts'
+import { richPhotos, richToMarkdown } from '../src/hub/rich.ts'
 
 const md = (...blocks: unknown[]) => richToMarkdown({ blocks } as RichMessage)
 

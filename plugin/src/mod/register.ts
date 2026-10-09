@@ -5,6 +5,7 @@
 // commands.ts; here are only the engine's `$` calls, which the engine allows
 // nowhere but this file.
 import type { Register } from 'claude-code'
+
 import { DEFAULT_PORT } from '../shared/protocol.ts'
 import { Runner } from './commands.ts'
 

@@ -1,5 +1,7 @@
+import type { Formatted } from '../src/shared/markdown.ts'
+
 import { describe, expect, test } from 'bun:test'
-import { toTelegram, type Formatted } from '../src/shared/markdown.ts'
+import { toTelegram } from '../src/shared/markdown.ts'
 
 // The entity's text, for readable expectations.
 const spans = (f: Formatted) => f.entities.map(e => ({ ...e, text: f.text.slice(e.offset, e.offset + e.length) }))

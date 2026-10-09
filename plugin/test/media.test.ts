@@ -1,5 +1,7 @@
+import type { OutFile } from '../src/shared/media.ts'
+
 import { describe, expect, test } from 'bun:test'
-import { albums, kindOf, MAX_PHOTO, type OutFile } from '../src/shared/media.ts'
+import { albums, kindOf, MAX_PHOTO } from '../src/shared/media.ts'
 
 const MB = 1024 * 1024
 const f = (name: string, kind = kindOf(name, 1)): OutFile => ({ path: `/q/${name}`, name, size: 1, kind })

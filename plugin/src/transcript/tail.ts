@@ -1,5 +1,7 @@
+import type { Logger } from '../shared/log.ts'
+
 import { closeSync, openSync, readFileSync, readSync, statSync } from 'fs'
-import { nullLogger, type Logger } from '../shared/log.ts'
+import { nullLogger } from '../shared/log.ts'
 import { parseRecord } from './parse.ts'
 
 const NEWLINE = 0x0a

@@ -1,8 +1,10 @@
+import type { HubToPlugin } from '../src/shared/protocol.ts'
+
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { readFileSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
 import { HubClient, spawnHubDetached } from '../src/plugin/hub-client.ts'
-import { PROTOCOL_VERSION, type HubToPlugin } from '../src/shared/protocol.ts'
+import { PROTOCOL_VERSION } from '../src/shared/protocol.ts'
 import { FakeTelegram } from './fake-telegram.ts'
 import { freePort, memLogger, tempDir, waitFor } from './helpers.ts'
 

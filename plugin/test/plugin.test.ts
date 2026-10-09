@@ -1,3 +1,5 @@
+import type { Config } from '../src/shared/config.ts'
+
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, truncateSync, writeFileSync } from 'fs'
 import { join } from 'path'
@@ -5,7 +7,6 @@ import { Hub } from '../src/hub/hub.ts'
 import { TelegramApi } from '../src/hub/telegram.ts'
 import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, MAX_AUTO_CONTINUES, PluginCore } from '../src/plugin/plugin.ts'
 import { NOTIFY_MARKER } from '../src/transcript/relay.ts'
-import type { Config } from '../src/shared/config.ts'
 import { FakeTelegram, topicMsg } from './fake-telegram.ts'
 import { freePort, memLogger, tempDir, waitFor } from './helpers.ts'
 

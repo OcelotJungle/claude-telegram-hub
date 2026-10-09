@@ -1,5 +1,7 @@
+import type { Token, Tokens } from 'marked'
+
 import { decodeHTML } from 'entities'
-import { Lexer, type Token, type Tokens } from 'marked'
+import { Lexer } from 'marked'
 
 // Agent text (CommonMark + GFM) as a rich message in blocks (Bot API 10.1),
 // so Telegram shows real headings, lists and tables. Blocks carry text as it

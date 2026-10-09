@@ -1,15 +1,19 @@
+import type { Logger } from '../shared/log.ts'
+import type { ChannelMeta, HubToPlugin } from '../shared/protocol.ts'
+import type { Outgoing } from '../transcript/relay.ts'
+import type { Titles } from '../transcript/tail.ts'
+
 import { randomUUID } from 'crypto'
 import { copyFileSync, mkdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 import { basename, join, resolve } from 'path'
 import { isInside } from '../shared/config.ts'
-import type { Logger } from '../shared/log.ts'
 import { toTelegram } from '../shared/markdown.ts'
 import { MAX_CAPTION, MAX_UPLOAD } from '../shared/media.ts'
-import { PROTOCOL_VERSION, type ChannelMeta, type HubToPlugin } from '../shared/protocol.ts'
+import { PROTOCOL_VERSION } from '../shared/protocol.ts'
 import { transcriptPathFor } from '../transcript/locate.ts'
 import { parseRecord } from '../transcript/parse.ts'
-import { Relay, type Outgoing } from '../transcript/relay.ts'
-import { effectiveTitle, readSessionTitles, TranscriptTailer, type Titles } from '../transcript/tail.ts'
+import { Relay } from '../transcript/relay.ts'
+import { effectiveTitle, readSessionTitles, TranscriptTailer } from '../transcript/tail.ts'
 import { HubClient } from './hub-client.ts'
 
 export type PluginOptions = {

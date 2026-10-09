@@ -1,6 +1,7 @@
+import type { TranscriptEvent } from '../src/transcript/parse.ts'
+
 import { describe, expect, test } from 'bun:test'
 import { NOTIFY_MARKER, Relay } from '../src/transcript/relay.ts'
-import type { TranscriptEvent } from '../src/transcript/parse.ts'
 
 const own = (name: string) => /(^|__)tg_(enable|disable|notify)$/.test(name)
 const text = (t: string, m = 'm1'): TranscriptEvent => ({ kind: 'text', text: t, messageId: m })

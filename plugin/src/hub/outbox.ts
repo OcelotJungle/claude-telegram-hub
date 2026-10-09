@@ -1,9 +1,10 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'fs'
-import { dirname } from 'path'
 import type { Logger } from '../shared/log.ts'
 import type { Entity } from '../shared/markdown.ts'
 import type { OutFile } from '../shared/media.ts'
 import type { Block } from './rich-out.ts'
+
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'fs'
+import { dirname } from 'path'
 
 // One Telegram send for a session's topic: a piece of text at most one
 // message long, or files (one file or an album) with text as their caption.

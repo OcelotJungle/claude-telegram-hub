@@ -1,5 +1,7 @@
+import type { Token, Tokens } from 'marked'
+
 import { decodeHTML } from 'entities'
-import { Lexer, type Token, type Tokens } from 'marked'
+import { Lexer } from 'marked'
 
 // A Bot API MessageEntity. Offsets and lengths count UTF-16 code units, as
 // JavaScript string indices do.

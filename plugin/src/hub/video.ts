@@ -1,6 +1,7 @@
-import { rmSync, statSync } from 'fs'
 import type { Logger } from '../shared/log.ts'
 import type { VideoMeta } from '../shared/media.ts'
+
+import { rmSync, statSync } from 'fs'
 
 // Bot API thumbnail limits: a JPEG of at most 320 px a side, under 200 kB.
 const THUMB_SIDE = 320

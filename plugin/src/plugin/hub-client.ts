@@ -1,8 +1,9 @@
+import type { Logger } from '../shared/log.ts'
+import type { HubToPlugin, PluginToHub } from '../shared/protocol.ts'
+
 import { spawn } from 'child_process'
 import { randomUUID } from 'crypto'
 import { homedir } from 'os'
-import type { Logger } from '../shared/log.ts'
-import type { HubToPlugin, PluginToHub } from '../shared/protocol.ts'
 
 type Hello = Extract<PluginToHub, { type: 'hello' }>
 export type SendFiles = Extract<PluginToHub, { type: 'sendFiles' }>

@@ -1,10 +1,12 @@
-import { mkdirSync, writeFileSync } from 'fs'
-import { join } from 'path'
 import type { TelegramMessage, TelegramUpdate } from '@gramio/types'
-import { nullLogger, type Logger } from '../shared/log.ts'
+import type { Logger } from '../shared/log.ts'
 import type { Entity } from '../shared/markdown.ts'
 import type { OutFile } from '../shared/media.ts'
 import type { Block } from './rich-out.ts'
+
+import { mkdirSync, writeFileSync } from 'fs'
+import { join } from 'path'
+import { nullLogger } from '../shared/log.ts'
 
 // Bot API types, generated from its documentation.
 export type Message = TelegramMessage
