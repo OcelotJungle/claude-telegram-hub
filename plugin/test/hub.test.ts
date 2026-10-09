@@ -161,6 +161,23 @@ describe('inbound', () => {
     expect(a.messages.some(m => m.type === 'inbound')).toBe(false)
   })
 
+  // Rich text pasted into Telegram arrives as text plus entities.
+  test('a formatted message is delivered as its text, and the log names it without the text', async () => {
+    await startHub()
+    const a = await enabled('a')
+    const text = '# План\n\nСначала **v2g1**, потом `cleanup`.'
+    const entities = [
+      { type: 'bold', offset: 0, length: 6 },
+      { type: 'bold', offset: 17, length: 4 },
+      { type: 'code', offset: 29, length: 7 },
+    ]
+    const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text, extra: { entities } })
+    fake.pushUpdate(u)
+    expect((await a.next(m => m.type === 'inbound')).content).toBe(text)
+    const line = log.lines.find(l => l.includes(`message ${u.message!.message_id}`))
+    expect(line).toBe(`INFO message ${u.message!.message_id} in topic 100 → session a: text, ${text.length} chars, entities bold, code`)
+  })
+
   test('a topic of a session without a window gets "сессия сейчас не активна"', async () => {
     await startHub()
     const a = await enabled('a')

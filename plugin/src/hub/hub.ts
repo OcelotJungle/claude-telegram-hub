@@ -782,6 +782,7 @@ ${msg.text}`)
     this.setEnabled(route.sessionId, true)
     const { content, meta } = await this.inboundOf(api, m)
     this.send(ws, { type: 'inbound', content, meta })
+    this.log.info(`message ${m.message_id} in topic ${route.topicId} → session ${route.sessionId}: ${shapeOf(m, content)}`)
   }
 
   // Same meta shape as the official telegram plugin.
@@ -851,6 +852,14 @@ function filesPiece(files: OutFile[], caption: Formatted | undefined, loud: bool
     files,
     ...(caption?.entities.length ? { entities: caption.entities } : {}),
   }
+}
+
+// What a delivered message was, for the log: its kind, length and formatting,
+// never its text.
+function shapeOf(m: Message, content: string): string {
+  const kind = (['photo', 'document', 'voice', 'audio', 'video', 'video_note', 'sticker'] as const).find(k => m[k]) ?? 'text'
+  const types = [...new Set((m.entities ?? m.caption_entities ?? []).map(e => e.type))]
+  return `${kind}, ${content.length} chars${types.length ? `, entities ${types.join(', ')}` : ''}`
 }
 
 // Uploader-controlled names land inside the <channel> tag; strip delimiters.

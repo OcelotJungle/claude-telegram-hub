@@ -76,6 +76,13 @@ describe('routeUpdate', () => {
     expect(route(u).action).toBe('ignore')
   })
 
+  // A kind of message the hub does not know yet shows in the log by its fields.
+  test('the reason names the fields of a message without content, not the envelope', () => {
+    const { route } = setup()
+    const u = topicMsg({ chatId: GROUP, threadId: 10, fromId: ME, extra: { forum_topic_edited: { name: 'x' }, reply_to_message: {} } })
+    expect(route(u)).toEqual({ action: 'ignore', reason: 'service message (fields: forum_topic_edited)' })
+  })
+
   test('photo without caption is delivered', () => {
     const { route } = setup()
     const u = topicMsg({ chatId: GROUP, threadId: 10, fromId: ME, extra: { photo: [{ file_id: 'p', file_unique_id: 'u' }] } })

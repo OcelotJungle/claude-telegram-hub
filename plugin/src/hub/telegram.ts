@@ -18,6 +18,8 @@ export type Message = {
   is_topic_message?: boolean
   text?: string
   caption?: string
+  entities?: { type: string }[]
+  caption_entities?: { type: string }[]
   photo?: PhotoSize[]
   document?: FileRef
   voice?: FileRef

@@ -17,7 +17,7 @@ export function routeUpdate(u: Update, cfg: Config, sessions: SessionStore, isCo
   if (!m.from || m.from.is_bot) return ignore('bot or anonymous sender')
   if (!cfg.allowFrom.includes(String(m.from.id))) return ignore(`sender ${m.from.id} not allowed`)
   if (m.is_topic_message !== true || m.message_thread_id == null) return ignore('not in a topic')
-  if (!hasContent(m)) return ignore('service message')
+  if (!hasContent(m)) return ignore(`service message (fields: ${Object.keys(m).filter(k => !ENVELOPE.has(k)).join(', ')})`)
   const topicId = m.message_thread_id
   const sessionId = sessions.findByTopic(topicId)
   if (!sessionId) return ignore(`topic ${topicId} has no session`)
@@ -34,6 +34,12 @@ export function commandOf(text: string, botUsername: string | undefined): Omit<T
   if (m[2] && botUsername && m[2].toLowerCase() !== botUsername.toLowerCase()) return undefined
   return { name: m[1]!.toLowerCase() as TopicCommand['name'], args: (m[3] ?? '').trim() }
 }
+
+// Fields every message may carry, whatever its kind.
+const ENVELOPE = new Set([
+  'message_id', 'date', 'edit_date', 'chat', 'from', 'sender_chat', 'message_thread_id', 'is_topic_message',
+  'reply_to_message', 'external_reply', 'quote', 'forward_origin', 'via_bot', 'author_signature', 'has_protected_content',
+])
 
 function ignore(reason: string): Route {
   return { action: 'ignore', reason }
