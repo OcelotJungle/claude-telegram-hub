@@ -14,7 +14,7 @@ describe("TranscriptTailer", () => {
   });
 
   function make(path: string) {
-    const recs: any[] = [];
+    const recs: unknown[] = [];
     let idles = 0;
     const t = new TranscriptTailer({ path, onRecord: r => recs.push(r), onIdle: () => idles++ });
     tailers.push(t);
@@ -106,7 +106,7 @@ describe("TranscriptTailer", () => {
   test("polls on its own timer", async () => {
     const path = join(tempDir(), "s.jsonl");
     writeFileSync(path, "");
-    const recs: any[] = [];
+    const recs: unknown[] = [];
     const t = new TranscriptTailer({ path, onRecord: r => recs.push(r), intervalMs: 20 });
     tailers.push(t);
     t.start();

@@ -4,8 +4,16 @@
 import type { Server } from "bun";
 import type { Update } from "../src/hub/telegram.ts";
 
-type Call = { method: string; params: any };
+import { z } from "zod";
+import { updateSchema } from "../src/hub/telegram.ts";
+import { arr, field, isObject } from "../src/shared/guards.ts";
+
+// Request params as the bot sent them.
+type Params = Record<string, unknown>;
+type Call = { method: string; params: Params };
 type Failure = { code: number; description: string; retry_after?: number };
+
+const sentText = z.looseObject({ text: z.string() });
 
 export class FakeTelegram {
   readonly token = "123456:TEST";
@@ -40,8 +48,8 @@ export class FakeTelegram {
     this.server.stop(true);
   }
 
-  pushUpdate(u: Omit<Update, "update_id">): Update {
-    const full = { update_id: this.nextUpdateId++, ...u } as Update;
+  pushUpdate(u: Update): Update {
+    const full = { ...u, update_id: this.nextUpdateId++ };
     this.updates.push(full);
     this.waiting?.resolve();
     return full;
@@ -67,16 +75,16 @@ export class FakeTelegram {
     this.deletedTopics.add(threadId);
   }
 
-  callsOf(method: string): any[] {
+  callsOf(method: string): Params[] {
     return this.calls.filter(c => c.method === method).map(c => c.params);
   }
 
   // Text messages in order, plain and rich; a rich one gets the text of its
   // blocks as `text`.
-  texts(): any[] {
+  texts(): z.infer<typeof sentText>[] {
     return this.calls
       .filter(c => c.method === "sendMessage" || c.method === "sendRichMessage")
-      .map(c => (c.method === "sendRichMessage" ? { ...c.params, text: blocksText(c.params.rich_message.blocks) } : c.params));
+      .map(c => sentText.parse(c.method === "sendRichMessage" ? { ...c.params, text: blocksText(field(c.params.rich_message, "blocks")) } : c.params));
   }
 
   private async handle(req: Request): Promise<Response> {
@@ -89,8 +97,8 @@ export class FakeTelegram {
     }
     const m = url.pathname.match(/^\/bot([^/]+)\/(\w+)$/);
     if (!m || m[1] !== this.token) return json({ ok: false, error_code: 401, description: "Unauthorized" }, 401);
-    const method = m[2]!;
-    const params = req.method !== "POST" ? {} : (req.headers.get("content-type") ?? "").startsWith("multipart/") ? await formParams(req) : await req.json().catch(() => ({}));
+    const method = m[2] ?? "";
+    const params = req.method !== "POST" ? {} : (req.headers.get("content-type") ?? "").startsWith("multipart/") ? await formParams(req) : jsonParams(await req.json().catch(() => ({})));
     this.calls.push({ method, params });
 
     const hang = this.hangs.get(method) ?? 0;
@@ -125,14 +133,14 @@ export class FakeTelegram {
           return json({ ok: false, error_code: 400, description: "Bad Request: message thread not found" }, 400);
         }
         const message = () => ({ message_id: this.nextMessageId++, chat: { id: Number(params.chat_id) }, text: params.text });
-        return ok(method === "sendMediaGroup" ? params.media.map(message) : message());
+        return ok(method === "sendMediaGroup" ? arr(params.media).map(message) : message());
       }
       case "createForumTopic":
         return ok({ message_thread_id: this.nextThreadId++, name: params.name, icon_color: 0 });
       case "editForumTopic":
         return ok(true);
       case "getFile": {
-        const f = this.files.get(params.file_id);
+        const f = this.files.get(String(params.file_id));
         if (!f) return json({ ok: false, error_code: 400, description: "Bad Request: invalid file_id" }, 400);
         return ok({ file_id: params.file_id, file_unique_id: `u${params.file_id}`, file_path: f.path });
       }
@@ -141,7 +149,7 @@ export class FakeTelegram {
     }
   }
 
-  private async getUpdates(params: any): Promise<Response> {
+  private async getUpdates(params: Params): Promise<Response> {
     const offset = Number(params.offset ?? 0);
     if (offset > 0) this.updates = this.updates.filter(u => u.update_id >= offset);
     // A newer getUpdates terminates the one in progress, like Telegram does.
@@ -195,9 +203,11 @@ export function topicMsg(o: {
   text?: string;
   isTopic?: boolean;
   extra?: Record<string, unknown>;
-}): Omit<Update, "update_id"> {
+}): Update {
   const isTopic = o.isTopic ?? o.threadId != null;
-  return {
+  // Checked like an update from Telegram; pushUpdate numbers it.
+  return updateSchema.parse({
+    update_id: 0,
     message: {
       message_id: messageCounter++,
       date: Math.floor(Date.now() / 1000),
@@ -208,14 +218,18 @@ export function topicMsg(o: {
       ...(o.text != null ? { text: o.text } : {}),
       ...o.extra,
     },
-  } as Omit<Update, "update_id">;
+  });
+}
+
+function jsonParams(v: unknown): Params {
+  return isObject(v) ? v : {};
 }
 
 // Multipart fields as the JSON body would carry them: numbers and booleans
 // stay strings as sent, JSON fields (media, entities) are parsed, an uploaded
 // file becomes { file: name, size, body }.
-async function formParams(req: Request): Promise<any> {
-  const out: any = {};
+async function formParams(req: Request): Promise<Params> {
+  const out: Params = {};
   for (const [key, value] of (await req.formData()).entries()) {
     const v: unknown = value;
     if (v instanceof File) out[key] = { file: v.name, size: v.size, body: await v.text() };
@@ -224,15 +238,19 @@ async function formParams(req: Request): Promise<any> {
   return out;
 }
 
-function blocksText(blocks: any[]): string {
-  const text = (t: any): string => (typeof t === "string" ? t : Array.isArray(t) ? t.map(text).join("") : text(t?.text ?? ""));
-  const block = (b: any): string =>
-    b.type === "list"
-      ? b.items.map((i: any) => blocksText(i.blocks)).join("\n")
-      : b.blocks
-        ? blocksText(b.blocks)
-        : b.cells
-          ? b.cells.map((r: any[]) => r.map(c => text(c.text)).join(" | ")).join("\n")
-          : text(b.text);
-  return blocks.map(block).join("\n\n");
+function blocksText(blocks: unknown): string {
+  const text = (t: unknown): string => (typeof t === "string" ? t : Array.isArray(t) ? t.map(text).join("") : text(field(t, "text") ?? ""));
+  const block = (b: unknown): string =>
+    field(b, "type") === "list"
+      ? arr(field(b, "items"))
+          .map(i => blocksText(field(i, "blocks")))
+          .join("\n")
+      : field(b, "blocks")
+        ? blocksText(field(b, "blocks"))
+        : field(b, "cells")
+          ? arr(field(b, "cells"))
+              .map(r => arr(r).map(c => text(field(c, "text"))).join(" | "))
+              .join("\n")
+          : text(field(b, "text"));
+  return arr(blocks).map(block).join("\n\n");
 }

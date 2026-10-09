@@ -1,6 +1,7 @@
 import { readFileSync } from "fs";
 import { homedir } from "os";
 import { isAbsolute, join, relative, resolve } from "path";
+import { arr, field } from "./guards.ts";
 import { DEFAULT_PORT } from "./protocol.ts";
 
 // Shared by every cswap profile, so it never depends on CLAUDE_CONFIG_DIR.
@@ -67,10 +68,8 @@ export function loadConfig(): Config {
   } catch {
     return { allowFrom: [] };
   }
-  const obj = (raw ?? {}) as { groupId?: unknown; allowFrom?: unknown };
-  const cfg: Config = {
-    allowFrom: Array.isArray(obj.allowFrom) ? obj.allowFrom.map(String) : [],
-  };
-  if (obj.groupId != null && obj.groupId !== "") cfg.groupId = String(obj.groupId);
+  const groupId = field(raw, "groupId");
+  const cfg: Config = { allowFrom: arr(field(raw, "allowFrom")).map(String) };
+  if (groupId != null && groupId !== "") cfg.groupId = String(groupId);
   return cfg;
 }

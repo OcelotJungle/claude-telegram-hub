@@ -50,7 +50,7 @@ export class Runner {
       const sessionId = await this.deps.sessionId();
       const res = await this.deps.http(`${this.base}/commands?session=${encodeURIComponent(sessionId)}`);
       if (res.status !== 200) return;
-      for (const cmd of JSON.parse(res.text) as TopicCommand[]) void this.execute(sessionId, cmd);
+      for (const cmd of topicCommands(res.text)) void this.execute(sessionId, cmd);
     } catch {
       // The hub is down or restarting: the next poll tries again.
     } finally {
@@ -193,4 +193,16 @@ function duration(ms: number): string {
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+// The commands in the hub's answer; anything else in it is skipped.
+function topicCommands(json: string): TopicCommand[] {
+  const list: unknown = JSON.parse(json);
+  return Array.isArray(list) ? list.filter(isTopicCommand) : [];
+}
+
+function isTopicCommand(v: unknown): v is TopicCommand {
+  if (typeof v !== "object" || v === null) return false;
+  const name = "name" in v ? v.name : undefined;
+  return "id" in v && typeof v.id === "string" && (name === "info" || name === "compact") && "args" in v && typeof v.args === "string";
 }

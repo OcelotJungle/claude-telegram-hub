@@ -1,7 +1,11 @@
+import type { HubToPlugin } from "../src/shared/protocol.ts";
+
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createServer } from "net";
+import { z } from "zod";
+import { hubToPlugin } from "../src/shared/protocol-schema.ts";
 
 export function tempDir(prefix = "tghub-"): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -21,6 +25,12 @@ export async function waitFor<T>(
   }
 }
 
+// The value a test cannot go on without.
+export function must<T>(v: T | null | undefined, what = "value"): T {
+  if (v == null) throw new Error(`no ${what}`);
+  return v;
+}
+
 export function memLogger() {
   const lines: string[] = [];
   return {
@@ -33,9 +43,9 @@ export function memLogger() {
 
 // A raw WebSocket "plugin" for hub tests.
 export async function wsClient(port: number, hello?: object) {
-  const messages: any[] = [];
+  const messages: HubToPlugin[] = [];
   const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
-  ws.onmessage = e => messages.push(JSON.parse(String(e.data)));
+  ws.onmessage = e => messages.push(hubToPlugin.parse(JSON.parse(String(e.data))));
   await new Promise<void>((resolve, reject) => {
     ws.onopen = () => resolve();
     ws.onerror = () => reject(new Error("ws connect failed"));
@@ -44,11 +54,26 @@ export async function wsClient(port: number, hello?: object) {
     ws,
     messages,
     send: (o: object) => ws.send(JSON.stringify(o)),
-    next: (pred: (m: any) => boolean, timeoutMs = 3000) => waitFor(() => messages.find(pred), timeoutMs, "hub message"),
+    // The first message of the type that passes `pred`.
+    next: <K extends HubToPlugin["type"]>(type: K, pred: (m: Extract<HubToPlugin, { type: K }>) => boolean = () => true, timeoutMs = 3000) => {
+      const ofType = (m: HubToPlugin): m is Extract<HubToPlugin, { type: K }> => m.type === type;
+      return waitFor(() => messages.filter(ofType).find(pred), timeoutMs, `hub message ${type}`);
+    },
     close: () => ws.close(),
   };
   if (hello) client.send(hello);
   return client;
+}
+
+const healthSchema = z.object({ pid: z.number() });
+
+// The pid of the hub listening on the port, or undefined when none answers.
+export async function hubHealth(port: number): Promise<{ pid: number } | undefined> {
+  try {
+    return healthSchema.parse(await (await fetch(`http://127.0.0.1:${port}/health`)).json());
+  } catch {
+    return undefined;
+  }
 }
 
 export function freePort(): Promise<number> {
@@ -56,8 +81,9 @@ export function freePort(): Promise<number> {
     const srv = createServer();
     srv.once("error", reject);
     srv.listen(0, "127.0.0.1", () => {
-      const port = (srv.address() as { port: number }).port;
-      srv.close(() => resolve(port));
+      const addr = srv.address();
+      if (addr === null || typeof addr === "string") return reject(new Error("no TCP port"));
+      srv.close(() => resolve(addr.port));
     });
   });
 }

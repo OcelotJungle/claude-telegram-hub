@@ -1,4 +1,5 @@
 import { extname } from "path";
+import { z } from "zod";
 
 // Bot API upload limits.
 export const MAX_UPLOAD = 50 * 1024 * 1024;
@@ -16,6 +17,14 @@ export type VideoMeta = { width?: number; height?: number; duration?: number; th
 // A file queued for the topic: path is the hub's own copy, name the original.
 // video: a video's metadata, set once it was probed.
 export type OutFile = { path: string; name: string; size: number; kind: FileKind; video?: VideoMeta };
+
+export const outFileSchema: z.ZodType<OutFile> = z.object({
+  path: z.string(),
+  name: z.string(),
+  size: z.number(),
+  kind: z.enum(["photo", "video", "audio", "animation", "document"]),
+  video: z.object({ width: z.number().optional(), height: z.number().optional(), duration: z.number().optional(), thumb: z.string().optional() }).optional(),
+});
 
 const BY_EXT: Record<string, FileKind> = {
   ".jpg": "photo",
@@ -47,7 +56,7 @@ export function albums(files: OutFile[]): OutFile[][] {
   for (const file of files) {
     const last = out.at(-1);
     const fam = family(file.kind);
-    if (last && fam && family(last[0]!.kind) === fam && last.length < MAX_ALBUM) last.push(file);
+    if (last && fam && family(last[0].kind) === fam && last.length < MAX_ALBUM) last.push(file);
     else out.push([file]);
   }
   return out;

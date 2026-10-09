@@ -5,6 +5,10 @@ import type { Block } from "./rich-out.ts";
 
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "fs";
 import { dirname } from "path";
+import { z } from "zod";
+import { entitySchema } from "../shared/markdown.ts";
+import { outFileSchema } from "../shared/media.ts";
+import { blockSchema } from "./rich-out.ts";
 
 // One Telegram send for a session's topic: a piece of text at most one
 // message long, or files (one file or an album) with text as their caption.
@@ -14,6 +18,22 @@ export type Piece = { text: string; silent: boolean; entities?: Entity[]; rich?:
 export type OutItem = Piece & { id: string; sessionId: string };
 
 type Data = { items: OutItem[]; seen: string[] };
+
+const dataSchema: z.ZodType<Data> = z.object({
+  items: z.array(
+    z.object({
+      id: z.string(),
+      sessionId: z.string(),
+      text: z.string(),
+      silent: z.boolean(),
+      entities: z.array(entitySchema).optional(),
+      rich: z.array(blockSchema).optional(),
+      files: z.array(outFileSchema).optional(),
+      notice: z.boolean().optional(),
+    }),
+  ),
+  seen: z.array(z.string()),
+});
 
 // Plugin message ids remembered after their pieces are sent, to recognise a
 // plugin re-sending what the hub took before it crashed.
@@ -36,9 +56,7 @@ export class Outbox {
       return;
     }
     try {
-      const parsed = JSON.parse(raw) as Partial<Data>;
-      if (!Array.isArray(parsed.items) || !Array.isArray(parsed.seen)) throw new Error("unexpected shape");
-      this.data = { items: parsed.items, seen: parsed.seen };
+      this.data = dataSchema.parse(JSON.parse(raw));
     } catch (e) {
       const aside = `${file}.corrupt-${Date.now()}`;
       try {
@@ -119,8 +137,9 @@ export class Outbox {
   // Puts several pieces in place of one; they stay pieces of its message.
   replace(id: string, pieces: Piece[]): void {
     const at = this.data.items.findIndex(i => i.id === id);
-    if (at < 0) return;
-    const { sessionId } = this.data.items[at]!;
+    const old = this.data.items[at];
+    if (at < 0 || !old) return;
+    const { sessionId } = old;
     this.data.items.splice(at, 1, ...pieces.map((p, j) => ({ ...p, id: `${id}.${j}`, sessionId })));
     this.save();
   }

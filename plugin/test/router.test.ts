@@ -16,8 +16,7 @@ function setup() {
   store.set("live", { topicId: 10, title: "t", project: "p", enabled: false });
   store.set("closed", { topicId: 20, title: "t", project: "p", enabled: true });
   const connected = new Set(["live"]);
-  const route = (u: Omit<Update, "update_id">, c: { groupId?: string; allowFrom: string[] } = cfg) =>
-    routeUpdate({ update_id: 1, ...u } as Update, c, store, id => connected.has(id));
+  const route = (u: Update, c: { groupId?: string; allowFrom: string[] } = cfg) => routeUpdate(u, c, store, id => connected.has(id));
   return { route };
 }
 
@@ -54,8 +53,7 @@ describe("routeUpdate", () => {
 
   test("a private chat with the bot is ignored", () => {
     const { route } = setup();
-    const u = topicMsg({ chatId: ME, fromId: ME, text: "hi" });
-    u.message!.chat = { id: Number(ME), type: "private" };
+    const u = topicMsg({ chatId: ME, fromId: ME, text: "hi", extra: { chat: { id: Number(ME), type: "private" } } });
     expect(route(u).action).toBe("ignore");
   });
 
@@ -66,8 +64,7 @@ describe("routeUpdate", () => {
 
   test("bot senders are ignored", () => {
     const { route } = setup();
-    const u = topicMsg({ chatId: GROUP, threadId: 10, fromId: ME, text: "hi" });
-    u.message!.from!.is_bot = true;
+    const u = topicMsg({ chatId: GROUP, threadId: 10, fromId: ME, text: "hi", extra: { from: { id: Number(ME), is_bot: true, first_name: "Bot" } } });
     expect(route(u).action).toBe("ignore");
   });
 
@@ -103,7 +100,7 @@ describe("routeUpdate", () => {
 
   test("update without a message is ignored", () => {
     const { route } = setup();
-    expect(route({}).action).toBe("ignore");
+    expect(route({ update_id: 1 }).action).toBe("ignore");
   });
 });
 

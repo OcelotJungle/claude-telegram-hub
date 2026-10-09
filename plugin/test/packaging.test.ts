@@ -2,10 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
 import { join, resolve } from "path";
+import { z } from "zod";
 import { Hub } from "../src/hub/hub.ts";
 import { HOOK_NOTE_TOOL } from "../src/plugin/plugin.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
-import { freePort, memLogger, tempDir, waitFor, wsClient } from "./helpers.ts";
+import { freePort, memLogger, must, tempDir, wsClient } from "./helpers.ts";
 
 const PLUGIN = resolve(import.meta.dir, "..");
 const REPO = resolve(PLUGIN, "..");
@@ -42,7 +43,7 @@ describe("SessionStart hook", () => {
     const r = await runHook(port, { session_id: "new", transcript_path: "C:\\t\\new.jsonl", cwd: "C:\\p", hook_event_name: "SessionStart", source: "clear" });
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("");
-    const sw = await c.next(m => m.type === "switchSession");
+    const sw = await c.next("switchSession");
     expect(sw).toMatchObject({ sessionId: "new", transcriptPath: "C:\\t\\new.jsonl" });
   });
 
@@ -63,24 +64,33 @@ describe("SessionStart hook", () => {
 });
 
 describe("plugin packaging", () => {
-  const json = (p: string) => JSON.parse(readFileSync(p, "utf8"));
+  // The parts of the manifests the tests read.
+  const marketplace = z.object({ name: z.string(), plugins: z.array(z.object({ name: z.string(), source: z.string() })) });
+  const manifest = z.object({ name: z.string() });
+  const mcpConfig = z.object({ mcpServers: z.record(z.string(), z.object({ command: z.string() })) });
+  const pkgJson = z.object({ scripts: z.record(z.string(), z.string()) });
+  const hooksJson = z.object({
+    hooks: z.record(z.string(), z.array(z.object({ hooks: z.array(z.looseObject({ command: z.string().optional() })) }))),
+    modules: z.array(z.string()),
+  });
+  const json = <T>(p: string, schema: z.ZodType<T>) => schema.parse(JSON.parse(readFileSync(p, "utf8")));
 
   test("marketplace lists the plugin directory", () => {
-    const m = json(join(REPO, ".claude-plugin", "marketplace.json"));
+    const m = json(join(REPO, ".claude-plugin", "marketplace.json"), marketplace);
     expect(m.name).toBe("tg-hub-local");
-    const entry = m.plugins.find((p: any) => p.name === "tg-hub");
+    const entry = must(m.plugins.find(p => p.name === "tg-hub"), "tg-hub entry");
     expect(existsSync(join(REPO, entry.source, ".claude-plugin", "plugin.json"))).toBe(true);
   });
 
   test("plugin manifest, MCP server and hook point at real files", () => {
-    expect(json(join(PLUGIN, ".claude-plugin", "plugin.json")).name).toBe("tg-hub");
-    const mcp = json(join(PLUGIN, ".mcp.json"));
+    expect(json(join(PLUGIN, ".claude-plugin", "plugin.json"), manifest).name).toBe("tg-hub");
+    const mcp = json(join(PLUGIN, ".mcp.json"), mcpConfig);
     expect(mcp.mcpServers["tg-hub"].command).toBe("bun");
-    const pkg = json(join(PLUGIN, "package.json"));
+    const pkg = json(join(PLUGIN, "package.json"), pkgJson);
     expect(pkg.scripts.start).toContain("src/plugin/main.ts");
     expect(existsSync(join(PLUGIN, "src", "plugin", "main.ts"))).toBe(true);
-    const hooks = json(join(PLUGIN, "hooks", "hooks.json"));
-    const cmd: string = hooks.hooks.SessionStart[0].hooks[0].command;
+    const hooks = json(join(PLUGIN, "hooks", "hooks.json"), hooksJson);
+    const cmd = hooks.hooks.SessionStart[0].hooks[0].command;
     expect(cmd).toContain("src/hook/session-start.ts");
     expect(existsSync(HOOK)).toBe(true);
     // The function hooks module that runs commands from the topic.
@@ -90,9 +100,9 @@ describe("plugin packaging", () => {
 
   // The note that the mode went off reaches the agent through our own server.
   test("the PostToolBatch hook calls the note tool of the plugin server, main agent only", () => {
-    const hooks = json(join(PLUGIN, "hooks", "hooks.json"));
-    const pluginName = json(join(PLUGIN, ".claude-plugin", "plugin.json")).name;
-    const serverKey = Object.keys(json(join(PLUGIN, ".mcp.json")).mcpServers)[0];
+    const hooks = json(join(PLUGIN, "hooks", "hooks.json"), hooksJson);
+    const pluginName = json(join(PLUGIN, ".claude-plugin", "plugin.json"), manifest).name;
+    const serverKey = Object.keys(json(join(PLUGIN, ".mcp.json"), mcpConfig).mcpServers)[0];
     expect(hooks.hooks.PostToolBatch[0].hooks[0]).toMatchObject({
       type: "mcp_tool",
       server: `plugin:${pluginName}:${serverKey}`,

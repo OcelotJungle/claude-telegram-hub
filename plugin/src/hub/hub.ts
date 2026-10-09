@@ -3,7 +3,7 @@ import type { Config } from "../shared/config.ts";
 import type { Logger } from "../shared/log.ts";
 import type { Formatted } from "../shared/markdown.ts";
 import type { OutFile } from "../shared/media.ts";
-import type { ChannelMeta, CommandReply, HookBody, HubToPlugin, PluginToHub, TopicCommand } from "../shared/protocol.ts";
+import type { ChannelMeta, EnableResult, HookBody, HubToPlugin, PluginToHub, TopicCommand } from "../shared/protocol.ts";
 import type { OutItem, Piece } from "./outbox.ts";
 import type { SessionRecord } from "./sessions.ts";
 import type { Message, TelegramApi, Update } from "./telegram.ts";
@@ -13,11 +13,14 @@ import type { VideoTools } from "./video.ts";
 import { randomUUID } from "crypto";
 import { existsSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, unlinkSync } from "fs";
 import { dirname, join } from "path";
+import { z } from "zod";
 import { chunk } from "../shared/chunk.ts";
 import { isInside } from "../shared/config.ts";
+import { field } from "../shared/guards.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
+import { commandReply, hookBody, pluginToHub, sendFilesMessage, sendMessage } from "../shared/protocol-schema.ts";
 import { Outbox } from "./outbox.ts";
 import { commandOf, routeUpdate } from "./router.ts";
 import { SessionStore, topicName } from "./sessions.ts";
@@ -59,6 +62,11 @@ const INACTIVE_TEXT = "сессия сейчас не активна";
 const HOOK_TTL_MS = 60_000;
 const MAX_POLL_DELAY_MS = 15_000;
 const COMMAND_PICKUP_MS = 10_000;
+// How much of a message the hub cannot read goes into the log.
+const LOGGED_MESSAGE_CHARS = 200;
+// A spool file: what a closing window could not hand to a hub. Older plugins
+// wrote text items without a type.
+const spoolItems = z.array(z.union([sendFilesMessage, sendMessage.extend({ type: z.literal("send").optional(), sessionId: z.string() })]));
 const BOT_COMMANDS = [
   { command: "info", description: "Лимиты и контекст сессии" },
   { command: "compact", description: "Сжать контекст; /compact N — окно автокомпакта" },
@@ -132,7 +140,7 @@ export class Hub {
         },
       });
     } catch (e) {
-      if ((e as { code?: string }).code === "EADDRINUSE") return false;
+      if (field(e, "code") === "EADDRINUSE") return false;
       throw e;
     }
     this.running = true;
@@ -175,25 +183,16 @@ export class Hub {
     }
     if (url.pathname === "/health") return Response.json({ ok: true, pid: process.pid });
     if (url.pathname === "/hook" && req.method === "POST") {
-      let body: HookBody;
-      try {
-        body = (await req.json()) as HookBody;
-      } catch {
-        return new Response("bad json", { status: 400 });
-      }
-      this.onHook(body);
+      const body = hookBody.safeParse(await req.json().catch(() => undefined));
+      if (!body.success) return new Response("bad hook body", { status: 400 });
+      this.onHook(body.data);
       return new Response("ok");
     }
     if (url.pathname === "/commands" && req.method === "GET") return Response.json(this.takeCommands(url.searchParams.get("session") ?? ""));
     if (url.pathname === "/reply" && req.method === "POST") {
-      let r: CommandReply;
-      try {
-        r = (await req.json()) as CommandReply;
-      } catch {
-        return new Response("bad json", { status: 400 });
-      }
-      if (typeof r?.sessionId !== "string" || typeof r.id !== "string" || typeof r.text !== "string") return new Response("bad reply", { status: 400 });
-      this.enqueue(r.sessionId, `cmd-${r.id}`, r.text, r.notify === true);
+      const r = commandReply.safeParse(await req.json().catch(() => undefined));
+      if (!r.success) return new Response("bad reply", { status: 400 });
+      this.enqueue(r.data.sessionId, `cmd-${r.data.id}`, r.data.text, r.data.notify);
       return new Response("ok");
     }
     return new Response("not found", { status: 404 });
@@ -300,12 +299,18 @@ export class Hub {
   // --- plugin messages -----------------------------------------------------
 
   private onMessage(ws: WS, raw: string): void {
-    let msg: PluginToHub;
+    let json: unknown;
     try {
-      msg = JSON.parse(raw);
+      json = JSON.parse(raw);
     } catch {
       return;
     }
+    const parsed = pluginToHub.safeParse(json);
+    if (!parsed.success) {
+      this.log.warn(`unknown message from window ${ws.data.windowKey ?? "?"}: ${raw.slice(0, LOGGED_MESSAGE_CHARS)}`);
+      return;
+    }
+    const msg = parsed.data;
     try {
       this.dispatch(ws, msg);
     } catch (e) {
@@ -399,7 +404,7 @@ ${msg.text}`);
     return groupId;
   }
 
-  private async enable(sessionId: string, cwd: string, title: string) {
+  private async enable(sessionId: string, cwd: string, title: string): Promise<EnableResult> {
     const api = this.requireApi();
     const groupId = this.requireGroup();
     const existing = this.store.get(sessionId);
@@ -590,29 +595,30 @@ ${msg.text}`);
     }
     const api = this.requireApi();
     const groupId = this.requireGroup();
-    if (item.rich) {
-      await this.sendToTopic(api, groupId, sessionId, thread => api.sendRichMessage(groupId, thread, item.rich!, item.silent));
+    const { rich, files: queued } = item;
+    if (rich) {
+      await this.sendToTopic(api, groupId, sessionId, thread => api.sendRichMessage(groupId, thread, rich, item.silent));
       return;
     }
-    if (!item.files) {
+    if (!queued) {
       await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, item.text, item.silent, item.entities));
       return;
     }
-    const lost = item.files.filter(f => !existsSync(f.path));
+    const lost = queued.filter(f => !existsSync(f.path));
     if (lost.length) throw new LostFileError(`the queued copy is gone: ${lost.map(f => f.path).join(", ")}`);
-    const files = await this.probeVideos(item);
+    const files = await this.probeVideos(item.id, queued);
     await this.sendToTopic(api, groupId, sessionId, thread => api.sendFiles(groupId, thread, files, item.text, item.entities, item.silent));
   }
 
   // Videos are probed once, before their first send, and the result stays
   // with the queued piece; a thumbnail gone from disk is just not sent.
-  private async probeVideos(item: OutItem): Promise<OutFile[]> {
-    let files = item.files!;
+  private async probeVideos(itemId: string, queued: OutFile[]): Promise<OutFile[]> {
+    let files = queued;
     if (files.some(f => f.kind === "video" && !f.video)) {
       const tools = this.opts.videoTools ?? DEFAULT_VIDEO_TOOLS;
       const probed: OutFile[] = [];
       for (const f of files) probed.push(f.kind === "video" && !f.video ? { ...f, video: await probeVideo(f.path, f.name, tools, this.log) } : f);
-      this.outbox.setFiles(item.id, probed);
+      this.outbox.setFiles(itemId, probed);
       files = probed;
     }
     return files.map(f => (f.video?.thumb && !existsSync(f.video.thumb) ? { ...f, video: { ...f.video, thumb: undefined } } : f));
@@ -687,9 +693,7 @@ ${msg.text}`);
     for (const f of files) {
       const path = join(dir, f);
       try {
-        // Older plugins wrote text items without a type.
-        const items = JSON.parse(readFileSync(path, "utf8")) as (Extract<PluginToHub, { type: "sendFiles" }> | { type?: "send"; id: string; sessionId: string; text: string; notify: boolean })[];
-        if (!Array.isArray(items)) throw new Error("not a list");
+        const items = spoolItems.parse(JSON.parse(readFileSync(path, "utf8")));
         for (const it of items) {
           if (it.type === "sendFiles") this.enqueueFiles(it);
           else this.enqueue(it.sessionId, it.id, it.text, it.notify);
@@ -707,7 +711,8 @@ ${msg.text}`);
   }
 
   private async sendToTopic(api: TelegramApi, groupId: string, sessionId: string, send: (threadId: number) => Promise<unknown>): Promise<void> {
-    const rec = this.store.get(sessionId)!;
+    const rec = this.store.get(sessionId);
+    if (!rec) throw new Error(`session ${sessionId} has no topic`);
     try {
       await send(rec.topicId);
     } catch (e) {
@@ -792,7 +797,7 @@ ${msg.text}`);
       return;
     }
     if (route.action === "inactive") {
-      await api.sendMessage(cfg.groupId!, route.topicId, INACTIVE_TEXT, false).catch(e => this.log.warn(`inactive notice failed: ${e}`));
+      if (cfg.groupId) await api.sendMessage(cfg.groupId, route.topicId, INACTIVE_TEXT, false).catch(e => this.log.warn(`inactive notice failed: ${e}`));
       return;
     }
     const ws = this.connOf(route.sessionId);
@@ -836,9 +841,9 @@ ${msg.text}`);
       if (name) meta.attachment_name = name;
     };
     let content = m.text ?? m.caption ?? (m.rich_message ? await this.richContent(api, m.rich_message) : undefined);
-    if (m.photo?.length) {
+    const best = m.photo?.at(-1);
+    if (best) {
       content ??= "(photo)";
-      const best = m.photo[m.photo.length - 1]!;
       try {
         meta.image_path = await api.downloadFile(best.file_id, this.opts.inboxDir);
       } catch (e) {

@@ -1,5 +1,6 @@
 // Turns one transcript (.jsonl) record into the events the relay cares about.
 // Record shapes: see "Результаты проверки" in the design spec.
+import { arr, field, isObject } from "../shared/guards.ts";
 
 export type TranscriptEvent =
   | { kind: "text"; text: string; messageId: string }
@@ -13,11 +14,10 @@ export type TranscriptEvent =
   // the record format changed, and visible text may be going unrelayed.
   | { kind: "unknown_thinking"; blockKind: string };
 
-type Rec = Record<string, any>;
+type Rec = Record<string, unknown>;
 
-export function parseRecord(rec: unknown): TranscriptEvent[] {
-  if (!rec || typeof rec !== "object") return [];
-  const r = rec as Rec;
+export function parseRecord(r: unknown): TranscriptEvent[] {
+  if (!isObject(r)) return [];
   if (r.isSidechain === true) return [];
   switch (r.type) {
     case "assistant":
@@ -26,7 +26,7 @@ export function parseRecord(rec: unknown): TranscriptEvent[] {
       return isTerminalInput(r) ? [{ kind: "terminal_input" }] : [];
     // A message typed while the agent works is absorbed into the running turn.
     case "attachment":
-      return r.attachment?.type === "queued_command" && r.attachment.origin?.kind === "human" ? [{ kind: "terminal_input" }] : [];
+      return field(r.attachment, "type") === "queued_command" && field(field(r.attachment, "origin"), "kind") === "human" ? [{ kind: "terminal_input" }] : [];
     case "custom-title":
       return title("custom", r.customTitle);
     case "agent-name":
@@ -40,19 +40,20 @@ export function parseRecord(rec: unknown): TranscriptEvent[] {
 
 function parseAssistant(r: Rec): TranscriptEvent[] {
   const msg = r.message;
-  if (!msg || typeof msg.id !== "string" || !Array.isArray(msg.content)) return [];
-  const messageId: string = msg.id;
+  if (!isObject(msg) || typeof msg.id !== "string" || !Array.isArray(msg.content)) return [];
+  const messageId = msg.id;
   const out: TranscriptEvent[] = [];
-  for (const block of msg.content) {
-    if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
+  for (const block of arr(msg.content)) {
+    if (!isObject(block)) continue;
+    if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
       out.push({ kind: "text", text: block.text, messageId });
-    } else if (block?.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) {
+    } else if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) {
       // Narration is shown in the terminal as ordinary text; hidden thinking is
       // written empty, or as a summary when the user turned summaries on.
       const kind = thinkingKind(block.signature);
       if (kind === "narration") out.push({ kind: "text", text: block.thinking.trimEnd(), messageId });
       else if (kind !== "thinking") out.push({ kind: "unknown_thinking", blockKind: kind ?? "?" });
-    } else if (block?.type === "tool_use" && typeof block.name === "string") {
+    } else if (block.type === "tool_use" && typeof block.name === "string") {
       out.push({ kind: "tool_use", name: block.name, messageId });
     }
   }
@@ -73,11 +74,12 @@ export function thinkingKind(signature: unknown): string | undefined {
   if (typeof signature !== "string") return undefined;
   const head = Buffer.from(signature.slice(0, 64), "base64").toString("latin1");
   const m = head.match(/\x42([\x01-\x20])([a-z_]+)/);
-  return m && m[2]!.length === m[1]!.charCodeAt(0) ? m[2] : undefined;
+  const [, size, kind] = m ?? [];
+  return size !== undefined && kind !== undefined && kind.length === size.charCodeAt(0) ? kind : undefined;
 }
 
 function isTerminalInput(r: Rec): boolean {
-  return r.origin?.kind === "human" && r.isMeta !== true && r.isCompactSummary !== true;
+  return field(r.origin, "kind") === "human" && r.isMeta !== true && r.isCompactSummary !== true;
 }
 
 function title(source: "custom" | "agent" | "ai", value: unknown): TranscriptEvent[] {

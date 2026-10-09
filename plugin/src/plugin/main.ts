@@ -126,7 +126,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 }));
 
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
-  const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+  const args = req.params.arguments ?? {};
   const text = (t: string, isError = false) => ({ content: [{ type: "text" as const, text: t }], ...(isError ? { isError: true } : {}) });
   try {
     if (!core) throw new Error("CLAUDE_CODE_SESSION_ID is not set in this window, tg-hub cannot identify the session");

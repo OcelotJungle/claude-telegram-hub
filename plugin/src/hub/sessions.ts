@@ -1,7 +1,13 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname } from "path";
+import { z } from "zod";
 
 export type SessionRecord = { topicId: number; title: string; project: string; enabled: boolean };
+
+const dataSchema: z.ZodType<Record<string, SessionRecord>> = z.record(
+  z.string(),
+  z.object({ topicId: z.number(), title: z.string(), project: z.string(), enabled: z.boolean() }),
+);
 
 // sessionId → topic. Only the hub writes it; a session keeps its topic forever.
 export class SessionStore {
@@ -15,9 +21,7 @@ export class SessionStore {
       return;
     }
     try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) this.data = parsed;
-      else throw new Error("not an object");
+      this.data = dataSchema.parse(JSON.parse(raw));
     } catch {
       try {
         renameSync(file, `${file}.corrupt-${Date.now()}`);

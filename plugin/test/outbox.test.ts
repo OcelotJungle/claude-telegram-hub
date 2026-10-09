@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { readdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { Outbox } from "../src/hub/outbox.ts";
-import { memLogger, tempDir } from "./helpers.ts";
+import { memLogger, must, tempDir } from "./helpers.ts";
 
 let dir: string;
 let file: string;
@@ -37,7 +37,7 @@ describe("Outbox", () => {
   test("the queue survives a restart", () => {
     const o = new Outbox(file, log);
     o.add("m1", "a", [piece("one"), piece("two", false)]);
-    o.remove(o.head("a")!.id);
+    o.remove(must(o.head("a")).id);
     const again = new Outbox(file, log);
     expect(again.head("a")).toMatchObject({ sessionId: "a", text: "two", silent: false });
   });
@@ -46,7 +46,7 @@ describe("Outbox", () => {
     const o = new Outbox(file, log);
     expect(o.add("m1", "a", [piece("x")])).toBe(true);
     expect(o.add("m1", "a", [piece("x")])).toBe(false);
-    o.remove(o.head("a")!.id);
+    o.remove(must(o.head("a")).id);
     expect(new Outbox(file, log).add("m1", "a", [piece("x")])).toBe(false);
     expect(o.size).toBe(0);
   });
@@ -54,7 +54,7 @@ describe("Outbox", () => {
   test("a notice takes the place of a piece and is loud", () => {
     const o = new Outbox(file, log);
     o.add("m1", "a", [piece("bad"), piece("next")]);
-    o.replaceWithNotice(o.head("a")!.id, "⚠️ notice");
+    o.replaceWithNotice(must(o.head("a")).id, "⚠️ notice");
     expect(new Outbox(file, log).head("a")).toMatchObject({ text: "⚠️ notice", silent: false, notice: true });
     expect(o.countOf("a")).toBe(2);
   });
@@ -62,8 +62,8 @@ describe("Outbox", () => {
   test("a notice in place of files carries neither files nor entities", () => {
     const o = new Outbox(file, log);
     o.add("m1", "a", [{ text: "cap", silent: true, entities: [{ type: "bold", offset: 0, length: 3 }], files: [photo("x.png")] }]);
-    o.replaceWithNotice(o.head("a")!.id, "⚠️ notice");
-    const h = new Outbox(file, log).head("a")!;
+    o.replaceWithNotice(must(o.head("a")).id, "⚠️ notice");
+    const h = must(new Outbox(file, log).head("a"));
     expect(h.files).toBeUndefined();
     expect(h.entities).toBeUndefined();
   });
@@ -71,16 +71,16 @@ describe("Outbox", () => {
   test("a piece can lose its entities, in place and on disk", () => {
     const o = new Outbox(file, log);
     o.add("m1", "a", [{ text: "b", silent: true, entities: [{ type: "bold", offset: 0, length: 1 }] }, piece("next")]);
-    o.dropEntities(o.head("a")!.id);
+    o.dropEntities(must(o.head("a")).id);
     expect(new Outbox(file, log).head("a")).toMatchObject({ text: "b" });
-    expect(new Outbox(file, log).head("a")!.entities).toBeUndefined();
+    expect(must(new Outbox(file, log).head("a")).entities).toBeUndefined();
     expect(o.countOf("a")).toBe(2);
   });
 
   test("a piece can be replaced by several, keeping its place and its message", () => {
     const o = new Outbox(file, log);
     o.add("m1", "a", [piece("one"), piece("three")]);
-    o.replace(o.head("a")!.id, [piece("one-a"), piece("one-b")]);
+    o.replace(must(o.head("a")).id, [piece("one-a"), piece("one-b")]);
     const again = new Outbox(file, log);
     const seen: string[] = [];
     for (let h = again.head("a"); h; h = again.head("a")) {

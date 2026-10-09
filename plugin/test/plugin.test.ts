@@ -3,9 +3,11 @@ import type { Config } from "../src/shared/config.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, truncateSync, writeFileSync } from "fs";
 import { join } from "path";
+import { z } from "zod";
 import { Hub } from "../src/hub/hub.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
 import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, MAX_AUTO_CONTINUES, PluginCore } from "../src/plugin/plugin.ts";
+import { arr, field } from "../src/shared/guards.ts";
 import { NOTIFY_MARKER } from "../src/transcript/relay.ts";
 import { FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { freePort, memLogger, tempDir, waitFor } from "./helpers.ts";
@@ -211,7 +213,7 @@ describe("PluginCore", () => {
     append(assistantText("итог", "end_turn", "d1"), humanTyped("next"));
     await waitFor(() => !c.enabled, 3000, "disabled");
     await waitFor(() => sent().length === 1, 3000, "final text");
-    expect(sent()[0]!.text).toBe("итог");
+    expect(sent()[0].text).toBe("итог");
   });
 
   test("a topic message reaches the session and turns the mode back on", async () => {
@@ -220,8 +222,8 @@ describe("PluginCore", () => {
     await waitFor(() => !c.enabled);
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "как дела?" }));
     await waitFor(() => channel.length === 1, 3000, "channel message");
-    expect(channel[0]!.content).toBe("как дела?");
-    expect(channel[0]!.meta.chat_id).toBe(GROUP);
+    expect(channel[0].content).toBe("как дела?");
+    expect(channel[0].meta.chat_id).toBe(GROUP);
     await waitFor(() => c.enabled, 3000, "re-enabled");
   });
 
@@ -246,7 +248,7 @@ describe("PluginCore", () => {
     await waitFor(() => hub.isConnected("sess-2"), 3000, "switched");
     writeFileSync(next, line({ type: "ai-title", aiTitle: "После clear" }));
     await c.enable();
-    expect(fake.callsOf("createForumTopic").at(-1).name).toBe("demo-app · После clear");
+    expect(fake.callsOf("createForumTopic").at(-1)?.name).toBe("demo-app · После clear");
     appendFileSync(next, line(assistantText("в новой сессии", "end_turn")));
     append(assistantText("в старой сессии", "end_turn"));
     await waitFor(() => sent().length === 1, 3000, "message");
@@ -273,7 +275,7 @@ describe("PluginCore", () => {
     core = undefined;
     const files = readdirSync(spoolDir).filter(f => f.endsWith(".json"));
     expect(files.length).toBe(1);
-    const items = JSON.parse(readFileSync(join(spoolDir, files[0]!), "utf8"));
+    const items: unknown = JSON.parse(readFileSync(join(spoolDir, files[0]), "utf8"));
     expect(items).toMatchObject([{ sessionId: SID, text: "без хаба", notify: false }]);
     expect(spawned).toBeGreaterThan(0);
   });
@@ -301,7 +303,8 @@ describe("PluginCore", () => {
 
 // The PostToolBatch hook asks hookNote after every batch of tool calls.
 describe("note to the agent that the mode went off", () => {
-  const noteOf = (out: string) => JSON.parse(out).hookSpecificOutput;
+  const hookOutput = z.object({ hookSpecificOutput: z.object({ hookEventName: z.string(), additionalContext: z.string() }) });
+  const noteOf = (out: string) => hookOutput.parse(JSON.parse(out)).hookSpecificOutput;
   const toolBatch = (id: string) => [assistantTool("Bash", id), { type: "user", isSidechain: false, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "ok" }] } }];
 
   test("the first tool batch after terminal input tells the agent, once", async () => {
@@ -379,7 +382,7 @@ describe("a response cut by a lost connection", () => {
     await waitFor(() => channel.length === MAX_AUTO_CONTINUES, 3000, "continue prompts");
     append(cut());
     await waitFor(() => sent().some(s => s.text === CUT_LIMIT_NOTE), 3000, "limit note");
-    expect(sent().find(s => s.text === CUT_LIMIT_NOTE)!.silent).toBe(false);
+    expect(sent().find(s => s.text === CUT_LIMIT_NOTE)?.silent).toBe(false);
     expect(channel.length).toBe(MAX_AUTO_CONTINUES);
     append(assistantText("дальше сам", "end_turn"), cut());
     await waitFor(() => channel.length === MAX_AUTO_CONTINUES + 1, 3000, "continue after a normal turn");
@@ -434,7 +437,7 @@ describe("tg_send_file", () => {
     const c = await enabledCore();
     const d = tempDir();
     expect(await c.sendFiles([file("1.png", "x", d), file("2.jpg", "y", d)])).toBe("Sent 2 file(s) to the Telegram topic.");
-    expect(fake.callsOf("sendMediaGroup")[0].media.map((m: any) => m.type)).toEqual(["photo", "photo"]);
+    expect(arr(fake.callsOf("sendMediaGroup")[0].media).map(m => field(m, "type"))).toEqual(["photo", "photo"]);
   });
 
   test("as_document sends images as documents, grouped into an album", async () => {
@@ -444,7 +447,7 @@ describe("tg_send_file", () => {
     expect(fake.callsOf("sendPhoto")).toEqual([]);
     expect(fake.callsOf("sendDocument")[0]).toMatchObject({ document: { file: "a.png", body: "x" } });
     await c.sendFiles([file("1.png", "x", d), file("2.jpg", "y", d)], "", true);
-    expect(fake.callsOf("sendMediaGroup")[0].media.map((m: any) => m.type)).toEqual(["document", "document"]);
+    expect(arr(fake.callsOf("sendMediaGroup")[0].media).map(m => field(m, "type"))).toEqual(["document", "document"]);
   });
 
   test("nothing is sent if any file is wrong, and the reason names it", async () => {

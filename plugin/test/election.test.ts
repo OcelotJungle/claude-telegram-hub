@@ -4,26 +4,21 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { HubClient, spawnHubDetached } from "../src/plugin/hub-client.ts";
+import { arr, field } from "../src/shared/guards.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { FakeTelegram } from "./fake-telegram.ts";
-import { freePort, memLogger, tempDir, waitFor } from "./helpers.ts";
+import { freePort, hubHealth, memLogger, must, tempDir, waitFor } from "./helpers.ts";
 
 const HUB_MAIN = resolve(import.meta.dir, "../src/hub/main.ts");
 const GROUP = "-1001";
 
 let fake: FakeTelegram;
 let port: number;
+let stateDir: string;
 let env: Record<string, string>;
 const clients: HubClient[] = [];
 
-async function health(): Promise<{ pid: number } | undefined> {
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/health`);
-    return (await res.json()) as { pid: number };
-  } catch {
-    return undefined;
-  }
-}
+const health = () => hubHealth(port);
 
 function client(sessionId: string) {
   const messages: HubToPlugin[] = [];
@@ -43,7 +38,7 @@ function client(sessionId: string) {
 beforeEach(async () => {
   fake = new FakeTelegram();
   port = await freePort();
-  const stateDir = tempDir();
+  stateDir = tempDir();
   writeFileSync(join(stateDir, "config.json"), JSON.stringify({ groupId: GROUP, allowFrom: ["1"] }));
   env = {
     TG_HUB_STATE_DIR: stateDir,
@@ -76,7 +71,7 @@ describe("hub election", () => {
     const first = await health();
     expect(first?.pid).toBeGreaterThan(0);
     await Bun.sleep(2500);
-    expect((await health())?.pid).toBe(first!.pid);
+    expect((await health())?.pid).toBe(first?.pid);
     expect(fake.conflicts).toBe(0);
   }, 20_000);
 
@@ -86,7 +81,7 @@ describe("hub election", () => {
     a.c.start();
     b.c.start();
     await waitFor(() => a.c.connected && b.c.connected, 10_000, "both connected");
-    const old = (await health())!.pid;
+    const old = must(await health()).pid;
     process.kill(old);
     await waitFor(async () => {
       const h = await health();
@@ -98,8 +93,8 @@ describe("hub election", () => {
     const a = client("a");
     a.c.start();
     await waitFor(() => a.c.connected, 10_000, "connected");
-    expect(await a.c.request("enable", { title: "T" })).toMatchObject({ created: true });
-    const old = (await health())!.pid;
+    expect(await a.c.request({ op: "enable", title: "T" })).toMatchObject({ created: true });
+    const old = must(await health()).pid;
     process.kill(old);
     await waitFor(() => !a.c.connected, 5000, "disconnect");
     a.c.enqueue("a", "first", false);
@@ -117,17 +112,17 @@ describe("hub election", () => {
     const a = client("a");
     a.c.start();
     await waitFor(() => a.c.connected, 10_000, "connected");
-    await a.c.request("enable", { title: "T" });
+    await a.c.request({ op: "enable", title: "T" });
     fake.hangNext("sendRichMessage", 1000);
     a.c.enqueue("a", "in the queue", true);
     await waitFor(() => a.c.unacked.length === 0, 5000, "acked");
-    const old = (await health())!.pid;
+    const old = must(await health()).pid;
     process.kill(old);
     fake.clearHangs();
-    const queue = join(env.TG_HUB_STATE_DIR!, "outbox.json");
-    await waitFor(() => JSON.parse(readFileSync(queue, "utf8")).items.length === 0, 15_000, "delivered by the next hub");
+    const queue = join(stateDir, "outbox.json");
+    await waitFor(() => arr(field(JSON.parse(readFileSync(queue, "utf8")), "items")).length === 0, 15_000, "delivered by the next hub");
     expect(fake.texts().filter(p => p.text === "in the queue").length).toBeGreaterThanOrEqual(2);
-    expect((await health())!.pid).not.toBe(old);
+    expect(must(await health()).pid).not.toBe(old);
   }, 30_000);
 
   test("the hub exits after the last plugin stops", async () => {
@@ -141,6 +136,6 @@ describe("hub election", () => {
   test("a request while the hub is unreachable rejects after its timeout", async () => {
     const a = client("a");
     // never started: no connection at all
-    await expect(a.c.request("disable", {}, 200)).rejects.toThrow(/hub/);
+    await expect(a.c.request({ op: "disable" }, 200)).rejects.toThrow(/hub/);
   });
 });

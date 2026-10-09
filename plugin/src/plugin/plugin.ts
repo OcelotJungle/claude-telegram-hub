@@ -10,6 +10,7 @@ import { isInside } from "../shared/config.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { MAX_CAPTION, MAX_UPLOAD } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
+import { enableResult } from "../shared/protocol-schema.ts";
 import { transcriptPathFor } from "../transcript/locate.ts";
 import { parseRecord } from "../transcript/parse.ts";
 import { Relay } from "../transcript/relay.ts";
@@ -131,15 +132,12 @@ export class PluginCore {
   async enable(): Promise<string> {
     this.tailer?.pollNow();
     this.titles = readSessionTitles(this.transcriptPath);
-    const res = (await this.client.request("enable", { title: effectiveTitle(this.titles) ?? "" }, HUB_TELEGRAM_TIMEOUT_MS)) as {
-      topicTitle: string;
-      created: boolean;
-    };
+    const res = enableResult.parse(await this.client.request({ op: "enable", title: effectiveTitle(this.titles) ?? "" }, HUB_TELEGRAM_TIMEOUT_MS));
     return `Telegram mode is on. Topic «${res.topicTitle}»${res.created ? " was created" : ""}. Your text output is now relayed to it.`;
   }
 
   async disable(): Promise<string> {
-    await this.client.request("disable");
+    await this.client.request({ op: "disable" });
     return "Telegram mode is off.";
   }
 
@@ -150,7 +148,7 @@ export class PluginCore {
   }
 
   async download(fileId: string): Promise<string> {
-    return String(await this.client.request("download", { fileId }, HUB_TELEGRAM_TIMEOUT_MS));
+    return String(await this.client.request({ op: "download", fileId }, HUB_TELEGRAM_TIMEOUT_MS));
   }
 
   // Hook output after a batch of tool calls. Only the transcript knows who

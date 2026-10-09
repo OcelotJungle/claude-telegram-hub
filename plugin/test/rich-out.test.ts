@@ -109,7 +109,7 @@ describe("pieces of a long text", () => {
     const pieces = richPieces([para, para, para].join("\n\n"));
     expect(pieces.map(p => p.blocks?.length)).toEqual([2, 1]);
     expect(pieces.every(p => Buffer.byteLength(p.text) <= MAX_RICH_BYTES)).toBe(true);
-    expect(pieces[1]!.text).toBe(para);
+    expect(pieces[1].text).toBe(para);
   });
 
   test("splits to stay within the block count", () => {
@@ -117,7 +117,7 @@ describe("pieces of a long text", () => {
     const list = Array.from({ length: 150 }, (_, i) => `- ${i}`).join("\n");
     const pieces = richPieces(`${list}\n\nпосле\n\n${list}`);
     expect(pieces.length).toBe(2);
-    expect(pieces[0]!.blocks!.at(-1)).toEqual({ type: "paragraph", text: "после" });
+    expect(pieces[0].blocks?.at(-1)).toEqual({ type: "paragraph", text: "после" });
   });
 
   // Too big for one rich message: it goes as plain formatted text, which

@@ -1,9 +1,10 @@
 import type { Logger } from "../shared/log.ts";
-import type { HubToPlugin, PluginToHub } from "../shared/protocol.ts";
+import type { HubRequest, HubToPlugin, PluginToHub } from "../shared/protocol.ts";
 
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { homedir } from "os";
+import { hubToPlugin } from "../shared/protocol-schema.ts";
 
 type Hello = Extract<PluginToHub, { type: "hello" }>;
 export type SendFiles = Extract<PluginToHub, { type: "sendFiles" }>;
@@ -12,6 +13,9 @@ export type Queued = Extract<PluginToHub, { type: "send" }> | SendFiles;
 type Pending = { resolve(v: unknown): void; reject(e: Error): void; timer: ReturnType<typeof setTimeout> };
 
 const SPAWN_COOLDOWN_MS = 2000;
+const REQUEST_TIMEOUT_MS = 15_000;
+// How much of a message the plugin cannot read goes into the log.
+const LOGGED_MESSAGE_CHARS = 200;
 
 // Starts the hub as a detached process: not tied to this window, so closing
 // the window that started it leaves the hub running for the others.
@@ -123,7 +127,7 @@ export class HubClient {
     while (this.outbox.length > 0 && Date.now() < deadline) await Bun.sleep(25);
   }
 
-  async request(op: string, extra: Record<string, unknown> = {}, timeoutMs = 15_000): Promise<unknown> {
+  async request(req: HubRequest, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
     const deadline = Date.now() + timeoutMs;
     if (!this.ws) await this.waitConnected(timeoutMs);
     const id = randomUUID();
@@ -133,7 +137,7 @@ export class HubClient {
         reject(new Error("hub did not answer in time"));
       }, Math.max(1, deadline - Date.now()));
       this.pending.set(id, { resolve, reject, timer });
-      this.send({ type: "req", id, op, ...extra } as PluginToHub);
+      this.send({ type: "req", id, ...req });
     });
   }
 
@@ -203,12 +207,18 @@ export class HubClient {
   }
 
   private onMessage(raw: string): void {
-    let m: HubToPlugin;
+    let json: unknown;
     try {
-      m = JSON.parse(raw);
+      json = JSON.parse(raw);
     } catch {
       return;
     }
+    const parsed = hubToPlugin.safeParse(json);
+    if (!parsed.success) {
+      this.opts.log.warn(`unknown message from the hub: ${raw.slice(0, LOGGED_MESSAGE_CHARS)}`);
+      return;
+    }
+    const m = parsed.data;
     if (m.type === "ack") {
       this.outbox = this.outbox.filter(o => o.id !== m.id);
       return;

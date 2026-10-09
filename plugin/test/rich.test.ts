@@ -1,9 +1,7 @@
-import type { RichMessage } from "../src/hub/rich.ts";
-
 import { describe, expect, test } from "bun:test";
 import { richPhotos, richToMarkdown } from "../src/hub/rich.ts";
 
-const md = (...blocks: unknown[]) => richToMarkdown({ blocks } as RichMessage);
+const md = (...blocks: unknown[]) => richToMarkdown({ blocks });
 
 describe("rich message to Markdown", () => {
   // A Markdown file pasted into Telegram, as Bot API 10.1 describes it.
@@ -105,7 +103,7 @@ describe("rich message to Markdown", () => {
 
   test("a downloaded photo is named by its local path", () => {
     const photo = { type: "photo", photo: [{ file_id: "p1" }, { file_id: "p2" }] };
-    expect(richToMarkdown({ blocks: [photo] } as RichMessage, new Map([["p2", "C:\\inbox\\p.jpg"]]))).toBe("(photo: C:\\inbox\\p.jpg)");
+    expect(richToMarkdown({ blocks: [photo] }, new Map([["p2", "C:\\inbox\\p.jpg"]]))).toBe("(photo: C:\\inbox\\p.jpg)");
   });
 
   test("the photos to download: the largest size of each, wherever it sits", () => {
@@ -118,7 +116,7 @@ describe("rich message to Markdown", () => {
         { type: "details", summary: "x", blocks: [{ type: "blockquote", blocks: [photo("d")] }] },
         { type: "photo", photo: [] },
       ],
-    } as RichMessage;
+    };
     expect(richPhotos(m)).toEqual(["a", "b", "c", "d"]);
   });
 

@@ -11,7 +11,7 @@ export function chunk(f: Formatted, limit = MAX_MESSAGE): Formatted[] {
   const out: Formatted[] = [];
   let start = 0;
   for (;;) {
-    while (start < text.length && /\s/.test(text[start]!)) start++;
+    while (start < text.length && /\s/.test(text[start])) start++;
     if (text.length - start <= limit) {
       piece(f, start, text.length, out);
       return out;
@@ -29,7 +29,7 @@ export function chunk(f: Formatted, limit = MAX_MESSAGE): Formatted[] {
 }
 
 function piece(f: Formatted, start: number, end: number, out: Formatted[]): void {
-  while (end > start && /\s/.test(f.text[end - 1]!)) end--;
+  while (end > start && /\s/.test(f.text[end - 1])) end--;
   if (end <= start) return;
   const entities: Entity[] = [];
   for (const e of f.entities) {

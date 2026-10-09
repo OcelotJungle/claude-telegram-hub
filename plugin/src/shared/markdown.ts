@@ -1,7 +1,8 @@
-import type { Token, Tokens } from "marked";
+import type { MarkedToken, Token, Tokens } from "marked";
 
 import { decodeHTML } from "entities";
 import { Lexer } from "marked";
+import { z } from "zod";
 
 // A Bot API MessageEntity. Offsets and lengths count UTF-16 code units, as
 // JavaScript string indices do.
@@ -13,10 +14,29 @@ export type Entity = {
   language?: string;
 };
 
+export const entitySchema: z.ZodType<Entity> = z.object({
+  type: z.enum(["bold", "italic", "strikethrough", "code", "pre", "text_link", "blockquote"]),
+  offset: z.number(),
+  length: z.number(),
+  url: z.string().optional(),
+  language: z.string().optional(),
+});
+
 // Plain text plus the entities that format it.
 export type Formatted = { text: string; entities: Entity[] };
 
 const INDENT = "   ";
+
+// The kinds of token marked itself makes. This code uses no marked
+// extensions, so a token of one of these kinds has that kind's fields.
+const MARKED_TYPES: ReadonlySet<string> = new Set<MarkedToken["type"]>([
+  "blockquote", "br", "checkbox", "code", "codespan", "def", "del", "em", "escape", "heading", "hr",
+  "html", "image", "link", "list", "list_item", "paragraph", "space", "strong", "table", "text",
+]);
+
+export function isMarked(t: Token): t is MarkedToken {
+  return MARKED_TYPES.has(t.type);
+}
 
 // Writes plain text and records entities over it. Text inside a list item
 // gets the item's indent at every line start.
@@ -96,6 +116,7 @@ function blocks(b: Builder, tokens: Token[], gap: string): void {
 }
 
 function block(b: Builder, t: Token): void {
+  if (!isMarked(t)) return b.put(t.raw);
   switch (t.type) {
     case "paragraph":
       return inline(b, t.tokens ?? []);
@@ -104,7 +125,7 @@ function block(b: Builder, t: Token): void {
     case "heading":
       return b.wrap({ type: "bold" }, () => inline(b, t.tokens ?? []));
     case "code": {
-      const language = (t as Tokens.Code).lang?.split(/\s/)[0];
+      const language = t.lang?.split(/\s/)[0];
       return b.wrap({ type: "pre", ...(language ? { language } : {}) }, () => b.put(t.text));
     }
     case "blockquote":
@@ -115,9 +136,9 @@ function block(b: Builder, t: Token): void {
       b.quoteDepth--;
       return;
     case "list":
-      return list(b, t as Tokens.List);
+      return list(b, t);
     case "table":
-      return table(b, t as Tokens.Table);
+      return table(b, t);
     case "hr":
       return b.put("———");
     case "html":
@@ -146,13 +167,13 @@ function table(b: Builder, t: Tokens.Table): void {
   const rows = [t.header, ...t.rows].map(r => r.map(c => plain(c.tokens)));
   const widths = t.header.map((_, i) => Math.max(...rows.map(r => r[i]?.length ?? 0)));
   const pad = (s: string, i: number) => {
-    const room = widths[i]! - s.length;
+    const room = (widths[i] ?? 0) - s.length;
     if (t.align[i] === "right") return " ".repeat(room) + s;
     if (t.align[i] === "center") return " ".repeat(Math.floor(room / 2)) + s + " ".repeat(Math.ceil(room / 2));
     return s + " ".repeat(room);
   };
   const line = (r: string[]) => r.map((c, i) => pad(c, i)).join(" | ").trimEnd();
-  const lines = [line(rows[0]!), widths.map(w => "-".repeat(w)).join("-+-"), ...rows.slice(1).map(line)];
+  const lines = [line(rows[0] ?? []),widths.map(w => "-".repeat(w)).join("-+-"), ...rows.slice(1).map(line)];
   b.wrap({ type: "pre" }, () => b.put(lines.join("\n")));
 }
 
@@ -164,6 +185,10 @@ function plain(tokens: Token[]): string {
 
 function inline(b: Builder, tokens: Token[]): void {
   for (const t of tokens) {
+    if (!isMarked(t)) {
+      b.put(t.raw);
+      continue;
+    }
     switch (t.type) {
       case "text":
         if (t.tokens) inline(b, t.tokens);

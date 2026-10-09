@@ -8,7 +8,7 @@ const spans = (f: Formatted) => f.entities.map(e => ({ ...e, text: f.text.slice(
 const one = (md: string) => {
   const f = toTelegram(md);
   expect(f.entities.length).toBe(1);
-  return { full: f.text, ...spans(f)[0]! };
+  return { full: f.text, ...spans(f)[0] };
 };
 
 describe("markdown to Telegram entities", () => {

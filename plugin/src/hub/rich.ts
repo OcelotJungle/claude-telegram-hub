@@ -2,20 +2,17 @@
 // for the agent. Telegram sends a pasted document this way: a tree of blocks
 // (paragraphs, headings, lists, tables, media) instead of text and entities.
 // Kinds of block or text this file does not know show what text they carry.
-import type { TelegramRichMessage } from "@gramio/types";
+// The tree is read field by field: @gramio/types leaves out forms of rich
+// text the Bot API allows.
+import { arr, field, isObject, str } from "../shared/guards.ts";
 
-export type RichMessage = TelegramRichMessage;
-
-// A string, an array of rich texts, or an object with a type.
-export type RichText = string | RichText[] | ({ type: string } & Record<string, unknown>);
-
-type RichBlock = { type: string } & Record<string, unknown>;
-type ListItem = { label?: string; blocks?: RichBlock[]; has_checkbox?: true; is_checked?: true };
-type TableCell = { text?: RichText };
+// The part of Message.rich_message this file reads.
+export type RichMessage = { blocks: unknown };
 
 // Local paths of the photos the hub downloaded, by file_id.
 type Paths = ReadonlyMap<string, string>;
-type Media = { file_id?: string; file_name?: string; title?: string };
+
+const MAX_HEADING = 6;
 
 // A photo found in `paths` is named by its local path, any other file by its
 // file_id, which download_attachment takes.
@@ -28,35 +25,41 @@ export function richPhotos(m: RichMessage): string[] {
   const found: string[] = [];
   const walk = (v: unknown): void => {
     if (Array.isArray(v)) return v.forEach(walk);
-    if (!v || typeof v !== "object") return;
-    const o = v as Record<string, unknown>;
-    if (o.type === "photo" && Array.isArray(o.photo)) {
-      const best = (o.photo.at(-1) as Media | undefined)?.file_id;
+    if (!isObject(v)) return;
+    if (v.type === "photo") {
+      const best = largest(v.photo);
       if (best) found.push(best);
     }
-    Object.values(o).forEach(walk);
+    Object.values(v).forEach(walk);
   };
   walk(m.blocks);
   return found;
 }
 
+// The file_id of the last, largest, of a photo's sizes.
+function largest(sizes: unknown): string | undefined {
+  return str(field(arr(sizes).at(-1), "file_id"));
+}
+
 function blocks(list: unknown, paths: Paths): string {
-  return (Array.isArray(list) ? list : [])
-    .map(b => block(b as RichBlock, paths))
+  return arr(list)
+    .map(b => block(b, paths))
     .filter(s => s !== "")
     .join("\n\n");
 }
 
-function block(b: RichBlock, paths: Paths): string {
-  const t = (key = "text") => text(b[key] as RichText);
-  switch (b.type) {
+function block(b: unknown, paths: Paths): string {
+  if (!isObject(b)) return "";
+  const t = (key = "text") => text(b[key]);
+  const type = str(b.type) ?? "";
+  switch (type) {
     case "paragraph":
     case "footer":
       return t();
     case "heading":
-      return `${"#".repeat(Math.min(Math.max(Number(b.size) || 1, 1), 6))} ${t()}`;
+      return `${"#".repeat(Math.min(Math.max(Number(b.size) || 1, 1), MAX_HEADING))} ${t()}`;
     case "pre":
-      return `\`\`\`${typeof b.language === "string" ? b.language : ""}\n${t()}\n\`\`\``;
+      return `\`\`\`${str(b.language) ?? ""}\n${t()}\n\`\`\``;
     case "divider":
       return "---";
     case "mathematical_expression":
@@ -65,7 +68,7 @@ function block(b: RichBlock, paths: Paths): string {
     case "thinking":
       return "";
     case "list":
-      return ((b.items as ListItem[]) ?? []).map(i => listItem(i, paths)).join("\n");
+      return arr(b.items).map(i => listItem(i, paths)).join("\n");
     case "blockquote":
       return quote(blocks(b.blocks, paths), b.credit);
     case "expandable_blockquote":
@@ -75,17 +78,15 @@ function block(b: RichBlock, paths: Paths): string {
     case "slideshow":
       return withCaption(blocks(b.blocks, paths), b.caption);
     case "table":
-      return table(b.cells as TableCell[][]);
+      return table(b.cells);
     case "details":
       return [`**${t("summary")}**`, blocks(b.blocks, paths)].filter(Boolean).join("\n\n");
-    case "map": {
-      const l = b.location as { latitude?: number; longitude?: number } | undefined;
-      return withCaption(`(map: ${l?.latitude}, ${l?.longitude})`, b.caption);
-    }
+    case "map":
+      return withCaption(`(map: ${field(b.location, "latitude")}, ${field(b.location, "longitude")})`, b.caption);
     case "buttons":
-      return ((b.buttons as { text?: RichText; url?: string }[]) ?? []).map(button).join(" · ");
+      return arr(b.buttons).map(button).join(" · ");
     case "photo": {
-      const id = ((b.photo as Media[] | undefined) ?? []).at(-1)?.file_id;
+      const id = largest(b.photo);
       const path = id === undefined ? undefined : paths.get(id);
       return withCaption(path ? `(photo: ${path})` : media("photo", undefined, id), b.caption);
     }
@@ -94,8 +95,9 @@ function block(b: RichBlock, paths: Paths): string {
     case "audio":
     case "voice_note":
     case "document": {
-      const f = b[b.type] as Media | undefined;
-      return withCaption(media(b.type.replace("_", " "), f?.title ?? f?.file_name, f?.file_id), b.caption);
+      const f = b[type];
+      const name = str(field(f, "title")) ?? str(field(f, "file_name"));
+      return withCaption(media(type.replace("_", " "), name, str(field(f, "file_id"))), b.caption);
     }
     default:
       return "text" in b ? t() : blocks(b.blocks, paths);
@@ -104,10 +106,14 @@ function block(b: RichBlock, paths: Paths): string {
 
 // The label comes from Telegram ("1.", "•", "a)"); what follows it is indented
 // to line up under the first line.
-function listItem(item: ListItem, paths: Paths): string {
-  const label = item.label || "-";
+function listItem(item: unknown, paths: Paths): string {
+  if (!isObject(item)) return "";
+  const label = str(item.label) || "-";
   const box = item.has_checkbox ? (item.is_checked ? "[x] " : "[ ] ") : "";
-  const body = (item.blocks ?? []).map(b => block(b, paths)).filter(s => s !== "").join("\n");
+  const body = arr(item.blocks)
+    .map(b => block(b, paths))
+    .filter(s => s !== "")
+    .join("\n");
   const pad = " ".repeat(label.length + 1);
   return `${label} ${box}${body.split("\n").join(`\n${pad}`)}`;
 }
@@ -118,36 +124,36 @@ function media(kind: string, name: string | undefined, fileId: string | undefine
 
 function quote(body: string, credit: unknown): string {
   const lines = body.split("\n");
-  const by = credit === undefined ? "" : text(credit as RichText);
+  const by = text(credit);
   if (by) lines.push(`— ${by}`);
   return lines.map(l => (l ? `> ${l}` : ">")).join("\n");
 }
 
 function withCaption(body: string, caption: unknown): string {
-  const c = caption as { text?: RichText; credit?: RichText } | undefined;
-  if (!c) return body;
-  const parts = [text(c.text ?? ""), c.credit === undefined ? "" : `— ${text(c.credit)}`].filter(Boolean);
+  if (!isObject(caption)) return body;
+  const parts = [text(caption.text), caption.credit === undefined ? "" : `— ${text(caption.credit)}`].filter(Boolean);
   return parts.length ? `${body} ${parts.join(" ")}` : body;
 }
 
-function table(rows: TableCell[][] | undefined): string {
-  if (!rows?.length) return "";
-  const width = Math.max(...rows.map(r => r.length));
-  const line = (r: TableCell[]) =>
-    `| ${Array.from({ length: width }, (_, i) => (r[i]?.text === undefined ? "" : text(r[i]!.text!)).replace(/\|/g, "\\|").replace(/\n/g, " ")).join(" | ")} |`;
-  return [line(rows[0]!), `| ${Array(width).fill("---").join(" | ")} |`, ...rows.slice(1).map(line)].join("\n");
+function table(rows: unknown): string {
+  const cells = arr(rows).map(r => arr(r).map(c => text(field(c, "text"))));
+  if (!cells.length) return "";
+  const width = Math.max(...cells.map(r => r.length));
+  const line = (r: string[]) => `| ${Array.from({ length: width }, (_, i) => (r[i] ?? "").replace(/\|/g, "\\|").replace(/\n/g, " ")).join(" | ")} |`;
+  return [line(cells[0] ?? []), `| ${Array(width).fill("---").join(" | ")} |`, ...cells.slice(1).map(line)].join("\n");
 }
 
-function button(b: { text?: RichText; url?: string }): string {
-  const label = text(b.text ?? "");
-  return b.url ? `[${label}](${b.url})` : label;
+function button(b: unknown): string {
+  const label = text(field(b, "text"));
+  const url = str(field(b, "url"));
+  return url ? `[${label}](${url})` : label;
 }
 
-function text(t: RichText | undefined): string {
-  if (t === undefined || t === null) return "";
+function text(t: unknown): string {
   if (typeof t === "string") return t;
   if (Array.isArray(t)) return t.map(text).join("");
-  const inner = () => text(t.text as RichText);
+  if (!isObject(t)) return "";
+  const inner = () => text(t.text);
   switch (t.type) {
     case "bold":
       return `**${inner()}**`;
@@ -166,7 +172,7 @@ function text(t: RichText | undefined): string {
     case "mathematical_expression":
       return `$${t.expression}$`;
     case "button":
-      return button((t.button as { text?: RichText; url?: string }) ?? {});
+      return button(t.button);
     case "anchor":
       return "";
     default:

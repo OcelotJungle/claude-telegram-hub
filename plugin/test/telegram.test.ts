@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { isThreadNotFound, TelegramApi, TelegramError } from "../src/hub/telegram.ts";
+import { field } from "../src/shared/guards.ts";
 import { FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { tempDir } from "./helpers.ts";
 
@@ -104,7 +105,7 @@ describe("TelegramApi", () => {
     fake.pushUpdate(topicMsg({ chatId: -100, threadId: 7, fromId: 1, text: "yo" }));
     const updates = await p;
     expect(updates.length).toBe(1);
-    expect(updates[0]!.message?.text).toBe("yo");
+    expect(updates[0].message?.text).toBe("yo");
   });
 
   test("downloadFile saves into the destination dir with a safe name", async () => {
@@ -149,7 +150,7 @@ describe("TelegramApi uploads and formatting", () => {
     ]);
     for (const kind of ["video", "audio", "animation", "document"] as const) {
       await api.sendFiles("-100", 7, [file(`f.${kind}`, kind)], "", undefined, true);
-      const method = `send${kind[0]!.toUpperCase()}${kind.slice(1)}`;
+      const method = `send${kind[0].toUpperCase()}${kind.slice(1)}`;
       expect(fake.callsOf(method)[0]).toMatchObject({ [kind]: { file: `f.${kind}` }, disable_notification: "true" });
       expect(fake.callsOf(method)[0].caption).toBeUndefined();
     }
@@ -172,6 +173,6 @@ describe("TelegramApi uploads and formatting", () => {
   test("an upload Telegram fails with 5xx is retried with the whole file", async () => {
     fake.failNext("sendDocument", { code: 502, description: "Bad Gateway" });
     await api.sendFiles("-100", 7, [file("log.txt", "document")], "", undefined, true);
-    expect(fake.callsOf("sendDocument").map(c => c.document.body)).toEqual(["body of log.txt", "body of log.txt"]);
+    expect(fake.callsOf("sendDocument").map(c => field(c.document, "body"))).toEqual(["body of log.txt", "body of log.txt"]);
   });
 });

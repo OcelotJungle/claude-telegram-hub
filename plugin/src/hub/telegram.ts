@@ -6,11 +6,41 @@ import type { Block } from "./rich-out.ts";
 
 import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
+import { z } from "zod";
+import { field } from "../shared/guards.ts";
 import { nullLogger } from "../shared/log.ts";
+
+const MS_PER_SECOND = 1000;
+const DOWNLOAD_TIMEOUT_MS = 120_000;
 
 // Bot API types, generated from its documentation.
 export type Message = TelegramMessage;
 export type Update = TelegramUpdate;
+
+// The envelope of every Bot API answer.
+const answerSchema = z.object({
+  ok: z.boolean(),
+  result: z.unknown().optional(),
+  error_code: z.number().optional(),
+  description: z.string().optional(),
+  parameters: z.object({ retry_after: z.number().optional() }).optional(),
+});
+
+// Results are checked for the fields the hub reads.
+const meSchema = z.object({ id: z.number(), username: z.string().optional() });
+const sentSchema = z.object({ message_id: z.number() });
+const topicSchema = z.object({ message_thread_id: z.number(), name: z.string() });
+const fileSchema = z.object({ file_path: z.string().optional(), file_unique_id: z.string().optional() });
+// An update keeps every field Telegram sent, typed by the Bot API
+// documentation; what routing relies on is checked.
+export const updateSchema = z.custom<Update>(isUpdate);
+const updatesSchema = z.array(updateSchema);
+
+function isUpdate(v: unknown): v is Update {
+  if (typeof field(v, "update_id") !== "number") return false;
+  const m = field(v, "message");
+  return m === undefined || (typeof field(m, "message_id") === "number" && typeof field(field(m, "chat"), "id") === "number");
+}
 
 export class TelegramError extends Error {
   constructor(
@@ -72,16 +102,16 @@ export class TelegramApi {
   // Retries network errors until the deadline, and 5xx and 429 (honouring
   // retry_after) up to maxAttempts; other API errors are thrown at once.
   // `waitMs` is how long Telegram may legitimately hold the request (long poll).
-  async call<T>(method: string, params: Body, o: { signal?: AbortSignal; retry?: boolean; waitMs?: number } = {}): Promise<T> {
+  async call<T>(method: string, params: Body, result: z.ZodType<T>, o: { signal?: AbortSignal; retry?: boolean; waitMs?: number } = {}): Promise<T> {
     const deadline = Date.now() + this.deadlineMs;
     let apiFailures = 0;
     let netFailures = 0;
     for (;;) {
       let wait: number;
       try {
-        const result = await this.callOnce<T>(method, params, this.attemptTimeoutMs + (o.waitMs ?? 0), o.signal);
+        const answer = await this.callOnce(method, params, result, this.attemptTimeoutMs + (o.waitMs ?? 0), o.signal);
         if (netFailures) this.log.info(`telegram ${method} got through after ${netFailures} failed attempt(s)`);
-        return result;
+        return answer;
       } catch (e) {
         if (o.retry === false || o.signal?.aborted) throw e;
         if (e instanceof TelegramError) {
@@ -99,54 +129,59 @@ export class TelegramApi {
     }
   }
 
-  private async callOnce<T>(method: string, params: Body, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+  private async callOnce<T>(method: string, params: Body, result: z.ZodType<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
     const timeout = AbortSignal.timeout(timeoutMs);
     const res = await fetch(`${this.base}/bot${this.opts.token}/${method}`, {
       method: "POST",
       ...(typeof params === "function" ? { body: params() } : { headers: { "content-type": "application/json" }, body: JSON.stringify(params) }),
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });
-    let body: any;
+    let json: unknown;
     try {
-      body = await res.json();
+      json = await res.json();
     } catch (e) {
       if (timeout.aborted || signal?.aborted) throw e;
       throw new TelegramError(res.status, `non-JSON response (HTTP ${res.status})`);
     }
+    const answer = answerSchema.safeParse(json);
+    if (!answer.success) throw new TelegramError(res.status, `not a Bot API response (HTTP ${res.status})`);
+    const body = answer.data;
     if (!body.ok) throw new TelegramError(body.error_code ?? res.status, body.description ?? "unknown error", body.parameters?.retry_after);
-    return body.result as T;
+    const parsed = result.safeParse(body.result);
+    if (!parsed.success) throw new TelegramError(res.status, `unexpected ${method} result: ${z.prettifyError(parsed.error)}`);
+    return parsed.data;
   }
 
   getMe(signal?: AbortSignal): Promise<{ id: number; username?: string }> {
-    return this.call("getMe", {}, { signal });
+    return this.call("getMe", {}, meSchema, { signal });
   }
 
   getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<Update[]> {
-    return this.call<Update[]>("getUpdates", { offset, timeout: timeoutSec, allowed_updates: ["message"] }, { signal, retry: false, waitMs: timeoutSec * 1000 });
+    return this.call("getUpdates", { offset, timeout: timeoutSec, allowed_updates: ["message"] }, updatesSchema, { signal, retry: false, waitMs: timeoutSec * MS_PER_SECOND });
   }
 
   sendMessage(chatId: string, threadId: number, text: string, silent: boolean, entities?: Entity[]): Promise<{ message_id: number }> {
-    return this.call("sendMessage", { chat_id: chatId, message_thread_id: threadId, text, disable_notification: silent, ...(entities?.length ? { entities } : {}) });
+    return this.call("sendMessage", { chat_id: chatId, message_thread_id: threadId, text, disable_notification: silent, ...(entities?.length ? { entities } : {}) }, sentSchema);
   }
 
   sendRichMessage(chatId: string, threadId: number, blocks: Block[], silent: boolean): Promise<{ message_id: number }> {
-    return this.call("sendRichMessage", { chat_id: chatId, message_thread_id: threadId, rich_message: { blocks }, disable_notification: silent });
+    return this.call("sendRichMessage", { chat_id: chatId, message_thread_id: threadId, rich_message: { blocks }, disable_notification: silent }, sentSchema);
   }
 
   // One file by the method of its kind, several as a media group with the
   // caption on the first item (Telegram shows it under the album).
   sendFiles(chatId: string, threadId: number, files: OutFile[], caption: string, captionEntities: Entity[] | undefined, silent: boolean): Promise<unknown> {
     const cap = caption ? { caption, ...(captionEntities?.length ? { caption_entities: captionEntities } : {}) } : {};
+    const single = files.length === 1 ? files[0] : undefined;
     const form = () => {
       const f = new FormData();
       f.set("chat_id", chatId);
       f.set("message_thread_id", String(threadId));
       f.set("disable_notification", String(silent));
-      if (files.length === 1) {
-        const file = files[0]!;
-        f.set(file.kind, Bun.file(file.path), file.name);
-        for (const [k, v] of Object.entries({ ...cap, ...videoFields(file) })) f.set(k, typeof v === "string" ? v : JSON.stringify(v));
-        const thumb = thumbOf(file);
+      if (single) {
+        f.set(single.kind, Bun.file(single.path), single.name);
+        for (const [k, v] of Object.entries({ ...cap, ...videoFields(single) })) f.set(k, typeof v === "string" ? v : JSON.stringify(v));
+        const thumb = thumbOf(single);
         if (thumb) f.set("thumbnail", Bun.file(thumb), "thumbnail.jpg");
       } else {
         const media = files.map((file, i) => ({
@@ -165,30 +200,30 @@ export class TelegramApi {
       }
       return f;
     };
-    const method = files.length === 1 ? `send${files[0]!.kind[0]!.toUpperCase()}${files[0]!.kind.slice(1)}` : "sendMediaGroup";
+    const method = single ? `send${single.kind.charAt(0).toUpperCase()}${single.kind.slice(1)}` : "sendMediaGroup";
     const bytes = files.reduce((n, file) => n + file.size, 0);
-    return this.call(method, form, { waitMs: bytes / UPLOAD_BYTES_PER_MS });
+    return this.call(method, form, z.unknown(), { waitMs: bytes / UPLOAD_BYTES_PER_MS });
   }
 
   setMyCommands(commands: { command: string; description: string }[], signal?: AbortSignal): Promise<true> {
-    return this.call("setMyCommands", { commands }, { signal });
+    return this.call("setMyCommands", { commands }, z.literal(true), { signal });
   }
 
   createForumTopic(chatId: string, name: string): Promise<{ message_thread_id: number; name: string }> {
-    return this.call("createForumTopic", { chat_id: chatId, name });
+    return this.call("createForumTopic", { chat_id: chatId, name }, topicSchema);
   }
 
   editForumTopic(chatId: string, threadId: number, name: string): Promise<true> {
-    return this.call("editForumTopic", { chat_id: chatId, message_thread_id: threadId, name });
+    return this.call("editForumTopic", { chat_id: chatId, message_thread_id: threadId, name }, z.literal(true));
   }
 
   async downloadFile(fileId: string, destDir: string): Promise<string> {
-    const file = await this.call<{ file_path?: string; file_unique_id?: string }>("getFile", { file_id: fileId });
+    const file = await this.call("getFile", { file_id: fileId }, fileSchema);
     if (!file.file_path) throw new Error("Telegram returned no file_path — the file may have expired");
-    const res = await fetch(`${this.base}/file/bot${this.opts.token}/${file.file_path}`, { signal: AbortSignal.timeout(120_000) });
+    const res = await fetch(`${this.base}/file/bot${this.opts.token}/${file.file_path}`, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
     if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
     const buf = Buffer.from(await res.arrayBuffer());
-    const rawExt = file.file_path.includes(".") ? file.file_path.split(".").pop()! : "bin";
+    const rawExt = file.file_path.includes(".") ? (file.file_path.split(".").at(-1) ?? "") : "";
     const ext = rawExt.replace(/[^a-zA-Z0-9]/g, "") || "bin";
     const unique = (file.file_unique_id ?? "").replace(/[^a-zA-Z0-9_-]/g, "") || "dl";
     mkdirSync(destDir, { recursive: true });

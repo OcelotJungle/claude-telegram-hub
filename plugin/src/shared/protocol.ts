@@ -15,12 +15,15 @@ export type ChannelMeta = Record<string, string>;
 
 export type QueuedFile = { path: string; name: string; size: number };
 
+// What a plugin asks the hub to do; the hub answers with a res message.
+export type HubRequest = { op: "enable"; title: string } | { op: "disable" } | { op: "download"; fileId: string };
+// The result of enable.
+export type EnableResult = { topicTitle: string; created: boolean };
+
 export type PluginToHub =
   | { type: "hello"; v: number; windowKey: string; sessionId: string; cwd: string }
   | { type: "session"; sessionId: string; cwd: string }
-  | { type: "req"; id: string; op: "enable"; title: string }
-  | { type: "req"; id: string; op: "disable" }
-  | { type: "req"; id: string; op: "download"; fileId: string }
+  | ({ type: "req"; id: string } & HubRequest)
   // sessionId: the session the text was written in (older plugins omit it;
   // then the window's current session is meant).
   | { type: "send"; id: string; sessionId?: string; text: string; notify: boolean }

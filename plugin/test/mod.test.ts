@@ -2,6 +2,7 @@ import type { Usage } from "../src/mod/commands.ts";
 
 import { describe, expect, test } from "bun:test";
 import { autocompactArg, infoText, Runner, tokens } from "../src/mod/commands.ts";
+import { field } from "../src/shared/guards.ts";
 
 const NOW = Date.parse("2026-01-01T11:40:00Z");
 
@@ -98,7 +99,7 @@ describe("replies", () => {
           return { status: 200, text: JSON.stringify(list) };
         }
         await Bun.sleep(30);
-        posted.push(JSON.parse(init.body!).id);
+        posted.push(String(field(JSON.parse(init.body ?? "{}"), "id")));
         return { status: 200, text: "ok" };
       },
       now: () => NOW,

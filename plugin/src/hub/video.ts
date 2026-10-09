@@ -2,11 +2,27 @@ import type { Logger } from "../shared/log.ts";
 import type { VideoMeta } from "../shared/media.ts";
 
 import { rmSync, statSync } from "fs";
+import { z } from "zod";
 
 // Bot API thumbnail limits: a JPEG of at most 320 px a side, under 200 kB.
 const THUMB_SIDE = 320;
 const MAX_THUMB = 200 * 1024;
 const TOOL_TIMEOUT_MS = 30_000;
+
+// The part of ffprobe's JSON output that dimensions() asks for.
+const probeSchema = z.object({
+  streams: z
+    .array(
+      z.object({
+        width: z.number().optional(),
+        height: z.number().optional(),
+        duration: z.string().optional(),
+        side_data_list: z.array(z.object({ rotation: z.number().optional() })).optional(),
+      }),
+    )
+    .optional(),
+  format: z.object({ duration: z.string().optional() }).optional(),
+});
 
 export type VideoTools = { ffprobe: string; ffmpeg: string };
 
@@ -46,10 +62,7 @@ export async function probeVideo(path: string, name: string, tools: VideoTools, 
 async function dimensions(path: string, ffprobe: string): Promise<VideoMeta> {
   const entries = "stream=width,height,duration:stream_side_data=rotation:format=duration";
   const out = await run(ffprobe, ["-v", "error", "-select_streams", "v:0", "-show_entries", entries, "-of", "json", path]);
-  const json = JSON.parse(out) as {
-    streams?: { width?: number; height?: number; duration?: string; side_data_list?: { rotation?: number }[] }[];
-    format?: { duration?: string };
-  };
+  const json = probeSchema.parse(JSON.parse(out));
   const stream = json.streams?.[0];
   if (!stream?.width || !stream.height) throw new Error("no video stream");
   // Phones store portrait video as landscape plus a rotation.

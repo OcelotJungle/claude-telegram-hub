@@ -2,6 +2,8 @@ import type { Token, Tokens } from "marked";
 
 import { decodeHTML } from "entities";
 import { Lexer } from "marked";
+import { z } from "zod";
+import { isMarked } from "../shared/markdown.ts";
 
 // Agent text (CommonMark + GFM) as a rich message in blocks (Bot API 10.1),
 // so Telegram shows real headings, lists and tables. Blocks carry text as it
@@ -25,6 +27,42 @@ export type Block =
   | { type: "list"; items: ListItem[] }
   | { type: "table"; cells: Cell[][]; is_bordered?: true; is_striped?: true }
   | { type: "divider" };
+
+// Blocks as the hub's queue file keeps them.
+const richTextSchema: z.ZodType<RichText> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.array(richTextSchema),
+    z.object({ type: z.enum(["bold", "italic", "strikethrough", "code"]), text: richTextSchema }),
+    z.object({ type: z.literal("url"), text: richTextSchema, url: z.string() }),
+  ]),
+);
+const listItemSchema: z.ZodType<ListItem> = z.lazy(() =>
+  z.object({
+    blocks: z.array(blockSchema),
+    has_checkbox: z.literal(true).optional(),
+    is_checked: z.literal(true).optional(),
+    type: z.literal("1").optional(),
+    value: z.number().optional(),
+  }),
+);
+const cellSchema: z.ZodType<Cell> = z.object({
+  text: richTextSchema,
+  is_header: z.literal(true).optional(),
+  align: z.enum(["left", "center", "right"]),
+  valign: z.literal("middle"),
+});
+export const blockSchema: z.ZodType<Block> = z.lazy(() =>
+  z.union([
+    z.object({ type: z.literal("paragraph"), text: richTextSchema }),
+    z.object({ type: z.literal("heading"), size: z.number(), text: richTextSchema }),
+    z.object({ type: z.literal("pre"), text: z.string(), language: z.string().optional() }),
+    z.object({ type: z.literal("blockquote"), blocks: z.array(blockSchema) }),
+    z.object({ type: z.literal("list"), items: z.array(listItemSchema) }),
+    z.object({ type: z.literal("table"), cells: z.array(z.array(cellSchema)), is_bordered: z.literal(true).optional(), is_striped: z.literal(true).optional() }),
+    z.object({ type: z.literal("divider") }),
+  ]),
+);
 
 // Telegram cuts Cyrillic text short of its documented 32768 characters, near
 // 35000 bytes, without an error; a piece stays well below.
@@ -90,6 +128,7 @@ function blocks(tokens: Token[]): Block[] {
 
 // The blocks of one token; undefined for tokens that show nothing.
 function block(t: Token): Block[] | undefined {
+  if (!isMarked(t)) return [{ type: "paragraph", text: t.raw }];
   switch (t.type) {
     case "space":
     case "def":
@@ -100,17 +139,17 @@ function block(t: Token): Block[] | undefined {
     case "text":
       return [{ type: "paragraph", text: t.tokens ? inline(t.tokens) : decodeHTML(t.text) }];
     case "heading":
-      return [{ type: "heading", size: (t as Tokens.Heading).depth, text: inline(t.tokens ?? []) }];
+      return [{ type: "heading", size: t.depth, text: inline(t.tokens ?? []) }];
     case "code": {
-      const language = (t as Tokens.Code).lang?.split(/\s/)[0];
+      const language = t.lang?.split(/\s/)[0];
       return [{ type: "pre", text: t.text, ...(language ? { language } : {}) }];
     }
     case "blockquote":
       return [{ type: "blockquote", blocks: blocks(t.tokens ?? []) }];
     case "list":
-      return [list(t as Tokens.List)];
+      return [list(t)];
     case "table":
-      return [table(t as Tokens.Table)];
+      return [table(t)];
     case "hr":
       return [{ type: "divider" }];
     case "html":
@@ -161,6 +200,10 @@ function inline(tokens: Token[]): RichText {
     else parts.push(p);
   };
   for (const t of tokens) {
+    if (!isMarked(t)) {
+      put(t.raw);
+      continue;
+    }
     switch (t.type) {
       case "text":
         put(t.tokens ? inline(t.tokens) : decodeHTML(t.text));
@@ -196,7 +239,7 @@ function inline(tokens: Token[]): RichText {
         put(t.raw);
     }
   }
-  return parts.length === 1 ? parts[0]! : parts;
+  return parts.length === 1 ? parts[0] : parts;
 }
 
 // A bare URL, or a link whose text is its URL, stays plain: Telegram links it

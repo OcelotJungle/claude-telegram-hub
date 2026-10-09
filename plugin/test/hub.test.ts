@@ -9,6 +9,7 @@ import { Hub } from "../src/hub/hub.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
 import { Runner } from "../src/mod/commands.ts";
+import { arr, field } from "../src/shared/guards.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { freePort, hasFfmpeg, makeVideo, memLogger, tempDir, waitFor, wsClient } from "./helpers.ts";
@@ -59,7 +60,7 @@ const hello = (sessionId: string, windowKey = `win-${sessionId}`) => ({ type: "h
 async function plugin(sessionId: string, windowKey?: string) {
   const c = await wsClient(port, hello(sessionId, windowKey));
   clients.push(c);
-  await c.next(m => m.type === "state");
+  await c.next("state");
   return c;
 }
 
@@ -67,7 +68,7 @@ let reqId = 0;
 async function req(c: Awaited<ReturnType<typeof plugin>>, body: object) {
   const id = `r${++reqId}`;
   c.send({ type: "req", id, ...body });
-  return c.next(m => m.type === "res" && m.id === id, 5000);
+  return c.next("res", m => m.id === id, 5000);
 }
 
 async function enabled(sessionId: string, title = "Title") {
@@ -98,7 +99,7 @@ describe("enable", () => {
     const res = await req(c, { op: "enable", title: "Реализация хаба" });
     expect(res).toMatchObject({ ok: true, result: { topicTitle: "claude-telegram-hub · Реализация хаба", created: true } });
     expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: "claude-telegram-hub · Реализация хаба" }]);
-    await c.next(m => m.type === "state" && m.enabled === true);
+    await c.next("state", m => m.enabled === true);
     expect(new SessionStore(join(dir, "sessions.json")).get("s1")).toEqual({ topicId: 100, title: "Реализация хаба", project: "claude-telegram-hub", enabled: true });
   });
 
@@ -108,7 +109,7 @@ describe("enable", () => {
     await req(c, { op: "enable", title: "T" });
     await req(c, { op: "disable" });
     const res = await req(c, { op: "enable", title: "T" });
-    expect(res.result.created).toBe(false);
+    expect(res.result).toMatchObject({ created: false });
     expect(fake.callsOf("createForumTopic").length).toBe(1);
   });
 
@@ -155,7 +156,7 @@ describe("inbound", () => {
     const b = await enabled("b", "B");
     await req(b, { op: "disable" });
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 101, fromId: ME, text: "привет B" }));
-    const msg = await b.next(m => m.type === "inbound");
+    const msg = await b.next("inbound");
     expect(msg.content).toBe("привет B");
     expect(msg.meta).toMatchObject({ chat_id: GROUP, user_id: ME, user: "user" });
     await waitFor(() => b.messages.filter(m => m.type === "state").at(-1)?.enabled === true, 3000, "enabled state");
@@ -175,9 +176,9 @@ describe("inbound", () => {
     ];
     const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text, extra: { entities } });
     fake.pushUpdate(u);
-    expect((await a.next(m => m.type === "inbound")).content).toBe(text);
-    const line = log.lines.find(l => l.includes(`message ${u.message!.message_id}`));
-    expect(line).toBe(`INFO message ${u.message!.message_id} in topic 100 → session a: text, ${text.length} chars, entities bold, code`);
+    expect((await a.next("inbound")).content).toBe(text);
+    const line = log.lines.find(l => l.includes(`message ${u.message?.message_id}`));
+    expect(line).toBe(`INFO message ${u.message?.message_id} in topic 100 → session a: text, ${text.length} chars, entities bold, code`);
   });
 
   // What Telegram makes of a Markdown file pasted into the chat.
@@ -187,9 +188,9 @@ describe("inbound", () => {
     const rich_message = { blocks: [{ type: "heading", size: 2, text: "План" }, { type: "paragraph", text: ["Сначала ", { type: "bold", text: "v2g1" }] }] };
     const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, extra: { rich_message } });
     fake.pushUpdate(u);
-    const msg = await a.next(m => m.type === "inbound");
+    const msg = await a.next("inbound");
     expect(msg.content).toBe("## План\n\nСначала **v2g1**");
-    expect(log.lines).toContain(`INFO message ${u.message!.message_id} in topic 100 → session a: rich_message, 25 chars`);
+    expect(log.lines).toContain(`INFO message ${u.message?.message_id} in topic 100 → session a: rich_message, 25 chars`);
   });
 
   test("photos of a rich message are downloaded into the inbox, other files keep their file_id", async () => {
@@ -204,7 +205,7 @@ describe("inbound", () => {
       ],
     };
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, extra: { rich_message } }));
-    const msg = await a.next(m => m.type === "inbound");
+    const msg = await a.next("inbound");
     const [photo, gone, doc] = msg.content.split("\n\n");
     expect(photo.startsWith(`(photo: ${join(dir, "inbox")}`)).toBe(true);
     expect(gone).toBe("(photo, file_id: GONE)");
@@ -230,7 +231,7 @@ describe("inbound", () => {
     fake.pushUpdate(topicMsg({ chatId: "-555", threadId: 100, fromId: ME, text: "other chat" }));
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: "42", text: "stranger" }));
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "mine" }));
-    const msg = await a.next(m => m.type === "inbound");
+    const msg = await a.next("inbound");
     expect(msg.content).toBe("mine");
     expect(a.messages.filter(m => m.type === "inbound").length).toBe(1);
     expect(log.lines.some(l => l.includes("-555"))).toBe(true);
@@ -244,7 +245,7 @@ describe("inbound", () => {
     fake.pushUpdate(
       topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, extra: { caption: "look", photo: [{ file_id: "P1", file_unique_id: "u1" }, { file_id: "P2", file_unique_id: "u2" }] } }),
     );
-    const msg = await a.next(m => m.type === "inbound");
+    const msg = await a.next("inbound");
     expect(msg.content).toBe("look");
     expect(msg.meta.image_path.startsWith(join(dir, "inbox"))).toBe(true);
   });
@@ -255,7 +256,7 @@ describe("inbound", () => {
     fake.pushUpdate(
       topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, extra: { document: { file_id: "D1", file_unique_id: "d", file_name: "a<b>.txt", file_size: 5, mime_type: "text/plain" } } }),
     );
-    const msg = await a.next(m => m.type === "inbound");
+    const msg = await a.next("inbound");
     expect(msg.content).toBe("(document: a_b_.txt)");
     expect(msg.meta).toMatchObject({ attachment_kind: "document", attachment_file_id: "D1", attachment_name: "a_b_.txt", attachment_size: "5" });
   });
@@ -267,7 +268,7 @@ describe("send", () => {
     const a = await enabled("a");
     a.send({ type: "send", id: "x1", text: "working", notify: false });
     a.send({ type: "send", id: "x2", text: "done", notify: true });
-    await a.next(m => m.type === "ack" && m.id === "x2");
+    await a.next("ack", m => m.id === "x2");
     expect(a.messages.some(m => m.type === "ack" && m.id === "x1")).toBe(true);
     expect(fake.callsOf("sendRichMessage")).toEqual([
       { chat_id: GROUP, message_thread_id: 100, rich_message: { blocks: [{ type: "paragraph", text: "working" }] }, disable_notification: true },
@@ -300,7 +301,7 @@ describe("send", () => {
     await startHub();
     const a = await plugin("a");
     a.send({ type: "send", id: "x1", text: "nowhere", notify: false });
-    await a.next(m => m.type === "ack" && m.id === "x1");
+    await a.next("ack", m => m.id === "x1");
     expect(fake.texts().length).toBe(0);
     expect(log.lines.some(l => l.startsWith("WARN") && l.includes("nowhere"))).toBe(true);
   });
@@ -339,7 +340,7 @@ describe("send", () => {
     const a = await enabled("a", "T");
     fake.deleteTopic(100);
     a.send({ type: "send", id: "x1", text: "still here", notify: false });
-    await a.next(m => m.type === "ack" && m.id === "x1");
+    await a.next("ack", m => m.id === "x1");
     expect(fake.callsOf("createForumTopic").length).toBe(2);
     expect(fake.texts().at(-1)).toMatchObject({ message_thread_id: 101, text: "still here" });
     expect(new SessionStore(join(dir, "sessions.json")).get("a")?.topicId).toBe(101);
@@ -386,7 +387,7 @@ describe("delivery", () => {
     const a = await enabled("a");
     fake.hangNext("sendRichMessage", 1000);
     a.send({ type: "send", id: "x1", text: "kept safe", notify: false });
-    await a.next(m => m.type === "ack" && m.id === "x1");
+    await a.next("ack", m => m.id === "x1");
     expect(readFileSync(join(dir, "outbox.json"), "utf8")).toContain("kept safe");
   });
 
@@ -417,7 +418,7 @@ describe("delivery", () => {
     const a = await enabled("a");
     fake.hangNext("sendRichMessage", 1000);
     a.send({ type: "send", id: "x1", text: "survivor", notify: true });
-    await a.next(m => m.type === "ack" && m.id === "x1");
+    await a.next("ack", m => m.id === "x1");
     a.close();
     await hub.stop();
     fake.stop();
@@ -431,7 +432,7 @@ describe("delivery", () => {
     await startHub();
     const a = await enabled("a");
     a.send({ type: "send", id: "x1", text: "once", notify: false });
-    await a.next(m => m.type === "ack" && m.id === "x1");
+    await a.next("ack", m => m.id === "x1");
     a.send({ type: "send", id: "x1", text: "once", notify: false });
     await waitFor(() => a.messages.filter(m => m.type === "ack" && m.id === "x1").length === 2);
     await Bun.sleep(100);
@@ -469,7 +470,7 @@ describe("delivery", () => {
     const a = await enabled("a");
     fake.hangNext("sendRichMessage", 4);
     a.send({ type: "send", id: "x1", text: "last words", notify: true });
-    await a.next(m => m.type === "ack" && m.id === "x1");
+    await a.next("ack", m => m.id === "x1");
     a.close();
     await Bun.sleep(400);
     expect(exited).toBe(false);
@@ -483,7 +484,7 @@ describe("delivery", () => {
     await startHub({ idleMs: 100, token: false });
     const a = await plugin("a");
     a.send({ type: "send", id: "x1", text: "for later", notify: false });
-    await a.next(m => m.type === "ack" && m.id === "x1");
+    await a.next("ack", m => m.id === "x1");
     a.close();
     await waitFor(() => exited, 3000, "idle exit");
     expect(readFileSync(join(dir, "outbox.json"), "utf8")).toContain("for later");
@@ -516,7 +517,7 @@ describe("formatting", () => {
     a.send({ type: "send", id: "x1", text: "## Итог\n\n**готово**, см. `hub.ts`\n\n| a | b |\n|---|---|\n| 1 | 2 |", notify: false });
     await waitFor(() => fake.texts().length === 1);
     expect(fake.callsOf("sendMessage")).toEqual([]);
-    expect(fake.callsOf("sendRichMessage")[0].rich_message.blocks).toEqual([
+    expect(field(fake.callsOf("sendRichMessage")[0].rich_message, "blocks")).toEqual([
       { type: "heading", size: 2, text: "Итог" },
       { type: "paragraph", text: [{ type: "bold", text: "готово" }, ", см. ", { type: "code", text: "hub.ts" }] },
       {
@@ -545,7 +546,7 @@ describe("formatting", () => {
     const [first, ...rest] = fake.texts();
     expect(first).toMatchObject({ text: "до", disable_notification: false });
     expect(rest.map(s => s.text).join("")).toBe("z".repeat(31000));
-    expect(rest.every(s => s.entities[0].type === "pre" && s.disable_notification)).toBe(true);
+    expect(rest.every(s => field(arr(s.entities)[0], "type") === "pre" && s.disable_notification === true)).toBe(true);
   });
 
   test("a rich message Telegram rejects goes as plain text with entities, then without them", async () => {
@@ -585,7 +586,7 @@ describe("files", () => {
   };
   const sendFiles = (c: { send(o: object): void }, id: string, files: object[], o: { caption?: string; notify?: boolean; sessionId?: string } = {}) =>
     c.send({ type: "sendFiles", id, sessionId: o.sessionId ?? "a", files, caption: o.caption ?? "", notify: o.notify ?? false });
-  const done = (c: Awaited<ReturnType<typeof plugin>>, id: string) => c.next(m => m.type === "filesSent" && m.id === id, 5000);
+  const done = (c: Awaited<ReturnType<typeof plugin>>, id: string) => c.next("filesSent", m => m.id === id, 5000);
   const sends = () => fake.calls.filter(c => c.method.startsWith("send")).map(c => c.method);
 
   test("a photo goes with a formatted caption, the plugin hears it is sent, the copy is removed", async () => {
@@ -593,7 +594,7 @@ describe("files", () => {
     const a = await enabled("a");
     const f = queued("f1", "shot.png");
     sendFiles(a, "f1", [f], { caption: "see **this**" });
-    await a.next(m => m.type === "ack" && m.id === "f1");
+    await a.next("ack", m => m.id === "f1");
     expect(await done(a, "f1")).toEqual({ type: "filesSent", id: "f1" });
     expect(fake.callsOf("sendPhoto")).toEqual([
       {
@@ -703,7 +704,7 @@ describe("files", () => {
     sendFiles(a, "f1", [video("f1", "clip.mp4")], { caption: "cap" });
     expect(await done(a, "f1")).toEqual({ type: "filesSent", id: "f1" });
     const [sent] = fake.callsOf("sendVideo");
-    expect(sent.thumbnail.size).toBeLessThan(200 * 1024);
+    expect(field(sent.thumbnail, "size")).toBeLessThan(200 * 1024);
     expect(sent).toMatchObject({ video: { file: "clip.mp4" }, caption: "cap", width: "640", height: "360", duration: "3", supports_streaming: "true", thumbnail: thumbPart });
     expect(existsSync(join(dir, "outbox-files", "f1"))).toBe(false);
   });
@@ -779,7 +780,7 @@ describe("files", () => {
     const a = await enabled("a");
     fake.hangNext("sendDocument", 100);
     sendFiles(a, "f1", [queued("f1", "a.txt")]);
-    await a.next(m => m.type === "ack" && m.id === "f1");
+    await a.next("ack", m => m.id === "f1");
     await hub.stop();
     fake.clearHangs();
     await startHub();
@@ -799,7 +800,7 @@ describe("hooks and transport", () => {
       body: JSON.stringify({ messagingSocket: "pipe-B", session_id: "b2", transcript_path: "C:\\t\\b2.jsonl", cwd: CWD, source: "clear" }),
     });
     expect(res.status).toBe(200);
-    const sw = await b.next(m => m.type === "switchSession");
+    const sw = await b.next("switchSession");
     expect(sw).toEqual({ type: "switchSession", sessionId: "b2", transcriptPath: "C:\\t\\b2.jsonl", cwd: CWD });
     expect(a.messages.some(m => m.type === "switchSession")).toBe(false);
   });
@@ -811,7 +812,7 @@ describe("hooks and transport", () => {
       body: JSON.stringify({ messagingSocket: "pipe-C", session_id: "c", transcript_path: "C:\\t\\c.jsonl", cwd: CWD, source: "startup" }),
     });
     const c = await plugin("c", "pipe-C");
-    await c.next(m => m.type === "switchSession");
+    await c.next("switchSession");
   });
 
   test("the session message re-registers a window under a new session id", async () => {
@@ -832,7 +833,7 @@ describe("hooks and transport", () => {
 
   test("health reports the hub pid", async () => {
     await startHub();
-    const res = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
+    const res: unknown = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
     expect(res).toEqual({ ok: true, pid: process.pid });
   });
 
@@ -943,7 +944,7 @@ describe("commands", () => {
     const sent = await reply(runner, t => t.startsWith("Лимиты"));
     expect(sent).toMatchObject({ message_thread_id: 100, disable_notification: false });
     expect(sent.text).toContain("Сейчас: 128k токенов");
-    expect(sent.rich_message.blocks[0].text[0]).toEqual({ type: "bold", text: "Лимиты" });
+    expect(arr(field(arr(field(sent.rich_message, "blocks"))[0], "text"))[0]).toEqual({ type: "bold", text: "Лимиты" });
     expect(a.messages.some(m => m.type === "inbound")).toBe(false);
     expect(new SessionStore(join(dir, "sessions.json")).get("a")?.enabled).toBe(false);
   });
@@ -1085,6 +1086,6 @@ describe("commands", () => {
   test("the hub puts the commands into the bot menu", async () => {
     await startHub();
     const call = await waitFor(() => fake.callsOf("setMyCommands")[0]);
-    expect(call.commands.map((c: { command: string }) => c.command)).toEqual(["info", "compact"]);
+    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact"]);
   });
 });

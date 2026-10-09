@@ -32,7 +32,9 @@ export function commandOf(text: string, botUsername: string | undefined): Omit<T
   const m = text.match(/^\/(info|compact)(?:@(\w+))?(?:\s+([\s\S]*))?$/i);
   if (!m) return undefined;
   if (m[2] && botUsername && m[2].toLowerCase() !== botUsername.toLowerCase()) return undefined;
-  return { name: m[1]!.toLowerCase() as TopicCommand["name"], args: (m[3] ?? "").trim() };
+  const name = m[1]?.toLowerCase();
+  if (name !== "info" && name !== "compact") return undefined;
+  return { name, args: (m[3] ?? "").trim() };
 }
 
 // Fields every message may carry, whatever its kind.

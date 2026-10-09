@@ -31,7 +31,7 @@ export class Relay {
   setEnabled(on: boolean): Outgoing[] {
     let out: Outgoing[] = [];
     if (!on && this.enabled) {
-      if (this.ending !== undefined) out = this.finishTurn();
+      if (this.ending !== undefined) out = this.finishTurn(this.ending);
       else if (this.pending !== undefined) out = [{ text: this.pending, notify: false }];
     }
     this.enabled = on;
@@ -46,7 +46,7 @@ export class Relay {
   feed(ev: TranscriptEvent): Outgoing[] {
     const out: Outgoing[] = [];
     if (this.ending !== undefined && ("messageId" in ev ? ev.messageId !== this.ending : ev.kind === "terminal_input")) {
-      out.push(...this.finishTurn());
+      out.push(...this.finishTurn(this.ending));
     }
     switch (ev.kind) {
       case "text":
@@ -69,18 +69,18 @@ export class Relay {
   // A tool of ours that posts to the topic is about to run: the text written
   // before the call goes first. A turn that ended before it is finished.
   textBeforeToolCall(): Outgoing[] {
-    const out = this.ending !== undefined ? this.finishTurn() : [];
+    const out = this.ending !== undefined ? this.finishTurn(this.ending) : [];
     if (this.enabled && this.pending !== undefined) out.push({ text: this.pending, notify: false });
     this.pending = undefined;
     return out;
   }
 
   idle(): Outgoing[] {
-    return this.ending === undefined ? [] : this.finishTurn();
+    return this.ending === undefined ? [] : this.finishTurn(this.ending);
   }
 
-  private finishTurn(): Outgoing[] {
-    this.ended.push(this.ending!);
+  private finishTurn(ending: string): Outgoing[] {
+    this.ended.push(ending);
     if (this.ended.length > REMEMBERED_ENDS) this.ended.shift();
     this.ending = undefined;
     const out: Outgoing[] = [];
