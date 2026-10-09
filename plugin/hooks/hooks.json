@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/src/hook/sessionStart.ts\"",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/src/hook/session-start.ts\"",
             "timeout": 5
           }
         ]

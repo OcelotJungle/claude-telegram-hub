@@ -6,7 +6,7 @@ import { TelegramApi } from '../src/hub/telegram.ts'
 import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, MAX_AUTO_CONTINUES, PluginCore } from '../src/plugin/plugin.ts'
 import { NOTIFY_MARKER } from '../src/transcript/relay.ts'
 import type { Config } from '../src/shared/config.ts'
-import { FakeTelegram, topicMsg } from './fakeTelegram.ts'
+import { FakeTelegram, topicMsg } from './fake-telegram.ts'
 import { freePort, memLogger, tempDir, waitFor } from './helpers.ts'
 
 const GROUP = '-1001'

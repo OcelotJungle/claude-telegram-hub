@@ -4,7 +4,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { appendFileSync, mkdirSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
 import { z } from 'zod'
-import { FakeTelegram, topicMsg } from './fakeTelegram.ts'
+import { FakeTelegram, topicMsg } from './fake-telegram.ts'
 import { freePort, tempDir, waitFor } from './helpers.ts'
 
 const MAIN = resolve(import.meta.dir, '../src/plugin/main.ts')

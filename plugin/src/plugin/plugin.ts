@@ -10,7 +10,7 @@ import { transcriptPathFor } from '../transcript/locate.ts'
 import { parseRecord } from '../transcript/parse.ts'
 import { Relay, type Outgoing } from '../transcript/relay.ts'
 import { effectiveTitle, readSessionTitles, TranscriptTailer, type Titles } from '../transcript/tail.ts'
-import { HubClient } from './hubClient.ts'
+import { HubClient } from './hub-client.ts'
 
 export type PluginOptions = {
   sessionId: string

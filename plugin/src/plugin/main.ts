@@ -8,7 +8,7 @@ import { join, resolve } from 'path'
 import { z } from 'zod'
 import { hubPort, paths } from '../shared/config.ts'
 import { createLogger } from '../shared/log.ts'
-import { spawnHubDetached } from './hubClient.ts'
+import { spawnHubDetached } from './hub-client.ts'
 import { HOOK_NOTE_TOOL, PluginCore } from './plugin.ts'
 
 const log = createLogger(paths().logFile, 'plugin')

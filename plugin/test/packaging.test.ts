@@ -9,7 +9,7 @@ import { freePort, memLogger, tempDir, waitFor, wsClient } from './helpers.ts'
 
 const PLUGIN = resolve(import.meta.dir, '..')
 const REPO = resolve(PLUGIN, '..')
-const HOOK = join(PLUGIN, 'src', 'hook', 'sessionStart.ts')
+const HOOK = join(PLUGIN, 'src', 'hook', 'session-start.ts')
 
 // Async on purpose: an in-process hub must keep serving while the hook runs.
 async function runHook(port: number, input: object, socket = 'pipe-H') {
@@ -81,7 +81,7 @@ describe('plugin packaging', () => {
     expect(existsSync(join(PLUGIN, 'src', 'plugin', 'main.ts'))).toBe(true)
     const hooks = json(join(PLUGIN, 'hooks', 'hooks.json'))
     const cmd: string = hooks.hooks.SessionStart[0].hooks[0].command
-    expect(cmd).toContain('src/hook/sessionStart.ts')
+    expect(cmd).toContain('src/hook/session-start.ts')
     expect(existsSync(HOOK)).toBe(true)
     // The function hooks module that runs commands from the topic.
     expect(hooks.modules).toEqual(['../src/mod/register.ts'])

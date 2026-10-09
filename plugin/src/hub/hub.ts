@@ -13,7 +13,7 @@ import { commandOf, routeUpdate } from './router.ts'
 import { SessionStore, topicName, type SessionRecord } from './sessions.ts'
 import { isThreadNotFound, TelegramError, type Message, type TelegramApi, type Update } from './telegram.ts'
 import { richPhotos, richToMarkdown, type RichMessage } from './rich.ts'
-import { richPieces } from './richOut.ts'
+import { richPieces } from './rich-out.ts'
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath, type VideoTools } from './video.ts'
 
 type Conn = { windowKey?: string; sessionId?: string; cwd?: string }

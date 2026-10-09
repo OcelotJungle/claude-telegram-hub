@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { basename, join } from 'path'
 import type { OutFile } from '../src/shared/media.ts'
 import { isThreadNotFound, TelegramApi, TelegramError } from '../src/hub/telegram.ts'
-import { FakeTelegram, topicMsg } from './fakeTelegram.ts'
+import { FakeTelegram, topicMsg } from './fake-telegram.ts'
 import { tempDir } from './helpers.ts'
 
 let fake: FakeTelegram

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { MAX_RICH_BLOCKS, MAX_RICH_BYTES, richPieces, toRichBlocks } from '../src/hub/richOut.ts'
+import { MAX_RICH_BLOCKS, MAX_RICH_BYTES, richPieces, toRichBlocks } from '../src/hub/rich-out.ts'
 
 describe('agent Markdown to rich blocks', () => {
   test('heading, paragraph with inline formatting and links, code, quote, divider', () => {

@@ -3,7 +3,7 @@ import { join } from 'path'
 import { commandOf, routeUpdate } from '../src/hub/router.ts'
 import { SessionStore } from '../src/hub/sessions.ts'
 import type { Update } from '../src/hub/telegram.ts'
-import { topicMsg } from './fakeTelegram.ts'
+import { topicMsg } from './fake-telegram.ts'
 import { tempDir } from './helpers.ts'
 
 const GROUP = '-1001'
