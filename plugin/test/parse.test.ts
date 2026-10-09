@@ -212,9 +212,17 @@ describe("topic messages reaching the agent", () => {
     expect(parseRecord(rec)).toEqual([{ kind: "channel_seen", messageIds: [4841] }]);
   });
 
+  test("a message that interrupted the agent comes from our plugin through the inbox", () => {
+    const peer = { kind: "peer", from: "unknown", plugin: "tg-hub" };
+    const rec = { ...userBase, isMeta: true, origin: peer, message: { role: "user", content: `Another Claude session sent a message:\n${tag(5107, "! стоп")}` } };
+    expect(parseRecord(rec)).toEqual([{ kind: "channel_seen", messageIds: [5107] }]);
+  });
+
   test("another channel's messages and quoted tags are not ours", () => {
     const other = { kind: "channel", server: "plugin:telegram:telegram" };
     expect(parseRecord({ ...userBase, isMeta: true, origin: other, message: { role: "user", content: tag(5, "x") } })).toEqual([]);
+    const otherPeer = { kind: "peer", from: "uds:x", plugin: "other" };
+    expect(parseRecord({ ...userBase, isMeta: true, origin: otherPeer, message: { role: "user", content: tag(5, "x") } })).toEqual([]);
     expect(parseRecord({ ...userBase, origin: { kind: "human" }, message: { role: "user", content: `see ${tag(6, "x")}` } })).toEqual([{ kind: "terminal_input" }]);
   });
 });

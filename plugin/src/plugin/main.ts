@@ -74,11 +74,11 @@ const core = sessionId
       emitChannel: (content, meta) => {
         mcp.notification({ method: "notifications/claude/channel", params: { content, meta } }).catch(e => log.error(`channel notification failed: ${e}`));
       },
-      interrupt: note => {
+      interrupt: prompt => {
         const socket = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
         const token = process.env.CLAUDE_CODE_MESSAGING_TOKEN;
         if (!socket || !token) return Promise.reject(new Error("CLAUDE_CODE_MESSAGING_SOCKET or CLAUDE_CODE_MESSAGING_TOKEN is not set"));
-        return sendInterrupt(socket, token, note);
+        return sendInterrupt(socket, token, prompt);
       },
       answerPermission: (requestId, behavior) => {
         mcp.notification({ method: "notifications/claude/channel/permission", params: { request_id: requestId, behavior } }).catch(e => log.error(`permission answer failed: ${e}`));

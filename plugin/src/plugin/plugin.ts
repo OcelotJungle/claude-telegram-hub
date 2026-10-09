@@ -42,11 +42,19 @@ export const CUT_LIMIT_NOTE = `⚠️ Связь с API оборвалась п�
 const HUB_TELEGRAM_TIMEOUT_MS = 150_000;
 // Tools that wait for the user's answer: the agent is not working meanwhile.
 const WAITS_FOR_USER = new Set(["AskUserQuestion"]);
-// A topic message starting with this stops the agent's turn before it arrives.
+// A topic message starting with this stops the agent's turn and takes its place.
 const INTERRUPT_PREFIX = "!";
-export const INTERRUPT_NOTE =
-  'tg-hub: the user interrupted your work from Telegram (their topic message starts with "!"). ' +
-  "Do not reply to this note; their message follows.";
+
+// A topic message that interrupts the agent, in the <channel> tag Claude Code
+// would have put it in.
+export function interruptPrompt(content: string, meta: ChannelMeta): string {
+  const attrs = Object.entries(meta).map(([k, v]) => ` ${k}="${v.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;")}"`).join("");
+  return (
+    'tg-hub: the user interrupted your work from Telegram with this topic message (it starts with "!"). ' +
+    "It is their message, as if it came through the channel: answer it.\n" +
+    `<channel source="tg-hub"${attrs}>\n${content}\n</channel>`
+  );
+}
 
 export type PluginOptions = {
   sessionId: string;
@@ -64,9 +72,9 @@ export type PluginOptions = {
   fileWaitMs?: number;
   spawnHub(): void;
   emitChannel(content: string, meta: ChannelMeta): void;
-  // Ends the agent's turn, as Esc in the terminal would, leaving the note
-  // in its context.
-  interrupt(note: string): Promise<void>;
+  // Ends the agent's turn, as Esc in the terminal would, and gives it the
+  // prompt instead.
+  interrupt(prompt: string): Promise<void>;
   // Answers a permission prompt of Claude Code.
   answerPermission(requestId: string, behavior: PermissionBehavior): void;
   // Ends the Claude Code process of this window (/stop in the topic).
@@ -349,15 +357,16 @@ export class PluginCore {
     this.client.send({ type: "busy", busy });
   }
 
-  // A message starting with "!" to a working agent stops its turn first; the
-  // message itself still comes as a channel message.
+  // A message starting with "!" to a working agent stops its turn and comes
+  // in its place; when that fails, it comes as a channel message.
   private deliver(content: string, meta: ChannelMeta): void {
     const interrupt = this.busy && content.trimStart().startsWith(INTERRUPT_PREFIX);
     this.inbound = this.inbound.then(async () => {
       if (interrupt) {
         try {
-          await this.opts.interrupt(INTERRUPT_NOTE);
+          await this.opts.interrupt(interruptPrompt(content, meta));
           this.log.info(`session ${this.sessionId}: interrupted from the topic`);
+          return;
         } catch (e) {
           this.log.warn(`session ${this.sessionId}: could not interrupt the agent: ${e}`);
         }

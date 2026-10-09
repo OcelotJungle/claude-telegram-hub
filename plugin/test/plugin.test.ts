@@ -6,7 +6,7 @@ import { join } from "path";
 import { z } from "zod";
 import { Hub } from "../src/hub/hub.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
-import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, INTERRUPT_NOTE, MAX_AUTO_CONTINUES, PluginCore } from "../src/plugin/plugin.ts";
+import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, interruptPrompt, MAX_AUTO_CONTINUES, PluginCore } from "../src/plugin/plugin.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { NOTIFY_MARKER } from "../src/transcript/relay.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
@@ -26,8 +26,8 @@ let config: Config;
 let core: PluginCore | undefined;
 let channel: { content: string; meta: Record<string, string> }[];
 let answers: { requestId: string; behavior: string }[];
-// Each interrupt, with the number of channel messages emitted before it.
-let interrupts: { note: string; channelBefore: number }[];
+// Each interrupt, with the number of channel messages emitted before and after it.
+let interrupts: { prompt: string; channelBefore: number; channelAfter: number }[];
 let interruptMs: number;
 let interruptFails: boolean;
 let terminated: number;
@@ -75,9 +75,11 @@ function makeCore(sessionId = SID) {
     fileWaitMs: 3000,
     spawnHub: () => void spawned++,
     emitChannel: (content, meta) => channel.push({ content, meta }),
-    interrupt: async note => {
-      interrupts.push({ note, channelBefore: channel.length });
+    interrupt: async prompt => {
+      const call = { prompt, channelBefore: channel.length, channelAfter: -1 };
+      interrupts.push(call);
       await Bun.sleep(interruptMs);
+      call.channelAfter = channel.length;
       if (interruptFails) throw new Error("inbox is gone");
     },
     answerPermission: (requestId, behavior) => answers.push({ requestId, behavior }),
@@ -270,16 +272,43 @@ describe("PluginCore", () => {
     ]);
   });
 
-  test("a message starting with ! stops the working agent before it arrives, in order with the next one", async () => {
+  test("a message starting with ! stops the working agent and comes in its place, before the next one", async () => {
     await enabledCore();
     append(assistantText("Смотрю", "tool_use", "i1"), assistantTool("Bash", "i1"));
     await waitFor(() => fake.callsOf("sendChatAction").length >= 1, 3000, "busy");
     interruptMs = 100;
-    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!стоп, не туда" }));
+    const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!стоп, не туда" });
+    fake.pushUpdate(u);
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "смотри в src" }));
-    await waitFor(() => channel.length === 2, 3000, "both messages");
-    expect(interrupts).toEqual([{ note: INTERRUPT_NOTE, channelBefore: 0 }]);
-    expect(channel.map(m => m.content)).toEqual(["!стоп, не туда", "смотри в src"]);
+    await waitFor(() => channel.length === 1, 3000, "the next message");
+    expect(interrupts.map(i => [i.channelBefore, i.channelAfter])).toEqual([[0, 0]]);
+    expect(channel.map(m => m.content)).toEqual(["смотри в src"]);
+    const prompt = interrupts[0].prompt;
+    expect(prompt).toContain(`message_id="${u.message?.message_id}"`);
+    expect(prompt).toContain("\n!стоп, не туда\n</channel>");
+  });
+
+  test("an interrupting message wears ✍ until it is in the agent's context", async () => {
+    await enabledCore();
+    append(assistantText("Смотрю", "tool_use", "i3"), assistantTool("Bash", "i3"));
+    await waitFor(() => fake.callsOf("sendChatAction").length >= 1, 3000, "busy");
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!стоп" }));
+    await waitFor(() => fake.callsOf("setMessageReaction").length === 1, 3000, "reaction set");
+    append({
+      type: "user",
+      isSidechain: false,
+      isMeta: true,
+      origin: { kind: "peer", from: "unknown", plugin: "tg-hub" },
+      message: { role: "user", content: `Another Claude session sent a message:\n${interrupts[0].prompt}\n\nThis came from another Claude session.` },
+    });
+    await waitFor(() => fake.callsOf("setMessageReaction").length === 2, 3000, "reaction cleared");
+    expect(arr(fake.callsOf("setMessageReaction")[1].reaction)).toEqual([]);
+  });
+
+  test("the interrupting message keeps its meta in the tag, quotes escaped", () => {
+    expect(interruptPrompt("стоп", { chat_id: "-1001", user: 'a "b" <c>' })).toEndWith(
+      '<channel source="tg-hub" chat_id="-1001" user="a &quot;b&quot; &lt;c>">\nстоп\n</channel>',
+    );
   });
 
   test("a message starting with ! to an idle agent is just a message", async () => {

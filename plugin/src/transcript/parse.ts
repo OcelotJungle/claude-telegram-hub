@@ -138,12 +138,18 @@ function contentText(r: Rec): string {
 }
 
 // Claude Code names a plugin's channel "plugin:<plugin>:<server>".
+// A channel message of ours, or a topic message that interrupted the agent:
+// the plugin puts those into the window's inbox, where they become peer
+// messages from the tg-hub plugin.
 function isOurChannel(origin: unknown): boolean {
+  const kind = field(origin, "kind");
+  if (kind === "peer") return field(origin, "plugin") === "tg-hub";
   const server = field(origin, "server");
-  return field(origin, "kind") === "channel" && typeof server === "string" && server.endsWith(":tg-hub");
+  return kind === "channel" && typeof server === "string" && server.endsWith(":tg-hub");
 }
 
-// Claude Code wraps each channel message in a <channel …> tag carrying its meta.
+// Claude Code wraps each channel message in a <channel …> tag carrying its
+// meta; the plugin wraps an interrupting message the same way.
 function channelSeen(text: string): TranscriptEvent[] {
   const messageIds = [...text.matchAll(CHANNEL_MESSAGE_ID)].map(m => Number(m[1]));
   return messageIds.length ? [{ kind: "channel_seen", messageIds }] : [];
