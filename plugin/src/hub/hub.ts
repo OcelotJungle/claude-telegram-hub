@@ -24,7 +24,7 @@ import { commandReply, hookBody, pluginToHub, sendFilesMessage, sendMessage } fr
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
 import { commandOf, routeCallback, routeUpdate } from "./router.ts";
-import { SessionStore, topicName } from "./sessions.ts";
+import { accountOf, SessionStore, topicName } from "./sessions.ts";
 import { isThreadNotFound, TelegramError } from "./telegram.ts";
 import { richPhotos, richToMarkdown } from "./rich.ts";
 import { richPieces } from "./rich-out.ts";
@@ -58,7 +58,7 @@ const BOT_COMMANDS = [
   { command: "compact", description: "Сжать контекст; /compact N — окно автокомпакта" },
 ];
 
-type Conn = { windowKey?: string; sessionId?: string; cwd?: string };
+type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string };
 type WS = ServerWebSocket<Conn>;
 type Card = {
   text: string;
@@ -280,11 +280,17 @@ export class Hub {
     this.armIdle();
   }
 
+  // With idleMs 0, or a launch command to start sessions from the topic, the
+  // hub stays up with no window at all.
+  private alwaysOn(): boolean {
+    return this.opts.idleMs <= 0 || this.opts.config().launch !== undefined;
+  }
+
   private armIdle(): void {
-    if (this.conns.size > 0 || !this.running) return;
+    if (this.conns.size > 0 || !this.running || this.alwaysOn()) return;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
-      if (this.conns.size > 0) return;
+      if (this.conns.size > 0 || this.alwaysOn()) return;
       this.idleExpired = true;
       if (this.deliverable() > 0) this.log.info(`no plugins connected — exiting once ${this.deliverable()} queued piece(s) reach Telegram`);
       this.maybeExit();
@@ -360,7 +366,8 @@ export class Hub {
     switch (msg.type) {
       case "hello": {
         if (msg.v !== PROTOCOL_VERSION) this.log.warn(`plugin protocol v${msg.v}, hub v${PROTOCOL_VERSION}`);
-        ws.data = { windowKey: msg.windowKey, sessionId: msg.sessionId, cwd: msg.cwd };
+        ws.data = { windowKey: msg.windowKey, sessionId: msg.sessionId, cwd: msg.cwd, account: accountOf(msg.configDir) };
+        this.store.setWhere(msg.sessionId, msg.cwd, ws.data.account);
         this.log.info(`window ${msg.windowKey} connected, session ${msg.sessionId}`);
         this.pushState(msg.sessionId);
         this.giveHeldResults(ws, msg.sessionId);
@@ -372,6 +379,8 @@ export class Hub {
       case "session":
         ws.data.sessionId = msg.sessionId;
         ws.data.cwd = msg.cwd;
+        ws.data.account = accountOf(msg.configDir) ?? ws.data.account;
+        this.store.setWhere(msg.sessionId, msg.cwd, ws.data.account);
         this.log.info(`window ${ws.data.windowKey} switched to session ${msg.sessionId}`);
         this.pushState(msg.sessionId);
         return;
@@ -414,7 +423,7 @@ ${msg.text}`);
     try {
       let result: unknown;
       if (!sid) throw new Error("window has not said hello");
-      if (msg.op === "enable") result = await this.chain(sid, () => this.enable(sid, ws.data.cwd ?? "", msg.title));
+      if (msg.op === "enable") result = await this.chain(sid, () => this.enable(sid, ws.data.cwd ?? "", ws.data.account, msg.title));
       else if (msg.op === "disable") result = this.setEnabled(sid, false);
       else result = await this.requireApi().downloadFile(msg.fileId, this.opts.inboxDir);
       this.send(ws, { type: "res", id: msg.id, ok: true, result });
@@ -444,7 +453,7 @@ ${msg.text}`);
     return groupId;
   }
 
-  private async enable(sessionId: string, cwd: string, title: string): Promise<EnableResult> {
+  private async enable(sessionId: string, cwd: string, account: string | undefined, title: string): Promise<EnableResult> {
     const api = this.requireApi();
     const groupId = this.requireGroup();
     const existing = this.store.get(sessionId);
@@ -455,7 +464,7 @@ ${msg.text}`);
     }
     const project = projectName(cwd);
     const topic = await api.createForumTopic(groupId, topicName(project, title));
-    this.store.set(sessionId, { topicId: topic.message_thread_id, title, project, enabled: true });
+    this.store.set(sessionId, { topicId: topic.message_thread_id, title, project, enabled: true, ...(cwd ? { cwd } : {}), ...(account ? { account } : {}) });
     this.log.info(`created topic ${topic.message_thread_id} "${topic.name}" for session ${sessionId}`);
     this.pushState(sessionId);
     return { topicTitle: topicName(project, title), created: true };

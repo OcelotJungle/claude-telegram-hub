@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "fs";
 import { join } from "path";
 import { chunk } from "../src/shared/chunk.ts";
-import { loadConfig, loadToken, paths } from "../src/shared/config.ts";
+import { idleMs, loadConfig, loadToken, paths } from "../src/shared/config.ts";
 import { tempDir } from "./helpers.ts";
 
 describe("chunk", () => {
@@ -127,6 +127,29 @@ describe("config", () => {
   test("config coerces numeric ids to strings", () => {
     writeFileSync(join(dir, "config.json"), JSON.stringify({ groupId: -1001234, allowFrom: [123456789] }));
     expect(loadConfig()).toEqual({ groupId: "-1001234", allowFrom: ["123456789"] });
+  });
+
+  test("TG_HUB_IDLE_MS=0 means never, nonsense means the default", () => {
+    process.env.TG_HUB_IDLE_MS = "0";
+    expect(idleMs()).toBe(0);
+    process.env.TG_HUB_IDLE_MS = "1500";
+    expect(idleMs()).toBe(1500);
+    process.env.TG_HUB_IDLE_MS = "soon";
+    expect(idleMs()).toBe(300_000);
+    delete process.env.TG_HUB_IDLE_MS;
+    expect(idleMs()).toBe(300_000);
+  });
+
+  test("a launch section is read, with a default timeout", () => {
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], launch: { command: ["cswap.exe", "run", "{account}"], defaultAccount: 1 } }));
+    expect(loadConfig().launch).toEqual({ command: ["cswap.exe", "run", "{account}"], defaultAccount: "1", timeoutSec: 90 });
+  });
+
+  test("a broken launch section is reported, not used", () => {
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], launch: { command: "cswap.exe run 1" } }));
+    const cfg = loadConfig();
+    expect(cfg.launch).toBeUndefined();
+    expect(cfg.launchError).toContain("command");
   });
 
   test("missing or corrupt config gives empty allowFrom", () => {

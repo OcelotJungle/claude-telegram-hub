@@ -20,9 +20,11 @@ export type HubRequest = { op: "enable"; title: string } | { op: "disable" } | {
 // The result of enable.
 export type EnableResult = { topicTitle: string; created: boolean };
 
+// configDir: the window's CLAUDE_CONFIG_DIR, which names its cswap account
+// (older plugins omit it).
 export type PluginToHub =
-  | { type: "hello"; v: number; windowKey: string; sessionId: string; cwd: string }
-  | { type: "session"; sessionId: string; cwd: string }
+  | { type: "hello"; v: number; windowKey: string; sessionId: string; cwd: string; configDir?: string }
+  | { type: "session"; sessionId: string; cwd: string; configDir?: string }
   | ({ type: "req"; id: string } & HubRequest)
   // sessionId: the session the text was written in (older plugins omit it;
   // then the window's current session is meant).

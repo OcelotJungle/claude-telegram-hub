@@ -1,16 +1,24 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
-import { dirname } from "path";
+import { basename, dirname } from "path";
 import { z } from "zod";
 
 const MAX_TOPIC_NAME = 128;
 const SEP = " · ";
+// A cswap profile folder: <number>-<email>.
+const CSWAP_PROFILE = /^(\d+)-/;
 
-export type SessionRecord = { topicId: number; title: string; project: string; enabled: boolean };
+// cwd and account: where and on which cswap account the session last ran.
+export type SessionRecord = { topicId: number; title: string; project: string; enabled: boolean; cwd?: string; account?: string };
 
 const dataSchema: z.ZodType<Record<string, SessionRecord>> = z.record(
   z.string(),
-  z.object({ topicId: z.number(), title: z.string(), project: z.string(), enabled: z.boolean() }),
+  z.object({ topicId: z.number(), title: z.string(), project: z.string(), enabled: z.boolean(), cwd: z.string().optional(), account: z.string().optional() }),
 );
+
+// The cswap account of a Claude Code config dir (…\sessions\1-me_gmail.com → "1").
+export function accountOf(configDir: string | undefined): string | undefined {
+  return configDir ? basename(configDir).match(CSWAP_PROFILE)?.[1] : undefined;
+}
 
 // sessionId → topic. Only the hub writes it; a session keeps its topic forever.
 export class SessionStore {
@@ -43,6 +51,16 @@ export class SessionStore {
 
   set(sessionId: string, rec: SessionRecord): void {
     this.data[sessionId] = rec;
+    this.save();
+  }
+
+  // Remembers where the session runs now; unknown values keep the old ones.
+  setWhere(sessionId: string, cwd: string | undefined, account: string | undefined): void {
+    const rec = this.data[sessionId];
+    if (!rec) return;
+    const next = { ...rec, ...(cwd ? { cwd } : {}), ...(account ? { account } : {}) };
+    if (next.cwd === rec.cwd && next.account === rec.account) return;
+    this.data[sessionId] = next;
     this.save();
   }
 

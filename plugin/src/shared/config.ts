@@ -1,11 +1,13 @@
 import { readFileSync } from "fs";
 import { homedir } from "os";
 import { isAbsolute, join, relative, resolve } from "path";
+import { z } from "zod";
 import { arr, field } from "./guards.ts";
 import { DEFAULT_PORT } from "./protocol.ts";
 
 export const API_BASE = "https://api.telegram.org";
 const DEFAULT_IDLE_MS = 5 * 60 * 1000;
+const DEFAULT_LAUNCH_TIMEOUT_SEC = 90;
 // Byte order marks.
 const UTF16LE_BOM = [0xff, 0xfe];
 const UTF16BE_BOM = [0xfe, 0xff];
@@ -41,8 +43,12 @@ export function apiBase(): string {
   return process.env.TG_HUB_API_BASE || API_BASE;
 }
 
+// 0 (TG_HUB_IDLE_MS=0): the hub never exits for want of windows.
 export function idleMs(): number {
-  return Number(process.env.TG_HUB_IDLE_MS) || DEFAULT_IDLE_MS;
+  const v = process.env.TG_HUB_IDLE_MS;
+  if (v === undefined || v.trim() === "") return DEFAULT_IDLE_MS;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_IDLE_MS;
 }
 
 // Hand-edited files on Windows come in whatever encoding the editor picked:
@@ -67,7 +73,18 @@ export function loadToken(): string | undefined {
   return undefined;
 }
 
-export type Config = { groupId?: string; allowFrom: string[] };
+// How the hub starts a session that has no window: command is the program
+// and its arguments, with {cwd}, {account} and {session} put in.
+export type Launch = { command: string[]; defaultAccount?: string; timeoutSec: number };
+
+// launchError: config.json has a launch section that is not valid.
+export type Config = { groupId?: string; allowFrom: string[]; launch?: Launch; launchError?: string };
+
+const launchSchema: z.ZodType<Launch> = z.object({
+  command: z.array(z.string()).min(1),
+  defaultAccount: z.union([z.string(), z.number()]).transform(String).optional(),
+  timeoutSec: z.number().positive().default(DEFAULT_LAUNCH_TIMEOUT_SEC),
+});
 
 export function loadConfig(): Config {
   let raw: unknown;
@@ -79,5 +96,11 @@ export function loadConfig(): Config {
   const groupId = field(raw, "groupId");
   const cfg: Config = { allowFrom: arr(field(raw, "allowFrom")).map(String) };
   if (groupId != null && groupId !== "") cfg.groupId = String(groupId);
+  const launch = field(raw, "launch");
+  if (launch !== undefined) {
+    const parsed = launchSchema.safeParse(launch);
+    if (parsed.success) cfg.launch = parsed.data;
+    else cfg.launchError = z.prettifyError(parsed.error);
+  }
   return cfg;
 }

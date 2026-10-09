@@ -21,7 +21,8 @@ const hub = new Hub({
   inboxDir: p.inboxDir,
   api: token ? new TelegramApi({ token, base: apiBase(), log }) : undefined,
   config: loadConfig,
-  idleMs: idleMs(),
+  // --always-on: started by the Task Scheduler (scripts/install-hub-task.ps1).
+  idleMs: process.argv.includes("--always-on") ? 0 : idleMs(),
   pollTimeoutSec: Number(process.env.TG_HUB_POLL_TIMEOUT) || undefined,
   log,
   onExit: () => process.exit(0),

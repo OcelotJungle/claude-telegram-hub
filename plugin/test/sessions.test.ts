@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
-import { SessionStore, topicName } from "../src/hub/sessions.ts";
+import { accountOf, SessionStore, topicName } from "../src/hub/sessions.ts";
 import { tempDir } from "./helpers.ts";
 
 const rec = { topicId: 101, title: "Fix login", project: "app", enabled: true };
@@ -22,6 +22,26 @@ describe("SessionStore", () => {
     expect(b.get("s1")?.topicId).toBe(101);
     expect(b.findByTopic(202)).toBe("s2");
     expect(b.findByTopic(999)).toBeUndefined();
+  });
+
+  test("setWhere remembers the last cwd and account, unknown values keep the old ones", () => {
+    const file = join(tempDir(), "sessions.json");
+    const a = new SessionStore(file);
+    a.set("s1", rec);
+    a.setWhere("s1", "C:\\app", "2");
+    a.setWhere("s1", "C:\\app", undefined);
+    expect(new SessionStore(file).get("s1")).toEqual({ ...rec, cwd: "C:\\app", account: "2" });
+    a.setWhere("s1", "C:\\app", "1");
+    expect(a.get("s1")?.account).toBe("1");
+    a.setWhere("nobody", "C:\\x", "1");
+    expect(a.get("nobody")).toBeUndefined();
+  });
+
+  test("the account is the number of the cswap profile folder", () => {
+    expect(accountOf("C:\\Users\\me\\.claude-swap-backup\\sessions\\1-me_gmail.com")).toBe("1");
+    expect(accountOf("C:\\Users\\me\\.claude-swap-backup\\sessions\\12-x_y.com\\")).toBe("12");
+    expect(accountOf("C:\\Users\\me\\.claude")).toBeUndefined();
+    expect(accountOf(undefined)).toBeUndefined();
   });
 
   test("setEnabled is persisted", () => {

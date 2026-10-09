@@ -96,7 +96,7 @@ export class PluginCore {
     this.transcriptPath = transcriptPathFor(opts.sessionId, opts.cwd, opts.configDir);
     this.client = new HubClient({
       port: opts.port,
-      hello: () => ({ type: "hello", v: PROTOCOL_VERSION, windowKey: opts.windowKey, sessionId: this.sessionId, cwd: this.cwd }),
+      hello: () => ({ type: "hello", v: PROTOCOL_VERSION, windowKey: opts.windowKey, sessionId: this.sessionId, cwd: this.cwd, configDir: opts.configDir }),
       spawnHub: opts.spawnHub,
       onMessage: m => this.onHubMessage(m),
       log: opts.log,
@@ -249,7 +249,7 @@ export class PluginCore {
     this.sessionId = sessionId;
     this.cwd = cwd || this.cwd;
     this.follow(transcriptPath);
-    this.client.send({ type: "session", sessionId, cwd: this.cwd });
+    this.client.send({ type: "session", sessionId, cwd: this.cwd, configDir: this.opts.configDir });
   }
 
   private follow(path: string): void {

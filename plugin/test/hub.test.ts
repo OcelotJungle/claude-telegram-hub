@@ -56,7 +56,8 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
   expect(hub.start()).toBe(true);
 }
 
-const hello = (sessionId: string, windowKey = `win-${sessionId}`) => ({ type: "hello", v: PROTOCOL_VERSION, windowKey, sessionId, cwd: CWD });
+const PROFILE = "C:\\Users\\me\\.claude-swap-backup\\sessions\\2-me_gmail.com";
+const hello = (sessionId: string, windowKey = `win-${sessionId}`) => ({ type: "hello", v: PROTOCOL_VERSION, windowKey, sessionId, cwd: CWD, configDir: PROFILE });
 
 async function plugin(sessionId: string, windowKey?: string) {
   const c = await wsClient(port, hello(sessionId, windowKey));
@@ -101,7 +102,16 @@ describe("enable", () => {
     expect(res).toMatchObject({ ok: true, result: { topicTitle: "claude-telegram-hub · Реализация хаба", created: true } });
     expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: "claude-telegram-hub · Реализация хаба" }]);
     await c.next("state", m => m.enabled === true);
-    expect(new SessionStore(join(dir, "sessions.json")).get("s1")).toEqual({ topicId: 100, title: "Реализация хаба", project: "claude-telegram-hub", enabled: true });
+    expect(new SessionStore(join(dir, "sessions.json")).get("s1")).toEqual({ topicId: 100, title: "Реализация хаба", project: "claude-telegram-hub", enabled: true, cwd: CWD, account: "2" });
+  });
+
+  test("the session record follows the window's cwd and account", async () => {
+    await startHub();
+    await enabled("s1");
+    const c = await wsClient(port, { ...hello("s1", "w2"), cwd: "C:\\elsewhere", configDir: "C:\\p\\sessions\\1-other_mail.com" });
+    clients.push(c);
+    await c.next("state");
+    expect(new SessionStore(join(dir, "sessions.json")).get("s1")).toMatchObject({ cwd: "C:\\elsewhere", account: "1" });
   });
 
   test("a second enable reuses the topic", async () => {
@@ -1038,6 +1048,19 @@ describe("idle exit", () => {
   test("a hub nobody connects to exits too", async () => {
     await startHub({ idleMs: 150 });
     await waitFor(() => exited, 2000, "idle exit");
+  });
+
+  test("with idleMs 0 or a launch command the hub stays up", async () => {
+    await startHub({ idleMs: 0 });
+    const a = await plugin("a");
+    a.close();
+    await Bun.sleep(200);
+    expect(exited).toBe(false);
+    await hub.stop();
+    config = { ...config, launch: { command: ["x"], timeoutSec: 90 } };
+    await startHub({ idleMs: 50 });
+    await Bun.sleep(200);
+    expect(exited).toBe(false);
   });
 });
 
