@@ -12,6 +12,7 @@ import { Outbox, type OutItem, type Piece } from './outbox.ts'
 import { commandOf, routeUpdate } from './router.ts'
 import { SessionStore, topicName, type SessionRecord } from './sessions.ts'
 import { isThreadNotFound, TelegramError, type Message, type TelegramApi, type Update } from './telegram.ts'
+import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath, type VideoTools } from './video.ts'
 
 type Conn = { windowKey?: string; sessionId?: string; cwd?: string }
 type WS = ServerWebSocket<Conn>
@@ -27,6 +28,8 @@ export type HubOptions = {
   filesDir: string
   inboxDir: string
   api: TelegramApi | undefined
+  // ffprobe and ffmpeg, for the metadata and thumbnail of videos to send.
+  videoTools?: VideoTools
   config: () => Config
   idleMs: number
   // How long a command from the topic waits for the plugin's module to take it.
@@ -484,12 +487,13 @@ ${msg.text}`)
     return isInside(this.opts.filesDir, path)
   }
 
-  // Removes queued copies and the message folder once it is empty.
+  // Removes queued copies, their thumbnails and the message folder once it is empty.
   private dropFiles(files: { path: string }[]): void {
     for (const f of files) {
       if (!this.inFilesDir(f.path)) continue
       try {
         rmSync(f.path, { force: true })
+        rmSync(thumbPath(f.path), { force: true })
         rmdirSync(dirname(f.path))
       } catch {}
     }
@@ -576,14 +580,28 @@ ${msg.text}`)
     }
     const api = this.requireApi()
     const groupId = this.requireGroup()
-    const files = item.files
-    if (!files) {
+    if (!item.files) {
       await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, item.text, item.silent, item.entities))
       return
     }
-    const lost = files.filter(f => !existsSync(f.path))
+    const lost = item.files.filter(f => !existsSync(f.path))
     if (lost.length) throw new LostFileError(`the queued copy is gone: ${lost.map(f => f.path).join(', ')}`)
+    const files = await this.probeVideos(item)
     await this.sendToTopic(api, groupId, sessionId, thread => api.sendFiles(groupId, thread, files, item.text, item.entities, item.silent))
+  }
+
+  // Videos are probed once, before their first send, and the result stays
+  // with the queued piece; a thumbnail gone from disk is just not sent.
+  private async probeVideos(item: OutItem): Promise<OutFile[]> {
+    let files = item.files!
+    if (files.some(f => f.kind === 'video' && !f.video)) {
+      const tools = this.opts.videoTools ?? DEFAULT_VIDEO_TOOLS
+      const probed: OutFile[] = []
+      for (const f of files) probed.push(f.kind === 'video' && !f.video ? { ...f, video: await probeVideo(f.path, f.name, tools, this.log) } : f)
+      this.outbox.setFiles(item.id, probed)
+      files = probed
+    }
+    return files.map(f => (f.video?.thumb && !existsSync(f.video.thumb) ? { ...f, video: { ...f.video, thumb: undefined } } : f))
   }
 
   // Before giving a piece up: photos Telegram cannot take go as documents,

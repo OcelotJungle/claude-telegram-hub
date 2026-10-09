@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'fs'
+import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { createServer } from 'net'
@@ -60,4 +60,22 @@ export function freePort(): Promise<number> {
       srv.close(() => resolve(port))
     })
   })
+}
+
+export const hasFfmpeg = !!Bun.which('ffmpeg') && !!Bun.which('ffprobe')
+
+// A real H.264 clip made by ffmpeg, like the screen recordings the hub sends.
+export function makeVideo(path: string, o: { width?: number; height?: number; seconds?: number; rotation?: number } = {}): void {
+  const size = `${o.width ?? 640}x${o.height ?? 360}`
+  const args = ['-v', 'error', '-nostdin', '-y', '-f', 'lavfi', '-i', `testsrc=size=${size}:rate=25:duration=${o.seconds ?? 3}`, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
+  const plain = o.rotation ? `${path}.plain.mp4` : path
+  const run = (a: string[]) => {
+    const r = Bun.spawnSync(['ffmpeg', ...a], { stderr: 'pipe' })
+    if (r.exitCode !== 0) throw new Error(`ffmpeg failed: ${r.stderr.toString()}`)
+  }
+  run([...args, plain])
+  if (o.rotation) {
+    run(['-v', 'error', '-nostdin', '-y', '-display_rotation', String(o.rotation), '-i', plain, '-c', 'copy', path])
+    rmSync(plain)
+  }
 }

@@ -105,6 +105,13 @@ export class Outbox {
     this.save()
   }
 
+  setFiles(id: string, files: OutFile[]): void {
+    const item = this.data.items.find(i => i.id === id)
+    if (!item) return
+    item.files = files
+    this.save()
+  }
+
   // Puts several pieces in place of one; they stay pieces of its message.
   replace(id: string, pieces: Piece[]): void {
     const at = this.data.items.findIndex(i => i.id === id)

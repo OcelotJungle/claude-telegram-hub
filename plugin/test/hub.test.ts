@@ -4,11 +4,12 @@ import { join } from 'path'
 import { Hub } from '../src/hub/hub.ts'
 import { SessionStore } from '../src/hub/sessions.ts'
 import { TelegramApi } from '../src/hub/telegram.ts'
+import type { VideoTools } from '../src/hub/video.ts'
 import { Runner, type Usage } from '../src/mod/commands.ts'
 import { PROTOCOL_VERSION } from '../src/shared/protocol.ts'
 import type { Config } from '../src/shared/config.ts'
 import { FakeTelegram, topicMsg } from './fakeTelegram.ts'
-import { freePort, memLogger, tempDir, waitFor, wsClient } from './helpers.ts'
+import { freePort, hasFfmpeg, makeVideo, memLogger, tempDir, waitFor, wsClient } from './helpers.ts'
 
 const GROUP = '-1001'
 const ME = '123456789'
@@ -24,7 +25,7 @@ let log: ReturnType<typeof memLogger>
 let exited: boolean
 const clients: { close(): void }[] = []
 
-async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number } = {}) {
+async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools } = {}) {
   port = await freePort()
   hub = new Hub({
     port,
@@ -34,6 +35,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     spoolScanMs: 50,
     filesDir: join(dir, 'outbox-files'),
     inboxDir: join(dir, 'inbox'),
+    ...(o.videoTools ? { videoTools: o.videoTools } : {}),
     api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === 'string' ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500 }),
     config: () => config,
     idleMs: o.idleMs ?? 60_000,
@@ -611,6 +613,64 @@ describe('files', () => {
     expect(fake.callsOf('sendVideo')[0]).toMatchObject({ video: { file: 'clip.mp4' }, disable_notification: 'true' })
     expect(fake.callsOf('sendVideo')[0].caption).toBeUndefined()
     expect(log.lines.some(l => l.startsWith('WARN') && l.includes('as documents'))).toBe(true)
+  })
+
+  // A real clip the plugin put into outbox-files/<message id>/.
+  const video = (id: string, name: string) => {
+    const d = join(dir, 'outbox-files', id)
+    mkdirSync(d, { recursive: true })
+    const path = join(d, `${n++}-${name}`)
+    makeVideo(path, { width: 640, height: 360, seconds: 3 })
+    return { path, name, size: Bun.file(path).size }
+  }
+  const thumbPart = { file: 'thumbnail.jpg', size: expect.any(Number), body: expect.any(String) }
+  const videoFields = { width: 640, height: 360, duration: 3, supports_streaming: true }
+
+  test.skipIf(!hasFfmpeg)('a video goes with its size, duration, streaming and a thumbnail, which is removed with the copy', async () => {
+    await startHub()
+    const a = await enabled('a')
+    sendFiles(a, 'f1', [video('f1', 'clip.mp4')], { caption: 'cap' })
+    expect(await done(a, 'f1')).toEqual({ type: 'filesSent', id: 'f1' })
+    const [sent] = fake.callsOf('sendVideo')
+    expect(sent.thumbnail.size).toBeLessThan(200 * 1024)
+    expect(sent).toMatchObject({ video: { file: 'clip.mp4' }, caption: 'cap', width: '640', height: '360', duration: '3', supports_streaming: 'true', thumbnail: thumbPart })
+    expect(existsSync(join(dir, 'outbox-files', 'f1'))).toBe(false)
+  })
+
+  test.skipIf(!hasFfmpeg)('a video in an album has its fields and its thumbnail attached', async () => {
+    await startHub()
+    const a = await enabled('a')
+    sendFiles(a, 'f1', [queued('f1', '1.png'), video('f1', 'clip.mp4')], { caption: 'cap' })
+    await done(a, 'f1')
+    const [album] = fake.callsOf('sendMediaGroup')
+    expect(album.media).toEqual([
+      { type: 'photo', media: 'attach://file0', caption: 'cap' },
+      { type: 'video', media: 'attach://file1', ...videoFields, thumbnail: 'attach://thumb1' },
+    ])
+    expect(album).toMatchObject({ file1: { file: 'clip.mp4' }, thumb1: thumbPart })
+    expect(album.thumb0).toBeUndefined()
+    expect(existsSync(join(dir, 'outbox-files', 'f1'))).toBe(false)
+  })
+
+  test.skipIf(!hasFfmpeg)('a video split off an album Telegram rejected keeps its metadata', async () => {
+    await startHub()
+    const a = await enabled('a')
+    fake.failNext('sendMediaGroup', { code: 400, description: 'Bad Request: PHOTO_INVALID_DIMENSIONS' })
+    sendFiles(a, 'f1', [queued('f1', 'tall.png'), video('f1', 'clip.mp4')])
+    expect(await done(a, 'f1')).toEqual({ type: 'filesSent', id: 'f1' })
+    expect(sends()).toEqual(['sendMediaGroup', 'sendDocument', 'sendVideo'])
+    expect(fake.callsOf('sendVideo')[0]).toMatchObject({ video: { file: 'clip.mp4' }, width: '640', height: '360', duration: '3', supports_streaming: 'true', thumbnail: thumbPart })
+    expect(existsSync(join(dir, 'outbox-files', 'f1'))).toBe(false)
+  })
+
+  test('without ffprobe and ffmpeg a video is sent as before, with a warning', async () => {
+    await startHub({ videoTools: { ffprobe: 'no-such-ffprobe', ffmpeg: 'no-such-ffmpeg' } })
+    const a = await enabled('a')
+    const f = queued('f1', 'clip.mp4')
+    sendFiles(a, 'f1', [f])
+    expect(await done(a, 'f1')).toEqual({ type: 'filesSent', id: 'f1' })
+    expect(fake.callsOf('sendVideo')).toEqual([{ chat_id: GROUP, message_thread_id: '100', disable_notification: 'true', video: { file: 'clip.mp4', size: f.size, body: 'body of clip.mp4' } }])
+    expect(log.lines.some(l => l.startsWith('WARN') && l.includes('clip.mp4'))).toBe(true)
   })
 
   test('files Telegram rejects are reported to the plugin and in the topic, and their copies removed', async () => {

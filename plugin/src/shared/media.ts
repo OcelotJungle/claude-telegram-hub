@@ -9,8 +9,13 @@ export const MAX_ALBUM = 10
 // Also the Bot API method suffix (sendPhoto…) and the upload field name.
 export type FileKind = 'photo' | 'video' | 'audio' | 'animation' | 'document'
 
+// What Telegram needs to show a video with a preview, its duration and
+// streaming; thumb is a JPEG next to the hub's copy. Empty when probing failed.
+export type VideoMeta = { width?: number; height?: number; duration?: number; thumb?: string }
+
 // A file queued for the topic: path is the hub's own copy, name the original.
-export type OutFile = { path: string; name: string; size: number; kind: FileKind }
+// video: a video's metadata, set once it was probed.
+export type OutFile = { path: string; name: string; size: number; kind: FileKind; video?: VideoMeta }
 
 const BY_EXT: Record<string, FileKind> = {
   '.jpg': 'photo',

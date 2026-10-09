@@ -157,10 +157,23 @@ export class TelegramApi {
       if (files.length === 1) {
         const file = files[0]!
         f.set(file.kind, Bun.file(file.path), file.name)
-        for (const [k, v] of Object.entries(cap)) f.set(k, typeof v === 'string' ? v : JSON.stringify(v))
+        for (const [k, v] of Object.entries({ ...cap, ...videoFields(file) })) f.set(k, typeof v === 'string' ? v : JSON.stringify(v))
+        const thumb = thumbOf(file)
+        if (thumb) f.set('thumbnail', Bun.file(thumb), 'thumbnail.jpg')
       } else {
-        f.set('media', JSON.stringify(files.map((file, i) => ({ type: file.kind, media: `attach://file${i}`, ...(i === 0 ? cap : {}) }))))
-        files.forEach((file, i) => f.set(`file${i}`, Bun.file(file.path), file.name))
+        const media = files.map((file, i) => ({
+          type: file.kind,
+          media: `attach://file${i}`,
+          ...videoFields(file),
+          ...(thumbOf(file) ? { thumbnail: `attach://thumb${i}` } : {}),
+          ...(i === 0 ? cap : {}),
+        }))
+        f.set('media', JSON.stringify(media))
+        files.forEach((file, i) => {
+          f.set(`file${i}`, Bun.file(file.path), file.name)
+          const thumb = thumbOf(file)
+          if (thumb) f.set(`thumb${i}`, Bun.file(thumb), 'thumbnail.jpg')
+        })
       }
       return f
     }
@@ -195,4 +208,16 @@ export class TelegramApi {
     writeFileSync(path, buf)
     return path
   }
+}
+
+// Without these Telegram shows a big video as a black square with no duration
+// that must be downloaded before it plays.
+function videoFields(file: OutFile): { width?: number; height?: number; duration?: number; supports_streaming?: true } {
+  const v = file.kind === 'video' ? file.video : undefined
+  if (!v?.width || !v.height) return {}
+  return { width: v.width, height: v.height, ...(v.duration ? { duration: v.duration } : {}), supports_streaming: true }
+}
+
+function thumbOf(file: OutFile): string | undefined {
+  return file.kind === 'video' ? file.video?.thumb : undefined
 }
