@@ -21,9 +21,9 @@ export type HubRequest = { op: "enable"; title: string } | { op: "disable" } | {
 export type EnableResult = { topicTitle: string; created: boolean };
 
 // configDir: the window's CLAUDE_CONFIG_DIR, which names its cswap account
-// (older plugins omit it).
+// (older plugins omit it). busy: the agent is in a turn.
 export type PluginToHub =
-  | { type: "hello"; v: number; windowKey: string; sessionId: string; cwd: string; configDir?: string }
+  | { type: "hello"; v: number; windowKey: string; sessionId: string; cwd: string; configDir?: string; busy?: boolean }
   | { type: "session"; sessionId: string; cwd: string; configDir?: string }
   | ({ type: "req"; id: string } & HubRequest)
   // sessionId: the session the text was written in (older plugins omit it;
@@ -41,7 +41,9 @@ export type PluginToHub =
   // edited in place. final: the card will not change any more.
   | { type: "card"; id: string; sessionId: string; text: string; final: boolean }
   // Topic messages that reached the agent's context, by Telegram message id.
-  | { type: "seen"; messageIds: number[] };
+  | { type: "seen"; messageIds: number[] }
+  // The agent started working, or stopped: its turn ended or it waits for the user.
+  | { type: "busy"; busy: boolean };
 
 export type HubToPlugin =
   | { type: "state"; enabled: boolean; topicTitle?: string }

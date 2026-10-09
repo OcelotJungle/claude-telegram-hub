@@ -188,6 +188,12 @@ export class TelegramApi {
     return this.call("answerCallbackQuery", { callback_query_id: id, ...(text ? { text } : {}) }, z.unknown());
   }
 
+  // "typing…" in a topic for up to 5 seconds. One attempt: the next one is
+  // seconds away anyway.
+  sendTyping(chatId: string, threadId: number): Promise<unknown> {
+    return this.call("sendChatAction", { chat_id: chatId, message_thread_id: threadId, action: "typing" }, z.unknown(), { retry: false });
+  }
+
   // Without an emoji the bot's reaction comes off.
   setMessageReaction(chatId: string, messageId: number, emoji?: string): Promise<unknown> {
     return this.call("setMessageReaction", { chat_id: chatId, message_id: messageId, reaction: emoji ? [{ type: "emoji", emoji }] : [] }, z.unknown());

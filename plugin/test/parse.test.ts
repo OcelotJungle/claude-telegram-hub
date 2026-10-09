@@ -175,6 +175,13 @@ describe("user records", () => {
     expect(parseRecord({ type: "attachment" })).toEqual([]);
   });
 
+  test("an interrupt by the user ends the turn", () => {
+    const plain = { ...userBase, message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] } };
+    expect(parseRecord(plain)).toEqual([{ kind: "interrupted" }]);
+    const tool = { ...userBase, message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user for tool use]" }] } };
+    expect(parseRecord(tool)).toEqual([{ kind: "interrupted" }]);
+  });
+
   test("task notification is not terminal input", () => {
     const rec = { ...userBase, origin: { kind: "task-notification" }, promptSource: "system", turnOrigin: "task_notification", message: { role: "user", content: "<task-notification>" } };
     expect(parseRecord(rec)).toEqual([]);

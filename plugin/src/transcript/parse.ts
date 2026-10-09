@@ -11,6 +11,8 @@ const MAX_DETAIL_CHARS = 60;
 // Input fields that tell what a tool call does, best first.
 const DETAIL_FIELDS = ["file_path", "notebook_path", "description", "pattern", "command", "url", "query", "prompt"];
 const CHANNEL_MESSAGE_ID = /<channel\b[^>]*\bmessage_id="(\d+)"/g;
+// Claude Code's record for Esc: "[Request interrupted by user]", or "… for tool use]".
+const INTERRUPTED = /^\[Request interrupted by user\b/;
 
 export type TranscriptEvent =
   | { kind: "text"; text: string; messageId: string }
@@ -28,7 +30,9 @@ export type TranscriptEvent =
   // killed. taskId of a subagent is its agent id.
   | { kind: "task_status"; taskId: string; status: string }
   // Topic messages that reached the agent's context: Telegram message ids.
-  | { kind: "channel_seen"; messageIds: number[] };
+  | { kind: "channel_seen"; messageIds: number[] }
+  // The user stopped the turn (Esc).
+  | { kind: "interrupted" };
 
 type Rec = Record<string, unknown>;
 
@@ -40,7 +44,8 @@ export function parseRecord(r: unknown): TranscriptEvent[] {
       return parseAssistant(r);
     case "user":
       if (isTerminalInput(r)) return [{ kind: "terminal_input" }];
-      return isOurChannel(r.origin) ? channelSeen(contentText(r)) : taskStatus(r);
+      if (isOurChannel(r.origin)) return channelSeen(contentText(r));
+      return INTERRUPTED.test(contentText(r)) ? [{ kind: "interrupted" }] : taskStatus(r);
     // A message typed while the agent works is absorbed into the running turn.
     case "attachment": {
       const a = r.attachment;

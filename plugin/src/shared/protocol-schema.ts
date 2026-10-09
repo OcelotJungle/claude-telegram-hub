@@ -20,7 +20,7 @@ export const sendFilesMessage = z.object({
 export const sendMessage = z.object({ type: z.literal("send"), id: z.string(), sessionId: z.string().optional(), text: z.string(), notify: z.boolean() });
 
 export const pluginToHub: z.ZodType<PluginToHub> = z.union([
-  z.object({ type: z.literal("hello"), v: z.number(), windowKey: z.string(), sessionId: z.string(), cwd: z.string(), configDir: z.string().optional() }),
+  z.object({ type: z.literal("hello"), v: z.number(), windowKey: z.string(), sessionId: z.string(), cwd: z.string(), configDir: z.string().optional(), busy: z.boolean().optional() }),
   z.object({ type: z.literal("session"), sessionId: z.string(), cwd: z.string(), configDir: z.string().optional() }),
   z.object({ type: z.literal("req"), id: z.string(), op: z.literal("enable"), title: z.string() }),
   z.object({ type: z.literal("req"), id: z.string(), op: z.literal("disable") }),
@@ -32,6 +32,7 @@ export const pluginToHub: z.ZodType<PluginToHub> = z.union([
   z.object({ type: z.literal("terminalInput") }),
   z.object({ type: z.literal("card"), id: z.string(), sessionId: z.string(), text: z.string(), final: z.boolean() }),
   z.object({ type: z.literal("seen"), messageIds: z.array(z.number()) }),
+  z.object({ type: z.literal("busy"), busy: z.boolean() }),
 ]);
 
 export const hubToPlugin: z.ZodType<HubToPlugin> = z.union([

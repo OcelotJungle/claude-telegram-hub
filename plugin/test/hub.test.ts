@@ -51,6 +51,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     sendRetryBaseMs: 10,
     sendRetryMaxMs: 50,
     cardEditMs: o.cardEditMs ?? 50,
+    typingEveryMs: 50,
     readyDelayMs: 50,
     ...(o.spawn ? { spawn: o.spawn } : {}),
     ...(o.projectsDir ? { projectsDir: o.projectsDir } : {}),
@@ -217,6 +218,36 @@ describe("inbound", () => {
     a.send({ type: "seen", messageIds: [u.message?.message_id] });
     await waitFor(() => fake.callsOf("setMessageReaction").length === 3, 3000);
     expect(fake.callsOf("setMessageReaction").map(c => arr(c.reaction).length)).toEqual([1, 1, 0]);
+  });
+
+  test("the topic of a busy agent shows typing until its turn ends", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send({ type: "busy", busy: true });
+    await waitFor(() => fake.callsOf("sendChatAction").length >= 2);
+    expect(fake.callsOf("sendChatAction")[0]).toEqual({ chat_id: GROUP, message_thread_id: 100, action: "typing" });
+    a.send({ type: "busy", busy: false });
+    await Bun.sleep(100);
+    const shown = fake.callsOf("sendChatAction").length;
+    await Bun.sleep(200);
+    expect(fake.callsOf("sendChatAction").length).toBe(shown);
+  });
+
+  test("no typing while the mode is off", async () => {
+    await startHub();
+    const a = await enabled("a");
+    await req(a, { op: "disable" });
+    a.send({ type: "busy", busy: true });
+    await Bun.sleep(200);
+    expect(fake.callsOf("sendChatAction")).toEqual([]);
+  });
+
+  test("a window that connects busy shows typing at once", async () => {
+    await startHub();
+    await enabled("a");
+    const c = await wsClient(port, { ...hello("a", "w2"), busy: true });
+    clients.push(c);
+    await waitFor(() => fake.callsOf("sendChatAction").length >= 1);
   });
 
   test("a command for the plugin wears no ✍", async () => {

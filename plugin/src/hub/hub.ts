@@ -66,6 +66,9 @@ const TOO_MANY_REQUESTS = 429;
 // On a topic message from when the hub hands it to the session until it is
 // in the agent's context.
 const TAKEN_REACTION = "✍";
+// Telegram shows "typing…" for up to 5 s; it is renewed this often while the
+// agent works.
+const TYPING_EVERY_MS = 4000;
 const BOT_COMMANDS = [
   { command: "info", description: "Лимиты и контекст сессии" },
   { command: "compact", description: "Сжать контекст; /compact N — окно автокомпакта" },
@@ -73,7 +76,7 @@ const BOT_COMMANDS = [
   { command: "stop", description: "Завершить сессию" },
 ];
 
-type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string };
+type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; busy?: boolean };
 type WS = ServerWebSocket<Conn>;
 type Card = {
   text: string;
@@ -110,6 +113,7 @@ export type HubOptions = {
   sendRetryBaseMs?: number;
   sendRetryMaxMs?: number;
   cardEditMs?: number;
+  typingEveryMs?: number;
   // Where Claude Code keeps transcripts, to find the cwd of a session the hub
   // has not recorded one for.
   projectsDir?: string;
@@ -186,6 +190,9 @@ export class Hub {
   // Idle time is up, but the queue is still being delivered.
   private idleExpired = false;
   private spoolTimer: ReturnType<typeof setInterval> | undefined;
+  private typingTimer: ReturnType<typeof setInterval> | undefined;
+  // Sessions whose last "typing…" failed: the next failure is not logged.
+  private typingFailed = new Set<string>();
   private abort = new AbortController();
   private running = false;
   private log: Logger;
@@ -219,6 +226,9 @@ export class Hub {
     for (const sid of this.outbox.sessions()) void this.pump(sid);
     this.ingestSpool();
     this.spoolTimer = setInterval(() => this.ingestSpool(), this.opts.spoolScanMs ?? SPOOL_SCAN_MS);
+    this.typingTimer = setInterval(() => {
+      for (const ws of this.conns) if (ws.data.busy) this.showTyping(ws);
+    }, this.opts.typingEveryMs ?? TYPING_EVERY_MS);
     this.armIdle();
     if (this.opts.api) void this.pollLoop(this.opts.api);
     else this.log.error("no TELEGRAM_BOT_TOKEN — not polling Telegram");
@@ -231,6 +241,7 @@ export class Hub {
     this.abort.abort();
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.spoolTimer) clearInterval(this.spoolTimer);
+    if (this.typingTimer) clearInterval(this.typingTimer);
     for (const queued of this.commands.values()) for (const e of queued) clearTimeout(e.timer);
     for (const card of this.cards.values()) clearTimeout(card.timer);
     for (const l of this.launches.values()) clearTimeout(l.timer);
@@ -409,7 +420,7 @@ export class Hub {
     switch (msg.type) {
       case "hello": {
         if (msg.v !== PROTOCOL_VERSION) this.log.warn(`plugin protocol v${msg.v}, hub v${PROTOCOL_VERSION}`);
-        ws.data = { windowKey: msg.windowKey, sessionId: msg.sessionId, cwd: msg.cwd, account: accountOf(msg.configDir) };
+        ws.data = { windowKey: msg.windowKey, sessionId: msg.sessionId, cwd: msg.cwd, account: accountOf(msg.configDir), busy: msg.busy };
         this.store.setWhere(msg.sessionId, msg.cwd, ws.data.account);
         this.log.info(`window ${msg.windowKey} connected, session ${msg.sessionId}, account ${ws.data.account ?? "not named"}`);
         this.askDefaultAccount(ws, msg.configDir);
@@ -419,6 +430,7 @@ export class Hub {
         this.pendingHooks.delete(msg.windowKey);
         if (pending && Date.now() - pending.at < HOOK_TTL_MS) this.forwardHook(ws, pending.body);
         this.launched(ws, msg.sessionId);
+        if (msg.busy) this.showTyping(ws);
         return;
       }
       case "session":
@@ -464,7 +476,28 @@ ${msg.text}`);
       case "seen":
         for (const id of msg.messageIds) this.react(id, undefined);
         return;
+      // Shown at once, then renewed by the typing timer.
+      case "busy":
+        ws.data.busy = msg.busy;
+        if (msg.busy) this.showTyping(ws);
+        return;
     }
+  }
+
+  // "typing…" in the topic of a busy window's session while the mode is on.
+  private showTyping(ws: WS): void {
+    const sid = ws.data.sessionId;
+    const rec = sid ? this.store.get(sid) : undefined;
+    const api = this.opts.api;
+    const groupId = this.opts.config().groupId;
+    if (!sid || !rec?.enabled || !api || !groupId) return;
+    api.sendTyping(groupId, rec.topicId).then(
+      () => this.typingFailed.delete(sid),
+      e => {
+        if (!this.typingFailed.has(sid)) this.log.warn(`showing typing in the topic of session ${sid} failed: ${e}`);
+        this.typingFailed.add(sid);
+      },
+    );
   }
 
   private async handleRequest(ws: WS, msg: Extract<PluginToHub, { type: "req" }>): Promise<void> {

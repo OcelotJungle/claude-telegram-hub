@@ -97,6 +97,7 @@ beforeEach(async () => {
     idleMs: 60_000,
     pollTimeoutSec: 1,
     cardEditMs: 50,
+    typingEveryMs: 50,
     log: memLogger(),
     onExit() {},
   });
@@ -254,6 +255,25 @@ describe("PluginCore", () => {
       { chat_id: GROUP, message_id: id, reaction: [{ type: "emoji", emoji: "✍" }] },
       { chat_id: GROUP, message_id: id, reaction: [] },
     ]);
+  });
+
+  test("the topic shows typing while the agent works, not while it waits for an answer", async () => {
+    await enabledCore();
+    const typing = () => fake.callsOf("sendChatAction").length;
+    append(assistantText("Смотрю", "tool_use", "w1"), assistantTool("Bash", "w1"));
+    await waitFor(() => typing() >= 2, 3000, "typing");
+    append(assistantTool("AskUserQuestion", "w2"));
+    await Bun.sleep(150);
+    const asked = typing();
+    await Bun.sleep(200);
+    expect(typing()).toBe(asked);
+    append(assistantText("Понял", "tool_use", "w3"));
+    await waitFor(() => typing() > asked, 3000, "typing again");
+    append(assistantText("Готово", "end_turn", "w4"));
+    await Bun.sleep(150);
+    const ended = typing();
+    await Bun.sleep(200);
+    expect(typing()).toBe(ended);
   });
 
   test("a subagent shows as one card that is edited until it is done", async () => {
@@ -485,7 +505,7 @@ describe("tg_send_file", () => {
     writeFileSync(path, body);
     return path;
   };
-  const sends = () => fake.calls.filter(c => c.method.startsWith("send")).map(c => c.method);
+  const sends = () => fake.calls.filter(c => c.method.startsWith("send") && c.method !== "sendChatAction").map(c => c.method);
   const leftCopies = () => (existsSync(join(state, "outbox-files")) ? readdirSync(join(state, "outbox-files")) : []);
 
   test("a file reaches the topic, the original stays, the queued copy goes", async () => {

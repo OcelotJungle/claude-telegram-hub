@@ -1,5 +1,6 @@
 import type { Logger } from "../shared/log.ts";
 import type { ChannelMeta, HubToPlugin, PermissionBehavior } from "../shared/protocol.ts";
+import type { TranscriptEvent } from "../transcript/parse.ts";
 import type { Outgoing } from "../transcript/relay.ts";
 import type { Titles } from "../transcript/tail.ts";
 
@@ -39,6 +40,8 @@ export const CUT_LIMIT_NOTE = `⚠️ Связь с API оборвалась п�
 // Requests that make the hub call Telegram. The hub retries a flaky network
 // for up to 2 minutes (TelegramApi deadlineMs), so wait a bit longer than that.
 const HUB_TELEGRAM_TIMEOUT_MS = 150_000;
+// Tools that wait for the user's answer: the agent is not working meanwhile.
+const WAITS_FOR_USER = new Set(["AskUserQuestion"]);
 
 export type PluginOptions = {
   sessionId: string;
@@ -71,6 +74,23 @@ export function isOwnTool(name: string): boolean {
   return /(^|__)tg_(enable|disable|notify)$/.test(name);
 }
 
+// Whether the agent works after this event; undefined when it tells nothing.
+function busyAfter(ev: TranscriptEvent): boolean | undefined {
+  switch (ev.kind) {
+    case "terminal_input":
+    case "channel_seen":
+    case "text":
+      return true;
+    case "tool_use":
+      return !WAITS_FOR_USER.has(ev.name);
+    case "turn_end":
+    case "interrupted":
+      return false;
+    default:
+      return undefined;
+  }
+}
+
 // One per Claude Code window: follows the session transcript, relays the
 // agent's text to the hub, delivers inbound topic messages to the session.
 
@@ -89,6 +109,8 @@ export class PluginCore {
   private noteOwed = false;
   // Responses cut since a turn last ended normally.
   private cuts = 0;
+  // The agent is in a turn and not waiting for the user.
+  private busy = false;
   enabled = false;
 
   constructor(private opts: PluginOptions) {
@@ -98,7 +120,7 @@ export class PluginCore {
     this.transcriptPath = transcriptPathFor(opts.sessionId, opts.cwd, opts.configDir);
     this.client = new HubClient({
       port: opts.port,
-      hello: () => ({ type: "hello", v: PROTOCOL_VERSION, windowKey: opts.windowKey, sessionId: this.sessionId, cwd: this.cwd, configDir: opts.configDir }),
+      hello: () => ({ type: "hello", v: PROTOCOL_VERSION, windowKey: opts.windowKey, sessionId: this.sessionId, cwd: this.cwd, configDir: opts.configDir, busy: this.busy }),
       spawnHub: opts.spawnHub,
       onMessage: m => this.onHubMessage(m),
       log: opts.log,
@@ -248,6 +270,7 @@ export class PluginCore {
     this.log.info(`session ${this.sessionId} → ${sessionId}`);
     this.flush(this.relay.idle());
     this.setEnabled(false);
+    this.setBusy(false);
     this.sessionId = sessionId;
     this.cwd = cwd || this.cwd;
     this.follow(transcriptPath);
@@ -304,7 +327,16 @@ export class PluginCore {
         if (ev.cut) this.responseCut();
         else this.cuts = 0;
       }
+      const busy = busyAfter(ev);
+      if (busy !== undefined) this.setBusy(busy);
     }
+  }
+
+  // The topic shows the bot typing while the agent is busy.
+  private setBusy(busy: boolean): void {
+    if (busy === this.busy) return;
+    this.busy = busy;
+    this.client.send({ type: "busy", busy });
   }
 
   private responseCut(): void {
