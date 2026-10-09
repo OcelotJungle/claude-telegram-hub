@@ -61,6 +61,17 @@ describe("TranscriptTailer", () => {
     expect(recs).toEqual([{ text: "Привет" }]);
   });
 
+  test("fromStart reads an existing file from its start, open() polls only on demand", () => {
+    const path = join(tempDir(), "s.jsonl");
+    writeFileSync(path, line({ n: 0 }));
+    const recs: unknown[] = [];
+    const t = new TranscriptTailer({ path, fromStart: true, onRecord: r => recs.push(r) });
+    t.open();
+    expect(recs).toEqual([]);
+    t.pollNow();
+    expect(recs).toEqual([{ n: 0 }]);
+  });
+
   test("a file that appears later is read from its start", () => {
     const path = join(tempDir(), "s.jsonl");
     const { t, recs } = make(path);

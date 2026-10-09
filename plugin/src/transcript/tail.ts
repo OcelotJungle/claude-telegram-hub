@@ -8,8 +8,8 @@ const NEWLINE = 0x0a;
 const POLL_INTERVAL_MS = 300;
 
 // Follows a transcript file by polling. Starts at the current end of an
-// existing file (history is never replayed); a file that does not exist yet is
-// read from its start once it appears.
+// existing file (history is never replayed) unless fromStart; a file that does
+// not exist yet is read from its start once it appears.
 export class TranscriptTailer {
   private offset = 0;
   private rest: Buffer = Buffer.alloc(0);
@@ -22,6 +22,7 @@ export class TranscriptTailer {
       onRecord(rec: unknown): void;
       onIdle?(): void;
       intervalMs?: number;
+      fromStart?: boolean;
       log?: Logger;
     },
   ) {
@@ -33,9 +34,14 @@ export class TranscriptTailer {
   }
 
   start(): void {
-    this.offset = fileSize(this.opts.path) ?? 0;
-    this.rest = Buffer.alloc(0);
+    this.open();
     this.timer = setInterval(() => this.pollNow(), this.opts.intervalMs ?? POLL_INTERVAL_MS);
+  }
+
+  // Picks the start offset without polling on a timer: the owner calls pollNow.
+  open(): void {
+    this.offset = this.opts.fromStart ? 0 : (fileSize(this.opts.path) ?? 0);
+    this.rest = Buffer.alloc(0);
   }
 
   stop(): void {

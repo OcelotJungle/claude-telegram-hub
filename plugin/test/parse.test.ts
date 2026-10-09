@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseRecord } from "../src/transcript/parse.ts";
+import { parseAgentRecord, parseRecord } from "../src/transcript/parse.ts";
 
 // Shapes mirror records observed in Claude Code transcripts.
 const assistant = (id: string, stop: string | null, block: object) => ({
@@ -178,6 +178,41 @@ describe("user records", () => {
   test("task notification is not terminal input", () => {
     const rec = { ...userBase, origin: { kind: "task-notification" }, promptSource: "system", turnOrigin: "task_notification", message: { role: "user", content: "<task-notification>" } };
     expect(parseRecord(rec)).toEqual([]);
+  });
+
+  test("a task notification tells which task stopped and how", () => {
+    const content = "<task-notification>\n<task-id>a1b2c3</task-id>\n<status>completed</status>\n<summary>Agent done</summary>\n</task-notification>";
+    const rec = { ...userBase, origin: { kind: "task-notification" }, message: { role: "user", content } };
+    expect(parseRecord(rec)).toEqual([{ kind: "task_status", taskId: "a1b2c3", status: "completed" }]);
+    const blocks = { ...rec, message: { role: "user", content: [{ type: "text", text: content.replace("completed", "killed") }] } };
+    expect(parseRecord(blocks)).toEqual([{ kind: "task_status", taskId: "a1b2c3", status: "killed" }]);
+  });
+});
+
+describe("tool call details", () => {
+  const call = (input: object) => parseRecord(assistant("m1", "tool_use", { type: "tool_use", id: "t", name: "X", input }));
+
+  test("a path shows as its file name", () => {
+    expect(call({ file_path: "C:\\src\\hub\\hub.ts", old_string: "a" })).toEqual([{ kind: "tool_use", name: "X", messageId: "m1", detail: "hub.ts" }]);
+  });
+
+  test("a description beats a command, and only the first line is kept", () => {
+    expect(call({ command: "bun test", description: "Run tests" })[0]).toMatchObject({ detail: "Run tests" });
+    expect(call({ command: "cd x\nbun test" })[0]).toMatchObject({ detail: "cd x" });
+  });
+
+  test("a long detail is cut", () => {
+    expect(call({ pattern: "a".repeat(100) })[0]).toMatchObject({ detail: `${"a".repeat(60)}…` });
+  });
+});
+
+describe("subagent records", () => {
+  test("sidechain assistant records give events, other records none", () => {
+    expect(parseAgentRecord({ ...assistant("m1", "end_turn", text("found it")), isSidechain: true })).toEqual([
+      { kind: "text", text: "found it", messageId: "m1" },
+      { kind: "turn_end", messageId: "m1" },
+    ]);
+    expect(parseAgentRecord({ ...userBase, isSidechain: true, message: { role: "user", content: "go" } })).toEqual([]);
   });
 });
 

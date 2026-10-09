@@ -5,7 +5,7 @@ import type { Titles } from "../transcript/tail.ts";
 
 import { randomUUID } from "crypto";
 import { copyFileSync, mkdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
-import { basename, join, resolve } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { isInside } from "../shared/config.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { BYTES_PER_MB, MAX_CAPTION, MAX_UPLOAD } from "../shared/media.ts";
@@ -14,6 +14,7 @@ import { enableResult } from "../shared/protocol-schema.ts";
 import { transcriptPathFor } from "../transcript/locate.ts";
 import { parseRecord } from "../transcript/parse.ts";
 import { Relay } from "../transcript/relay.ts";
+import { SubagentWatcher } from "../transcript/subagents.ts";
 import { effectiveTitle, readSessionTitles, TranscriptTailer } from "../transcript/tail.ts";
 import { HubClient } from "./hub-client.ts";
 
@@ -59,6 +60,8 @@ export type PluginOptions = {
   answerPermission(requestId: string, behavior: PermissionBehavior): void;
   log: Logger;
   tailIntervalMs?: number;
+  // How often a subagent card may change; the watcher's own default if unset.
+  cardEveryMs?: number;
 };
 
 // Our own tools never make the text before them "intermediate".
@@ -74,6 +77,7 @@ export class PluginCore {
   private cwd: string;
   private transcriptPath: string;
   private tailer: TranscriptTailer | undefined;
+  private subagents: SubagentWatcher | undefined;
   private relay = new Relay({ isOwnTool });
   private client: HubClient;
   private titles: Titles = {};
@@ -106,6 +110,7 @@ export class PluginCore {
 
   stop(): void {
     this.tailer?.stop();
+    this.subagents?.stop();
     this.client.stop();
   }
 
@@ -259,6 +264,19 @@ export class PluginCore {
       log: this.log,
     });
     this.tailer.start();
+    this.subagents?.stop();
+    // Claude Code keeps a session's subagents in <session>/subagents/ next to
+    // its transcript.
+    const sessionId = this.sessionId;
+    this.subagents = new SubagentWatcher({
+      dir: join(dirname(path), basename(path, ".jsonl"), "subagents"),
+      onCard: card => this.client.send({ type: "card", sessionId, ...card }),
+      canStart: () => this.enabled,
+      intervalMs: this.opts.tailIntervalMs,
+      sendEveryMs: this.opts.cardEveryMs,
+      log: this.log,
+    });
+    this.subagents.start();
   }
 
   private onRecord(rec: unknown): void {
@@ -276,6 +294,8 @@ export class PluginCore {
         this.titles[ev.source] = ev.title;
         const after = effectiveTitle(this.titles);
         if (after && after !== before) this.client.send({ type: "title", title: after });
+      } else if (ev.kind === "task_status") {
+        this.subagents?.taskStatus(ev.taskId, ev.status);
       } else if (ev.kind === "turn_end") {
         if (ev.cut) this.responseCut();
         else this.cuts = 0;

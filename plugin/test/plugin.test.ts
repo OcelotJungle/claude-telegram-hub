@@ -73,6 +73,7 @@ function makeCore(sessionId = SID) {
     answerPermission: (requestId, behavior) => answers.push({ requestId, behavior }),
     log: pluginLog,
     tailIntervalMs: 30,
+    cardEveryMs: 30,
   });
   core.start();
   return core;
@@ -93,6 +94,7 @@ beforeEach(async () => {
     config: () => config,
     idleMs: 60_000,
     pollTimeoutSec: 1,
+    cardEditMs: 50,
     log: memLogger(),
     onExit() {},
   });
@@ -228,6 +230,31 @@ describe("PluginCore", () => {
     expect(channel[0].content).toBe("как дела?");
     expect(channel[0].meta.chat_id).toBe(GROUP);
     await waitFor(() => c.enabled, 3000, "re-enabled");
+  });
+
+  test("a subagent shows as one card that is edited until it is done", async () => {
+    await enabledCore();
+    const dir = join(transcript.replace(/\.jsonl$/, ""), "subagents");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "agent-a1.meta.json"), JSON.stringify({ agentType: "Explore", description: "Find it" }));
+    const agent = join(dir, "agent-a1.jsonl");
+    appendFileSync(agent, line({ ...assistantText("Looking", "tool_use", "s1"), isSidechain: true }));
+    await waitFor(() => sent().length === 1, 3000, "card");
+    expect(sent()[0]).toEqual({ text: "🤖 Explore · Find it\n⏳ 0 с · 0 действий\n\nLooking", silent: true, topic: 100 });
+    appendFileSync(agent, line({ ...assistantText("Found", "end_turn", "s2"), isSidechain: true }));
+    await waitFor(() => fake.callsOf("editMessageText").some(c => String(c.text).includes("✅ готово")), 3000, "final edit");
+    expect(String(fake.callsOf("editMessageText").at(-1)?.text)).toEndWith("Looking\n\nFound");
+    expect(sent().length).toBe(1);
+  });
+
+  test("a subagent is first shown only while the mode is on", async () => {
+    makeCore();
+    await waitFor(() => hub.isConnected(SID), 3000, "plugin connected");
+    const dir = join(transcript.replace(/\.jsonl$/, ""), "subagents");
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(join(dir, "agent-a1.jsonl"), line({ ...assistantText("Looking", "end_turn", "s1"), isSidechain: true }));
+    await Bun.sleep(200);
+    expect(sent()).toEqual([]);
   });
 
   test("a permission request is sent loudly while enabled", async () => {

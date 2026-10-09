@@ -34,7 +34,10 @@ export type PluginToHub =
   // lets the topic answer it.
   | { type: "permission"; requestId?: string; toolName: string; description: string; inputPreview?: string }
   | { type: "title"; title: string }
-  | { type: "terminalInput" };
+  | { type: "terminalInput" }
+  // A subagent's card as Markdown: one Telegram message, sent once and then
+  // edited in place. final: the card will not change any more.
+  | { type: "card"; id: string; sessionId: string; text: string; final: boolean };
 
 export type HubToPlugin =
   | { type: "state"; enabled: boolean; topicTitle?: string }

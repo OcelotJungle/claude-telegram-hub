@@ -1,14 +1,20 @@
 // Turns one transcript (.jsonl) record into the events the relay cares about.
 // Record shapes: see "Результаты проверки" in the design spec.
+import { basename } from "path";
 import { arr, field, isObject } from "../shared/guards.ts";
 
 // The block kind sits near the start of a thinking signature; this much of
 // its base64 covers it.
 const SIGNATURE_HEAD_CHARS = 64;
+// A tool call's detail (its file, command or pattern) is cut to this.
+const MAX_DETAIL_CHARS = 60;
+// Input fields that tell what a tool call does, best first.
+const DETAIL_FIELDS = ["file_path", "notebook_path", "description", "pattern", "command", "url", "query", "prompt"];
 
 export type TranscriptEvent =
   | { kind: "text"; text: string; messageId: string }
-  | { kind: "tool_use"; name: string; messageId: string }
+  // detail: what the call works on, for a status line.
+  | { kind: "tool_use"; name: string; messageId: string; detail?: string }
   // cut: the connection to the API was lost mid-response, the turn ended on
   // it and the answer may be incomplete.
   | { kind: "turn_end"; messageId: string; cut?: true }
@@ -16,7 +22,10 @@ export type TranscriptEvent =
   | { kind: "title"; source: "custom" | "agent" | "ai"; title: string }
   // A thinking block with text whose kind is neither thinking nor narration:
   // the record format changed, and visible text may be going unrelayed.
-  | { kind: "unknown_thinking"; blockKind: string };
+  | { kind: "unknown_thinking"; blockKind: string }
+  // A background task (a subagent among them) stopped: completed, failed or
+  // killed. taskId of a subagent is its agent id.
+  | { kind: "task_status"; taskId: string; status: string };
 
 type Rec = Record<string, unknown>;
 
@@ -27,7 +36,7 @@ export function parseRecord(r: unknown): TranscriptEvent[] {
     case "assistant":
       return parseAssistant(r);
     case "user":
-      return isTerminalInput(r) ? [{ kind: "terminal_input" }] : [];
+      return isTerminalInput(r) ? [{ kind: "terminal_input" }] : taskStatus(r);
     // A message typed while the agent works is absorbed into the running turn.
     case "attachment":
       return field(r.attachment, "type") === "queued_command" && field(field(r.attachment, "origin"), "kind") === "human" ? [{ kind: "terminal_input" }] : [];
@@ -40,6 +49,12 @@ export function parseRecord(r: unknown): TranscriptEvent[] {
     default:
       return [];
   }
+}
+
+// A record of a subagent's own transcript (subagents/agent-<id>.jsonl): all
+// of them are sidechain records.
+export function parseAgentRecord(r: unknown): TranscriptEvent[] {
+  return isObject(r) && r.type === "assistant" ? parseAssistant(r) : [];
 }
 
 function parseAssistant(r: Rec): TranscriptEvent[] {
@@ -58,7 +73,8 @@ function parseAssistant(r: Rec): TranscriptEvent[] {
       if (kind === "narration") out.push({ kind: "text", text: block.thinking.trimEnd(), messageId });
       else if (kind !== "thinking") out.push({ kind: "unknown_thinking", blockKind: kind ?? "?" });
     } else if (block.type === "tool_use" && typeof block.name === "string") {
-      out.push({ kind: "tool_use", name: block.name, messageId });
+      const detail = toolDetail(block.input);
+      out.push(detail ? { kind: "tool_use", name: block.name, messageId, detail } : { kind: "tool_use", name: block.name, messageId });
     }
   }
   // Every record of a split message carries the final stop_reason; the relay
@@ -80,6 +96,27 @@ export function thinkingKind(signature: unknown): string | undefined {
   const m = head.match(/\x42([\x01-\x20])([a-z_]+)/);
   const [, size, kind] = m ?? [];
   return size !== undefined && kind !== undefined && kind.length === size.charCodeAt(0) ? kind : undefined;
+}
+
+function toolDetail(input: unknown): string | undefined {
+  for (const key of DETAIL_FIELDS) {
+    const v = field(input, key);
+    if (typeof v !== "string" || !v.trim()) continue;
+    const s = key.endsWith("path") ? basename(v) : (v.trim().split("\n")[0] ?? "");
+    return s.length > MAX_DETAIL_CHARS ? `${s.slice(0, MAX_DETAIL_CHARS)}…` : s;
+  }
+  return undefined;
+}
+
+// Claude Code tells the agent a background task stopped with a prompt
+// holding a <task-notification>.
+function taskStatus(r: Rec): TranscriptEvent[] {
+  const content = field(r.message, "content");
+  const text = typeof content === "string" ? content : arr(content).map(b => field(b, "text")).filter(t => typeof t === "string").join("\n");
+  if (!text.includes("<task-notification>")) return [];
+  const taskId = text.match(/<task-id>([^<]+)<\/task-id>/)?.[1];
+  const status = text.match(/<status>([^<]+)<\/status>/)?.[1];
+  return taskId && status ? [{ kind: "task_status", taskId: taskId.trim(), status: status.trim() }] : [];
 }
 
 function isTerminalInput(r: Rec): boolean {

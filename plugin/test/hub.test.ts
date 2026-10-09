@@ -28,7 +28,7 @@ let log: ReturnType<typeof memLogger>;
 let exited: boolean;
 const clients: { close(): void }[] = [];
 
-async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools } = {}) {
+async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number } = {}) {
   port = await freePort();
   hub = new Hub({
     port,
@@ -47,6 +47,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     pollRetryBaseMs: 10,
     sendRetryBaseMs: 10,
     sendRetryMaxMs: 50,
+    cardEditMs: o.cardEditMs ?? 50,
     log,
     onExit: () => {
       exited = true;
@@ -951,6 +952,76 @@ describe("polling", () => {
   test("a wrong token is reported plainly", async () => {
     await startHub({ token: "1:wrong" });
     await waitFor(() => log.lines.some(l => l.startsWith("ERROR") && l.includes("bot token rejected")), 3000, "token error in log");
+  });
+});
+
+describe("subagent cards", () => {
+  const card = (id: string, text: string, final = false) => ({ type: "card", id, sessionId: "a", text, final });
+
+  test("a card is sent silently once, then edited in place", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send(card("x-0", "🤖 **Explore**\n⏳ 1 действие"));
+    await waitFor(() => fake.texts().length === 1);
+    expect(fake.texts()[0]).toMatchObject({ text: "🤖 Explore\n⏳ 1 действие", disable_notification: true, entities: [{ type: "bold", offset: 3, length: 7 }] });
+    const id = fake.lastMessageId;
+    a.send(card("x-0", "🤖 **Explore**\n✅ готово", true));
+    await waitFor(() => fake.callsOf("editMessageText").length === 1);
+    expect(fake.callsOf("editMessageText")[0]).toMatchObject({ chat_id: GROUP, message_id: id, text: "🤖 Explore\n✅ готово" });
+    a.send(card("x-0", "🤖 **Explore**\n✅ готово", true));
+    await Bun.sleep(150);
+    expect(fake.texts().length).toBe(1);
+    expect(fake.callsOf("editMessageText").length).toBe(1);
+  });
+
+  test("edits are throttled, and only the latest version goes", async () => {
+    await startHub({ cardEditMs: 400 });
+    const a = await enabled("a");
+    a.send(card("x-0", "v1"));
+    await waitFor(() => fake.texts().length === 1);
+    a.send(card("x-0", "v2"));
+    a.send(card("x-0", "v3"));
+    a.send(card("x-0", "v4"));
+    await Bun.sleep(150);
+    expect(fake.callsOf("editMessageText")).toEqual([]);
+    await waitFor(() => fake.callsOf("editMessageText").length === 1, 2000);
+    await Bun.sleep(100);
+    expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual(["v4"]);
+  });
+
+  test("a card changed while queued is sent as its latest version", async () => {
+    await startHub();
+    const a = await enabled("a");
+    fake.hangNext("sendMessage");
+    a.send({ type: "send", id: "t1", sessionId: "a", text: "before", notify: false });
+    a.send(card("x-0", "v1"));
+    a.send(card("x-0", "v2"));
+    await waitFor(() => fake.texts().some(t => t.text === "v2"), 5000);
+    // The hung send of "before" is retried, the card goes after it.
+    expect([...new Set(fake.texts().map(t => t.text))]).toEqual(["before", "v2"]);
+    await Bun.sleep(150);
+    expect(fake.callsOf("editMessageText")).toEqual([]);
+  });
+
+  test("a card whose message is gone is forgotten", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send(card("x-0", "v1"));
+    await waitFor(() => fake.texts().length === 1);
+    fake.failNext("editMessageText", { code: 400, description: "Bad Request: message to edit not found" });
+    a.send(card("x-0", "v2"));
+    await waitFor(() => fake.callsOf("editMessageText").length === 1);
+    a.send(card("x-0", "v3"));
+    await waitFor(() => fake.texts().length === 2);
+    expect(fake.texts()[1]?.text).toBe("v3");
+  });
+
+  test("a card of a session without a topic is dropped", async () => {
+    await startHub();
+    const a = await plugin("a");
+    a.send(card("x-0", "v1"));
+    await Bun.sleep(150);
+    expect(fake.texts()).toEqual([]);
   });
 });
 

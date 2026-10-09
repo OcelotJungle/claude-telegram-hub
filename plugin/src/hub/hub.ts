@@ -48,6 +48,11 @@ const MAX_PREVIEW_CHARS = 1500;
 const MAX_PERMISSIONS = 200;
 const PERMISSION_KEY_CHARS = 8;
 const PERMISSION_ANSWERS: Record<PermissionBehavior, string> = { allow: "✅ Разрешено", deny: "❌ Отклонено" };
+// A subagent card is edited at most this often; versions in between are skipped.
+const CARD_EDIT_MS = 5000;
+// Cards remembered for editing; the oldest are forgotten past this.
+const MAX_CARDS = 200;
+const TOO_MANY_REQUESTS = 429;
 const BOT_COMMANDS = [
   { command: "info", description: "Лимиты и контекст сессии" },
   { command: "compact", description: "Сжать контекст; /compact N — окно автокомпакта" },
@@ -55,6 +60,17 @@ const BOT_COMMANDS = [
 
 type Conn = { windowKey?: string; sessionId?: string; cwd?: string };
 type WS = ServerWebSocket<Conn>;
+type Card = {
+  text: string;
+  final: boolean;
+  // The final version is shown: nothing more to do.
+  done: boolean;
+  messageId?: number;
+  shown?: string;
+  lastEdit: number;
+  editing: boolean;
+  timer?: ReturnType<typeof setTimeout>;
+};
 
 export type HubOptions = {
   port: number;
@@ -78,6 +94,7 @@ export type HubOptions = {
   // Pause between attempts to deliver the head of a session's queue.
   sendRetryBaseMs?: number;
   sendRetryMaxMs?: number;
+  cardEditMs?: number;
   log: Logger;
   onExit(): void;
 };
@@ -126,6 +143,9 @@ export class Hub {
   private botUsername: string | undefined;
   // Permission prompts sent to topics, by the key in their buttons' data.
   private permissions = new Map<string, { sessionId: string; requestId: string } & Formatted>();
+  // Subagent cards by `${sessionId}:${cardId}`: text is the latest Markdown
+  // version, shown what the message holds now (undefined until it is sent).
+  private cards = new Map<string, Card>();
   private pumping = new Set<string>();
   // Sessions whose delivery waits for the user to fix the setup.
   private blocked = new Set<string>();
@@ -179,6 +199,7 @@ export class Hub {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.spoolTimer) clearInterval(this.spoolTimer);
     for (const queued of this.commands.values()) for (const e of queued) clearTimeout(e.timer);
+    for (const card of this.cards.values()) clearTimeout(card.timer);
     this.server?.stop(true);
     this.log.info("hub stopped");
   }
@@ -382,6 +403,9 @@ ${msg.text}`);
         this.log.info(`terminal input in session ${sid}: Telegram mode off`);
         this.setEnabled(sid, false);
         return;
+      case "card":
+        this.onCard(msg);
+        return;
     }
   }
 
@@ -511,6 +535,71 @@ ${msg.text}`);
     }
     await api.answerCallbackQuery(press.id, outcome).catch(e => this.log.warn(`answering a button press failed: ${e}`));
     await api.editMessageText(groupId, press.messageId, `${p.text}\n\n${outcome}`, p.entities).catch(e => this.log.warn(`editing a permission message failed: ${e}`));
+  }
+
+  // --- subagent cards -------------------------------------------------------
+
+  // The first version of a card is queued like any text, so it keeps its place
+  // among the session's messages; later versions edit that message, at most
+  // every CARD_EDIT_MS.
+  private onCard(msg: Extract<PluginToHub, { type: "card" }>): void {
+    if (!this.store.get(msg.sessionId)) return;
+    const key = `${msg.sessionId}:${msg.id}`;
+    const card = this.cards.get(key);
+    // A finished card stays finished: a late version changes nothing.
+    if (card?.done) return;
+    if (card) {
+      card.text = msg.text;
+      card.final = msg.final;
+      if (card.messageId !== undefined) this.scheduleCardEdit(key, card);
+      return;
+    }
+    this.cards.set(key, { text: msg.text, final: msg.final, done: false, lastEdit: 0, editing: false });
+    for (const old of this.cards.keys()) {
+      if (this.cards.size <= MAX_CARDS) break;
+      this.cards.delete(old);
+    }
+    const [first] = textPieces(msg.text, true);
+    // The outbox remembers sent ids: a card sent anew needs a new one.
+    if (first && this.outbox.add(`card-${randomUUID()}`, msg.sessionId, [{ ...first, card: key }])) void this.pump(msg.sessionId);
+  }
+
+  private scheduleCardEdit(key: string, card: Card): void {
+    if (card.timer || card.editing) return;
+    if (card.text === card.shown) {
+      card.done = card.final;
+      return;
+    }
+    const wait = Math.max(0, card.lastEdit + (this.opts.cardEditMs ?? CARD_EDIT_MS) - Date.now());
+    card.timer = setTimeout(() => {
+      card.timer = undefined;
+      void this.editCard(key, card);
+    }, wait);
+  }
+
+  private async editCard(key: string, card: Card): Promise<void> {
+    if (!this.running || card.messageId === undefined || !this.opts.api) return;
+    const text = card.text;
+    const f = cardFormat(text);
+    card.editing = true;
+    try {
+      await this.opts.api.editMessageText(this.requireGroup(), card.messageId, f.text, f.entities);
+      card.shown = text;
+    } catch (e) {
+      if (e instanceof TelegramError && /message is not modified/i.test(e.description)) card.shown = text;
+      else if (e instanceof TelegramError && /message to edit not found/i.test(e.description)) {
+        this.cards.delete(key);
+        return;
+      } else if (e instanceof TelegramError && e.code !== TOO_MANY_REQUESTS) {
+        // Retrying the same version cannot help; the next one may.
+        this.log.warn(`Telegram did not take an edit of subagent card ${key}: ${e.description}`);
+        card.shown = text;
+      } else this.log.warn(`editing subagent card ${key} failed, retrying: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      card.editing = false;
+      card.lastEdit = Date.now();
+    }
+    if (this.cards.get(key) === card) this.scheduleCardEdit(key, card);
   }
 
   // --- delivery -------------------------------------------------------------
@@ -661,6 +750,18 @@ ${msg.text}`);
       await this.sendToTopic(api, groupId, sessionId, thread => api.sendRichMessage(groupId, thread, rich, item.silent));
       return;
     }
+    const card = item.card ? this.cards.get(item.card) : undefined;
+    if (item.card && card) {
+      // The card may have changed while it waited in the queue.
+      const text = card.text;
+      const f = cardFormat(text);
+      const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, f.text, true, f.entities));
+      card.messageId = sent.message_id;
+      card.shown = text;
+      card.lastEdit = Date.now();
+      this.scheduleCardEdit(item.card, card);
+      return;
+    }
     if (!queued) {
       await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, item.text, item.silent, item.entities, item.buttons));
       return;
@@ -771,18 +872,18 @@ ${msg.text}`);
     }
   }
 
-  private async sendToTopic(api: TelegramApi, groupId: string, sessionId: string, send: (threadId: number) => Promise<unknown>): Promise<void> {
+  private async sendToTopic<T>(api: TelegramApi, groupId: string, sessionId: string, send: (threadId: number) => Promise<T>): Promise<T> {
     const rec = this.store.get(sessionId);
     if (!rec) throw new Error(`session ${sessionId} has no topic`);
     try {
-      await send(rec.topicId);
+      return await send(rec.topicId);
     } catch (e) {
       if (!isThreadNotFound(e)) throw e;
       // The topic was deleted by hand: give the session a new one.
       const topic = await api.createForumTopic(groupId, topicName(rec.project, rec.title));
       this.store.set(sessionId, { ...rec, topicId: topic.message_thread_id });
       this.log.warn(`topic ${rec.topicId} of session ${sessionId} is gone, created ${topic.message_thread_id}`);
-      await send(topic.message_thread_id);
+      return await send(topic.message_thread_id);
     }
   }
 
@@ -956,6 +1057,11 @@ function names(files: OutFile[]): string {
 // with entities.
 function textPieces(text: string, markdown: boolean): Piece[] {
   return chunk(markdown ? toTelegram(text) : { text, entities: [] }).map(p => ({ text: p.text, silent: true, ...(p.entities.length ? { entities: p.entities } : {}) }));
+}
+
+// A card is one message: its first chunk, should it ever outgrow one.
+function cardFormat(md: string): Formatted {
+  return chunk(toTelegram(md))[0] ?? { text: md, entities: [] };
 }
 
 function markdownPieces(md: string): Piece[] {
