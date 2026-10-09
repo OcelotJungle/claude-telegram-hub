@@ -46,5 +46,5 @@ function ignore(reason: string): Route {
 }
 
 function hasContent(m: Message): boolean {
-  return Boolean(m.text || m.caption || m.photo || m.document || m.voice || m.audio || m.video || m.video_note || m.sticker)
+  return Boolean(m.text || m.caption || m.rich_message || m.photo || m.document || m.voice || m.audio || m.video || m.video_note || m.sticker)
 }

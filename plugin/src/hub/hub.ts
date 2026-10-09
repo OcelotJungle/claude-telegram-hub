@@ -12,6 +12,7 @@ import { Outbox, type OutItem, type Piece } from './outbox.ts'
 import { commandOf, routeUpdate } from './router.ts'
 import { SessionStore, topicName, type SessionRecord } from './sessions.ts'
 import { isThreadNotFound, TelegramError, type Message, type TelegramApi, type Update } from './telegram.ts'
+import { richToMarkdown } from './rich.ts'
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath, type VideoTools } from './video.ts'
 
 type Conn = { windowKey?: string; sessionId?: string; cwd?: string }
@@ -801,7 +802,7 @@ ${msg.text}`)
       if (f.mime_type) meta.attachment_mime = f.mime_type
       if (name) meta.attachment_name = name
     }
-    let content = m.text ?? m.caption
+    let content = m.text ?? m.caption ?? (m.rich_message ? richToMarkdown(m.rich_message) : undefined)
     if (m.photo?.length) {
       content ??= '(photo)'
       const best = m.photo[m.photo.length - 1]!
@@ -857,7 +858,7 @@ function filesPiece(files: OutFile[], caption: Formatted | undefined, loud: bool
 // What a delivered message was, for the log: its kind, length and formatting,
 // never its text.
 function shapeOf(m: Message, content: string): string {
-  const kind = (['photo', 'document', 'voice', 'audio', 'video', 'video_note', 'sticker'] as const).find(k => m[k]) ?? 'text'
+  const kind = (['rich_message', 'photo', 'document', 'voice', 'audio', 'video', 'video_note', 'sticker'] as const).find(k => m[k]) ?? 'text'
   const types = [...new Set((m.entities ?? m.caption_entities ?? []).map(e => e.type))]
   return `${kind}, ${content.length} chars${types.length ? `, entities ${types.join(', ')}` : ''}`
 }

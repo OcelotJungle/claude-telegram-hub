@@ -178,6 +178,18 @@ describe('inbound', () => {
     expect(line).toBe(`INFO message ${u.message!.message_id} in topic 100 → session a: text, ${text.length} chars, entities bold, code`)
   })
 
+  // What Telegram makes of a Markdown file pasted into the chat.
+  test('a rich message reaches the session as Markdown', async () => {
+    await startHub()
+    const a = await enabled('a')
+    const rich_message = { blocks: [{ type: 'heading', size: 2, text: 'План' }, { type: 'paragraph', text: ['Сначала ', { type: 'bold', text: 'v2g1' }] }] }
+    const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, extra: { rich_message } })
+    fake.pushUpdate(u)
+    const msg = await a.next(m => m.type === 'inbound')
+    expect(msg.content).toBe('## План\n\nСначала **v2g1**')
+    expect(log.lines).toContain(`INFO message ${u.message!.message_id} in topic 100 → session a: rich_message, 25 chars`)
+  })
+
   test('a topic of a session without a window gets "сессия сейчас не активна"', async () => {
     await startHub()
     const a = await enabled('a')

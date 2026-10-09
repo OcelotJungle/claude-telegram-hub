@@ -3,6 +3,7 @@ import { join } from 'path'
 import { nullLogger, type Logger } from '../shared/log.ts'
 import type { Entity } from '../shared/markdown.ts'
 import type { OutFile } from '../shared/media.ts'
+import type { RichMessage } from './rich.ts'
 
 // Only the Bot API fields the hub reads.
 export type User = { id: number; is_bot: boolean; first_name?: string; username?: string }
@@ -20,6 +21,8 @@ export type Message = {
   caption?: string
   entities?: { type: string }[]
   caption_entities?: { type: string }[]
+  // A pasted document: blocks instead of text (Bot API 10.1).
+  rich_message?: RichMessage
   photo?: PhotoSize[]
   document?: FileRef
   voice?: FileRef

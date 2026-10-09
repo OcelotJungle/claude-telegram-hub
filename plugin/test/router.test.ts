@@ -83,6 +83,12 @@ describe('routeUpdate', () => {
     expect(route(u)).toEqual({ action: 'ignore', reason: 'service message (fields: forum_topic_edited)' })
   })
 
+  test('a rich message (Bot API 10.1) is delivered', () => {
+    const { route } = setup()
+    const u = topicMsg({ chatId: GROUP, threadId: 10, fromId: ME, extra: { rich_message: { blocks: [{ type: 'paragraph', text: 'hi' }] } } })
+    expect(route(u).action).toBe('deliver')
+  })
+
   test('photo without caption is delivered', () => {
     const { route } = setup()
     const u = topicMsg({ chatId: GROUP, threadId: 10, fromId: ME, extra: { photo: [{ file_id: 'p', file_unique_id: 'u' }] } })
