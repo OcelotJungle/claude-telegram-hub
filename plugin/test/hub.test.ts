@@ -728,7 +728,8 @@ describe('polling', () => {
     for (let i = 0; i < 4; i++) fake.failNext('getMe', { code: 502, description: 'Bad Gateway' })
     await startHub()
     await waitFor(() => log.lines.some(l => l.includes('polling Telegram as @test_bot')), 3000, 'bot name in log')
-    expect(fake.callsOf('getUpdates').length).toBeGreaterThan(0)
+    // The line is logged before getUpdates reaches the fake.
+    await waitFor(() => fake.callsOf('getUpdates').length > 0, 3000, 'getUpdates after getMe')
   })
 
   test('a hung getUpdates warms the connection up with getMe and polls again', async () => {
