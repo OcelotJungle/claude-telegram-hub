@@ -1114,6 +1114,21 @@ describe("starting and stopping sessions", () => {
     expect(spawned[0]?.[2]).toBe(dir);
   });
 
+  test("a session whose account is not known is not started until /run N", async () => {
+    const spawned = await closedSession();
+    const store = new SessionStore(join(dir, "sessions.json"));
+    const rec = must(store.get(SID));
+    await hub.stop();
+    store.set(SID, { topicId: rec.topicId, title: rec.title, project: rec.project, enabled: rec.enabled, cwd: CWD });
+    await startHub({ spawn: c => void spawned.push(c) });
+    fake.pushUpdate(msg("hi"));
+    await waitFor(() => texts().includes("⚠️ Аккаунт сессии неизвестен, не запускаю. Напиши /run N"));
+    expect(spawned).toEqual([]);
+    fake.pushUpdate(msg("/run 2"));
+    await waitFor(() => spawned.length === 1);
+    expect(spawned[0]?.[5]).toBe("2");
+  });
+
   test("without launch in the config a closed session is just inactive", async () => {
     await startHub();
     const a = await enabled(SID);

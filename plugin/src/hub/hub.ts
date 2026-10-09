@@ -1065,8 +1065,8 @@ ${msg.text}`);
   }
 
   // Runs the configured command for a session without a window: the account
-  // given, else the one it ran on last, else the default one. The messages
-  // wait until the session connects; one start at a time.
+  // given, else the one it ran on last; with neither it does not start. The
+  // messages wait until the session connects; one start at a time.
   private launch(sessionId: string, account: string | undefined, held: Message[]): void {
     const cfg = this.opts.config();
     const rec = this.store.get(sessionId);
@@ -1075,8 +1075,8 @@ ${msg.text}`);
       const why = cfg.launchError ? `секция launch в config.json с ошибкой: ${cfg.launchError}` : "в config.json нет секции launch";
       return this.notice(sessionId, `⚠️ Автозапуск не настроен: ${why}`, true);
     }
-    const acc = account ?? rec.account ?? cfg.launch.defaultAccount;
-    if (!acc) return this.notice(sessionId, "⚠️ Не знаю, на каком аккаунте запускать сессию. Напиши /run N", true);
+    const acc = account ?? rec.account;
+    if (!acc) return this.notice(sessionId, "⚠️ Аккаунт сессии неизвестен, не запускаю. Напиши /run N", true);
     const cwd = rec.cwd ?? (this.opts.projectsDir ? sessionCwd(sessionId, this.opts.projectsDir) : undefined);
     if (!cwd) return this.notice(sessionId, "⚠️ Не знаю, в какой папке запускать сессию: её нет ни в записи хаба, ни в транскрипте", true);
     let command: string[];

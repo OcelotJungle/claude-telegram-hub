@@ -141,8 +141,8 @@ describe("config", () => {
   });
 
   test("a launch section is read, with a default timeout", () => {
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], launch: { command: ["cswap.exe", "run", "{account}"], defaultAccount: 1 } }));
-    expect(loadConfig().launch).toEqual({ command: ["cswap.exe", "run", "{account}"], defaultAccount: "1", timeoutSec: 90 });
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], launch: { command: ["cswap.exe", "run", "{account}"] } }));
+    expect(loadConfig().launch).toEqual({ command: ["cswap.exe", "run", "{account}"], timeoutSec: 90 });
   });
 
   test("a broken launch section is reported, not used", () => {

@@ -75,14 +75,13 @@ export function loadToken(): string | undefined {
 
 // How the hub starts a session that has no window: command is the program
 // and its arguments, with {cwd}, {account} and {session} put in.
-export type Launch = { command: string[]; defaultAccount?: string; timeoutSec: number };
+export type Launch = { command: string[]; timeoutSec: number };
 
 // launchError: config.json has a launch section that is not valid.
 export type Config = { groupId?: string; allowFrom: string[]; launch?: Launch; launchError?: string };
 
 const launchSchema: z.ZodType<Launch> = z.object({
   command: z.array(z.string()).min(1),
-  defaultAccount: z.union([z.string(), z.number()]).transform(String).optional(),
   timeoutSec: z.number().positive().default(DEFAULT_LAUNCH_TIMEOUT_SEC),
 });
 
