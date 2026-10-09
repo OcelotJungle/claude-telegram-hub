@@ -23,6 +23,7 @@ import { toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { commandReply, hookBody, pluginToHub, sendFilesMessage, sendMessage } from "../shared/protocol-schema.ts";
+import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
 import { launchCommand, LaunchError, sessionCwd } from "./launch.ts";
@@ -113,6 +114,10 @@ export type HubOptions = {
   spawn?(command: string[]): void;
   readyDelayMs?: number;
   stopTimeoutMs?: number;
+  // A window in this config dir runs on the default login, whose account is
+  // asked of defaultAccount (cswap by default).
+  defaultConfigDir?: string;
+  defaultAccount?(): Promise<string | undefined>;
   log: Logger;
   onExit(): void;
 };
@@ -166,7 +171,7 @@ export class Hub {
   private cards = new Map<string, Card>();
   private pumping = new Set<string>();
   // Sessions being started from the topic, with the messages they will get.
-  private launches = new Map<string, { held: Message[]; timer: ReturnType<typeof setTimeout> }>();
+  private launches = new Map<string, { account: string; held: Message[]; timer: ReturnType<typeof setTimeout> }>();
   // Sessions told to end, until their window goes.
   private stops = new Map<string, ReturnType<typeof setTimeout>>();
   private readyTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -401,13 +406,14 @@ export class Hub {
         if (msg.v !== PROTOCOL_VERSION) this.log.warn(`plugin protocol v${msg.v}, hub v${PROTOCOL_VERSION}`);
         ws.data = { windowKey: msg.windowKey, sessionId: msg.sessionId, cwd: msg.cwd, account: accountOf(msg.configDir) };
         this.store.setWhere(msg.sessionId, msg.cwd, ws.data.account);
-        this.log.info(`window ${msg.windowKey} connected, session ${msg.sessionId}`);
+        this.log.info(`window ${msg.windowKey} connected, session ${msg.sessionId}, account ${ws.data.account ?? "not named"}`);
+        this.askDefaultAccount(ws, msg.configDir);
         this.pushState(msg.sessionId);
         this.giveHeldResults(ws, msg.sessionId);
         const pending = this.pendingHooks.get(msg.windowKey);
         this.pendingHooks.delete(msg.windowKey);
         if (pending && Date.now() - pending.at < HOOK_TTL_MS) this.forwardHook(ws, pending.body);
-        this.launched(msg.sessionId);
+        this.launched(ws, msg.sessionId);
         return;
       }
       case "session":
@@ -417,7 +423,7 @@ export class Hub {
         this.store.setWhere(msg.sessionId, msg.cwd, ws.data.account);
         this.log.info(`window ${ws.data.windowKey} switched to session ${msg.sessionId}`);
         this.pushState(msg.sessionId);
-        this.launched(msg.sessionId);
+        this.launched(ws, msg.sessionId);
         return;
       case "req":
         void this.handleRequest(ws, msg);
@@ -1096,17 +1102,22 @@ ${msg.text}`);
       this.log.warn(`session ${sessionId} did not connect in ${sec} s; ${l?.held.length ?? 0} held message(s) dropped`);
       this.notice(sessionId, `⚠️ Сессия не запустилась за ${sec} с`, true);
     }, sec * MS_PER_SECOND);
-    this.launches.set(sessionId, { held, timer });
+    this.launches.set(sessionId, { account: acc, held, timer });
     this.notice(sessionId, `🚀 Запускаю сессию (аккаунт ${acc})…`, false);
   }
 
   // A window of the session connected: a start it waited for is done, and
-  // the held messages go once Claude Code is ready for them.
-  private launched(sessionId: string): void {
+  // the held messages go once Claude Code is ready for them. A window that
+  // does not name its account runs on the one it was started on.
+  private launched(ws: WS, sessionId: string): void {
     const l = this.launches.get(sessionId);
     if (!l) return;
     clearTimeout(l.timer);
     this.launches.delete(sessionId);
+    if (!ws.data.account) {
+      ws.data.account = l.account;
+      this.store.setWhere(sessionId, undefined, l.account);
+    }
     this.log.info(`session ${sessionId} started, ${l.held.length} held message(s) to deliver`);
     this.notice(sessionId, "✅ Сессия запущена", false);
     if (!l.held.length) return;
@@ -1123,6 +1134,19 @@ ${msg.text}`);
       })();
     }, this.opts.readyDelayMs ?? READY_DELAY_MS);
     this.readyTimers.add(t);
+  }
+
+  // A window on the default login does not name its account in its config
+  // dir; cswap tells which account that login is.
+  private askDefaultAccount(ws: WS, configDir: string | undefined): void {
+    if (!configDir || !isDefaultConfigDir(configDir, this.opts.defaultConfigDir ?? DEFAULT_CONFIG_DIR)) return;
+    void (this.opts.defaultAccount ?? defaultLoginAccount)().then(account => {
+      const sid = ws.data.sessionId;
+      if (!account || !sid) return this.log.warn(`window ${ws.data.windowKey}: the account of the default login is unknown`);
+      this.log.info(`window ${ws.data.windowKey} runs on the default login, account ${account}`);
+      ws.data.account = account;
+      this.store.setWhere(sid, undefined, account);
+    });
   }
 
   // The hub's own word in a session's topic, in order with the rest.

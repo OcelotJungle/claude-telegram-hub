@@ -18,6 +18,7 @@ const GROUP = "-1001";
 const ME = "123456789";
 // A session folder that exists: the repository itself.
 const CWD = join(import.meta.dir, "..", "..");
+const DEFAULT_DIR = "C:\\Users\\me\\.claude";
 
 let fake: FakeTelegram;
 let hub: Hub;
@@ -28,7 +29,7 @@ let log: ReturnType<typeof memLogger>;
 let exited: boolean;
 const clients: { close(): void }[] = [];
 
-type HubExtras = { spawn?(command: string[]): void; projectsDir?: string; stopTimeoutMs?: number };
+type HubExtras = { spawn?(command: string[]): void; projectsDir?: string; stopTimeoutMs?: number; defaultAccount?(): Promise<string | undefined> };
 
 async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number } & HubExtras = {}) {
   port = await freePort();
@@ -54,6 +55,8 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     ...(o.spawn ? { spawn: o.spawn } : {}),
     ...(o.projectsDir ? { projectsDir: o.projectsDir } : {}),
     ...(o.stopTimeoutMs ? { stopTimeoutMs: o.stopTimeoutMs } : {}),
+    defaultConfigDir: DEFAULT_DIR,
+    defaultAccount: o.defaultAccount ?? (async () => undefined),
     log,
     onExit: () => {
       exited = true;
@@ -118,6 +121,15 @@ describe("enable", () => {
     clients.push(c);
     await c.next("state");
     expect(new SessionStore(join(dir, "sessions.json")).get("s1")).toMatchObject({ cwd: "C:\\elsewhere", account: "1" });
+  });
+
+  test("a window on the default login gets the account cswap names for it", async () => {
+    await startHub({ defaultAccount: async () => "2" });
+    const c = await wsClient(port, { ...hello("s1"), configDir: DEFAULT_DIR });
+    clients.push(c);
+    await c.next("state");
+    expect((await req(c, { op: "enable", title: "T" })).ok).toBe(true);
+    await waitFor(() => new SessionStore(join(dir, "sessions.json")).get("s1")?.account === "2");
   });
 
   test("a second enable reuses the topic", async () => {
@@ -1127,6 +1139,10 @@ describe("starting and stopping sessions", () => {
     fake.pushUpdate(msg("/run 2"));
     await waitFor(() => spawned.length === 1);
     expect(spawned[0]?.[5]).toBe("2");
+    const w = await wsClient(port, { type: "hello", v: PROTOCOL_VERSION, windowKey: "w-started", sessionId: SID, cwd: CWD });
+    clients.push(w);
+    await waitFor(() => texts().includes("✅ Сессия запущена"));
+    expect(new SessionStore(join(dir, "sessions.json")).get(SID)?.account).toBe("2");
   });
 
   test("without launch in the config a closed session is just inactive", async () => {
