@@ -389,6 +389,16 @@ describe('tg_send_file', () => {
     expect(fake.callsOf('sendMediaGroup')[0].media.map((m: any) => m.type)).toEqual(['photo', 'photo'])
   })
 
+  test('as_document sends images as documents, grouped into an album', async () => {
+    const c = await enabledCore()
+    const d = tempDir()
+    expect(await c.sendFiles([file('a.png', 'x', d)], '', true)).toBe('Sent 1 file(s) to the Telegram topic.')
+    expect(fake.callsOf('sendPhoto')).toEqual([])
+    expect(fake.callsOf('sendDocument')[0]).toMatchObject({ document: { file: 'a.png', body: 'x' } })
+    await c.sendFiles([file('1.png', 'x', d), file('2.jpg', 'y', d)], '', true)
+    expect(fake.callsOf('sendMediaGroup')[0].media.map((m: any) => m.type)).toEqual(['document', 'document'])
+  })
+
   test('nothing is sent if any file is wrong, and the reason names it', async () => {
     const c = await enabledCore()
     const ok = file('ok.txt')

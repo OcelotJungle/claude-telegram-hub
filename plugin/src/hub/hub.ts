@@ -467,7 +467,7 @@ ${msg.text}`)
       return fail('This session has no Telegram topic yet — call tg_enable first.')
     }
     const caption = toTelegram(msg.caption)
-    const pieces = albums(msg.files.map(f => ({ ...f, kind: kindOf(f.name, f.size) }))).map((files, i) => filesPiece(files, i === 0 ? caption : undefined, msg.notify && i === 0))
+    const pieces = albums(msg.files.map(f => ({ ...f, kind: msg.asDocument ? 'document' : kindOf(f.name, f.size) }))).map((files, i) => filesPiece(files, i === 0 ? caption : undefined, msg.notify && i === 0))
     if (this.outbox.add(msg.id, msg.sessionId, pieces)) {
       this.fileMessages.set(msg.id, { errors: [], ws })
       void this.pump(msg.sessionId)

@@ -150,7 +150,7 @@ export class PluginCore {
 
   // Checks everything before sending anything, then hands the hub copies:
   // the agent may change or delete the originals right after the call.
-  async sendFiles(paths: string[], caption = ''): Promise<string> {
+  async sendFiles(paths: string[], caption = '', asDocument = false): Promise<string> {
     if (!paths.length) throw new Error('give at least one file path')
     const files = paths.map(p => this.sendable(p))
     const shown = toTelegram(caption).text.length
@@ -172,7 +172,7 @@ export class PluginCore {
     this.tailer?.pollNow()
     this.flush(this.relay.textBeforeToolCall())
     const res = await this.client.sendFiles(
-      { type: 'sendFiles', id, sessionId: this.sessionId, files: queued, caption, notify: !this.enabled },
+      { type: 'sendFiles', id, sessionId: this.sessionId, files: queued, caption, notify: !this.enabled, ...(asDocument ? { asDocument } : {}) },
       this.opts.fileWaitMs ?? HUB_TELEGRAM_TIMEOUT_MS,
     )
     if (!res) return `Telegram is not reachable right now: the ${files.length} file(s) are queued, and the hub will send them when it is.`

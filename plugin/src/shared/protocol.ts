@@ -25,7 +25,8 @@ export type PluginToHub =
   // then the window's current session is meant).
   | { type: 'send'; id: string; sessionId?: string; text: string; notify: boolean }
   // Files for the topic; paths are the plugin's copies in outbox-files/.
-  | { type: 'sendFiles'; id: string; sessionId: string; files: QueuedFile[]; caption: string; notify: boolean }
+  // asDocument: every file goes as a document, so Telegram does not recompress images.
+  | { type: 'sendFiles'; id: string; sessionId: string; files: QueuedFile[]; caption: string; notify: boolean; asDocument?: boolean }
   | { type: 'permission'; toolName: string; description: string }
   | { type: 'title'; title: string }
   | { type: 'terminalInput' }

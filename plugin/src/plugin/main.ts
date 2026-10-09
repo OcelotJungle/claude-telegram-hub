@@ -101,12 +101,13 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'tg_send_file',
       description:
-        'Send files to the Telegram topic of this session. By extension: jpg/png/webp go as photos (over 10 MB as documents), mp4 as video, mp3/m4a as audio, gif as an animation, anything else as a document. Consecutive photos and videos form one album, as do documents and audio. Up to 50 MB per file. caption is Markdown, up to 1024 characters as shown. Works whenever the session has a topic, even with the mode off.',
+        'Send files to the Telegram topic of this session. By extension: jpg/png/webp go as photos (over 10 MB as documents), mp4 as video, mp3/m4a as audio, gif as an animation, anything else as a document. Consecutive photos and videos form one album, as do documents and audio. as_document sends every file as a document instead, without Telegram recompression (for screenshots where pixels matter). Up to 50 MB per file. caption is Markdown, up to 1024 characters as shown. Works whenever the session has a topic, even with the mode off.',
       inputSchema: {
         type: 'object',
         properties: {
           paths: { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Absolute paths (relative ones are taken from the project directory), sent in this order.' },
           caption: { type: 'string' },
+          as_document: { type: 'boolean', description: "Send every file as a document, without Telegram's recompression — for screenshots where pixels matter. Default false." },
         },
         required: ['paths'],
       },
@@ -142,7 +143,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       case 'tg_send_file': {
         const paths = args.paths
         if (!Array.isArray(paths) || !paths.every(p => typeof p === 'string')) throw new Error('paths must be a list of file paths')
-        return text(await core.sendFiles(paths, typeof args.caption === 'string' ? args.caption : ''))
+        return text(await core.sendFiles(paths, typeof args.caption === 'string' ? args.caption : '', args.as_document === true))
       }
       case 'download_attachment':
         if (typeof args.file_id !== 'string') throw new Error('file_id is required')
