@@ -6,7 +6,7 @@ import { join } from "path";
 import { z } from "zod";
 import { Hub } from "../src/hub/hub.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
-import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, MAX_AUTO_CONTINUES, PluginCore } from "../src/plugin/plugin.ts";
+import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, INTERRUPT_NOTE, MAX_AUTO_CONTINUES, PluginCore } from "../src/plugin/plugin.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { NOTIFY_MARKER } from "../src/transcript/relay.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
@@ -26,6 +26,10 @@ let config: Config;
 let core: PluginCore | undefined;
 let channel: { content: string; meta: Record<string, string> }[];
 let answers: { requestId: string; behavior: string }[];
+// Each interrupt, with the number of channel messages emitted before it.
+let interrupts: { note: string; channelBefore: number }[];
+let interruptMs: number;
+let interruptFails: boolean;
 let terminated: number;
 let spoolDir: string;
 let state: string;
@@ -71,6 +75,11 @@ function makeCore(sessionId = SID) {
     fileWaitMs: 3000,
     spawnHub: () => void spawned++,
     emitChannel: (content, meta) => channel.push({ content, meta }),
+    interrupt: async note => {
+      interrupts.push({ note, channelBefore: channel.length });
+      await Bun.sleep(interruptMs);
+      if (interruptFails) throw new Error("inbox is gone");
+    },
     answerPermission: (requestId, behavior) => answers.push({ requestId, behavior }),
     terminate: () => void terminated++,
     log: pluginLog,
@@ -109,6 +118,9 @@ beforeEach(async () => {
   writeFileSync(transcript, line({ type: "ai-title", aiTitle: "Старое имя" }) + line(assistantText("old history", "end_turn")));
   channel = [];
   answers = [];
+  interrupts = [];
+  interruptMs = 0;
+  interruptFails = false;
   terminated = 0;
   spoolDir = join(state, "spool");
   spawned = 0;
@@ -255,6 +267,36 @@ describe("PluginCore", () => {
       { chat_id: GROUP, message_id: id, reaction: [{ type: "emoji", emoji: "✍" }] },
       { chat_id: GROUP, message_id: id, reaction: [] },
     ]);
+  });
+
+  test("a message starting with ! stops the working agent before it arrives, in order with the next one", async () => {
+    await enabledCore();
+    append(assistantText("Смотрю", "tool_use", "i1"), assistantTool("Bash", "i1"));
+    await waitFor(() => fake.callsOf("sendChatAction").length >= 1, 3000, "busy");
+    interruptMs = 100;
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!стоп, не туда" }));
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "смотри в src" }));
+    await waitFor(() => channel.length === 2, 3000, "both messages");
+    expect(interrupts).toEqual([{ note: INTERRUPT_NOTE, channelBefore: 0 }]);
+    expect(channel.map(m => m.content)).toEqual(["!стоп, не туда", "смотри в src"]);
+  });
+
+  test("a message starting with ! to an idle agent is just a message", async () => {
+    await enabledCore();
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!привет" }));
+    await waitFor(() => channel.length === 1, 3000, "channel message");
+    expect(interrupts).toEqual([]);
+  });
+
+  test("a message still arrives when the interrupt fails", async () => {
+    await enabledCore();
+    append(assistantText("Смотрю", "tool_use", "i2"), assistantTool("Bash", "i2"));
+    await waitFor(() => fake.callsOf("sendChatAction").length >= 1, 3000, "busy");
+    interruptFails = true;
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!стоп" }));
+    await waitFor(() => channel.length === 1, 3000, "channel message");
+    expect(interrupts.length).toBe(1);
+    expect(pluginLog.lines.some(l => l.includes("could not interrupt"))).toBe(true);
   });
 
   test("the topic shows typing while the agent works, not while it waits for an answer", async () => {

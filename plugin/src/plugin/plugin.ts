@@ -42,6 +42,11 @@ export const CUT_LIMIT_NOTE = `⚠️ Связь с API оборвалась п�
 const HUB_TELEGRAM_TIMEOUT_MS = 150_000;
 // Tools that wait for the user's answer: the agent is not working meanwhile.
 const WAITS_FOR_USER = new Set(["AskUserQuestion"]);
+// A topic message starting with this stops the agent's turn before it arrives.
+const INTERRUPT_PREFIX = "!";
+export const INTERRUPT_NOTE =
+  'tg-hub: the user interrupted your work from Telegram (their topic message starts with "!"). ' +
+  "Do not reply to this note; their message follows.";
 
 export type PluginOptions = {
   sessionId: string;
@@ -59,6 +64,9 @@ export type PluginOptions = {
   fileWaitMs?: number;
   spawnHub(): void;
   emitChannel(content: string, meta: ChannelMeta): void;
+  // Ends the agent's turn, as Esc in the terminal would, leaving the note
+  // in its context.
+  interrupt(note: string): Promise<void>;
   // Answers a permission prompt of Claude Code.
   answerPermission(requestId: string, behavior: PermissionBehavior): void;
   // Ends the Claude Code process of this window (/stop in the topic).
@@ -111,6 +119,8 @@ export class PluginCore {
   private cuts = 0;
   // The agent is in a turn and not waiting for the user.
   private busy = false;
+  // Topic messages reach the session one after another, in the order they came.
+  private inbound = Promise.resolve();
   enabled = false;
 
   constructor(private opts: PluginOptions) {
@@ -339,6 +349,23 @@ export class PluginCore {
     this.client.send({ type: "busy", busy });
   }
 
+  // A message starting with "!" to a working agent stops its turn first; the
+  // message itself still comes as a channel message.
+  private deliver(content: string, meta: ChannelMeta): void {
+    const interrupt = this.busy && content.trimStart().startsWith(INTERRUPT_PREFIX);
+    this.inbound = this.inbound.then(async () => {
+      if (interrupt) {
+        try {
+          await this.opts.interrupt(INTERRUPT_NOTE);
+          this.log.info(`session ${this.sessionId}: interrupted from the topic`);
+        } catch (e) {
+          this.log.warn(`session ${this.sessionId}: could not interrupt the agent: ${e}`);
+        }
+      }
+      this.opts.emitChannel(content, meta);
+    });
+  }
+
   private responseCut(): void {
     const before = this.cuts++;
     if (!this.enabled) return;
@@ -372,7 +399,7 @@ export class PluginCore {
         this.setEnabled(m.enabled);
         return;
       case "inbound":
-        this.opts.emitChannel(m.content, m.meta);
+        this.deliver(m.content, m.meta);
         return;
       case "switchSession":
         this.switchSession(m.sessionId, m.transcriptPath, m.cwd);

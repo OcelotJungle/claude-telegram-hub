@@ -10,6 +10,7 @@ import { hubPort, paths } from "../shared/config.ts";
 import { createLogger } from "../shared/log.ts";
 import { findClaudePid, windowsProcessInfo } from "./claude-process.ts";
 import { spawnHubDetached } from "./hub-client.ts";
+import { sendInterrupt } from "./interrupt.ts";
 import { HOOK_NOTE_TOOL, PluginCore } from "./plugin.ts";
 
 // A closing window gives queued text this long to reach the hub, and the
@@ -72,6 +73,12 @@ const core = sessionId
       spawnHub: () => spawnHubDetached(hubMain),
       emitChannel: (content, meta) => {
         mcp.notification({ method: "notifications/claude/channel", params: { content, meta } }).catch(e => log.error(`channel notification failed: ${e}`));
+      },
+      interrupt: note => {
+        const socket = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
+        const token = process.env.CLAUDE_CODE_MESSAGING_TOKEN;
+        if (!socket || !token) return Promise.reject(new Error("CLAUDE_CODE_MESSAGING_SOCKET or CLAUDE_CODE_MESSAGING_TOKEN is not set"));
+        return sendInterrupt(socket, token, note);
       },
       answerPermission: (requestId, behavior) => {
         mcp.notification({ method: "notifications/claude/channel/permission", params: { request_id: requestId, behavior } }).catch(e => log.error(`permission answer failed: ${e}`));
