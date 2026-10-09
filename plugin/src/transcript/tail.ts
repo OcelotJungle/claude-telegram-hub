@@ -1,8 +1,8 @@
-import type { Logger } from '../shared/log.ts'
+import type { Logger } from "../shared/log.ts"
 
-import { closeSync, openSync, readFileSync, readSync, statSync } from 'fs'
-import { nullLogger } from '../shared/log.ts'
-import { parseRecord } from './parse.ts'
+import { closeSync, openSync, readFileSync, readSync, statSync } from "fs"
+import { nullLogger } from "../shared/log.ts"
+import { parseRecord } from "./parse.ts"
 
 const NEWLINE = 0x0a
 
@@ -71,7 +71,7 @@ export class TranscriptTailer {
     }
     if (size === this.offset) return []
     const chunk = Buffer.alloc(size - this.offset)
-    const fd = openSync(this.opts.path, 'r')
+    const fd = openSync(this.opts.path, "r")
     let read = 0
     try {
       read = readSync(fd, chunk, 0, chunk.length, this.offset)
@@ -83,7 +83,7 @@ export class TranscriptTailer {
     const lines: string[] = []
     let nl: number
     while ((nl = data.indexOf(NEWLINE)) >= 0) {
-      const l = data.subarray(0, nl).toString('utf8').trim()
+      const l = data.subarray(0, nl).toString("utf8").trim()
       if (l) lines.push(l)
       data = data.subarray(nl + 1)
     }
@@ -112,11 +112,11 @@ export function readSessionTitles(path: string): Titles {
   const last: Titles = {}
   let text: string
   try {
-    text = readFileSync(path, 'utf8')
+    text = readFileSync(path, "utf8")
   } catch {
     return last
   }
-  for (const l of text.split('\n')) {
+  for (const l of text.split("\n")) {
     if (!l.includes('-title"') && !l.includes('"agent-name"')) continue
     let rec: unknown
     try {
@@ -124,7 +124,7 @@ export function readSessionTitles(path: string): Titles {
     } catch {
       continue
     }
-    for (const ev of parseRecord(rec)) if (ev.kind === 'title') last[ev.source] = ev.title
+    for (const ev of parseRecord(rec)) if (ev.kind === "title") last[ev.source] = ev.title
   }
   return last
 }

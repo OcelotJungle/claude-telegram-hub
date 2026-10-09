@@ -1,7 +1,7 @@
-import type { Token, Tokens } from 'marked'
+import type { Token, Tokens } from "marked"
 
-import { decodeHTML } from 'entities'
-import { Lexer } from 'marked'
+import { decodeHTML } from "entities"
+import { Lexer } from "marked"
 
 // Agent text (CommonMark + GFM) as a rich message in blocks (Bot API 10.1),
 // so Telegram shows real headings, lists and tables. Blocks carry text as it
@@ -13,18 +13,18 @@ import { Lexer } from 'marked'
 export type RichText =
   | string
   | RichText[]
-  | { type: 'bold' | 'italic' | 'strikethrough' | 'code'; text: RichText }
-  | { type: 'url'; text: RichText; url: string }
-type ListItem = { blocks: Block[]; has_checkbox?: true; is_checked?: true; type?: '1'; value?: number }
-type Cell = { text: RichText; is_header?: true; align: 'left' | 'center' | 'right'; valign: 'middle' }
+  | { type: "bold" | "italic" | "strikethrough" | "code"; text: RichText }
+  | { type: "url"; text: RichText; url: string }
+type ListItem = { blocks: Block[]; has_checkbox?: true; is_checked?: true; type?: "1"; value?: number }
+type Cell = { text: RichText; is_header?: true; align: "left" | "center" | "right"; valign: "middle" }
 export type Block =
-  | { type: 'paragraph'; text: RichText }
-  | { type: 'heading'; size: number; text: RichText }
-  | { type: 'pre'; text: string; language?: string }
-  | { type: 'blockquote'; blocks: Block[] }
-  | { type: 'list'; items: ListItem[] }
-  | { type: 'table'; cells: Cell[][]; is_bordered?: true; is_striped?: true }
-  | { type: 'divider' }
+  | { type: "paragraph"; text: RichText }
+  | { type: "heading"; size: number; text: RichText }
+  | { type: "pre"; text: string; language?: string }
+  | { type: "blockquote"; blocks: Block[] }
+  | { type: "list"; items: ListItem[] }
+  | { type: "table"; cells: Cell[][]; is_bordered?: true; is_striped?: true }
+  | { type: "divider" }
 
 // Telegram cuts Cyrillic text short of its documented 32768 characters, near
 // 35000 bytes, without an error; a piece stays well below.
@@ -46,7 +46,7 @@ export function richPieces(md: string): RichPiece[] {
   const out: RichPiece[] = []
   let group: { raw: string[]; blocks: Block[]; bytes: number; count: number } | undefined
   const flush = () => {
-    if (group) out.push({ text: group.raw.join('\n\n'), blocks: group.blocks })
+    if (group) out.push({ text: group.raw.join("\n\n"), blocks: group.blocks })
     group = undefined
   }
   for (const t of new Lexer({ gfm: true }).lex(md)) {
@@ -73,11 +73,11 @@ export function richPieces(md: string): RichPiece[] {
 
 function blockCount(b: Block): number {
   switch (b.type) {
-    case 'list':
+    case "list":
       return 1 + b.items.reduce((n, i) => n + 1 + i.blocks.reduce((m, x) => m + blockCount(x), 0), 0)
-    case 'blockquote':
+    case "blockquote":
       return 1 + b.blocks.reduce((n, x) => n + blockCount(x), 0)
-    case 'table':
+    case "table":
       return 1 + b.cells.length
     default:
       return 1
@@ -91,43 +91,43 @@ function blocks(tokens: Token[]): Block[] {
 // The blocks of one token; undefined for tokens that show nothing.
 function block(t: Token): Block[] | undefined {
   switch (t.type) {
-    case 'space':
-    case 'def':
-    case 'checkbox':
+    case "space":
+    case "def":
+    case "checkbox":
       return undefined
-    case 'paragraph':
-      return [{ type: 'paragraph', text: inline(t.tokens ?? []) }]
-    case 'text':
-      return [{ type: 'paragraph', text: t.tokens ? inline(t.tokens) : decodeHTML(t.text) }]
-    case 'heading':
-      return [{ type: 'heading', size: (t as Tokens.Heading).depth, text: inline(t.tokens ?? []) }]
-    case 'code': {
+    case "paragraph":
+      return [{ type: "paragraph", text: inline(t.tokens ?? []) }]
+    case "text":
+      return [{ type: "paragraph", text: t.tokens ? inline(t.tokens) : decodeHTML(t.text) }]
+    case "heading":
+      return [{ type: "heading", size: (t as Tokens.Heading).depth, text: inline(t.tokens ?? []) }]
+    case "code": {
       const language = (t as Tokens.Code).lang?.split(/\s/)[0]
-      return [{ type: 'pre', text: t.text, ...(language ? { language } : {}) }]
+      return [{ type: "pre", text: t.text, ...(language ? { language } : {}) }]
     }
-    case 'blockquote':
-      return [{ type: 'blockquote', blocks: blocks(t.tokens ?? []) }]
-    case 'list':
+    case "blockquote":
+      return [{ type: "blockquote", blocks: blocks(t.tokens ?? []) }]
+    case "list":
       return [list(t as Tokens.List)]
-    case 'table':
+    case "table":
       return [table(t as Tokens.Table)]
-    case 'hr':
-      return [{ type: 'divider' }]
-    case 'html':
-      return [{ type: 'paragraph', text: t.text.replace(/\n+$/, '') }]
+    case "hr":
+      return [{ type: "divider" }]
+    case "html":
+      return [{ type: "paragraph", text: t.text.replace(/\n+$/, "") }]
     default:
-      return [{ type: 'paragraph', text: 'text' in t && typeof t.text === 'string' ? t.text : t.raw }]
+      return [{ type: "paragraph", text: "text" in t && typeof t.text === "string" ? t.text : t.raw }]
   }
 }
 
 function list(t: Tokens.List): Block {
-  const start = typeof t.start === 'number' ? t.start : 1
+  const start = typeof t.start === "number" ? t.start : 1
   return {
-    type: 'list',
+    type: "list",
     items: t.items.map((item, i): ListItem => ({
       blocks: blocks(item.tokens),
       ...(item.task ? { has_checkbox: true, ...(item.checked ? { is_checked: true } : {}) } : {}),
-      ...(t.ordered ? { type: '1', value: start + i } : {}),
+      ...(t.ordered ? { type: "1", value: start + i } : {}),
     })),
   }
 }
@@ -138,11 +138,11 @@ function table(t: Tokens.Table): Block {
       (c, i): Cell => ({
         text: inline(c.tokens),
         ...(header ? { is_header: true } : {}),
-        align: t.align[i] ?? (header ? 'center' : 'left'),
-        valign: 'middle',
+        align: t.align[i] ?? (header ? "center" : "left"),
+        valign: "middle",
       }),
     )
-  return { type: 'table', cells: [row(t.header, true), ...t.rows.map(r => row(r, false))], is_bordered: true, is_striped: true }
+  return { type: "table", cells: [row(t.header, true), ...t.rows.map(r => row(r, false))], is_bordered: true, is_striped: true }
 }
 
 // Links Telegram can open.
@@ -154,43 +154,43 @@ function openable(url: string): boolean {
 function inline(tokens: Token[]): RichText {
   const parts: RichText[] = []
   const put = (p: RichText) => {
-    if (p === '' || (Array.isArray(p) && !p.length)) return
+    if (p === "" || (Array.isArray(p) && !p.length)) return
     if (Array.isArray(p)) return p.forEach(put)
     const last = parts.at(-1)
-    if (typeof p === 'string' && typeof last === 'string') parts[parts.length - 1] = last + p
+    if (typeof p === "string" && typeof last === "string") parts[parts.length - 1] = last + p
     else parts.push(p)
   }
   for (const t of tokens) {
     switch (t.type) {
-      case 'text':
+      case "text":
         put(t.tokens ? inline(t.tokens) : decodeHTML(t.text))
         break
-      case 'escape':
-      case 'html':
+      case "escape":
+      case "html":
         put(t.text)
         break
-      case 'strong':
-        put({ type: 'bold', text: inline(t.tokens ?? []) })
+      case "strong":
+        put({ type: "bold", text: inline(t.tokens ?? []) })
         break
-      case 'em':
-        put({ type: 'italic', text: inline(t.tokens ?? []) })
+      case "em":
+        put({ type: "italic", text: inline(t.tokens ?? []) })
         break
-      case 'del':
-        put({ type: 'strikethrough', text: inline(t.tokens ?? []) })
+      case "del":
+        put({ type: "strikethrough", text: inline(t.tokens ?? []) })
         break
-      case 'codespan':
-        put({ type: 'code', text: t.text })
+      case "codespan":
+        put({ type: "code", text: t.text })
         break
-      case 'br':
-        put('\n')
+      case "br":
+        put("\n")
         break
-      case 'link':
-      case 'image': {
-        const label = t.type === 'image' ? t.text || t.href : inline(t.tokens ?? [])
+      case "link":
+      case "image": {
+        const label = t.type === "image" ? t.text || t.href : inline(t.tokens ?? [])
         put(link(t.href, label))
         break
       }
-      case 'checkbox':
+      case "checkbox":
         break
       default:
         put(t.raw)
@@ -203,6 +203,6 @@ function inline(tokens: Token[]): RichText {
 // itself. A target Telegram cannot open stays visible after the text.
 function link(href: string, label: RichText): RichText {
   if (label === href || label === `mailto:${href}` || `mailto:${label}` === href) return label
-  if (openable(href)) return { type: 'url', text: label, url: href }
+  if (openable(href)) return { type: "url", text: label, url: href }
   return [label, ` (${href})`]
 }

@@ -1,14 +1,14 @@
-import type { Logger } from '../shared/log.ts'
-import type { HubToPlugin, PluginToHub } from '../shared/protocol.ts'
+import type { Logger } from "../shared/log.ts"
+import type { HubToPlugin, PluginToHub } from "../shared/protocol.ts"
 
-import { spawn } from 'child_process'
-import { randomUUID } from 'crypto'
-import { homedir } from 'os'
+import { spawn } from "child_process"
+import { randomUUID } from "crypto"
+import { homedir } from "os"
 
-type Hello = Extract<PluginToHub, { type: 'hello' }>
-export type SendFiles = Extract<PluginToHub, { type: 'sendFiles' }>
+type Hello = Extract<PluginToHub, { type: "hello" }>
+export type SendFiles = Extract<PluginToHub, { type: "sendFiles" }>
 // What the hub must ack: text and files for a topic.
-export type Queued = Extract<PluginToHub, { type: 'send' }> | SendFiles
+export type Queued = Extract<PluginToHub, { type: "send" }> | SendFiles
 type Pending = { resolve(v: unknown): void; reject(e: Error): void; timer: ReturnType<typeof setTimeout> }
 
 const SPAWN_COOLDOWN_MS = 2000
@@ -18,12 +18,12 @@ const SPAWN_COOLDOWN_MS = 2000
 export function spawnHubDetached(hubMain: string, env?: Record<string, string>): void {
   const child = spawn(process.execPath, [hubMain], {
     detached: true,
-    stdio: 'ignore',
+    stdio: "ignore",
     windowsHide: true,
     cwd: homedir(),
     env: { ...process.env, ...env },
   })
-  child.on('error', () => {})
+  child.on("error", () => {})
   child.unref()
 }
 
@@ -91,7 +91,7 @@ export class HubClient {
   }
 
   enqueue(sessionId: string, text: string, notify: boolean): void {
-    this.push({ type: 'send', id: randomUUID(), sessionId, text, notify })
+    this.push({ type: "send", id: randomUUID(), sessionId, text, notify })
   }
 
   // Resolves with the hub's result once every send of the files is done, or
@@ -130,10 +130,10 @@ export class HubClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        reject(new Error('hub did not answer in time'))
+        reject(new Error("hub did not answer in time"))
       }, Math.max(1, deadline - Date.now()))
       this.pending.set(id, { resolve, reject, timer })
-      this.send({ type: 'req', id, op, ...extra } as PluginToHub)
+      this.send({ type: "req", id, op, ...extra } as PluginToHub)
     })
   }
 
@@ -141,7 +141,7 @@ export class HubClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.waiters = this.waiters.filter(w => w !== done)
-        reject(new Error('tg-hub: the hub is not reachable'))
+        reject(new Error("tg-hub: the hub is not reachable"))
       }, timeoutMs)
       const done = () => {
         clearTimeout(timer)
@@ -160,7 +160,7 @@ export class HubClient {
       opened = true
       this.attempt = 0
       this.ws = ws
-      this.opts.log.info('connected to hub')
+      this.opts.log.info("connected to hub")
       this.send(this.opts.hello())
       for (const item of this.outbox) this.send(item)
       for (const w of this.waiters.splice(0)) w()
@@ -170,10 +170,10 @@ export class HubClient {
     ws.onclose = () => {
       if (this.ws === ws) {
         this.ws = undefined
-        this.opts.log.warn('hub connection lost')
+        this.opts.log.warn("hub connection lost")
         for (const [id, p] of this.pending) {
           clearTimeout(p.timer)
-          p.reject(new Error('hub connection lost'))
+          p.reject(new Error("hub connection lost"))
           this.pending.delete(id)
         }
       }
@@ -186,7 +186,7 @@ export class HubClient {
   private maybeSpawn(): void {
     if (Date.now() - this.lastSpawn < SPAWN_COOLDOWN_MS) return
     this.lastSpawn = Date.now()
-    this.opts.log.info('no hub listening — starting one')
+    this.opts.log.info("no hub listening — starting one")
     try {
       this.opts.spawnHub()
     } catch (e) {
@@ -209,21 +209,21 @@ export class HubClient {
     } catch {
       return
     }
-    if (m.type === 'ack') {
+    if (m.type === "ack") {
       this.outbox = this.outbox.filter(o => o.id !== m.id)
       return
     }
-    if (m.type === 'filesSent') {
+    if (m.type === "filesSent") {
       this.fileWaiters.get(m.id)?.({ ...(m.error ? { error: m.error } : {}) })
       return
     }
-    if (m.type === 'res') {
+    if (m.type === "res") {
       const p = this.pending.get(m.id)
       if (!p) return
       this.pending.delete(m.id)
       clearTimeout(p.timer)
       if (m.ok) p.resolve(m.result)
-      else p.reject(new Error(m.error ?? 'hub error'))
+      else p.reject(new Error(m.error ?? "hub error"))
       return
     }
     this.opts.onMessage(m)

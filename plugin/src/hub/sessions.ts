@@ -1,5 +1,5 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
-import { dirname } from 'path'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs"
+import { dirname } from "path"
 
 export type SessionRecord = { topicId: number; title: string; project: string; enabled: boolean }
 
@@ -10,14 +10,14 @@ export class SessionStore {
   constructor(private file: string) {
     let raw: string
     try {
-      raw = readFileSync(file, 'utf8')
+      raw = readFileSync(file, "utf8")
     } catch {
       return
     }
     try {
       const parsed = JSON.parse(raw)
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) this.data = parsed
-      else throw new Error('not an object')
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) this.data = parsed
+      else throw new Error("not an object")
     } catch {
       try {
         renameSync(file, `${file}.corrupt-${Date.now()}`)
@@ -49,17 +49,17 @@ export class SessionStore {
   private save(): void {
     mkdirSync(dirname(this.file), { recursive: true })
     const tmp = `${this.file}.tmp`
-    writeFileSync(tmp, JSON.stringify(this.data, null, 2) + '\n')
+    writeFileSync(tmp, JSON.stringify(this.data, null, 2) + "\n")
     renameSync(tmp, this.file)
   }
 }
 
 const MAX_TOPIC_NAME = 128
-const SEP = ' · '
+const SEP = " · "
 
 export function topicName(project: string, title: string): string {
-  const t = title.trim() || 'без названия'
+  const t = title.trim() || "без названия"
   const name = `${project}${SEP}${t}`
   if (name.length <= MAX_TOPIC_NAME) return name
-  return name.slice(0, MAX_TOPIC_NAME - 1) + '…'
+  return name.slice(0, MAX_TOPIC_NAME - 1) + "…"
 }

@@ -1,19 +1,19 @@
-import type { Config } from '../src/shared/config.ts'
+import type { Config } from "../src/shared/config.ts"
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, truncateSync, writeFileSync } from 'fs'
-import { join } from 'path'
-import { Hub } from '../src/hub/hub.ts'
-import { TelegramApi } from '../src/hub/telegram.ts'
-import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, MAX_AUTO_CONTINUES, PluginCore } from '../src/plugin/plugin.ts'
-import { NOTIFY_MARKER } from '../src/transcript/relay.ts'
-import { FakeTelegram, topicMsg } from './fake-telegram.ts'
-import { freePort, memLogger, tempDir, waitFor } from './helpers.ts'
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, truncateSync, writeFileSync } from "fs"
+import { join } from "path"
+import { Hub } from "../src/hub/hub.ts"
+import { TelegramApi } from "../src/hub/telegram.ts"
+import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, MAX_AUTO_CONTINUES, PluginCore } from "../src/plugin/plugin.ts"
+import { NOTIFY_MARKER } from "../src/transcript/relay.ts"
+import { FakeTelegram, topicMsg } from "./fake-telegram.ts"
+import { freePort, memLogger, tempDir, waitFor } from "./helpers.ts"
 
-const GROUP = '-1001'
-const ME = '123456789'
-const CWD = 'C:\\code\\demo-app'
-const SID = 'sess-1'
+const GROUP = "-1001"
+const ME = "123456789"
+const CWD = "C:\\code\\demo-app"
+const SID = "sess-1"
 
 let fake: FakeTelegram
 let hub: Hub
@@ -28,26 +28,26 @@ let state: string
 let spawned: number
 let pluginLog: ReturnType<typeof memLogger>
 
-const line = (o: object) => JSON.stringify(o) + '\n'
-const append = (...recs: object[]) => appendFileSync(transcript, recs.map(line).join(''))
+const line = (o: object) => JSON.stringify(o) + "\n"
+const append = (...recs: object[]) => appendFileSync(transcript, recs.map(line).join(""))
 let msgN = 0
-const assistantText = (text: string, stop: 'tool_use' | 'end_turn' | 'stop_sequence', id = `m${++msgN}`) => ({
-  type: 'assistant',
+const assistantText = (text: string, stop: "tool_use" | "end_turn" | "stop_sequence", id = `m${++msgN}`) => ({
+  type: "assistant",
   isSidechain: false,
-  message: { id, role: 'assistant', content: [{ type: 'text', text }], stop_reason: stop },
+  message: { id, role: "assistant", content: [{ type: "text", text }], stop_reason: stop },
 })
 const assistantTool = (name: string, id: string) => ({
-  type: 'assistant',
+  type: "assistant",
   isSidechain: false,
-  message: { id, role: 'assistant', content: [{ type: 'tool_use', id: 't', name, input: {} }], stop_reason: 'tool_use' },
+  message: { id, role: "assistant", content: [{ type: "tool_use", id: "t", name, input: {} }], stop_reason: "tool_use" },
 })
-const humanTyped = (text: string) => ({ type: 'user', isSidechain: false, origin: { kind: 'human' }, promptSource: 'typed', message: { role: 'user', content: text } })
-const typedMidTurn = (text: string) => ({ type: 'attachment', isSidechain: false, attachment: { type: 'queued_command', prompt: text, commandMode: 'prompt', origin: { kind: 'human' } } })
-const NARRATION_SIG = 'CAQSrgcKEQgSGAI4AUIJbmFycmF0aW9uEgxhMFJuZKXpKQCYxWIaDLo3cuvEnZjRl04uqSIwcikVdFlQ26x5rHo0oYhd4CFFTF+Qg/KbIJ4gkTpHfgPAWqq3'
+const humanTyped = (text: string) => ({ type: "user", isSidechain: false, origin: { kind: "human" }, promptSource: "typed", message: { role: "user", content: text } })
+const typedMidTurn = (text: string) => ({ type: "attachment", isSidechain: false, attachment: { type: "queued_command", prompt: text, commandMode: "prompt", origin: { kind: "human" } } })
+const NARRATION_SIG = "CAQSrgcKEQgSGAI4AUIJbmFycmF0aW9uEgxhMFJuZKXpKQCYxWIaDLo3cuvEnZjRl04uqSIwcikVdFlQ26x5rHo0oYhd4CFFTF+Qg/KbIJ4gkTpHfgPAWqq3"
 const assistantNarration = (text: string, id: string) => ({
-  type: 'assistant',
+  type: "assistant",
   isSidechain: false,
-  message: { id, role: 'assistant', content: [{ type: 'thinking', thinking: text, signature: NARRATION_SIG }], stop_reason: 'tool_use' },
+  message: { id, role: "assistant", content: [{ type: "thinking", thinking: text, signature: NARRATION_SIG }], stop_reason: "tool_use" },
 })
 
 function sent() {
@@ -59,11 +59,11 @@ function makeCore(sessionId = SID) {
     sessionId,
     cwd: CWD,
     configDir,
-    windowKey: 'pipe-1',
+    windowKey: "pipe-1",
     port,
     spoolDir,
     stateDir: state,
-    filesDir: join(state, 'outbox-files'),
+    filesDir: join(state, "outbox-files"),
     fileWaitMs: 3000,
     spawnHub: () => void spawned++,
     emitChannel: (content, meta) => channel.push({ content, meta }),
@@ -81,10 +81,10 @@ beforeEach(async () => {
   config = { groupId: GROUP, allowFrom: [ME] }
   hub = new Hub({
     port,
-    sessionsFile: join(state, 'sessions.json'),
-    outboxFile: join(state, 'outbox.json'),
-    filesDir: join(state, 'outbox-files'),
-    inboxDir: join(state, 'inbox'),
+    sessionsFile: join(state, "sessions.json"),
+    outboxFile: join(state, "outbox.json"),
+    filesDir: join(state, "outbox-files"),
+    inboxDir: join(state, "inbox"),
     api: new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2 }),
     config: () => config,
     idleMs: 60_000,
@@ -94,12 +94,12 @@ beforeEach(async () => {
   })
   hub.start()
   configDir = tempDir()
-  const projDir = join(configDir, 'projects', 'C--code-demo-app')
+  const projDir = join(configDir, "projects", "C--code-demo-app")
   mkdirSync(projDir, { recursive: true })
   transcript = join(projDir, `${SID}.jsonl`)
-  writeFileSync(transcript, line({ type: 'ai-title', aiTitle: 'Старое имя' }) + line(assistantText('old history', 'end_turn')))
+  writeFileSync(transcript, line({ type: "ai-title", aiTitle: "Старое имя" }) + line(assistantText("old history", "end_turn")))
   channel = []
-  spoolDir = join(state, 'spool')
+  spoolDir = join(state, "spool")
   spawned = 0
   pluginLog = memLogger()
 })
@@ -113,186 +113,186 @@ afterEach(async () => {
 
 async function enabledCore() {
   const c = makeCore()
-  await waitFor(() => hub.isConnected(SID), 3000, 'plugin connected')
+  await waitFor(() => hub.isConnected(SID), 3000, "plugin connected")
   await c.enable()
   return c
 }
 
-describe('PluginCore', () => {
-  test('enable creates a topic named from the session title, history is not sent', async () => {
+describe("PluginCore", () => {
+  test("enable creates a topic named from the session title, history is not sent", async () => {
     const c = makeCore()
     const answer = await c.enable()
-    expect(answer).toContain('demo-app · Старое имя')
-    expect(fake.callsOf('createForumTopic')).toEqual([{ chat_id: GROUP, name: 'demo-app · Старое имя' }])
+    expect(answer).toContain("demo-app · Старое имя")
+    expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: "demo-app · Старое имя" }])
     await Bun.sleep(150)
     expect(sent()).toEqual([])
   })
 
-  test('intermediate text is silent and the final text is silent without tg_notify', async () => {
+  test("intermediate text is silent and the final text is silent without tg_notify", async () => {
     await enabledCore()
-    append(assistantText('Смотрю код', 'tool_use', 'a1'), assistantTool('Read', 'a1'), assistantText('Готово', 'end_turn', 'a2'))
-    await waitFor(() => sent().length === 2, 3000, 'two messages')
+    append(assistantText("Смотрю код", "tool_use", "a1"), assistantTool("Read", "a1"), assistantText("Готово", "end_turn", "a2"))
+    await waitFor(() => sent().length === 2, 3000, "two messages")
     expect(sent()).toEqual([
-      { text: 'Смотрю код', silent: true, topic: 100 },
-      { text: 'Готово', silent: true, topic: 100 },
+      { text: "Смотрю код", silent: true, topic: 100 },
+      { text: "Готово", silent: true, topic: 100 },
     ])
   })
 
-  test('tg_notify makes the final text loud', async () => {
+  test("tg_notify makes the final text loud", async () => {
     const c = await enabledCore()
-    append(assistantText('Сводка', 'tool_use', 'b1'), assistantTool('mcp__plugin_tg-hub_tg-hub__tg_notify', 'b1'))
+    append(assistantText("Сводка", "tool_use", "b1"), assistantTool("mcp__plugin_tg-hub_tg-hub__tg_notify", "b1"))
     await Bun.sleep(100)
-    expect(c.notify('done')).toContain('notification')
-    append(assistantText('Всё сделано', 'end_turn', 'b2'))
-    await waitFor(() => sent().length === 2, 3000, 'two messages')
+    expect(c.notify("done")).toContain("notification")
+    append(assistantText("Всё сделано", "end_turn", "b2"))
+    await waitFor(() => sent().length === 2, 3000, "two messages")
     expect(sent()).toEqual([
-      { text: 'Сводка', silent: true, topic: 100 },
-      { text: 'Всё сделано', silent: false, topic: 100 },
+      { text: "Сводка", silent: true, topic: 100 },
+      { text: "Всё сделано", silent: false, topic: 100 },
     ])
   })
 
-  test('tg_notify with no text after it sends the marker loudly', async () => {
+  test("tg_notify with no text after it sends the marker loudly", async () => {
     const c = await enabledCore()
-    c.notify('ask')
-    append({ type: 'assistant', isSidechain: false, message: { id: 'c1', role: 'assistant', content: [{ type: 'thinking', thinking: '' }], stop_reason: 'end_turn' } })
-    await waitFor(() => sent().length === 1, 3000, 'marker')
+    c.notify("ask")
+    append({ type: "assistant", isSidechain: false, message: { id: "c1", role: "assistant", content: [{ type: "thinking", thinking: "" }], stop_reason: "end_turn" } })
+    await waitFor(() => sent().length === 1, 3000, "marker")
     expect(sent()[0]).toEqual({ text: NOTIFY_MARKER, silent: false, topic: 100 })
   })
 
-  test('typing in the terminal turns the mode off', async () => {
+  test("typing in the terminal turns the mode off", async () => {
     const c = await enabledCore()
-    append(humanTyped('сам продолжу'))
-    await waitFor(() => !c.enabled, 3000, 'disabled')
-    append(assistantText('ответ в терминал', 'end_turn'))
+    append(humanTyped("сам продолжу"))
+    await waitFor(() => !c.enabled, 3000, "disabled")
+    append(assistantText("ответ в терминал", "end_turn"))
     await Bun.sleep(200)
     expect(sent()).toEqual([])
   })
 
-  test('narration is relayed like text', async () => {
+  test("narration is relayed like text", async () => {
     await enabledCore()
-    append(assistantNarration('Нашёл момент сбоя.\n\n', 'n1'), assistantTool('Bash', 'n1'))
-    await waitFor(() => sent().length === 1, 3000, 'narration')
-    expect(sent()).toEqual([{ text: 'Нашёл момент сбоя.', silent: true, topic: 100 }])
+    append(assistantNarration("Нашёл момент сбоя.\n\n", "n1"), assistantTool("Bash", "n1"))
+    await waitFor(() => sent().length === 1, 3000, "narration")
+    expect(sent()).toEqual([{ text: "Нашёл момент сбоя.", silent: true, topic: 100 }])
   })
 
-  test('thinking text of an unknown kind is reported in the log', async () => {
+  test("thinking text of an unknown kind is reported in the log", async () => {
     await enabledCore()
-    append({ type: 'assistant', isSidechain: false, message: { id: 'u1', role: 'assistant', content: [{ type: 'thinking', thinking: 'hm', signature: 'zz' }], stop_reason: 'tool_use' } })
-    await waitFor(() => pluginLog.lines.some(l => l.startsWith('WARN') && l.includes('thinking')), 3000, 'warning')
+    append({ type: "assistant", isSidechain: false, message: { id: "u1", role: "assistant", content: [{ type: "thinking", thinking: "hm", signature: "zz" }], stop_reason: "tool_use" } })
+    await waitFor(() => pluginLog.lines.some(l => l.startsWith("WARN") && l.includes("thinking")), 3000, "warning")
   })
 
   // The text written before the message was typed was written in Telegram mode.
-  test('a message typed mid-turn turns the mode off; text written before it still goes', async () => {
+  test("a message typed mid-turn turns the mode off; text written before it still goes", async () => {
     const c = await enabledCore()
-    append(assistantText('Проверяю', 'tool_use', 'q1'), typedMidTurn('Как успехи?'))
-    await waitFor(() => !c.enabled, 3000, 'disabled')
-    append(assistantTool('Bash', 'q1'), assistantText('ответ в терминал', 'end_turn', 'q2'))
-    await waitFor(() => sent().length === 1, 3000, 'pending text')
+    append(assistantText("Проверяю", "tool_use", "q1"), typedMidTurn("Как успехи?"))
+    await waitFor(() => !c.enabled, 3000, "disabled")
+    append(assistantTool("Bash", "q1"), assistantText("ответ в терминал", "end_turn", "q2"))
+    await waitFor(() => sent().length === 1, 3000, "pending text")
     await Bun.sleep(200)
-    expect(sent()).toEqual([{ text: 'Проверяю', silent: true, topic: 100 }])
+    expect(sent()).toEqual([{ text: "Проверяю", silent: true, topic: 100 }])
   })
 
   // Background tasks, Monitor events and subagent reports start turns too.
-  test('prompts Claude Code itself sends leave the mode on', async () => {
+  test("prompts Claude Code itself sends leave the mode on", async () => {
     const c = await enabledCore()
     append(
-      { type: 'user', isSidechain: false, origin: { kind: 'task-notification', producer: 'session-task' }, message: { role: 'user', content: '<task-notification>\n<status>completed</status>\n</task-notification>' } },
-      { type: 'attachment', isSidechain: false, attachment: { type: 'queued_command', prompt: '<task-notification/>', commandMode: 'task-notification', origin: { kind: 'task-notification' } } },
-      { type: 'user', isSidechain: false, origin: { kind: 'peer', handback: true }, isMeta: true, message: { role: 'user', content: 'Another Claude…' } },
-      assistantText('продолжаю', 'end_turn', 'tn1'),
+      { type: "user", isSidechain: false, origin: { kind: "task-notification", producer: "session-task" }, message: { role: "user", content: "<task-notification>\n<status>completed</status>\n</task-notification>" } },
+      { type: "attachment", isSidechain: false, attachment: { type: "queued_command", prompt: "<task-notification/>", commandMode: "task-notification", origin: { kind: "task-notification" } } },
+      { type: "user", isSidechain: false, origin: { kind: "peer", handback: true }, isMeta: true, message: { role: "user", content: "Another Claude…" } },
+      assistantText("продолжаю", "end_turn", "tn1"),
     )
-    await waitFor(() => sent().length === 1, 3000, 'turn text')
+    await waitFor(() => sent().length === 1, 3000, "turn text")
     expect(c.enabled).toBe(true)
-    expect(c.hookNote('')).toBe('')
+    expect(c.hookNote("")).toBe("")
   })
 
-  test('the final text of a turn ended right before terminal input is still sent', async () => {
+  test("the final text of a turn ended right before terminal input is still sent", async () => {
     const c = await enabledCore()
-    append(assistantText('итог', 'end_turn', 'd1'), humanTyped('next'))
-    await waitFor(() => !c.enabled, 3000, 'disabled')
-    await waitFor(() => sent().length === 1, 3000, 'final text')
-    expect(sent()[0]!.text).toBe('итог')
+    append(assistantText("итог", "end_turn", "d1"), humanTyped("next"))
+    await waitFor(() => !c.enabled, 3000, "disabled")
+    await waitFor(() => sent().length === 1, 3000, "final text")
+    expect(sent()[0]!.text).toBe("итог")
   })
 
-  test('a topic message reaches the session and turns the mode back on', async () => {
+  test("a topic message reaches the session and turns the mode back on", async () => {
     const c = await enabledCore()
     await c.disable()
     await waitFor(() => !c.enabled)
-    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: 'как дела?' }))
-    await waitFor(() => channel.length === 1, 3000, 'channel message')
-    expect(channel[0]!.content).toBe('как дела?')
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "как дела?" }))
+    await waitFor(() => channel.length === 1, 3000, "channel message")
+    expect(channel[0]!.content).toBe("как дела?")
     expect(channel[0]!.meta.chat_id).toBe(GROUP)
-    await waitFor(() => c.enabled, 3000, 're-enabled')
+    await waitFor(() => c.enabled, 3000, "re-enabled")
   })
 
-  test('a permission request is sent loudly while enabled', async () => {
+  test("a permission request is sent loudly while enabled", async () => {
     const c = await enabledCore()
-    c.permissionRequest({ tool_name: 'Bash', description: 'git push' })
+    c.permissionRequest({ tool_name: "Bash", description: "git push" })
     await waitFor(() => sent().length === 1)
-    expect(sent()[0]).toEqual({ text: '🔐 Нужно подтверждение: Bash — git push', silent: false, topic: 100 })
+    expect(sent()[0]).toEqual({ text: "🔐 Нужно подтверждение: Bash — git push", silent: false, topic: 100 })
   })
 
-  test('a rename renames the topic', async () => {
+  test("a rename renames the topic", async () => {
     await enabledCore()
-    append({ type: 'agent-name', agentName: 'Новое имя' })
-    await waitFor(() => fake.callsOf('editForumTopic').length === 1, 3000, 'rename')
-    expect(fake.callsOf('editForumTopic')[0].name).toBe('demo-app · Новое имя')
+    append({ type: "agent-name", agentName: "Новое имя" })
+    await waitFor(() => fake.callsOf("editForumTopic").length === 1, 3000, "rename")
+    expect(fake.callsOf("editForumTopic")[0].name).toBe("demo-app · Новое имя")
   })
 
-  test('switching session follows the new transcript', async () => {
+  test("switching session follows the new transcript", async () => {
     const c = await enabledCore()
-    const next = join(configDir, 'projects', 'C--code-demo-app', 'sess-2.jsonl')
-    c.switchSession('sess-2', next, CWD)
-    await waitFor(() => hub.isConnected('sess-2'), 3000, 'switched')
-    writeFileSync(next, line({ type: 'ai-title', aiTitle: 'После clear' }))
+    const next = join(configDir, "projects", "C--code-demo-app", "sess-2.jsonl")
+    c.switchSession("sess-2", next, CWD)
+    await waitFor(() => hub.isConnected("sess-2"), 3000, "switched")
+    writeFileSync(next, line({ type: "ai-title", aiTitle: "После clear" }))
     await c.enable()
-    expect(fake.callsOf('createForumTopic').at(-1).name).toBe('demo-app · После clear')
-    appendFileSync(next, line(assistantText('в новой сессии', 'end_turn')))
-    append(assistantText('в старой сессии', 'end_turn'))
-    await waitFor(() => sent().length === 1, 3000, 'message')
+    expect(fake.callsOf("createForumTopic").at(-1).name).toBe("demo-app · После clear")
+    appendFileSync(next, line(assistantText("в новой сессии", "end_turn")))
+    append(assistantText("в старой сессии", "end_turn"))
+    await waitFor(() => sent().length === 1, 3000, "message")
     await Bun.sleep(150)
-    expect(sent()).toEqual([{ text: 'в новой сессии', silent: true, topic: 101 }])
+    expect(sent()).toEqual([{ text: "в новой сессии", silent: true, topic: 101 }])
   })
 
-  test('shutdown sends text written just before the window closed', async () => {
+  test("shutdown sends text written just before the window closed", async () => {
     const c = await enabledCore()
-    append(assistantText('последнее слово', 'end_turn', 'z1'))
+    append(assistantText("последнее слово", "end_turn", "z1"))
     await c.shutdown(2000)
     core = undefined
-    await waitFor(() => sent().length === 1, 3000, 'last words')
-    expect(sent()).toEqual([{ text: 'последнее слово', silent: true, topic: 100 }])
+    await waitFor(() => sent().length === 1, 3000, "last words")
+    expect(sent()).toEqual([{ text: "последнее слово", silent: true, topic: 100 }])
     expect(spawned).toBe(0)
   })
 
-  test('a window closing while the hub is down leaves its text in spool/ and starts a hub', async () => {
+  test("a window closing while the hub is down leaves its text in spool/ and starts a hub", async () => {
     const c = await enabledCore()
     await hub.stop()
-    await waitFor(() => pluginLog.lines.some(l => l.includes('hub connection lost')), 3000, 'connection lost')
-    append(assistantText('без хаба', 'end_turn', 'y1'))
+    await waitFor(() => pluginLog.lines.some(l => l.includes("hub connection lost")), 3000, "connection lost")
+    append(assistantText("без хаба", "end_turn", "y1"))
     await c.shutdown(300)
     core = undefined
-    const files = readdirSync(spoolDir).filter(f => f.endsWith('.json'))
+    const files = readdirSync(spoolDir).filter(f => f.endsWith(".json"))
     expect(files.length).toBe(1)
-    const items = JSON.parse(readFileSync(join(spoolDir, files[0]!), 'utf8'))
-    expect(items).toMatchObject([{ sessionId: SID, text: 'без хаба', notify: false }])
+    const items = JSON.parse(readFileSync(join(spoolDir, files[0]!), "utf8"))
+    expect(items).toMatchObject([{ sessionId: SID, text: "без хаба", notify: false }])
     expect(spawned).toBeGreaterThan(0)
   })
 
-  test('a SessionStart hook for the same session keeps relaying', async () => {
+  test("a SessionStart hook for the same session keeps relaying", async () => {
     const c = await enabledCore()
     // same file, path spelled differently (drive letter case)
     c.switchSession(SID, transcript.replace(/^([A-Za-z]):/, (_, d) => d.toLowerCase() + ":"), CWD)
     expect(c.enabled).toBe(true)
-    append(assistantText('после компакта', 'end_turn'))
-    await waitFor(() => sent().length === 1, 3000, 'message')
+    append(assistantText("после компакта", "end_turn"))
+    await waitFor(() => sent().length === 1, 3000, "message")
   })
 
-  test('tg_notify while the mode is off says so', () => {
+  test("tg_notify while the mode is off says so", () => {
     const c = makeCore()
-    expect(c.notify('done')).toContain('off')
+    expect(c.notify("done")).toContain("off")
   })
 
-  test('enable without groupId returns the explanation', async () => {
+  test("enable without groupId returns the explanation", async () => {
     config = { allowFrom: [ME] }
     const c = makeCore()
     await expect(c.enable()).rejects.toThrow(/config\.json/)
@@ -300,73 +300,73 @@ describe('PluginCore', () => {
 })
 
 // The PostToolBatch hook asks hookNote after every batch of tool calls.
-describe('note to the agent that the mode went off', () => {
+describe("note to the agent that the mode went off", () => {
   const noteOf = (out: string) => JSON.parse(out).hookSpecificOutput
-  const toolBatch = (id: string) => [assistantTool('Bash', id), { type: 'user', isSidechain: false, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'ok' }] } }]
+  const toolBatch = (id: string) => [assistantTool("Bash", id), { type: "user", isSidechain: false, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "ok" }] } }]
 
-  test('the first tool batch after terminal input tells the agent, once', async () => {
+  test("the first tool batch after terminal input tells the agent, once", async () => {
     const c = await enabledCore()
     // No wait for the tailer: the hook may come before its next poll.
-    append(humanTyped('Как успехи?'), ...toolBatch('k1'))
-    const note = noteOf(c.hookNote(''))
-    expect(note.hookEventName).toBe('PostToolBatch')
-    expect(note.additionalContext).toContain('OFF')
-    expect(note.additionalContext).toContain('tg_notify')
+    append(humanTyped("Как успехи?"), ...toolBatch("k1"))
+    const note = noteOf(c.hookNote(""))
+    expect(note.hookEventName).toBe("PostToolBatch")
+    expect(note.additionalContext).toContain("OFF")
+    expect(note.additionalContext).toContain("tg_notify")
     expect(c.enabled).toBe(false)
-    expect(c.hookNote('')).toBe('')
+    expect(c.hookNote("")).toBe("")
   })
 
-  test('a message typed mid-turn is noted too', async () => {
+  test("a message typed mid-turn is noted too", async () => {
     const c = await enabledCore()
-    append(typedMidTurn('стоп'), ...toolBatch('k2'))
-    expect(noteOf(c.hookNote('')).additionalContext).toContain('OFF')
+    append(typedMidTurn("стоп"), ...toolBatch("k2"))
+    expect(noteOf(c.hookNote("")).additionalContext).toContain("OFF")
   })
 
-  test('a subagent batch leaves the note for the main agent', async () => {
+  test("a subagent batch leaves the note for the main agent", async () => {
     const c = await enabledCore()
-    append(humanTyped('сам'))
-    expect(c.hookNote('a3f559a955ec4c710')).toBe('')
-    expect(c.hookNote('')).not.toBe('')
+    append(humanTyped("сам"))
+    expect(c.hookNote("a3f559a955ec4c710")).toBe("")
+    expect(c.hookNote("")).not.toBe("")
   })
 
-  test('nothing to say when the agent turned the mode off itself', async () => {
+  test("nothing to say when the agent turned the mode off itself", async () => {
     const c = await enabledCore()
     await c.disable()
     await waitFor(() => !c.enabled)
-    append(humanTyped('ок'))
-    expect(c.hookNote('')).toBe('')
+    append(humanTyped("ок"))
+    expect(c.hookNote("")).toBe("")
   })
 
-  test('turning the mode back on drops an undelivered note', async () => {
+  test("turning the mode back on drops an undelivered note", async () => {
     const c = await enabledCore()
-    append(humanTyped('сам'))
-    await waitFor(() => !c.enabled, 3000, 'disabled')
+    append(humanTyped("сам"))
+    await waitFor(() => !c.enabled, 3000, "disabled")
     await c.enable()
     await waitFor(() => c.enabled)
-    expect(c.hookNote('')).toBe('')
+    expect(c.hookNote("")).toBe("")
   })
 })
 
-describe('a response cut by a lost connection', () => {
-  const ERROR = 'API Error: Connection lost mid-response. The response above may be incomplete.'
-  const cut = () => ({ ...assistantText(ERROR, 'stop_sequence'), error: 'server_error', truncatedAfterOutput: true, isApiErrorMessage: true })
+describe("a response cut by a lost connection", () => {
+  const ERROR = "API Error: Connection lost mid-response. The response above may be incomplete."
+  const cut = () => ({ ...assistantText(ERROR, "stop_sequence"), error: "server_error", truncatedAfterOutput: true, isApiErrorMessage: true })
 
-  test('the agent is told to continue, and the topic is told it does', async () => {
+  test("the agent is told to continue, and the topic is told it does", async () => {
     await enabledCore()
-    append(assistantText('Правлю тест', 'tool_use', 'r1'), assistantTool('Edit', 'r1'), cut())
-    await waitFor(() => channel.length === 1, 3000, 'continue prompt')
-    expect(channel[0]).toEqual({ content: CONTINUE_PROMPT, meta: { user: 'tg-hub', reason: 'response_cut' } })
-    await waitFor(() => sent().length === 3, 3000, 'three messages')
+    append(assistantText("Правлю тест", "tool_use", "r1"), assistantTool("Edit", "r1"), cut())
+    await waitFor(() => channel.length === 1, 3000, "continue prompt")
+    expect(channel[0]).toEqual({ content: CONTINUE_PROMPT, meta: { user: "tg-hub", reason: "response_cut" } })
+    await waitFor(() => sent().length === 3, 3000, "three messages")
     expect(sent()).toEqual([
-      { text: 'Правлю тест', silent: true, topic: 100 },
+      { text: "Правлю тест", silent: true, topic: 100 },
       { text: ERROR, silent: true, topic: 100 },
       { text: CUT_NOTE, silent: true, topic: 100 },
     ])
   })
 
-  test('with the mode off the person at the terminal decides', async () => {
+  test("with the mode off the person at the terminal decides", async () => {
     const c = makeCore()
-    await waitFor(() => hub.isConnected(SID), 3000, 'plugin connected')
+    await waitFor(() => hub.isConnected(SID), 3000, "plugin connected")
     append(cut())
     await Bun.sleep(300)
     expect(c.enabled).toBe(false)
@@ -376,120 +376,120 @@ describe('a response cut by a lost connection', () => {
   test(`after ${MAX_AUTO_CONTINUES} cuts in a row it stops and calls the person; a normal turn end starts the count over`, async () => {
     await enabledCore()
     for (let i = 0; i < MAX_AUTO_CONTINUES; i++) append(cut())
-    await waitFor(() => channel.length === MAX_AUTO_CONTINUES, 3000, 'continue prompts')
+    await waitFor(() => channel.length === MAX_AUTO_CONTINUES, 3000, "continue prompts")
     append(cut())
-    await waitFor(() => sent().some(s => s.text === CUT_LIMIT_NOTE), 3000, 'limit note')
+    await waitFor(() => sent().some(s => s.text === CUT_LIMIT_NOTE), 3000, "limit note")
     expect(sent().find(s => s.text === CUT_LIMIT_NOTE)!.silent).toBe(false)
     expect(channel.length).toBe(MAX_AUTO_CONTINUES)
-    append(assistantText('дальше сам', 'end_turn'), cut())
-    await waitFor(() => channel.length === MAX_AUTO_CONTINUES + 1, 3000, 'continue after a normal turn')
+    append(assistantText("дальше сам", "end_turn"), cut())
+    await waitFor(() => channel.length === MAX_AUTO_CONTINUES + 1, 3000, "continue after a normal turn")
   })
 
-  test('a cut written before the window started is history', async () => {
+  test("a cut written before the window started is history", async () => {
     appendFileSync(transcript, line(cut()))
     await enabledCore()
-    append(assistantText('новый ход', 'end_turn'))
-    await waitFor(() => sent().length === 1, 3000, 'new turn')
+    append(assistantText("новый ход", "end_turn"))
+    await waitFor(() => sent().length === 1, 3000, "new turn")
     expect(channel).toEqual([])
   })
 })
 
-describe('tg_send_file', () => {
+describe("tg_send_file", () => {
   const file = (name: string, body = `body of ${name}`, d = tempDir()) => {
     const path = join(d, name)
     writeFileSync(path, body)
     return path
   }
-  const sends = () => fake.calls.filter(c => c.method.startsWith('send')).map(c => c.method)
-  const leftCopies = () => (existsSync(join(state, 'outbox-files')) ? readdirSync(join(state, 'outbox-files')) : [])
+  const sends = () => fake.calls.filter(c => c.method.startsWith("send")).map(c => c.method)
+  const leftCopies = () => (existsSync(join(state, "outbox-files")) ? readdirSync(join(state, "outbox-files")) : [])
 
-  test('a file reaches the topic, the original stays, the queued copy goes', async () => {
+  test("a file reaches the topic, the original stays, the queued copy goes", async () => {
     const c = await enabledCore()
-    const path = file('shot.png')
-    expect(await c.sendFiles([path], 'see **this**')).toBe('Sent 1 file(s) to the Telegram topic.')
-    expect(fake.callsOf('sendPhoto')[0]).toMatchObject({ photo: { file: 'shot.png', body: 'body of shot.png' }, caption: 'see this' })
-    expect(readFileSync(path, 'utf8')).toBe('body of shot.png')
+    const path = file("shot.png")
+    expect(await c.sendFiles([path], "see **this**")).toBe("Sent 1 file(s) to the Telegram topic.")
+    expect(fake.callsOf("sendPhoto")[0]).toMatchObject({ photo: { file: "shot.png", body: "body of shot.png" }, caption: "see this" })
+    expect(readFileSync(path, "utf8")).toBe("body of shot.png")
     expect(leftCopies()).toEqual([])
   })
 
-  test('text written before the call reaches the topic first', async () => {
+  test("text written before the call reaches the topic first", async () => {
     const c = await enabledCore()
     // The tool_use record is not in the file yet: only the text before it.
-    append(assistantText('вот скрин', 'tool_use', 's1'))
-    await c.sendFiles([file('a.png')])
-    expect(sends()).toEqual(['sendRichMessage', 'sendPhoto'])
-    expect(sent()).toEqual([{ text: 'вот скрин', silent: true, topic: 100 }])
+    append(assistantText("вот скрин", "tool_use", "s1"))
+    await c.sendFiles([file("a.png")])
+    expect(sends()).toEqual(["sendRichMessage", "sendPhoto"])
+    expect(sent()).toEqual([{ text: "вот скрин", silent: true, topic: 100 }])
   })
 
-  test('silent while the mode is on, with sound while it is off', async () => {
+  test("silent while the mode is on, with sound while it is off", async () => {
     const c = await enabledCore()
-    await c.sendFiles([file('a.txt')])
+    await c.sendFiles([file("a.txt")])
     await c.disable()
     await waitFor(() => !c.enabled)
-    await c.sendFiles([file('b.txt')])
-    expect(fake.callsOf('sendDocument').map(p => p.disable_notification)).toEqual(['true', 'false'])
+    await c.sendFiles([file("b.txt")])
+    expect(fake.callsOf("sendDocument").map(p => p.disable_notification)).toEqual(["true", "false"])
   })
 
-  test('several files go as an album', async () => {
+  test("several files go as an album", async () => {
     const c = await enabledCore()
     const d = tempDir()
-    expect(await c.sendFiles([file('1.png', 'x', d), file('2.jpg', 'y', d)])).toBe('Sent 2 file(s) to the Telegram topic.')
-    expect(fake.callsOf('sendMediaGroup')[0].media.map((m: any) => m.type)).toEqual(['photo', 'photo'])
+    expect(await c.sendFiles([file("1.png", "x", d), file("2.jpg", "y", d)])).toBe("Sent 2 file(s) to the Telegram topic.")
+    expect(fake.callsOf("sendMediaGroup")[0].media.map((m: any) => m.type)).toEqual(["photo", "photo"])
   })
 
-  test('as_document sends images as documents, grouped into an album', async () => {
+  test("as_document sends images as documents, grouped into an album", async () => {
     const c = await enabledCore()
     const d = tempDir()
-    expect(await c.sendFiles([file('a.png', 'x', d)], '', true)).toBe('Sent 1 file(s) to the Telegram topic.')
-    expect(fake.callsOf('sendPhoto')).toEqual([])
-    expect(fake.callsOf('sendDocument')[0]).toMatchObject({ document: { file: 'a.png', body: 'x' } })
-    await c.sendFiles([file('1.png', 'x', d), file('2.jpg', 'y', d)], '', true)
-    expect(fake.callsOf('sendMediaGroup')[0].media.map((m: any) => m.type)).toEqual(['document', 'document'])
+    expect(await c.sendFiles([file("a.png", "x", d)], "", true)).toBe("Sent 1 file(s) to the Telegram topic.")
+    expect(fake.callsOf("sendPhoto")).toEqual([])
+    expect(fake.callsOf("sendDocument")[0]).toMatchObject({ document: { file: "a.png", body: "x" } })
+    await c.sendFiles([file("1.png", "x", d), file("2.jpg", "y", d)], "", true)
+    expect(fake.callsOf("sendMediaGroup")[0].media.map((m: any) => m.type)).toEqual(["document", "document"])
   })
 
-  test('nothing is sent if any file is wrong, and the reason names it', async () => {
+  test("nothing is sent if any file is wrong, and the reason names it", async () => {
     const c = await enabledCore()
-    const ok = file('ok.txt')
-    const big = file('big.bin', '')
+    const ok = file("ok.txt")
+    const big = file("big.bin", "")
     truncateSync(big, 50 * 1024 * 1024 + 1)
     const cases: [string[], string][] = [
-      [[], 'at least one'],
-      [[ok, join(tempDir(), 'missing.png')], 'missing.png: no such file'],
-      [[tempDir()], 'not a file'],
-      [[file('empty.txt', '')], 'empty'],
-      [[big], '50 MB'],
-      [[file('sessions.json', '{}', state)], 'tg-hub state'],
+      [[], "at least one"],
+      [[ok, join(tempDir(), "missing.png")], "missing.png: no such file"],
+      [[tempDir()], "not a file"],
+      [[file("empty.txt", "")], "empty"],
+      [[big], "50 MB"],
+      [[file("sessions.json", "{}", state)], "tg-hub state"],
     ]
     for (const [paths, why] of cases) await expect(c.sendFiles(paths)).rejects.toThrow(why)
-    await expect(c.sendFiles([ok], 'я'.repeat(1025))).rejects.toThrow('1024')
+    await expect(c.sendFiles([ok], "я".repeat(1025))).rejects.toThrow("1024")
     // Formatting does not count: the caption is measured as Telegram shows it.
-    expect(await c.sendFiles([ok], `**${'я'.repeat(1024)}**`)).toContain('Sent 1')
-    expect(sends()).toEqual(['sendDocument'])
+    expect(await c.sendFiles([ok], `**${"я".repeat(1024)}**`)).toContain("Sent 1")
+    expect(sends()).toEqual(["sendDocument"])
     expect(leftCopies()).toEqual([])
   })
 
-  test('a file Telegram sent into the inbox may be sent back', async () => {
+  test("a file Telegram sent into the inbox may be sent back", async () => {
     const c = await enabledCore()
-    mkdirSync(join(state, 'inbox'), { recursive: true })
-    expect(await c.sendFiles([file('photo.jpg', 'x', join(state, 'inbox'))])).toContain('Sent 1')
+    mkdirSync(join(state, "inbox"), { recursive: true })
+    expect(await c.sendFiles([file("photo.jpg", "x", join(state, "inbox"))])).toContain("Sent 1")
   })
 
-  test('a session without a topic gets the error from the hub', async () => {
+  test("a session without a topic gets the error from the hub", async () => {
     const c = makeCore()
-    await waitFor(() => hub.isConnected(SID), 3000, 'plugin connected')
-    await expect(c.sendFiles([file('a.txt')])).rejects.toThrow('tg_enable')
+    await waitFor(() => hub.isConnected(SID), 3000, "plugin connected")
+    await expect(c.sendFiles([file("a.txt")])).rejects.toThrow("tg_enable")
   })
 
-  test('a rejection by Telegram comes back as the error', async () => {
+  test("a rejection by Telegram comes back as the error", async () => {
     const c = await enabledCore()
-    fake.failNext('sendDocument', { code: 400, description: 'Bad Request: file is too big' })
-    const why = await c.sendFiles([file('a.txt')]).then(() => 'resolved', (e: Error) => e.message)
-    expect(why).toBe('a.txt: Bad Request: file is too big')
+    fake.failNext("sendDocument", { code: 400, description: "Bad Request: file is too big" })
+    const why = await c.sendFiles([file("a.txt")]).then(() => "resolved", (e: Error) => e.message)
+    expect(why).toBe("a.txt: Bad Request: file is too big")
   })
 
-  test('when Telegram does not answer in time the files stay queued and the agent is told so', async () => {
+  test("when Telegram does not answer in time the files stay queued and the agent is told so", async () => {
     const c = await enabledCore()
-    fake.hangNext('sendDocument', 1000)
-    expect(await c.sendFiles([file('a.txt')])).toContain('queued')
+    fake.hangNext("sendDocument", 1000)
+    expect(await c.sendFiles([file("a.txt")])).toContain("queued")
   })
 })

@@ -1,14 +1,14 @@
 // In-process fake of the Telegram Bot API, enough for the hub: long-poll
 // getUpdates (with the real "terminated by other getUpdates request" conflict),
 // sendMessage, sendRichMessage, media uploads (multipart), forum topics, getFile and file download.
-import type { Server } from 'bun'
-import type { Update } from '../src/hub/telegram.ts'
+import type { Server } from "bun"
+import type { Update } from "../src/hub/telegram.ts"
 
 type Call = { method: string; params: any }
 type Failure = { code: number; description: string; retry_after?: number }
 
 export class FakeTelegram {
-  readonly token = '123456:TEST'
+  readonly token = "123456:TEST"
   calls: Call[] = []
   conflicts = 0
   private server: Server<undefined>
@@ -26,7 +26,7 @@ export class FakeTelegram {
   constructor() {
     this.server = Bun.serve({
       port: 0,
-      hostname: '127.0.0.1',
+      hostname: "127.0.0.1",
       fetch: req => this.handle(req),
     })
   }
@@ -40,7 +40,7 @@ export class FakeTelegram {
     this.server.stop(true)
   }
 
-  pushUpdate(u: Omit<Update, 'update_id'>): Update {
+  pushUpdate(u: Omit<Update, "update_id">): Update {
     const full = { update_id: this.nextUpdateId++, ...u } as Update
     this.updates.push(full)
     this.waiting?.resolve()
@@ -75,8 +75,8 @@ export class FakeTelegram {
   // blocks as `text`.
   texts(): any[] {
     return this.calls
-      .filter(c => c.method === 'sendMessage' || c.method === 'sendRichMessage')
-      .map(c => (c.method === 'sendRichMessage' ? { ...c.params, text: blocksText(c.params.rich_message.blocks) } : c.params))
+      .filter(c => c.method === "sendMessage" || c.method === "sendRichMessage")
+      .map(c => (c.method === "sendRichMessage" ? { ...c.params, text: blocksText(c.params.rich_message.blocks) } : c.params))
   }
 
   private async handle(req: Request): Promise<Response> {
@@ -85,12 +85,12 @@ export class FakeTelegram {
     if (url.pathname.startsWith(filePrefix)) {
       const path = url.pathname.slice(filePrefix.length)
       for (const f of this.files.values()) if (f.path === path) return new Response(Buffer.from(f.body))
-      return new Response('not found', { status: 404 })
+      return new Response("not found", { status: 404 })
     }
     const m = url.pathname.match(/^\/bot([^/]+)\/(\w+)$/)
-    if (!m || m[1] !== this.token) return json({ ok: false, error_code: 401, description: 'Unauthorized' }, 401)
+    if (!m || m[1] !== this.token) return json({ ok: false, error_code: 401, description: "Unauthorized" }, 401)
     const method = m[2]!
-    const params = req.method !== 'POST' ? {} : (req.headers.get('content-type') ?? '').startsWith('multipart/') ? await formParams(req) : await req.json().catch(() => ({}))
+    const params = req.method !== "POST" ? {} : (req.headers.get("content-type") ?? "").startsWith("multipart/") ? await formParams(req) : await req.json().catch(() => ({}))
     this.calls.push({ method, params })
 
     const hang = this.hangs.get(method) ?? 0
@@ -108,32 +108,32 @@ export class FakeTelegram {
     }
 
     switch (method) {
-      case 'getUpdates':
+      case "getUpdates":
         return this.getUpdates(params)
-      case 'getMe':
-        return ok({ id: 1, is_bot: true, username: 'test_bot' })
-      case 'sendMessage':
-      case 'sendRichMessage':
-      case 'sendPhoto':
-      case 'sendVideo':
-      case 'sendAudio':
-      case 'sendAnimation':
-      case 'sendDocument':
-      case 'sendMediaGroup': {
+      case "getMe":
+        return ok({ id: 1, is_bot: true, username: "test_bot" })
+      case "sendMessage":
+      case "sendRichMessage":
+      case "sendPhoto":
+      case "sendVideo":
+      case "sendAudio":
+      case "sendAnimation":
+      case "sendDocument":
+      case "sendMediaGroup": {
         const thread = params.message_thread_id
         if (thread != null && this.deletedTopics.has(Number(thread))) {
-          return json({ ok: false, error_code: 400, description: 'Bad Request: message thread not found' }, 400)
+          return json({ ok: false, error_code: 400, description: "Bad Request: message thread not found" }, 400)
         }
         const message = () => ({ message_id: this.nextMessageId++, chat: { id: Number(params.chat_id) }, text: params.text })
-        return ok(method === 'sendMediaGroup' ? params.media.map(message) : message())
+        return ok(method === "sendMediaGroup" ? params.media.map(message) : message())
       }
-      case 'createForumTopic':
+      case "createForumTopic":
         return ok({ message_thread_id: this.nextThreadId++, name: params.name, icon_color: 0 })
-      case 'editForumTopic':
+      case "editForumTopic":
         return ok(true)
-      case 'getFile': {
+      case "getFile": {
         const f = this.files.get(params.file_id)
-        if (!f) return json({ ok: false, error_code: 400, description: 'Bad Request: invalid file_id' }, 400)
+        if (!f) return json({ ok: false, error_code: 400, description: "Bad Request: invalid file_id" }, 400)
         return ok({ file_id: params.file_id, file_unique_id: `u${params.file_id}`, file_path: f.path })
       }
       default:
@@ -148,7 +148,7 @@ export class FakeTelegram {
     if (this.activePoll) {
       this.conflicts++
       this.activePoll.abort(
-        json({ ok: false, error_code: 409, description: 'Conflict: terminated by other getUpdates request; make sure that only one bot instance is running' }, 409),
+        json({ ok: false, error_code: 409, description: "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running" }, 409),
       )
     }
     const timeoutMs = Math.min(Number(params.timeout ?? 0), 2) * 1000
@@ -179,7 +179,7 @@ export class FakeTelegram {
 }
 
 function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
 }
 
 function ok(result: unknown): Response {
@@ -195,20 +195,20 @@ export function topicMsg(o: {
   text?: string
   isTopic?: boolean
   extra?: Record<string, unknown>
-}): Omit<Update, 'update_id'> {
+}): Omit<Update, "update_id"> {
   const isTopic = o.isTopic ?? o.threadId != null
   return {
     message: {
       message_id: messageCounter++,
       date: Math.floor(Date.now() / 1000),
-      chat: { id: Number(o.chatId), type: 'supergroup', title: 'Hub', is_forum: true },
-      from: { id: Number(o.fromId), is_bot: false, first_name: 'User', username: 'user' },
+      chat: { id: Number(o.chatId), type: "supergroup", title: "Hub", is_forum: true },
+      from: { id: Number(o.fromId), is_bot: false, first_name: "User", username: "user" },
       ...(o.threadId != null ? { message_thread_id: o.threadId } : {}),
       ...(isTopic ? { is_topic_message: true } : {}),
       ...(o.text != null ? { text: o.text } : {}),
       ...o.extra,
     },
-  } as Omit<Update, 'update_id'>
+  } as Omit<Update, "update_id">
 }
 
 // Multipart fields as the JSON body would carry them: numbers and booleans
@@ -219,20 +219,20 @@ async function formParams(req: Request): Promise<any> {
   for (const [key, value] of (await req.formData()).entries()) {
     const v: unknown = value
     if (v instanceof File) out[key] = { file: v.name, size: v.size, body: await v.text() }
-    else out[key] = key === 'media' || key.endsWith('entities') ? JSON.parse(String(v)) : v
+    else out[key] = key === "media" || key.endsWith("entities") ? JSON.parse(String(v)) : v
   }
   return out
 }
 
 function blocksText(blocks: any[]): string {
-  const text = (t: any): string => (typeof t === 'string' ? t : Array.isArray(t) ? t.map(text).join('') : text(t?.text ?? ''))
+  const text = (t: any): string => (typeof t === "string" ? t : Array.isArray(t) ? t.map(text).join("") : text(t?.text ?? ""))
   const block = (b: any): string =>
-    b.type === 'list'
-      ? b.items.map((i: any) => blocksText(i.blocks)).join('\n')
+    b.type === "list"
+      ? b.items.map((i: any) => blocksText(i.blocks)).join("\n")
       : b.blocks
         ? blocksText(b.blocks)
         : b.cells
-          ? b.cells.map((r: any[]) => r.map(c => text(c.text)).join(' | ')).join('\n')
+          ? b.cells.map((r: any[]) => r.map(c => text(c.text)).join(" | ")).join("\n")
           : text(b.text)
-  return blocks.map(block).join('\n\n')
+  return blocks.map(block).join("\n\n")
 }

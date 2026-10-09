@@ -1,10 +1,10 @@
-import type { TranscriptEvent } from './parse.ts'
+import type { TranscriptEvent } from "./parse.ts"
 
 export type Outgoing = { text: string; notify: boolean }
 
 // Sent with sound when the agent called tg_notify but wrote no text after it,
 // so the phone still rings.
-export const NOTIFY_MARKER = '🔔 Ход завершён — ответ выше.'
+export const NOTIFY_MARKER = "🔔 Ход завершён — ответ выше."
 
 const REMEMBERED_ENDS = 50
 
@@ -45,21 +45,21 @@ export class Relay {
 
   feed(ev: TranscriptEvent): Outgoing[] {
     const out: Outgoing[] = []
-    if (this.ending !== undefined && ('messageId' in ev ? ev.messageId !== this.ending : ev.kind === 'terminal_input')) {
+    if (this.ending !== undefined && ("messageId" in ev ? ev.messageId !== this.ending : ev.kind === "terminal_input")) {
       out.push(...this.finishTurn())
     }
     switch (ev.kind) {
-      case 'text':
+      case "text":
         if (!this.enabled) break
         if (this.pending !== undefined) out.push({ text: this.pending, notify: false })
         this.pending = ev.text
         break
-      case 'tool_use':
+      case "tool_use":
         if (this.opts.isOwnTool(ev.name) || this.pending === undefined) break
         out.push({ text: this.pending, notify: false })
         this.pending = undefined
         break
-      case 'turn_end':
+      case "turn_end":
         if (!this.ended.includes(ev.messageId)) this.ending = ev.messageId
         break
     }

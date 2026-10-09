@@ -1,5 +1,5 @@
-import { appendFileSync, mkdirSync } from 'fs'
-import { dirname } from 'path'
+import { appendFileSync, mkdirSync } from "fs"
+import { dirname } from "path"
 
 export type Logger = {
   info(msg: string): void
@@ -15,9 +15,9 @@ export function createLogger(file: string, tag: string): Logger {
     } catch {}
   }
   return {
-    info: m => write('INFO', m),
-    warn: m => write('WARN', m),
-    error: m => write('ERROR', m),
+    info: m => write("INFO", m),
+    warn: m => write("WARN", m),
+    error: m => write("ERROR", m),
   }
 }
 

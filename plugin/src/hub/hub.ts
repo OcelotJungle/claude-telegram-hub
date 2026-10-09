@@ -1,30 +1,30 @@
-import type { Server, ServerWebSocket } from 'bun'
-import type { Config } from '../shared/config.ts'
-import type { Logger } from '../shared/log.ts'
-import type { Formatted } from '../shared/markdown.ts'
-import type { OutFile } from '../shared/media.ts'
-import type { ChannelMeta, CommandReply, HookBody, HubToPlugin, PluginToHub, TopicCommand } from '../shared/protocol.ts'
-import type { OutItem, Piece } from './outbox.ts'
-import type { SessionRecord } from './sessions.ts'
-import type { Message, TelegramApi, Update } from './telegram.ts'
-import type { RichMessage } from './rich.ts'
-import type { VideoTools } from './video.ts'
+import type { Server, ServerWebSocket } from "bun"
+import type { Config } from "../shared/config.ts"
+import type { Logger } from "../shared/log.ts"
+import type { Formatted } from "../shared/markdown.ts"
+import type { OutFile } from "../shared/media.ts"
+import type { ChannelMeta, CommandReply, HookBody, HubToPlugin, PluginToHub, TopicCommand } from "../shared/protocol.ts"
+import type { OutItem, Piece } from "./outbox.ts"
+import type { SessionRecord } from "./sessions.ts"
+import type { Message, TelegramApi, Update } from "./telegram.ts"
+import type { RichMessage } from "./rich.ts"
+import type { VideoTools } from "./video.ts"
 
-import { randomUUID } from 'crypto'
-import { existsSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, unlinkSync } from 'fs'
-import { dirname, join } from 'path'
-import { chunk } from '../shared/chunk.ts'
-import { isInside } from '../shared/config.ts'
-import { toTelegram } from '../shared/markdown.ts'
-import { albums, kindOf } from '../shared/media.ts'
-import { PROTOCOL_VERSION } from '../shared/protocol.ts'
-import { Outbox } from './outbox.ts'
-import { commandOf, routeUpdate } from './router.ts'
-import { SessionStore, topicName } from './sessions.ts'
-import { isThreadNotFound, TelegramError } from './telegram.ts'
-import { richPhotos, richToMarkdown } from './rich.ts'
-import { richPieces } from './rich-out.ts'
-import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath } from './video.ts'
+import { randomUUID } from "crypto"
+import { existsSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, unlinkSync } from "fs"
+import { dirname, join } from "path"
+import { chunk } from "../shared/chunk.ts"
+import { isInside } from "../shared/config.ts"
+import { toTelegram } from "../shared/markdown.ts"
+import { albums, kindOf } from "../shared/media.ts"
+import { PROTOCOL_VERSION } from "../shared/protocol.ts"
+import { Outbox } from "./outbox.ts"
+import { commandOf, routeUpdate } from "./router.ts"
+import { SessionStore, topicName } from "./sessions.ts"
+import { isThreadNotFound, TelegramError } from "./telegram.ts"
+import { richPhotos, richToMarkdown } from "./rich.ts"
+import { richPieces } from "./rich-out.ts"
+import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath } from "./video.ts"
 
 type Conn = { windowKey?: string; sessionId?: string; cwd?: string }
 type WS = ServerWebSocket<Conn>
@@ -55,13 +55,13 @@ export type HubOptions = {
   onExit(): void
 }
 
-const INACTIVE_TEXT = 'сессия сейчас не активна'
+const INACTIVE_TEXT = "сессия сейчас не активна"
 const HOOK_TTL_MS = 60_000
 const MAX_POLL_DELAY_MS = 15_000
 const COMMAND_PICKUP_MS = 10_000
 const BOT_COMMANDS = [
-  { command: 'info', description: 'Лимиты и контекст сессии' },
-  { command: 'compact', description: 'Сжать контекст; /compact N — окно автокомпакта' },
+  { command: "info", description: "Лимиты и контекст сессии" },
+  { command: "compact", description: "Сжать контекст; /compact N — окно автокомпакта" },
 ]
 
 // Delivery cannot work until the user fixes the setup: no token, no groupId,
@@ -71,17 +71,17 @@ class SetupError extends Error {}
 // A queued file copy vanished from disk: retrying cannot help.
 class LostFileError extends Error {}
 
-type Failure = 'retry' | 'setup' | 'rejected'
+type Failure = "retry" | "setup" | "rejected"
 
 function classify(e: unknown): Failure {
-  if (e instanceof SetupError) return 'setup'
-  if (e instanceof LostFileError) return 'rejected'
-  if (!(e instanceof TelegramError)) return 'retry'
-  if (e.code === 401 || e.code === 403 || e.code === 404) return 'setup'
+  if (e instanceof SetupError) return "setup"
+  if (e instanceof LostFileError) return "rejected"
+  if (!(e instanceof TelegramError)) return "retry"
+  if (e.code === 401 || e.code === 403 || e.code === 404) return "setup"
   if (e.code === 400) {
-    return /chat not found|not enough rights|have no rights|CHAT_WRITE_FORBIDDEN|CHAT_ADMIN_REQUIRED|bot was kicked|upgraded to a supergroup/i.test(e.description) ? 'setup' : 'rejected'
+    return /chat not found|not enough rights|have no rights|CHAT_WRITE_FORBIDDEN|CHAT_ADMIN_REQUIRED|bot was kicked|upgraded to a supergroup/i.test(e.description) ? "setup" : "rejected"
   }
-  return 'retry'
+  return "retry"
 }
 
 // The single Telegram poller on the machine. Plugins (one per Claude Code
@@ -123,7 +123,7 @@ export class Hub {
     try {
       this.server = Bun.serve<Conn>({
         port: this.opts.port,
-        hostname: '127.0.0.1',
+        hostname: "127.0.0.1",
         fetch: (req, server) => this.handleHttp(req, server),
         websocket: {
           open: ws => this.onOpen(ws),
@@ -132,7 +132,7 @@ export class Hub {
         },
       })
     } catch (e) {
-      if ((e as { code?: string }).code === 'EADDRINUSE') return false
+      if ((e as { code?: string }).code === "EADDRINUSE") return false
       throw e
     }
     this.running = true
@@ -144,7 +144,7 @@ export class Hub {
     this.spoolTimer = setInterval(() => this.ingestSpool(), this.opts.spoolScanMs ?? 5000)
     this.armIdle()
     if (this.opts.api) void this.pollLoop(this.opts.api)
-    else this.log.error('no TELEGRAM_BOT_TOKEN — not polling Telegram')
+    else this.log.error("no TELEGRAM_BOT_TOKEN — not polling Telegram")
     return true
   }
 
@@ -156,7 +156,7 @@ export class Hub {
     if (this.spoolTimer) clearInterval(this.spoolTimer)
     for (const queued of this.commands.values()) for (const e of queued) clearTimeout(e.timer)
     this.server?.stop(true)
-    this.log.info('hub stopped')
+    this.log.info("hub stopped")
   }
 
   isConnected(sessionId: string): boolean {
@@ -167,36 +167,36 @@ export class Hub {
 
   private async handleHttp(req: Request, server: Server<Conn>): Promise<Response | undefined> {
     // Browsers always send Origin; local plugins and hooks never do.
-    if (req.headers.get('origin')) return new Response('forbidden', { status: 403 })
+    if (req.headers.get("origin")) return new Response("forbidden", { status: 403 })
     const url = new URL(req.url)
-    if (url.pathname === '/ws') {
+    if (url.pathname === "/ws") {
       if (server.upgrade(req, { data: {} })) return undefined
-      return new Response('upgrade required', { status: 426 })
+      return new Response("upgrade required", { status: 426 })
     }
-    if (url.pathname === '/health') return Response.json({ ok: true, pid: process.pid })
-    if (url.pathname === '/hook' && req.method === 'POST') {
+    if (url.pathname === "/health") return Response.json({ ok: true, pid: process.pid })
+    if (url.pathname === "/hook" && req.method === "POST") {
       let body: HookBody
       try {
         body = (await req.json()) as HookBody
       } catch {
-        return new Response('bad json', { status: 400 })
+        return new Response("bad json", { status: 400 })
       }
       this.onHook(body)
-      return new Response('ok')
+      return new Response("ok")
     }
-    if (url.pathname === '/commands' && req.method === 'GET') return Response.json(this.takeCommands(url.searchParams.get('session') ?? ''))
-    if (url.pathname === '/reply' && req.method === 'POST') {
+    if (url.pathname === "/commands" && req.method === "GET") return Response.json(this.takeCommands(url.searchParams.get("session") ?? ""))
+    if (url.pathname === "/reply" && req.method === "POST") {
       let r: CommandReply
       try {
         r = (await req.json()) as CommandReply
       } catch {
-        return new Response('bad json', { status: 400 })
+        return new Response("bad json", { status: 400 })
       }
-      if (typeof r?.sessionId !== 'string' || typeof r.id !== 'string' || typeof r.text !== 'string') return new Response('bad reply', { status: 400 })
+      if (typeof r?.sessionId !== "string" || typeof r.id !== "string" || typeof r.text !== "string") return new Response("bad reply", { status: 400 })
       this.enqueue(r.sessionId, `cmd-${r.id}`, r.text, r.notify === true)
-      return new Response('ok')
+      return new Response("ok")
     }
-    return new Response('not found', { status: 404 })
+    return new Response("not found", { status: 404 })
   }
 
   // --- commands from the topic ---------------------------------------------
@@ -204,7 +204,7 @@ export class Hub {
   // Waits for the session's module; a window without one (an older Claude
   // Code, a window still on the old plugin) never takes it, and the user is
   // told so.
-  private queueCommand(sessionId: string, c: Omit<TopicCommand, 'id'>): void {
+  private queueCommand(sessionId: string, c: Omit<TopicCommand, "id">): void {
     const cmd = { id: randomUUID(), ...c }
     const ms = this.opts.commandPickupMs ?? COMMAND_PICKUP_MS
     const timer = setTimeout(() => {
@@ -266,7 +266,7 @@ export class Hub {
   private maybeExit(): void {
     if (!this.idleExpired || !this.running || this.conns.size > 0 || this.deliverable() > 0) return
     if (this.outbox.size) this.log.info(`no plugins connected — exiting; ${this.outbox.size} queued piece(s) wait on disk until the setup is fixed`)
-    else this.log.info('no plugins connected — exiting')
+    else this.log.info("no plugins connected — exiting")
     void this.stop().then(() => this.opts.onExit())
   }
 
@@ -294,7 +294,7 @@ export class Hub {
   }
 
   private forwardHook(ws: WS, body: HookBody): void {
-    this.send(ws, { type: 'switchSession', sessionId: body.session_id, transcriptPath: body.transcript_path, cwd: body.cwd })
+    this.send(ws, { type: "switchSession", sessionId: body.session_id, transcriptPath: body.transcript_path, cwd: body.cwd })
   }
 
   // --- plugin messages -----------------------------------------------------
@@ -316,7 +316,7 @@ export class Hub {
   private dispatch(ws: WS, msg: PluginToHub): void {
     const sid = ws.data.sessionId
     switch (msg.type) {
-      case 'hello': {
+      case "hello": {
         if (msg.v !== PROTOCOL_VERSION) this.log.warn(`plugin protocol v${msg.v}, hub v${PROTOCOL_VERSION}`)
         ws.data = { windowKey: msg.windowKey, sessionId: msg.sessionId, cwd: msg.cwd }
         this.log.info(`window ${msg.windowKey} connected, session ${msg.sessionId}`)
@@ -327,36 +327,36 @@ export class Hub {
         if (pending && Date.now() - pending.at < HOOK_TTL_MS) this.forwardHook(ws, pending.body)
         return
       }
-      case 'session':
+      case "session":
         ws.data.sessionId = msg.sessionId
         ws.data.cwd = msg.cwd
         this.log.info(`window ${ws.data.windowKey} switched to session ${msg.sessionId}`)
         this.pushState(msg.sessionId)
         return
-      case 'req':
+      case "req":
         void this.handleRequest(ws, msg)
         return
       // The plugin sends only text written while the mode was on, so it is
       // delivered whatever the mode is now. The ack goes once it is on disk.
-      case 'send': {
+      case "send": {
         const target = msg.sessionId ?? sid
         if (target) this.enqueue(target, msg.id, msg.text, msg.notify)
         else this.log.warn(`text from a window that has not said hello, not sent:
 ${msg.text}`)
-        this.send(ws, { type: 'ack', id: msg.id })
+        this.send(ws, { type: "ack", id: msg.id })
         return
       }
-      case 'sendFiles':
+      case "sendFiles":
         this.enqueueFiles(msg, ws)
-        this.send(ws, { type: 'ack', id: msg.id })
+        this.send(ws, { type: "ack", id: msg.id })
         return
-      case 'permission':
+      case "permission":
         if (sid && this.store.get(sid)?.enabled) this.enqueue(sid, `perm-${randomUUID()}`, `🔐 Нужно подтверждение: ${msg.toolName} — ${msg.description}`, true, false)
         return
-      case 'title':
+      case "title":
         if (sid) void this.chain(sid, () => this.retitle(sid, msg.title))
         return
-      case 'terminalInput':
+      case "terminalInput":
         if (!sid) return
         this.log.info(`terminal input in session ${sid}: Telegram mode off`)
         this.setEnabled(sid, false)
@@ -364,17 +364,17 @@ ${msg.text}`)
     }
   }
 
-  private async handleRequest(ws: WS, msg: Extract<PluginToHub, { type: 'req' }>): Promise<void> {
+  private async handleRequest(ws: WS, msg: Extract<PluginToHub, { type: "req" }>): Promise<void> {
     const sid = ws.data.sessionId
     try {
       let result: unknown
-      if (!sid) throw new Error('window has not said hello')
-      if (msg.op === 'enable') result = await this.chain(sid, () => this.enable(sid, ws.data.cwd ?? '', msg.title))
-      else if (msg.op === 'disable') result = this.setEnabled(sid, false)
+      if (!sid) throw new Error("window has not said hello")
+      if (msg.op === "enable") result = await this.chain(sid, () => this.enable(sid, ws.data.cwd ?? "", msg.title))
+      else if (msg.op === "disable") result = this.setEnabled(sid, false)
       else result = await this.requireApi().downloadFile(msg.fileId, this.opts.inboxDir)
-      this.send(ws, { type: 'res', id: msg.id, ok: true, result })
+      this.send(ws, { type: "res", id: msg.id, ok: true, result })
     } catch (e) {
-      this.send(ws, { type: 'res', id: msg.id, ok: false, error: e instanceof TelegramError ? e.message : e instanceof Error ? e.message : String(e) })
+      this.send(ws, { type: "res", id: msg.id, ok: false, error: e instanceof TelegramError ? e.message : e instanceof Error ? e.message : String(e) })
     }
   }
 
@@ -387,7 +387,7 @@ ${msg.text}`)
   }
 
   private requireApi(): TelegramApi {
-    if (!this.opts.api) throw new SetupError('TELEGRAM_BOT_TOKEN is not set — put it into .env in the tg-hub state dir and restart the hub')
+    if (!this.opts.api) throw new SetupError("TELEGRAM_BOT_TOKEN is not set — put it into .env in the tg-hub state dir and restart the hub")
     return this.opts.api
   }
 
@@ -443,7 +443,7 @@ ${msg.text}`)
     const ws = this.connOf(sessionId)
     if (!ws) return
     const rec = this.store.get(sessionId)
-    this.send(ws, { type: 'state', enabled: rec?.enabled ?? false, ...(rec ? { topicTitle: topicName(rec.project, rec.title) } : {}) })
+    this.send(ws, { type: "state", enabled: rec?.enabled ?? false, ...(rec ? { topicTitle: topicName(rec.project, rec.title) } : {}) })
   }
 
   // --- delivery -------------------------------------------------------------
@@ -465,22 +465,22 @@ ${msg.text}`)
 
   // One queue item per Telegram send, so a retry never repeats an album that
   // already went out. The caption and the sound go with the first send.
-  private enqueueFiles(msg: Extract<PluginToHub, { type: 'sendFiles' }>, ws?: WS): void {
+  private enqueueFiles(msg: Extract<PluginToHub, { type: "sendFiles" }>, ws?: WS): void {
     const fail = (error: string) => {
       this.dropFiles(msg.files.filter(f => this.inFilesDir(f.path)))
       this.filesSent(msg.id, msg.sessionId, [error], ws)
     }
     const outside = msg.files.filter(f => !this.inFilesDir(f.path))
     if (outside.length) {
-      this.log.error(`files outside ${this.opts.filesDir} refused for session ${msg.sessionId}: ${outside.map(f => f.path).join(', ')}`)
+      this.log.error(`files outside ${this.opts.filesDir} refused for session ${msg.sessionId}: ${outside.map(f => f.path).join(", ")}`)
       return fail(`the hub sends only copies from ${this.opts.filesDir}`)
     }
     if (!this.store.get(msg.sessionId)) {
-      this.log.warn(`session ${msg.sessionId} has no topic, files not sent: ${msg.files.map(f => f.name).join(', ')}`)
-      return fail('This session has no Telegram topic yet — call tg_enable first.')
+      this.log.warn(`session ${msg.sessionId} has no topic, files not sent: ${msg.files.map(f => f.name).join(", ")}`)
+      return fail("This session has no Telegram topic yet — call tg_enable first.")
     }
     const caption = toTelegram(msg.caption)
-    const pieces = albums(msg.files.map(f => ({ ...f, kind: msg.asDocument ? 'document' : kindOf(f.name, f.size) }))).map((files, i) => filesPiece(files, i === 0 ? caption : undefined, msg.notify && i === 0))
+    const pieces = albums(msg.files.map(f => ({ ...f, kind: msg.asDocument ? "document" : kindOf(f.name, f.size) }))).map((files, i) => filesPiece(files, i === 0 ? caption : undefined, msg.notify && i === 0))
     if (this.outbox.add(msg.id, msg.sessionId, pieces)) {
       this.fileMessages.set(msg.id, { errors: [], ws })
       void this.pump(msg.sessionId)
@@ -510,7 +510,7 @@ ${msg.text}`)
   }
 
   private filesSent(id: string, sessionId: string, errors: string[], ws?: WS): void {
-    const msg: HubToPlugin = { type: 'filesSent', id, ...(errors.length ? { error: errors.join('; ') } : {}) }
+    const msg: HubToPlugin = { type: "filesSent", id, ...(errors.length ? { error: errors.join("; ") } : {}) }
     const target = ws && this.conns.has(ws) ? ws : this.connOf(sessionId)
     if (target) return this.send(target, msg)
     this.heldResults.set(sessionId, [...(this.heldResults.get(sessionId) ?? []), msg])
@@ -556,7 +556,7 @@ ${msg.text}`)
         } catch (e) {
           if (!this.running) break
           const kind = classify(e)
-          if (kind === 'rejected') {
+          if (kind === "rejected") {
             this.onRejected(item, e)
             continue
           }
@@ -564,16 +564,16 @@ ${msg.text}`)
           if (failures === 1) {
             const waiting = `${this.outbox.countOf(sessionId)} piece(s) wait`
             this.log.warn(
-              kind === 'setup'
+              kind === "setup"
                 ? `delivery to session ${sessionId} is blocked: ${e instanceof Error ? e.message : e} — fix the bot or group setup; ${waiting}, retrying every ${max / 1000} s`
                 : `delivery to session ${sessionId} failed (${e instanceof Error ? e.message : e}); ${waiting}, retrying`,
             )
           }
-          if (kind === 'setup') {
+          if (kind === "setup") {
             this.blocked.add(sessionId)
             this.maybeExit()
           }
-          await this.sleep(kind === 'setup' ? max : Math.min(base * 2 ** (failures - 1), max))
+          await this.sleep(kind === "setup" ? max : Math.min(base * 2 ** (failures - 1), max))
         }
       }
     } finally {
@@ -599,7 +599,7 @@ ${msg.text}`)
       return
     }
     const lost = item.files.filter(f => !existsSync(f.path))
-    if (lost.length) throw new LostFileError(`the queued copy is gone: ${lost.map(f => f.path).join(', ')}`)
+    if (lost.length) throw new LostFileError(`the queued copy is gone: ${lost.map(f => f.path).join(", ")}`)
     const files = await this.probeVideos(item)
     await this.sendToTopic(api, groupId, sessionId, thread => api.sendFiles(groupId, thread, files, item.text, item.entities, item.silent))
   }
@@ -608,10 +608,10 @@ ${msg.text}`)
   // with the queued piece; a thumbnail gone from disk is just not sent.
   private async probeVideos(item: OutItem): Promise<OutFile[]> {
     let files = item.files!
-    if (files.some(f => f.kind === 'video' && !f.video)) {
+    if (files.some(f => f.kind === "video" && !f.video)) {
       const tools = this.opts.videoTools ?? DEFAULT_VIDEO_TOOLS
       const probed: OutFile[] = []
-      for (const f of files) probed.push(f.kind === 'video' && !f.video ? { ...f, video: await probeVideo(f.path, f.name, tools, this.log) } : f)
+      for (const f of files) probed.push(f.kind === "video" && !f.video ? { ...f, video: await probeVideo(f.path, f.name, tools, this.log) } : f)
       this.outbox.setFiles(item.id, probed)
       files = probed
     }
@@ -628,9 +628,9 @@ ${msg.text}`)
       this.outbox.replace(item.id, textPieces(item.text, true).map((p, i) => ({ ...p, silent: item.silent || i > 0 })))
       return
     }
-    if (item.files?.some(f => f.kind === 'photo') && e instanceof TelegramError && /PHOTO_|IMAGE_PROCESS_FAILED/i.test(e.description)) {
+    if (item.files?.some(f => f.kind === "photo") && e instanceof TelegramError && /PHOTO_|IMAGE_PROCESS_FAILED/i.test(e.description)) {
       this.log.warn(`Telegram rejected photos for session ${item.sessionId} (${why}); sending them as documents`)
-      const files = item.files.map(f => (f.kind === 'photo' ? { ...f, kind: 'document' as const } : f))
+      const files = item.files.map(f => (f.kind === "photo" ? { ...f, kind: "document" as const } : f))
       const caption = { text: item.text, entities: item.entities ?? [] }
       this.outbox.replace(item.id, albums(files).map((g, i) => filesPiece(g, i === 0 ? caption : undefined, !item.silent && i === 0)))
       return
@@ -650,7 +650,7 @@ ${msg.text}`)
       this.log.error(`Telegram did not take files for session ${item.sessionId}: ${reason}\n--- files ---\n${names(item.files)}\n--- end ---`)
       this.fileMessages.get(messageOf(item.id))?.errors.push(`${names(item.files)}: ${reason}`)
       this.dropFiles(item.files)
-      this.outbox.replaceWithNotice(item.id, `⚠️ Telegram не принял ${item.files.length === 1 ? 'файл' : 'файлы'} ${names(item.files)}: ${reason}`)
+      this.outbox.replaceWithNotice(item.id, `⚠️ Telegram не принял ${item.files.length === 1 ? "файл" : "файлы"} ${names(item.files)}: ${reason}`)
       return
     }
     this.log.error(`Telegram rejected a message for session ${item.sessionId}: ${reason}\n--- text ---\n${item.text}\n--- end ---`)
@@ -667,10 +667,10 @@ ${msg.text}`)
         resolve()
       }
       const timer = setTimeout(() => {
-        this.abort.signal.removeEventListener('abort', onAbort)
+        this.abort.signal.removeEventListener("abort", onAbort)
         resolve()
       }, ms)
-      this.abort.signal.addEventListener('abort', onAbort, { once: true })
+      this.abort.signal.addEventListener("abort", onAbort, { once: true })
     })
   }
 
@@ -680,7 +680,7 @@ ${msg.text}`)
     if (!dir) return
     let files: string[]
     try {
-      files = readdirSync(dir).filter(f => f.endsWith('.json'))
+      files = readdirSync(dir).filter(f => f.endsWith(".json"))
     } catch {
       return
     }
@@ -688,10 +688,10 @@ ${msg.text}`)
       const path = join(dir, f)
       try {
         // Older plugins wrote text items without a type.
-        const items = JSON.parse(readFileSync(path, 'utf8')) as (Extract<PluginToHub, { type: 'sendFiles' }> | { type?: 'send'; id: string; sessionId: string; text: string; notify: boolean })[]
-        if (!Array.isArray(items)) throw new Error('not a list')
+        const items = JSON.parse(readFileSync(path, "utf8")) as (Extract<PluginToHub, { type: "sendFiles" }> | { type?: "send"; id: string; sessionId: string; text: string; notify: boolean })[]
+        if (!Array.isArray(items)) throw new Error("not a list")
         for (const it of items) {
-          if (it.type === 'sendFiles') this.enqueueFiles(it)
+          if (it.type === "sendFiles") this.enqueueFiles(it)
           else this.enqueue(it.sessionId, it.id, it.text, it.notify)
         }
         unlinkSync(path)
@@ -735,7 +735,7 @@ ${msg.text}`)
       if (!online) {
         try {
           const me = await api.getMe(this.abort.signal)
-          this.log.info(wasOnline ? 'Telegram polling works again' : `polling Telegram as @${me.username ?? me.id}`)
+          this.log.info(wasOnline ? "Telegram polling works again" : `polling Telegram as @${me.username ?? me.id}`)
           if (!wasOnline) {
             this.botUsername = me.username
             void this.registerCommands(api)
@@ -745,7 +745,7 @@ ${msg.text}`)
         } catch (e) {
           if (!this.running) return
           if (e instanceof TelegramError && e.code === 401) {
-            this.log.error('bot token rejected by Telegram (401 Unauthorized) — fix TELEGRAM_BOT_TOKEN in .env and restart the hub; not polling')
+            this.log.error("bot token rejected by Telegram (401 Unauthorized) — fix TELEGRAM_BOT_TOKEN in .env and restart the hub; not polling")
             return
           }
           this.log.warn(`Telegram unreachable (${e}); still trying`)
@@ -756,7 +756,7 @@ ${msg.text}`)
       let updates: Update[]
       try {
         updates = await api.getUpdates(offset, this.opts.pollTimeoutSec ?? 25, this.abort.signal)
-        if (failures) this.log.info('Telegram polling works again')
+        if (failures) this.log.info("Telegram polling works again")
         failures = 0
       } catch (e) {
         if (!this.running) return
@@ -768,7 +768,7 @@ ${msg.text}`)
         failures++
         const delay = Math.min((this.opts.pollRetryBaseMs ?? 1000) * failures, MAX_POLL_DELAY_MS)
         const conflict = e.code === 409
-        this.log.warn(`${conflict ? 'getUpdates 409 Conflict — another poller uses this bot token' : `getUpdates failed: ${e}`}; retry in ${delay}ms`)
+        this.log.warn(`${conflict ? "getUpdates 409 Conflict — another poller uses this bot token" : `getUpdates failed: ${e}`}; retry in ${delay}ms`)
         await Bun.sleep(delay)
         continue
       }
@@ -787,11 +787,11 @@ ${msg.text}`)
     const cfg = this.opts.config()
     const route = routeUpdate(u, cfg, this.store, id => this.isConnected(id))
     const m = u.message
-    if (route.action === 'ignore') {
-      if (m) this.log.info(`ignored update from chat ${m.chat.id} (${m.chat.type}${m.chat.title ? ` "${m.chat.title}"` : ''}), sender ${m.from?.id}: ${route.reason}`)
+    if (route.action === "ignore") {
+      if (m) this.log.info(`ignored update from chat ${m.chat.id} (${m.chat.type}${m.chat.title ? ` "${m.chat.title}"` : ""}), sender ${m.from?.id}: ${route.reason}`)
       return
     }
-    if (route.action === 'inactive') {
+    if (route.action === "inactive") {
       await api.sendMessage(cfg.groupId!, route.topicId, INACTIVE_TEXT, false).catch(e => this.log.warn(`inactive notice failed: ${e}`))
       return
     }
@@ -801,7 +801,7 @@ ${msg.text}`)
     if (cmd) return this.queueCommand(route.sessionId, cmd)
     this.setEnabled(route.sessionId, true)
     const { content, meta } = await this.inboundOf(api, m)
-    this.send(ws, { type: 'inbound', content, meta })
+    this.send(ws, { type: "inbound", content, meta })
     this.log.info(`message ${m.message_id} in topic ${route.topicId} → session ${route.sessionId}: ${shapeOf(m, content)}`)
   }
 
@@ -837,46 +837,46 @@ ${msg.text}`)
     }
     let content = m.text ?? m.caption ?? (m.rich_message ? await this.richContent(api, m.rich_message) : undefined)
     if (m.photo?.length) {
-      content ??= '(photo)'
+      content ??= "(photo)"
       const best = m.photo[m.photo.length - 1]!
       try {
         meta.image_path = await api.downloadFile(best.file_id, this.opts.inboxDir)
       } catch (e) {
         this.log.warn(`photo download failed: ${e}`)
-        attach('photo', best)
+        attach("photo", best)
       }
     } else if (m.document) {
       const name = safeName(m.document.file_name)
-      content ??= `(document: ${name ?? 'file'})`
-      attach('document', m.document, name)
+      content ??= `(document: ${name ?? "file"})`
+      attach("document", m.document, name)
     } else if (m.voice) {
-      content ??= '(voice message)'
-      attach('voice', m.voice)
+      content ??= "(voice message)"
+      attach("voice", m.voice)
     } else if (m.audio) {
       const name = safeName(m.audio.file_name)
-      content ??= `(audio: ${safeName(m.audio.title) ?? name ?? 'audio'})`
-      attach('audio', m.audio, name)
+      content ??= `(audio: ${safeName(m.audio.title) ?? name ?? "audio"})`
+      attach("audio", m.audio, name)
     } else if (m.video) {
-      content ??= '(video)'
-      attach('video', m.video, safeName(m.video.file_name))
+      content ??= "(video)"
+      attach("video", m.video, safeName(m.video.file_name))
     } else if (m.video_note) {
-      content ??= '(video note)'
-      attach('video_note', m.video_note)
+      content ??= "(video note)"
+      attach("video_note", m.video_note)
     } else if (m.sticker) {
-      content ??= `(sticker${m.sticker.emoji ? ` ${m.sticker.emoji}` : ''})`
-      attach('sticker', m.sticker)
+      content ??= `(sticker${m.sticker.emoji ? ` ${m.sticker.emoji}` : ""})`
+      attach("sticker", m.sticker)
     }
-    return { content: content ?? '', meta }
+    return { content: content ?? "", meta }
   }
 }
 
 // Queue item ids are `<plugin message id>#<n>`, replacements add `.<m>`.
 function messageOf(itemId: string): string {
-  return itemId.slice(0, itemId.lastIndexOf('#'))
+  return itemId.slice(0, itemId.lastIndexOf("#"))
 }
 
 function names(files: OutFile[]): string {
-  return files.map(f => f.name).join(', ')
+  return files.map(f => f.name).join(", ")
 }
 
 // Text in pieces of at most one plain message, silent; markdown: formatted
@@ -887,7 +887,7 @@ function textPieces(text: string, markdown: boolean): Piece[] {
 
 function filesPiece(files: OutFile[], caption: Formatted | undefined, loud: boolean): Piece {
   return {
-    text: caption?.text ?? '',
+    text: caption?.text ?? "",
     silent: !loud,
     files,
     ...(caption?.entities.length ? { entities: caption.entities } : {}),
@@ -897,14 +897,14 @@ function filesPiece(files: OutFile[], caption: Formatted | undefined, loud: bool
 // What a delivered message was, for the log: its kind, length and formatting,
 // never its text.
 function shapeOf(m: Message, content: string): string {
-  const kind = (['rich_message', 'photo', 'document', 'voice', 'audio', 'video', 'video_note', 'sticker'] as const).find(k => m[k]) ?? 'text'
+  const kind = (["rich_message", "photo", "document", "voice", "audio", "video", "video_note", "sticker"] as const).find(k => m[k]) ?? "text"
   const types = [...new Set((m.entities ?? m.caption_entities ?? []).map(e => e.type))]
-  return `${kind}, ${content.length} chars${types.length ? `, entities ${types.join(', ')}` : ''}`
+  return `${kind}, ${content.length} chars${types.length ? `, entities ${types.join(", ")}` : ""}`
 }
 
 // Uploader-controlled names land inside the <channel> tag; strip delimiters.
 function safeName(s: string | undefined): string | undefined {
-  return s?.replace(/[<>\[\]\r\n;"]/g, '_')
+  return s?.replace(/[<>\[\]\r\n;"]/g, "_")
 }
 
 export function projectName(cwd: string): string {

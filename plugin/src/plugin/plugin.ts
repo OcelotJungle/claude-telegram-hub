@@ -1,20 +1,20 @@
-import type { Logger } from '../shared/log.ts'
-import type { ChannelMeta, HubToPlugin } from '../shared/protocol.ts'
-import type { Outgoing } from '../transcript/relay.ts'
-import type { Titles } from '../transcript/tail.ts'
+import type { Logger } from "../shared/log.ts"
+import type { ChannelMeta, HubToPlugin } from "../shared/protocol.ts"
+import type { Outgoing } from "../transcript/relay.ts"
+import type { Titles } from "../transcript/tail.ts"
 
-import { randomUUID } from 'crypto'
-import { copyFileSync, mkdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
-import { basename, join, resolve } from 'path'
-import { isInside } from '../shared/config.ts'
-import { toTelegram } from '../shared/markdown.ts'
-import { MAX_CAPTION, MAX_UPLOAD } from '../shared/media.ts'
-import { PROTOCOL_VERSION } from '../shared/protocol.ts'
-import { transcriptPathFor } from '../transcript/locate.ts'
-import { parseRecord } from '../transcript/parse.ts'
-import { Relay } from '../transcript/relay.ts'
-import { effectiveTitle, readSessionTitles, TranscriptTailer } from '../transcript/tail.ts'
-import { HubClient } from './hub-client.ts'
+import { randomUUID } from "crypto"
+import { copyFileSync, mkdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs"
+import { basename, join, resolve } from "path"
+import { isInside } from "../shared/config.ts"
+import { toTelegram } from "../shared/markdown.ts"
+import { MAX_CAPTION, MAX_UPLOAD } from "../shared/media.ts"
+import { PROTOCOL_VERSION } from "../shared/protocol.ts"
+import { transcriptPathFor } from "../transcript/locate.ts"
+import { parseRecord } from "../transcript/parse.ts"
+import { Relay } from "../transcript/relay.ts"
+import { effectiveTitle, readSessionTitles, TranscriptTailer } from "../transcript/tail.ts"
+import { HubClient } from "./hub-client.ts"
 
 export type PluginOptions = {
   sessionId: string
@@ -42,19 +42,19 @@ export function isOwnTool(name: string): boolean {
 }
 
 // Called by our PostToolBatch hook (hooks/hooks.json), not by the agent.
-export const HOOK_NOTE_TOOL = 'tg_hook_note'
+export const HOOK_NOTE_TOOL = "tg_hook_note"
 
 const MODE_OFF_NOTE =
-  'tg-hub: Telegram mode is now OFF for this session, because the user typed a message in the terminal. ' +
-  'Your text is no longer relayed to Telegram, and tg_notify is not needed. ' +
-  'If that message asks to continue in Telegram, call tg_enable.'
+  "tg-hub: Telegram mode is now OFF for this session, because the user typed a message in the terminal. " +
+  "Your text is no longer relayed to Telegram, and tg_notify is not needed. " +
+  "If that message asks to continue in Telegram, call tg_enable."
 
 // A response cut by a lost connection: the agent is told to go on, as the
 // person would, while the mode is on and the person is away.
 export const CONTINUE_PROMPT =
-  'tg-hub: the connection to the API was lost mid-response (API Error: Connection lost mid-response), ' +
-  'so your last response may be incomplete. Continue from where you stopped.'
-export const CUT_NOTE = '🔁 Связь с API оборвалась посреди ответа — агент продолжает сам.'
+  "tg-hub: the connection to the API was lost mid-response (API Error: Connection lost mid-response), " +
+  "so your last response may be incomplete. Continue from where you stopped."
+export const CUT_NOTE = "🔁 Связь с API оборвалась посреди ответа — агент продолжает сам."
 // Cuts in a row, with no turn ending normally in between, before it stops
 // and calls the person: the network may be down for good.
 export const MAX_AUTO_CONTINUES = 10
@@ -89,7 +89,7 @@ export class PluginCore {
     this.transcriptPath = transcriptPathFor(opts.sessionId, opts.cwd, opts.configDir)
     this.client = new HubClient({
       port: opts.port,
-      hello: () => ({ type: 'hello', v: PROTOCOL_VERSION, windowKey: opts.windowKey, sessionId: this.sessionId, cwd: this.cwd }),
+      hello: () => ({ type: "hello", v: PROTOCOL_VERSION, windowKey: opts.windowKey, sessionId: this.sessionId, cwd: this.cwd }),
       spawnHub: opts.spawnHub,
       onMessage: m => this.onHubMessage(m),
       log: opts.log,
@@ -122,7 +122,7 @@ export class PluginCore {
         this.log.warn(`hub unreachable at shutdown: ${left.length} message(s) left in ${file}`)
         this.client.spawnHubNow()
       } catch (e) {
-        this.log.error(`could not spool ${left.length} message(s): ${e}\n${left.map(o => (o.type === 'sendFiles' ? `files: ${o.files.map(f => f.path).join(', ')}` : o.text)).join('\n---\n')}`)
+        this.log.error(`could not spool ${left.length} message(s): ${e}\n${left.map(o => (o.type === "sendFiles" ? `files: ${o.files.map(f => f.path).join(", ")}` : o.text)).join("\n---\n")}`)
       }
     }
     this.stop()
@@ -131,26 +131,26 @@ export class PluginCore {
   async enable(): Promise<string> {
     this.tailer?.pollNow()
     this.titles = readSessionTitles(this.transcriptPath)
-    const res = (await this.client.request('enable', { title: effectiveTitle(this.titles) ?? '' }, HUB_TELEGRAM_TIMEOUT_MS)) as {
+    const res = (await this.client.request("enable", { title: effectiveTitle(this.titles) ?? "" }, HUB_TELEGRAM_TIMEOUT_MS)) as {
       topicTitle: string
       created: boolean
     }
-    return `Telegram mode is on. Topic «${res.topicTitle}»${res.created ? ' was created' : ''}. Your text output is now relayed to it.`
+    return `Telegram mode is on. Topic «${res.topicTitle}»${res.created ? " was created" : ""}. Your text output is now relayed to it.`
   }
 
   async disable(): Promise<string> {
-    await this.client.request('disable')
-    return 'Telegram mode is off.'
+    await this.client.request("disable")
+    return "Telegram mode is off."
   }
 
-  notify(_kind: 'done' | 'ask'): string {
-    if (!this.enabled) return 'Telegram mode is off — nothing will be sent.'
+  notify(_kind: "done" | "ask"): string {
+    if (!this.enabled) return "Telegram mode is off — nothing will be sent."
     this.relay.markNotify()
-    return 'The final message of this turn will be sent with a notification. Write it now as your last text.'
+    return "The final message of this turn will be sent with a notification. Write it now as your last text."
   }
 
   async download(fileId: string): Promise<string> {
-    return String(await this.client.request('download', { fileId }, HUB_TELEGRAM_TIMEOUT_MS))
+    return String(await this.client.request("download", { fileId }, HUB_TELEGRAM_TIMEOUT_MS))
   }
 
   // Hook output after a batch of tool calls. Only the transcript knows who
@@ -160,15 +160,15 @@ export class PluginCore {
   // A subagent's batch (agentId set) leaves the note for the main agent.
   hookNote(agentId: string): string {
     this.tailer?.pollNow()
-    if (agentId || !this.noteOwed) return ''
+    if (agentId || !this.noteOwed) return ""
     this.noteOwed = false
-    return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolBatch', additionalContext: MODE_OFF_NOTE } })
+    return JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolBatch", additionalContext: MODE_OFF_NOTE } })
   }
 
   // Checks everything before sending anything, then hands the hub copies:
   // the agent may change or delete the originals right after the call.
-  async sendFiles(paths: string[], caption = '', asDocument = false): Promise<string> {
-    if (!paths.length) throw new Error('give at least one file path')
+  async sendFiles(paths: string[], caption = "", asDocument = false): Promise<string> {
+    if (!paths.length) throw new Error("give at least one file path")
     const files = paths.map(p => this.sendable(p))
     const shown = toTelegram(caption).text.length
     if (shown > MAX_CAPTION) throw new Error(`the caption is ${shown} characters, Telegram allows ${MAX_CAPTION} — shorten it or write the text as a normal message`)
@@ -189,7 +189,7 @@ export class PluginCore {
     this.tailer?.pollNow()
     this.flush(this.relay.textBeforeToolCall())
     const res = await this.client.sendFiles(
-      { type: 'sendFiles', id, sessionId: this.sessionId, files: queued, caption, notify: !this.enabled, ...(asDocument ? { asDocument } : {}) },
+      { type: "sendFiles", id, sessionId: this.sessionId, files: queued, caption, notify: !this.enabled, ...(asDocument ? { asDocument } : {}) },
       this.opts.fileWaitMs ?? HUB_TELEGRAM_TIMEOUT_MS,
     )
     if (!res) return `Telegram is not reachable right now: the ${files.length} file(s) are queued, and the hub will send them when it is.`
@@ -214,12 +214,12 @@ export class PluginCore {
       real = realpathSync(path)
       state = realpathSync(state)
     } catch {}
-    if (isInside(state, real) && !isInside(join(state, 'inbox'), real)) throw new Error(`${p}: refusing to send tg-hub state files`)
+    if (isInside(state, real) && !isInside(join(state, "inbox"), real)) throw new Error(`${p}: refusing to send tg-hub state files`)
     return { path, name: basename(path), size: st.size }
   }
 
   permissionRequest(p: { tool_name: string; description: string }): void {
-    if (this.enabled) this.client.send({ type: 'permission', toolName: p.tool_name, description: p.description })
+    if (this.enabled) this.client.send({ type: "permission", toolName: p.tool_name, description: p.description })
   }
 
   // /clear or /resume inside the window changed the session (from the
@@ -237,7 +237,7 @@ export class PluginCore {
     this.sessionId = sessionId
     this.cwd = cwd || this.cwd
     this.follow(transcriptPath)
-    this.client.send({ type: 'session', sessionId, cwd: this.cwd })
+    this.client.send({ type: "session", sessionId, cwd: this.cwd })
   }
 
   private follow(path: string): void {
@@ -257,19 +257,19 @@ export class PluginCore {
   private onRecord(rec: unknown): void {
     for (const ev of parseRecord(rec)) {
       this.flush(this.relay.feed(ev))
-      if (ev.kind === 'terminal_input' && this.enabled) {
-        this.client.send({ type: 'terminalInput' })
+      if (ev.kind === "terminal_input" && this.enabled) {
+        this.client.send({ type: "terminalInput" })
         this.setEnabled(false)
         this.noteOwed = true
-      } else if (ev.kind === 'unknown_thinking' && !this.reportedKinds.has(ev.blockKind)) {
+      } else if (ev.kind === "unknown_thinking" && !this.reportedKinds.has(ev.blockKind)) {
         this.reportedKinds.add(ev.blockKind)
         this.log.warn(`transcript: thinking block of unknown kind "${ev.blockKind}" with text — not relayed; the transcript format may have changed`)
-      } else if (ev.kind === 'title') {
+      } else if (ev.kind === "title") {
         const before = effectiveTitle(this.titles)
         this.titles[ev.source] = ev.title
         const after = effectiveTitle(this.titles)
-        if (after && after !== before) this.client.send({ type: 'title', title: after })
-      } else if (ev.kind === 'turn_end') {
+        if (after && after !== before) this.client.send({ type: "title", title: after })
+      } else if (ev.kind === "turn_end") {
         if (ev.cut) this.responseCut()
         else this.cuts = 0
       }
@@ -286,7 +286,7 @@ export class PluginCore {
       return
     }
     this.client.enqueue(this.sessionId, CUT_NOTE, false)
-    this.opts.emitChannel(CONTINUE_PROMPT, { user: 'tg-hub', reason: 'response_cut' })
+    this.opts.emitChannel(CONTINUE_PROMPT, { user: "tg-hub", reason: "response_cut" })
   }
 
   private flush(out: Outgoing[]): void {
@@ -302,16 +302,16 @@ export class PluginCore {
 
   private onHubMessage(m: HubToPlugin): void {
     switch (m.type) {
-      case 'state':
+      case "state":
         // Turned off elsewhere (tg_disable, another window): first relay what
         // the transcript already holds, written while the mode was on.
         if (!m.enabled && this.enabled) this.tailer?.pollNow()
         this.setEnabled(m.enabled)
         return
-      case 'inbound':
+      case "inbound":
         this.opts.emitChannel(m.content, m.meta)
         return
-      case 'switchSession':
+      case "switchSession":
         this.switchSession(m.sessionId, m.transcriptPath, m.cwd)
         return
     }

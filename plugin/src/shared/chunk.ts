@@ -1,4 +1,4 @@
-import type { Entity, Formatted } from './markdown.ts'
+import type { Entity, Formatted } from "./markdown.ts"
 
 // Telegram caps a message at 4096 chars of plain text. Split long text,
 // preferring paragraph, then line, then word boundaries past half the limit;
@@ -17,12 +17,12 @@ export function chunk(f: Formatted, limit = MAX_MESSAGE): Formatted[] {
       return out
     }
     const end = start + limit
-    const para = text.lastIndexOf('\n\n', end)
-    const line = text.lastIndexOf('\n', end)
-    const space = text.lastIndexOf(' ', end)
+    const para = text.lastIndexOf("\n\n", end)
+    const line = text.lastIndexOf("\n", end)
+    const space = text.lastIndexOf(" ", end)
     const half = start + limit / 2
     let cut = para > half ? para : line > half ? line : space > half ? space : end
-    if (/[\uD800-\uDBFF]/.test(text[cut - 1] ?? '')) cut--
+    if (/[\uD800-\uDBFF]/.test(text[cut - 1] ?? "")) cut--
     piece(f, start, cut, out)
     start = cut
   }

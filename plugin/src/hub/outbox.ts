@@ -1,10 +1,10 @@
-import type { Logger } from '../shared/log.ts'
-import type { Entity } from '../shared/markdown.ts'
-import type { OutFile } from '../shared/media.ts'
-import type { Block } from './rich-out.ts'
+import type { Logger } from "../shared/log.ts"
+import type { Entity } from "../shared/markdown.ts"
+import type { OutFile } from "../shared/media.ts"
+import type { Block } from "./rich-out.ts"
 
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'fs'
-import { dirname } from 'path'
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "fs"
+import { dirname } from "path"
 
 // One Telegram send for a session's topic: a piece of text at most one
 // message long, or files (one file or an album) with text as their caption.
@@ -31,13 +31,13 @@ export class Outbox {
   ) {
     let raw: string
     try {
-      raw = readFileSync(file, 'utf8')
+      raw = readFileSync(file, "utf8")
     } catch {
       return
     }
     try {
       const parsed = JSON.parse(raw) as Partial<Data>
-      if (!Array.isArray(parsed.items) || !Array.isArray(parsed.seen)) throw new Error('unexpected shape')
+      if (!Array.isArray(parsed.items) || !Array.isArray(parsed.seen)) throw new Error("unexpected shape")
       this.data = { items: parsed.items, seen: parsed.seen }
     } catch (e) {
       const aside = `${file}.corrupt-${Date.now()}`
@@ -128,7 +128,7 @@ export class Outbox {
   private save(): void {
     mkdirSync(dirname(this.file), { recursive: true })
     const tmp = `${this.file}.tmp`
-    const fd = openSync(tmp, 'w')
+    const fd = openSync(tmp, "w")
     try {
       writeSync(fd, JSON.stringify(this.data))
       fsyncSync(fd)

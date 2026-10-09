@@ -1,7 +1,7 @@
 // What the plugin's function hooks module does with commands from the topic.
 // The module runs inside Claude Code with no Node: everything outside comes
 // in as Deps (the engine's `$` calls), so this file imports nothing but types.
-import type { CommandReply, TopicCommand } from '../shared/protocol.ts'
+import type { CommandReply, TopicCommand } from "../shared/protocol.ts"
 
 // The part of the engine's SessionUsage that /info shows.
 export type Usage = {
@@ -64,13 +64,13 @@ export class Runner {
     const asked = this.compacting.shift()
     if (!asked) return
     if (c.skip !== undefined) return this.reply(asked, `⚠️ Компакт пропущен: ${c.skip}`, true)
-    const sizes = c.tokensBefore !== undefined && c.tokensAfter !== undefined ? `: ${tokens(c.tokensBefore)} → ${tokens(c.tokensAfter)} токенов` : ''
+    const sizes = c.tokensBefore !== undefined && c.tokensAfter !== undefined ? `: ${tokens(c.tokensBefore)} → ${tokens(c.tokensAfter)} токенов` : ""
     await this.reply(asked, `✅ Контекст сжат${sizes}.`, true)
   }
 
   private async execute(sessionId: string, cmd: TopicCommand): Promise<void> {
     const to = { sessionId, id: cmd.id }
-    if (cmd.name === 'info') {
+    if (cmd.name === "info") {
       try {
         await this.reply(to, infoText(await this.deps.usage(), this.deps.now()), true)
       } catch (e) {
@@ -81,7 +81,7 @@ export class Runner {
     const window = autocompactArg(cmd.args)
     if (window !== undefined) {
       try {
-        const res = await this.deps.run('autocompact', window)
+        const res = await this.deps.run("autocompact", window)
         await this.reply(to, res.text?.trim() || `✅ /autocompact ${window} выполнена.`, true)
       } catch (e) {
         await this.reply(to, `⚠️ /autocompact ${window} не выполнена: ${message(e)}`, true)
@@ -89,9 +89,9 @@ export class Runner {
       return
     }
     this.compacting.push(to)
-    await this.reply(to, '🗜 Компакт запущен: начнётся, как только агент закончит текущий ход.', false)
+    await this.reply(to, "🗜 Компакт запущен: начнётся, как только агент закончит текущий ход.", false)
     try {
-      const res = await this.deps.run('compact', cmd.args)
+      const res = await this.deps.run("compact", cmd.args)
       // The command printed something and no compaction reported yet: it
       // ended without one (nothing to compact). Silent: the compaction hook
       // reports.
@@ -126,7 +126,7 @@ export class Runner {
   private async send(): Promise<void> {
     while (this.unsent.length) {
       try {
-        const res = await this.deps.http(`${this.base}/reply`, { method: 'POST', body: JSON.stringify(this.unsent[0]) })
+        const res = await this.deps.http(`${this.base}/reply`, { method: "POST", body: JSON.stringify(this.unsent[0]) })
         if (res.status !== 200) return
       } catch {
         return
@@ -136,35 +136,35 @@ export class Runner {
   }
 }
 
-const LIMIT_NAMES: Record<string, string> = { five_hour: '5 часов', seven_day: 'Неделя' }
+const LIMIT_NAMES: Record<string, string> = { five_hour: "5 часов", seven_day: "Неделя" }
 
 export function infoText(u: Usage, now: number): string {
   const lines: string[] = []
-  if (!u.rateLimits.length) lines.push('Лимиты: нет данных — появятся после первого ответа модели')
+  if (!u.rateLimits.length) lines.push("Лимиты: нет данных — появятся после первого ответа модели")
   else {
-    lines.push('**Лимиты**')
-    const order = (kind: string) => (kind === 'five_hour' ? 0 : kind === 'seven_day' ? 1 : 2)
+    lines.push("**Лимиты**")
+    const order = (kind: string) => (kind === "five_hour" ? 0 : kind === "seven_day" ? 1 : 2)
     for (const l of [...u.rateLimits].sort((a, b) => order(a.kind) - order(b.kind))) {
       const left = l.resetsAt ? Date.parse(l.resetsAt) - now : NaN
-      lines.push(`${LIMIT_NAMES[l.kind] ?? l.kind}: ${l.percentUsed}%${left > 0 ? ` (сброс через ${duration(left)})` : ''}`)
+      lines.push(`${LIMIT_NAMES[l.kind] ?? l.kind}: ${l.percentUsed}%${left > 0 ? ` (сброс через ${duration(left)})` : ""}`)
     }
   }
-  lines.push('', '**Контекст**')
+  lines.push("", "**Контекст**")
   const b = u.context.breakdown
   // The status line's figure; after a compaction it is gone until the next
   // model response, and the local estimate stands in.
   const used = u.context.tokens ?? b?.totalTokens
-  if (used === undefined) lines.push('Сейчас: нет данных')
+  if (used === undefined) lines.push("Сейчас: нет данных")
   else lines.push(u.context.tokens !== undefined ? `Сейчас: ${tokens(used)} токенов` : `Сейчас: ≈${tokens(used)} токенов (оценка)`)
-  if (!b) return lines.join('\n')
+  if (!b) return lines.join("\n")
   if (!b.isAutoCompactEnabled) {
-    lines.push('Автокомпакт: выключен')
-    return lines.join('\n')
+    lines.push("Автокомпакт: выключен")
+    return lines.join("\n")
   }
   const limit = b.autoCompactThreshold ?? b.rawMaxTokens
-  lines.push(`Автокомпакт: окно ${tokens(b.rawMaxTokens)}${b.autoCompactThreshold !== undefined ? `, срабатывает на ${tokens(b.autoCompactThreshold)}` : ''}`)
+  lines.push(`Автокомпакт: окно ${tokens(b.rawMaxTokens)}${b.autoCompactThreshold !== undefined ? `, срабатывает на ${tokens(b.autoCompactThreshold)}` : ""}`)
   if (used !== undefined) lines.push(`Использовано ${Math.round((used / limit) * 100)}% до автокомпакта`)
-  return lines.join('\n')
+  return lines.join("\n")
 }
 
 export function tokens(n: number): string {
@@ -177,10 +177,10 @@ export function tokens(n: number): string {
 // arguments are instructions for the summary.
 export function autocompactArg(args: string): string | undefined {
   const a = args.trim().toLowerCase()
-  if (a === 'auto') return a
+  if (a === "auto") return a
   const m = a.match(/^(\d+(?:\.\d+)?)([km]?)$/)
   if (!m) return undefined
-  return String(Math.round(Number(m[1]) * (m[2] === 'k' ? 1e3 : m[2] === 'm' ? 1e6 : 1)))
+  return String(Math.round(Number(m[1]) * (m[2] === "k" ? 1e3 : m[2] === "m" ? 1e6 : 1)))
 }
 
 function duration(ms: number): string {

@@ -1,12 +1,12 @@
-import type { Token, Tokens } from 'marked'
+import type { Token, Tokens } from "marked"
 
-import { decodeHTML } from 'entities'
-import { Lexer } from 'marked'
+import { decodeHTML } from "entities"
+import { Lexer } from "marked"
 
 // A Bot API MessageEntity. Offsets and lengths count UTF-16 code units, as
 // JavaScript string indices do.
 export type Entity = {
-  type: 'bold' | 'italic' | 'strikethrough' | 'code' | 'pre' | 'text_link' | 'blockquote'
+  type: "bold" | "italic" | "strikethrough" | "code" | "pre" | "text_link" | "blockquote"
   offset: number
   length: number
   url?: string
@@ -16,22 +16,22 @@ export type Entity = {
 // Plain text plus the entities that format it.
 export type Formatted = { text: string; entities: Entity[] }
 
-const INDENT = '   '
+const INDENT = "   "
 
 // Writes plain text and records entities over it. Text inside a list item
 // gets the item's indent at every line start.
 class Builder {
-  text = ''
+  text = ""
   private ents: { e: Entity; order: number }[] = []
-  private indent = ''
+  private indent = ""
   private lineStart = true
   quoteDepth = 0
   listDepth = 0
 
   put(s: string): void {
     for (const part of s.split(/(\n)/)) {
-      if (part === '\n') {
-        this.text += '\n'
+      if (part === "\n") {
+        this.text += "\n"
         this.lineStart = true
       } else if (part) {
         if (this.lineStart) this.text += this.indent
@@ -41,7 +41,7 @@ class Builder {
     }
   }
 
-  wrap(e: Omit<Entity, 'offset' | 'length'>, fn: () => void): void {
+  wrap(e: Omit<Entity, "offset" | "length">, fn: () => void): void {
     // The indent owed at a line start goes before the entity, not into it.
     const start = this.text.length + (this.lineStart ? this.indent.length : 0)
     fn()
@@ -76,7 +76,7 @@ class Builder {
 // entities: nothing to escape, and a long text splits like plain text.
 export function toTelegram(md: string): Formatted {
   const b = new Builder()
-  blocks(b, new Lexer({ gfm: true }).lex(md), '\n\n')
+  blocks(b, new Lexer({ gfm: true }).lex(md), "\n\n")
   return b.result()
 }
 
@@ -88,7 +88,7 @@ function openable(url: string): boolean {
 function blocks(b: Builder, tokens: Token[], gap: string): void {
   let first = true
   for (const t of tokens) {
-    if (t.type === 'space' || t.type === 'def' || t.type === 'checkbox') continue
+    if (t.type === "space" || t.type === "def" || t.type === "checkbox") continue
     if (!first) b.put(gap)
     first = false
     block(b, t)
@@ -97,45 +97,45 @@ function blocks(b: Builder, tokens: Token[], gap: string): void {
 
 function block(b: Builder, t: Token): void {
   switch (t.type) {
-    case 'paragraph':
+    case "paragraph":
       return inline(b, t.tokens ?? [])
-    case 'text':
+    case "text":
       return t.tokens ? inline(b, t.tokens) : b.put(decodeHTML(t.text))
-    case 'heading':
-      return b.wrap({ type: 'bold' }, () => inline(b, t.tokens ?? []))
-    case 'code': {
+    case "heading":
+      return b.wrap({ type: "bold" }, () => inline(b, t.tokens ?? []))
+    case "code": {
       const language = (t as Tokens.Code).lang?.split(/\s/)[0]
-      return b.wrap({ type: 'pre', ...(language ? { language } : {}) }, () => b.put(t.text))
+      return b.wrap({ type: "pre", ...(language ? { language } : {}) }, () => b.put(t.text))
     }
-    case 'blockquote':
+    case "blockquote":
       // Telegram does not nest blockquotes.
-      if (b.quoteDepth) return blocks(b, t.tokens ?? [], '\n\n')
+      if (b.quoteDepth) return blocks(b, t.tokens ?? [], "\n\n")
       b.quoteDepth++
-      b.wrap({ type: 'blockquote' }, () => blocks(b, t.tokens ?? [], '\n\n'))
+      b.wrap({ type: "blockquote" }, () => blocks(b, t.tokens ?? [], "\n\n"))
       b.quoteDepth--
       return
-    case 'list':
+    case "list":
       return list(b, t as Tokens.List)
-    case 'table':
+    case "table":
       return table(b, t as Tokens.Table)
-    case 'hr':
-      return b.put('———')
-    case 'html':
-      return b.put(t.text.replace(/\n+$/, ''))
+    case "hr":
+      return b.put("———")
+    case "html":
+      return b.put(t.text.replace(/\n+$/, ""))
     default:
-      return b.put('text' in t && typeof t.text === 'string' ? t.text : t.raw)
+      return b.put("text" in t && typeof t.text === "string" ? t.text : t.raw)
   }
 }
 
 function list(b: Builder, t: Tokens.List): void {
-  const start = typeof t.start === 'number' ? t.start : 1
+  const start = typeof t.start === "number" ? t.start : 1
   t.items.forEach((item, i) => {
-    if (i) b.put(t.loose ? '\n\n' : '\n')
-    const marker = item.task ? (item.checked ? '☑' : '☐') : t.ordered ? `${start + i}.` : b.listDepth % 2 ? '◦' : '•'
+    if (i) b.put(t.loose ? "\n\n" : "\n")
+    const marker = item.task ? (item.checked ? "☑" : "☐") : t.ordered ? `${start + i}.` : b.listDepth % 2 ? "◦" : "•"
     b.put(`${marker} `)
     b.indented(() => {
       b.listDepth++
-      blocks(b, item.tokens, item.loose ? '\n\n' : '\n')
+      blocks(b, item.tokens, item.loose ? "\n\n" : "\n")
       b.listDepth--
     })
   })
@@ -147,13 +147,13 @@ function table(b: Builder, t: Tokens.Table): void {
   const widths = t.header.map((_, i) => Math.max(...rows.map(r => r[i]?.length ?? 0)))
   const pad = (s: string, i: number) => {
     const room = widths[i]! - s.length
-    if (t.align[i] === 'right') return ' '.repeat(room) + s
-    if (t.align[i] === 'center') return ' '.repeat(Math.floor(room / 2)) + s + ' '.repeat(Math.ceil(room / 2))
-    return s + ' '.repeat(room)
+    if (t.align[i] === "right") return " ".repeat(room) + s
+    if (t.align[i] === "center") return " ".repeat(Math.floor(room / 2)) + s + " ".repeat(Math.ceil(room / 2))
+    return s + " ".repeat(room)
   }
-  const line = (r: string[]) => r.map((c, i) => pad(c, i)).join(' | ').trimEnd()
-  const lines = [line(rows[0]!), widths.map(w => '-'.repeat(w)).join('-+-'), ...rows.slice(1).map(line)]
-  b.wrap({ type: 'pre' }, () => b.put(lines.join('\n')))
+  const line = (r: string[]) => r.map((c, i) => pad(c, i)).join(" | ").trimEnd()
+  const lines = [line(rows[0]!), widths.map(w => "-".repeat(w)).join("-+-"), ...rows.slice(1).map(line)]
+  b.wrap({ type: "pre" }, () => b.put(lines.join("\n")))
 }
 
 function plain(tokens: Token[]): string {
@@ -165,39 +165,39 @@ function plain(tokens: Token[]): string {
 function inline(b: Builder, tokens: Token[]): void {
   for (const t of tokens) {
     switch (t.type) {
-      case 'text':
+      case "text":
         if (t.tokens) inline(b, t.tokens)
         else b.put(decodeHTML(t.text))
         break
-      case 'escape':
+      case "escape":
         b.put(t.text)
         break
-      case 'strong':
-        b.wrap({ type: 'bold' }, () => inline(b, t.tokens ?? []))
+      case "strong":
+        b.wrap({ type: "bold" }, () => inline(b, t.tokens ?? []))
         break
-      case 'em':
-        b.wrap({ type: 'italic' }, () => inline(b, t.tokens ?? []))
+      case "em":
+        b.wrap({ type: "italic" }, () => inline(b, t.tokens ?? []))
         break
-      case 'del':
-        b.wrap({ type: 'strikethrough' }, () => inline(b, t.tokens ?? []))
+      case "del":
+        b.wrap({ type: "strikethrough" }, () => inline(b, t.tokens ?? []))
         break
-      case 'codespan':
-        b.wrap({ type: 'code' }, () => b.put(t.text))
+      case "codespan":
+        b.wrap({ type: "code" }, () => b.put(t.text))
         break
-      case 'br':
-        b.put('\n')
+      case "br":
+        b.put("\n")
         break
-      case 'link':
+      case "link":
         link(b, t.href, () => inline(b, t.tokens ?? []), plain(t.tokens ?? []))
         break
-      case 'image': {
+      case "image": {
         const label = t.text || t.href
         link(b, t.href, () => b.put(label), label)
         break
       }
-      case 'checkbox':
+      case "checkbox":
         break
-      case 'html':
+      case "html":
         b.put(t.text)
         break
       default:
@@ -210,7 +210,7 @@ function inline(b: Builder, tokens: Token[]): void {
 // itself. A target Telegram cannot open stays visible after the text.
 function link(b: Builder, href: string, content: () => void, label: string): void {
   if (label === href || `mailto:${label}` === href) return content()
-  if (openable(href)) return b.wrap({ type: 'text_link', url: href }, content)
+  if (openable(href)) return b.wrap({ type: "text_link", url: href }, content)
   content()
   b.put(` (${href})`)
 }
