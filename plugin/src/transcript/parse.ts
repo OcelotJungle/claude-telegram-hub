@@ -2,6 +2,10 @@
 // Record shapes: see "Результаты проверки" in the design spec.
 import { arr, field, isObject } from "../shared/guards.ts";
 
+// The block kind sits near the start of a thinking signature; this much of
+// its base64 covers it.
+const SIGNATURE_HEAD_CHARS = 64;
+
 export type TranscriptEvent =
   | { kind: "text"; text: string; messageId: string }
   | { kind: "tool_use"; name: string; messageId: string }
@@ -72,7 +76,7 @@ function parseAssistant(r: Rec): TranscriptEvent[] {
 // ("thinking" or "narration"); observed in Claude Code with the model.
 export function thinkingKind(signature: unknown): string | undefined {
   if (typeof signature !== "string") return undefined;
-  const head = Buffer.from(signature.slice(0, 64), "base64").toString("latin1");
+  const head = Buffer.from(signature.slice(0, SIGNATURE_HEAD_CHARS), "base64").toString("latin1");
   const m = head.match(/\x42([\x01-\x20])([a-z_]+)/);
   const [, size, kind] = m ?? [];
   return size !== undefined && kind !== undefined && kind.length === size.charCodeAt(0) ? kind : undefined;

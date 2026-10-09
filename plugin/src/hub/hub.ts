@@ -29,6 +29,23 @@ import { richPhotos, richToMarkdown } from "./rich.ts";
 import { richPieces } from "./rich-out.ts";
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath } from "./video.ts";
 
+const INACTIVE_TEXT = "сессия сейчас не активна";
+const MS_PER_SECOND = 1000;
+const HOOK_TTL_MS = 60_000;
+const SPOOL_SCAN_MS = 5000;
+const POLL_TIMEOUT_SEC = 25;
+const POLL_RETRY_BASE_MS = 1000;
+const MAX_POLL_DELAY_MS = 15_000;
+const SEND_RETRY_BASE_MS = 1000;
+const SEND_RETRY_MAX_MS = 30_000;
+const COMMAND_PICKUP_MS = 10_000;
+// How much of a message the hub cannot read goes into the log.
+const LOGGED_MESSAGE_CHARS = 200;
+const BOT_COMMANDS = [
+  { command: "info", description: "Лимиты и контекст сессии" },
+  { command: "compact", description: "Сжать контекст; /compact N — окно автокомпакта" },
+];
+
 type Conn = { windowKey?: string; sessionId?: string; cwd?: string };
 type WS = ServerWebSocket<Conn>;
 
@@ -58,19 +75,9 @@ export type HubOptions = {
   onExit(): void;
 };
 
-const INACTIVE_TEXT = "сессия сейчас не активна";
-const HOOK_TTL_MS = 60_000;
-const MAX_POLL_DELAY_MS = 15_000;
-const COMMAND_PICKUP_MS = 10_000;
-// How much of a message the hub cannot read goes into the log.
-const LOGGED_MESSAGE_CHARS = 200;
 // A spool file: what a closing window could not hand to a hub. Older plugins
 // wrote text items without a type.
 const spoolItems = z.array(z.union([sendFilesMessage, sendMessage.extend({ type: z.literal("send").optional(), sessionId: z.string() })]));
-const BOT_COMMANDS = [
-  { command: "info", description: "Лимиты и контекст сессии" },
-  { command: "compact", description: "Сжать контекст; /compact N — окно автокомпакта" },
-];
 
 // Delivery cannot work until the user fixes the setup: no token, no groupId,
 // the bot is not in the group or may not write there.
@@ -149,7 +156,7 @@ export class Hub {
     for (const item of this.outbox.items()) if (item.files) this.fileMessages.set(messageOf(item.id), { errors: [] });
     for (const sid of this.outbox.sessions()) void this.pump(sid);
     this.ingestSpool();
-    this.spoolTimer = setInterval(() => this.ingestSpool(), this.opts.spoolScanMs ?? 5000);
+    this.spoolTimer = setInterval(() => this.ingestSpool(), this.opts.spoolScanMs ?? SPOOL_SCAN_MS);
     this.armIdle();
     if (this.opts.api) void this.pollLoop(this.opts.api);
     else this.log.error("no TELEGRAM_BOT_TOKEN — not polling Telegram");
@@ -209,7 +216,7 @@ export class Hub {
     const timer = setTimeout(() => {
       this.commands.set(sessionId, (this.commands.get(sessionId) ?? []).filter(e => e.cmd !== cmd));
       this.log.warn(`/${cmd.name} for session ${sessionId} was not taken in ${ms} ms`);
-      this.enqueue(sessionId, `cmd-${cmd.id}-lost`, `⚠️ /${cmd.name} не выполнена: окно не забрало её за ${ms / 1000} с. Команды выполняет модуль плагина — перезапусти окно.`, true, false);
+      this.enqueue(sessionId, `cmd-${cmd.id}-lost`, `⚠️ /${cmd.name} не выполнена: окно не забрало её за ${ms / MS_PER_SECOND} с. Команды выполняет модуль плагина — перезапусти окно.`, true, false);
     }, ms);
     this.commands.set(sessionId, [...(this.commands.get(sessionId) ?? []), { cmd, timer }]);
     this.log.info(`/${cmd.name} for session ${sessionId}`);
@@ -543,8 +550,8 @@ ${msg.text}`);
   private async pump(sessionId: string): Promise<void> {
     if (this.pumping.has(sessionId)) return;
     this.pumping.add(sessionId);
-    const base = this.opts.sendRetryBaseMs ?? 1000;
-    const max = this.opts.sendRetryMaxMs ?? 30_000;
+    const base = this.opts.sendRetryBaseMs ?? SEND_RETRY_BASE_MS;
+    const max = this.opts.sendRetryMaxMs ?? SEND_RETRY_MAX_MS;
     let failures = 0;
     try {
       while (this.running) {
@@ -754,13 +761,13 @@ ${msg.text}`);
             return;
           }
           this.log.warn(`Telegram unreachable (${e}); still trying`);
-          await Bun.sleep(this.opts.pollRetryBaseMs ?? 1000);
+          await Bun.sleep(this.opts.pollRetryBaseMs ?? POLL_RETRY_BASE_MS);
           continue;
         }
       }
       let updates: Update[];
       try {
-        updates = await api.getUpdates(offset, this.opts.pollTimeoutSec ?? 25, this.abort.signal);
+        updates = await api.getUpdates(offset, this.opts.pollTimeoutSec ?? POLL_TIMEOUT_SEC, this.abort.signal);
         if (failures) this.log.info("Telegram polling works again");
         failures = 0;
       } catch (e) {
@@ -771,7 +778,7 @@ ${msg.text}`);
           continue;
         }
         failures++;
-        const delay = Math.min((this.opts.pollRetryBaseMs ?? 1000) * failures, MAX_POLL_DELAY_MS);
+        const delay = Math.min((this.opts.pollRetryBaseMs ?? POLL_RETRY_BASE_MS) * failures, MAX_POLL_DELAY_MS);
         const conflict = e.code === 409;
         this.log.warn(`${conflict ? "getUpdates 409 Conflict — another poller uses this bot token" : `getUpdates failed: ${e}`}; retry in ${delay}ms`);
         await Bun.sleep(delay);
@@ -831,7 +838,7 @@ ${msg.text}`);
       message_id: String(m.message_id),
       user: m.from?.username ?? String(m.from?.id),
       user_id: String(m.from?.id),
-      ts: new Date(m.date * 1000).toISOString(),
+      ts: new Date(m.date * MS_PER_SECOND).toISOString(),
     };
     const attach = (kind: string, f: { file_id: string; file_size?: number; mime_type?: string }, name?: string) => {
       meta.attachment_kind = kind;

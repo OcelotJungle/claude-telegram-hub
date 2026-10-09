@@ -10,6 +10,14 @@ import { isMarked } from "../shared/markdown.ts";
 // is: Telegram's own Markdown parser would drop unknown tags, join lines and
 // make formulas of $…$.
 
+// Telegram cuts Cyrillic text short of its documented 32768 characters, near
+// 35000 bytes, without an error; a piece stays well below.
+export const MAX_RICH_BYTES = 30_000;
+// Every block counts, nested ones, list items and table rows included.
+export const MAX_RICH_BLOCKS = 500;
+// Between the Markdown of the top-level blocks of a piece.
+const BLOCK_SEPARATOR = "\n\n";
+
 // The blocks made here. Not @gramio/types: it leaves out the plain string and
 // the array forms of RichText that the Bot API allows.
 export type RichText =
@@ -64,12 +72,6 @@ export const blockSchema: z.ZodType<Block> = z.lazy(() =>
   ]),
 );
 
-// Telegram cuts Cyrillic text short of its documented 32768 characters, near
-// 35000 bytes, without an error; a piece stays well below.
-export const MAX_RICH_BYTES = 30_000;
-// Every block counts, nested ones, list items and table rows included.
-export const MAX_RICH_BLOCKS = 500;
-
 // One rich message: its Markdown source and blocks. A single block too big
 // for a rich message has no blocks and goes as plain formatted text.
 export type RichPiece = { text: string; blocks?: Block[] };
@@ -84,7 +86,7 @@ export function richPieces(md: string): RichPiece[] {
   const out: RichPiece[] = [];
   let group: { raw: string[]; blocks: Block[]; bytes: number; count: number } | undefined;
   const flush = () => {
-    if (group) out.push({ text: group.raw.join("\n\n"), blocks: group.blocks });
+    if (group) out.push({ text: group.raw.join(BLOCK_SEPARATOR), blocks: group.blocks });
     group = undefined;
   };
   for (const t of new Lexer({ gfm: true }).lex(md)) {
@@ -98,11 +100,11 @@ export function richPieces(md: string): RichPiece[] {
       out.push({ text: raw });
       continue;
     }
-    if (group && (group.bytes + 2 + bytes > MAX_RICH_BYTES || group.count + count > MAX_RICH_BLOCKS)) flush();
-    group ??= { raw: [], blocks: [], bytes: -2, count: 0 };
+    if (group && (group.bytes + BLOCK_SEPARATOR.length + bytes > MAX_RICH_BYTES || group.count + count > MAX_RICH_BLOCKS)) flush();
+    group ??= { raw: [], blocks: [], bytes: -BLOCK_SEPARATOR.length, count: 0 };
     group.raw.push(raw);
     group.blocks.push(...made);
-    group.bytes += 2 + bytes;
+    group.bytes += BLOCK_SEPARATOR.length + bytes;
     group.count += count;
   }
   flush();

@@ -7,11 +7,21 @@ import type { Block } from "./rich-out.ts";
 import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
+import { API_BASE } from "../shared/config.ts";
 import { field } from "../shared/guards.ts";
 import { nullLogger } from "../shared/log.ts";
 
 const MS_PER_SECOND = 1000;
+const MAX_ATTEMPTS = 5;
+const BASE_DELAY_MS = 1000;
+const MAX_DELAY_MS = 15_000;
+const ATTEMPT_TIMEOUT_MS = 5000;
+const NETWORK_RETRY_MS = 300;
+const DEADLINE_MS = 120_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
+// An upload attempt may take as long as sending its bytes at this rate
+// (64 KB/s), on top of the usual attempt timeout.
+const UPLOAD_BYTES_PER_MS = 64;
 
 // Bot API types, generated from its documentation.
 export type Message = TelegramMessage;
@@ -56,11 +66,6 @@ export function isThreadNotFound(e: unknown): boolean {
   return e instanceof TelegramError && e.code === 400 && /thread not found|TOPIC_DELETED|TOPIC_ID_INVALID/i.test(e.description);
 }
 
-const MAX_DELAY_MS = 15_000;
-// An upload attempt may take as long as sending its bytes at this rate
-// (64 KB/s), on top of the usual attempt timeout.
-const UPLOAD_BYTES_PER_MS = 64;
-
 // A request body: JSON params, or a multipart form built anew for each attempt.
 type Body = object | (() => FormData);
 
@@ -90,13 +95,13 @@ export class TelegramApi {
   private deadlineMs: number;
 
   constructor(private opts: ApiOptions) {
-    this.base = opts.base ?? "https://api.telegram.org";
+    this.base = opts.base ?? API_BASE;
     this.log = opts.log ?? nullLogger;
-    this.maxAttempts = opts.maxAttempts ?? 5;
-    this.baseDelayMs = opts.baseDelayMs ?? 1000;
-    this.attemptTimeoutMs = opts.attemptTimeoutMs ?? 5000;
-    this.networkRetryMs = opts.networkRetryMs ?? 300;
-    this.deadlineMs = opts.deadlineMs ?? 120_000;
+    this.maxAttempts = opts.maxAttempts ?? MAX_ATTEMPTS;
+    this.baseDelayMs = opts.baseDelayMs ?? BASE_DELAY_MS;
+    this.attemptTimeoutMs = opts.attemptTimeoutMs ?? ATTEMPT_TIMEOUT_MS;
+    this.networkRetryMs = opts.networkRetryMs ?? NETWORK_RETRY_MS;
+    this.deadlineMs = opts.deadlineMs ?? DEADLINE_MS;
   }
 
   // Retries network errors until the deadline, and 5xx and 429 (honouring
@@ -116,7 +121,7 @@ export class TelegramApi {
         if (o.retry === false || o.signal?.aborted) throw e;
         if (e instanceof TelegramError) {
           if (!(e.code === 429 || e.code >= 500) || ++apiFailures >= this.maxAttempts) throw e;
-          wait = e.retryAfter != null ? e.retryAfter * 1000 : Math.min(this.baseDelayMs * 2 ** (apiFailures - 1), MAX_DELAY_MS);
+          wait = e.retryAfter != null ? e.retryAfter * MS_PER_SECOND : Math.min(this.baseDelayMs * 2 ** (apiFailures - 1), MAX_DELAY_MS);
           this.log.warn(`telegram ${method} failed (${e.message}), retry ${apiFailures}/${this.maxAttempts - 1} in ${wait}ms`);
         } else {
           if (Date.now() + this.networkRetryMs >= deadline) throw e;

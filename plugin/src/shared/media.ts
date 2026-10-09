@@ -1,9 +1,10 @@
 import { extname } from "path";
 import { z } from "zod";
 
+export const BYTES_PER_MB = 1024 * 1024;
 // Bot API upload limits.
-export const MAX_UPLOAD = 50 * 1024 * 1024;
-export const MAX_PHOTO = 10 * 1024 * 1024;
+export const MAX_UPLOAD = 50 * BYTES_PER_MB;
+export const MAX_PHOTO = 10 * BYTES_PER_MB;
 export const MAX_CAPTION = 1024;
 export const MAX_ALBUM = 10;
 

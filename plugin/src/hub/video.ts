@@ -7,6 +7,11 @@ import { z } from "zod";
 // Bot API thumbnail limits: a JPEG of at most 320 px a side, under 200 kB.
 const THUMB_SIDE = 320;
 const MAX_THUMB = 200 * 1024;
+// ffmpeg's JPEG quality: 2 is the best, 31 the worst.
+const THUMB_QUALITY = 4;
+// About a second in skips a fade from black; shorter clips take the first frame.
+const THUMB_AT_SEC = 1;
+const SHORT_CLIP_SEC = 2;
 const TOOL_TIMEOUT_MS = 30_000;
 
 // The part of ffprobe's JSON output that dimensions() asks for.
@@ -45,10 +50,9 @@ export async function probeVideo(path: string, name: string, tools: VideoTools, 
   }
   const thumb = thumbPath(path);
   try {
-    // About a second in skips a fade from black; very short clips take the first frame.
-    const at = (meta.duration ?? 0) >= 2 ? "1" : "0";
+    const at = (meta.duration ?? 0) >= SHORT_CLIP_SEC ? THUMB_AT_SEC : 0;
     const scale = `scale=w='min(${THUMB_SIDE},iw)':h='min(${THUMB_SIDE},ih)':force_original_aspect_ratio=decrease`;
-    await run(tools.ffmpeg, ["-v", "error", "-nostdin", "-y", "-ss", at, "-i", path, "-frames:v", "1", "-vf", scale, "-q:v", "4", thumb]);
+    await run(tools.ffmpeg, ["-v", "error", "-nostdin", "-y", "-ss", String(at), "-i", path, "-frames:v", "1", "-vf", scale, "-q:v", String(THUMB_QUALITY), thumb]);
     const size = statSync(thumb).size;
     if (size === 0 || size >= MAX_THUMB) throw new Error(`thumbnail is ${size} bytes`);
     meta.thumb = thumb;

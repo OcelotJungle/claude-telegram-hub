@@ -3,6 +3,16 @@
 // in as Deps (the engine's `$` calls), so this file imports nothing but types.
 import type { CommandReply, TopicCommand } from "../shared/protocol.ts";
 
+const LIMIT_NAMES: Record<string, string> = { five_hour: "5 часов", seven_day: "Неделя" };
+// The order of the limits in /info; others go after these.
+const LIMIT_ORDER = ["five_hour", "seven_day"];
+const THOUSAND = 1_000;
+const MILLION = 1_000_000;
+const MS_PER_MINUTE = 60_000;
+const MINUTES_PER_HOUR = 60;
+const HOURS_PER_DAY = 24;
+const PERCENT = 100;
+
 // The part of the engine's SessionUsage that /info shows.
 export type Usage = {
   context: {
@@ -136,14 +146,12 @@ export class Runner {
   }
 }
 
-const LIMIT_NAMES: Record<string, string> = { five_hour: "5 часов", seven_day: "Неделя" };
-
 export function infoText(u: Usage, now: number): string {
   const lines: string[] = [];
   if (!u.rateLimits.length) lines.push("Лимиты: нет данных — появятся после первого ответа модели");
   else {
     lines.push("**Лимиты**");
-    const order = (kind: string) => (kind === "five_hour" ? 0 : kind === "seven_day" ? 1 : 2);
+    const order = (kind: string) => (LIMIT_ORDER.includes(kind) ? LIMIT_ORDER.indexOf(kind) : LIMIT_ORDER.length);
     for (const l of [...u.rateLimits].sort((a, b) => order(a.kind) - order(b.kind))) {
       const left = l.resetsAt ? Date.parse(l.resetsAt) - now : NaN;
       lines.push(`${LIMIT_NAMES[l.kind] ?? l.kind}: ${l.percentUsed}%${left > 0 ? ` (сброс через ${duration(left)})` : ""}`);
@@ -163,13 +171,13 @@ export function infoText(u: Usage, now: number): string {
   }
   const limit = b.autoCompactThreshold ?? b.rawMaxTokens;
   lines.push(`Автокомпакт: окно ${tokens(b.rawMaxTokens)}${b.autoCompactThreshold !== undefined ? `, срабатывает на ${tokens(b.autoCompactThreshold)}` : ""}`);
-  if (used !== undefined) lines.push(`Использовано ${Math.round((used / limit) * 100)}% до автокомпакта`);
+  if (used !== undefined) lines.push(`Использовано ${Math.round((used / limit) * PERCENT)}% до автокомпакта`);
   return lines.join("\n");
 }
 
 export function tokens(n: number): string {
-  if (n >= 1_000_000) return `${Number((n / 1_000_000).toFixed(1))}M`;
-  return `${Math.round(n / 1000)}k`;
+  if (n >= MILLION) return `${Number((n / MILLION).toFixed(1))}M`;
+  return `${Math.round(n / THOUSAND)}k`;
 }
 
 // `/compact <N>` with a token count (333000, 333k, 1.5m) or `auto` sets the
@@ -180,15 +188,17 @@ export function autocompactArg(args: string): string | undefined {
   if (a === "auto") return a;
   const m = a.match(/^(\d+(?:\.\d+)?)([km]?)$/);
   if (!m) return undefined;
-  return String(Math.round(Number(m[1]) * (m[2] === "k" ? 1e3 : m[2] === "m" ? 1e6 : 1)));
+  return String(Math.round(Number(m[1]) * (m[2] === "k" ? THOUSAND : m[2] === "m" ? MILLION : 1)));
 }
 
 function duration(ms: number): string {
-  const min = Math.max(1, Math.round(ms / 60_000));
-  if (min < 60) return `${min} мин`;
-  const h = Math.floor(min / 60);
-  if (h < 24) return min % 60 ? `${h} ч ${min % 60} мин` : `${h} ч`;
-  return h % 24 ? `${Math.floor(h / 24)} д ${h % 24} ч` : `${Math.floor(h / 24)} д`;
+  const min = Math.max(1, Math.round(ms / MS_PER_MINUTE));
+  if (min < MINUTES_PER_HOUR) return `${min} мин`;
+  const h = Math.floor(min / MINUTES_PER_HOUR);
+  const m = min % MINUTES_PER_HOUR;
+  if (h < HOURS_PER_DAY) return m ? `${h} ч ${m} мин` : `${h} ч`;
+  const d = Math.floor(h / HOURS_PER_DAY);
+  return h % HOURS_PER_DAY ? `${d} д ${h % HOURS_PER_DAY} ч` : `${d} д`;
 }
 
 function message(e: unknown): string {

@@ -1,12 +1,11 @@
 import type { TranscriptEvent } from "./parse.ts";
 
-export type Outgoing = { text: string; notify: boolean };
-
 // Sent with sound when the agent called tg_notify but wrote no text after it,
 // so the phone still rings.
 export const NOTIFY_MARKER = "🔔 Ход завершён — ответ выше.";
-
 const REMEMBERED_ENDS = 50;
+
+export type Outgoing = { text: string; notify: boolean };
 
 // Decides which assistant text goes to the topic and whether it notifies.
 // A text followed by a tool call is intermediate (silent, sent at once); the

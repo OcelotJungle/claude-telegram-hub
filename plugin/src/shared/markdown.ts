@@ -4,6 +4,8 @@ import { decodeHTML } from "entities";
 import { Lexer } from "marked";
 import { z } from "zod";
 
+const INDENT = "   ";
+
 // A Bot API MessageEntity. Offsets and lengths count UTF-16 code units, as
 // JavaScript string indices do.
 export type Entity = {
@@ -24,8 +26,6 @@ export const entitySchema: z.ZodType<Entity> = z.object({
 
 // Plain text plus the entities that format it.
 export type Formatted = { text: string; entities: Entity[] };
-
-const INDENT = "   ";
 
 // The kinds of token marked itself makes. This code uses no marked
 // extensions, so a token of one of these kinds has that kind's fields.

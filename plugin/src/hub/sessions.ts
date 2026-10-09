@@ -2,6 +2,9 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname } from "path";
 import { z } from "zod";
 
+const MAX_TOPIC_NAME = 128;
+const SEP = " · ";
+
 export type SessionRecord = { topicId: number; title: string; project: string; enabled: boolean };
 
 const dataSchema: z.ZodType<Record<string, SessionRecord>> = z.record(
@@ -57,9 +60,6 @@ export class SessionStore {
     renameSync(tmp, this.file);
   }
 }
-
-const MAX_TOPIC_NAME = 128;
-const SEP = " · ";
 
 export function topicName(project: string, title: string): string {
   const t = title.trim() || "без названия";

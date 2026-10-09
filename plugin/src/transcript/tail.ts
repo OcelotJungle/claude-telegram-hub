@@ -5,6 +5,7 @@ import { nullLogger } from "../shared/log.ts";
 import { parseRecord } from "./parse.ts";
 
 const NEWLINE = 0x0a;
+const POLL_INTERVAL_MS = 300;
 
 // Follows a transcript file by polling. Starts at the current end of an
 // existing file (history is never replayed); a file that does not exist yet is
@@ -34,7 +35,7 @@ export class TranscriptTailer {
   start(): void {
     this.offset = fileSize(this.opts.path) ?? 0;
     this.rest = Buffer.alloc(0);
-    this.timer = setInterval(() => this.pollNow(), this.opts.intervalMs ?? 300);
+    this.timer = setInterval(() => this.pollNow(), this.opts.intervalMs ?? POLL_INTERVAL_MS);
   }
 
   stop(): void {

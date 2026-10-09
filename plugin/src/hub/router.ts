@@ -3,6 +3,12 @@ import type { TopicCommand } from "../shared/protocol.ts";
 import type { SessionStore } from "./sessions.ts";
 import type { Message, Update } from "./telegram.ts";
 
+// Fields every message may carry, whatever its kind.
+const ENVELOPE = new Set([
+  "message_id", "date", "edit_date", "chat", "from", "sender_chat", "message_thread_id", "is_topic_message",
+  "reply_to_message", "external_reply", "quote", "forward_origin", "via_bot", "author_signature", "has_protected_content",
+]);
+
 export type Route =
   | { action: "ignore"; reason: string }
   | { action: "inactive"; topicId: number }
@@ -36,12 +42,6 @@ export function commandOf(text: string, botUsername: string | undefined): Omit<T
   if (name !== "info" && name !== "compact") return undefined;
   return { name, args: (m[3] ?? "").trim() };
 }
-
-// Fields every message may carry, whatever its kind.
-const ENVELOPE = new Set([
-  "message_id", "date", "edit_date", "chat", "from", "sender_chat", "message_thread_id", "is_topic_message",
-  "reply_to_message", "external_reply", "quote", "forward_origin", "via_bot", "author_signature", "has_protected_content",
-]);
 
 function ignore(reason: string): Route {
   return { action: "ignore", reason };

@@ -6,16 +6,22 @@ import { randomUUID } from "crypto";
 import { homedir } from "os";
 import { hubToPlugin } from "../shared/protocol-schema.ts";
 
+const SPAWN_COOLDOWN_MS = 2000;
+const REQUEST_TIMEOUT_MS = 15_000;
+const DRAIN_POLL_MS = 25;
+const MIN_RECONNECT_DELAY_MS = 100;
+const MAX_RECONNECT_DELAY_MS = 5000;
+// A reconnect delay varies by this share either way, so windows that lost the
+// hub together do not knock at the same moment.
+const RECONNECT_JITTER = 0.25;
+// How much of a message the plugin cannot read goes into the log.
+const LOGGED_MESSAGE_CHARS = 200;
+
 type Hello = Extract<PluginToHub, { type: "hello" }>;
 export type SendFiles = Extract<PluginToHub, { type: "sendFiles" }>;
 // What the hub must ack: text and files for a topic.
 export type Queued = Extract<PluginToHub, { type: "send" }> | SendFiles;
 type Pending = { resolve(v: unknown): void; reject(e: Error): void; timer: ReturnType<typeof setTimeout> };
-
-const SPAWN_COOLDOWN_MS = 2000;
-const REQUEST_TIMEOUT_MS = 15_000;
-// How much of a message the plugin cannot read goes into the log.
-const LOGGED_MESSAGE_CHARS = 200;
 
 // Starts the hub as a detached process: not tied to this window, so closing
 // the window that started it leaves the hub running for the others.
@@ -124,7 +130,7 @@ export class HubClient {
   // Resolves once every queued text is acked by the hub, or after timeoutMs.
   async drain(timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
-    while (this.outbox.length > 0 && Date.now() < deadline) await Bun.sleep(25);
+    while (this.outbox.length > 0 && Date.now() < deadline) await Bun.sleep(DRAIN_POLL_MS);
   }
 
   async request(req: HubRequest, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
@@ -199,9 +205,9 @@ export class HubClient {
   }
 
   private scheduleReconnect(): void {
-    const min = this.opts.minDelayMs ?? 100;
-    const max = this.opts.maxDelayMs ?? 5000;
-    const delay = Math.min(min * 2 ** this.attempt, max) * (0.75 + Math.random() * 0.5);
+    const min = this.opts.minDelayMs ?? MIN_RECONNECT_DELAY_MS;
+    const max = this.opts.maxDelayMs ?? MAX_RECONNECT_DELAY_MS;
+    const delay = Math.min(min * 2 ** this.attempt, max) * (1 + RECONNECT_JITTER * (2 * Math.random() - 1));
     this.attempt++;
     this.reconnectTimer = setTimeout(() => this.connect(), delay);
   }

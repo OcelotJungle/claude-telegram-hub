@@ -8,7 +8,7 @@ import { copyFileSync, mkdirSync, realpathSync, renameSync, rmSync, statSync, wr
 import { basename, join, resolve } from "path";
 import { isInside } from "../shared/config.ts";
 import { toTelegram } from "../shared/markdown.ts";
-import { MAX_CAPTION, MAX_UPLOAD } from "../shared/media.ts";
+import { BYTES_PER_MB, MAX_CAPTION, MAX_UPLOAD } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { enableResult } from "../shared/protocol-schema.ts";
 import { transcriptPathFor } from "../transcript/locate.ts";
@@ -16,6 +16,28 @@ import { parseRecord } from "../transcript/parse.ts";
 import { Relay } from "../transcript/relay.ts";
 import { effectiveTitle, readSessionTitles, TranscriptTailer } from "../transcript/tail.ts";
 import { HubClient } from "./hub-client.ts";
+
+// Called by our PostToolBatch hook (hooks/hooks.json), not by the agent.
+export const HOOK_NOTE_TOOL = "tg_hook_note";
+
+const MODE_OFF_NOTE =
+  "tg-hub: Telegram mode is now OFF for this session, because the user typed a message in the terminal. " +
+  "Your text is no longer relayed to Telegram, and tg_notify is not needed. " +
+  "If that message asks to continue in Telegram, call tg_enable.";
+
+// A response cut by a lost connection: the agent is told to go on, as the
+// person would, while the mode is on and the person is away.
+export const CONTINUE_PROMPT =
+  "tg-hub: the connection to the API was lost mid-response (API Error: Connection lost mid-response), " +
+  "so your last response may be incomplete. Continue from where you stopped.";
+export const CUT_NOTE = "🔁 Связь с API оборвалась посреди ответа — агент продолжает сам.";
+// Cuts in a row, with no turn ending normally in between, before it stops
+// and calls the person: the network may be down for good.
+export const MAX_AUTO_CONTINUES = 10;
+export const CUT_LIMIT_NOTE = `⚠️ Связь с API оборвалась посреди ответа ${MAX_AUTO_CONTINUES} раз подряд — сам больше не продолжаю, жду тебя.`;
+// Requests that make the hub call Telegram. The hub retries a flaky network
+// for up to 2 minutes (TelegramApi deadlineMs), so wait a bit longer than that.
+const HUB_TELEGRAM_TIMEOUT_MS = 150_000;
 
 export type PluginOptions = {
   sessionId: string;
@@ -42,30 +64,8 @@ export function isOwnTool(name: string): boolean {
   return /(^|__)tg_(enable|disable|notify)$/.test(name);
 }
 
-// Called by our PostToolBatch hook (hooks/hooks.json), not by the agent.
-export const HOOK_NOTE_TOOL = "tg_hook_note";
-
-const MODE_OFF_NOTE =
-  "tg-hub: Telegram mode is now OFF for this session, because the user typed a message in the terminal. " +
-  "Your text is no longer relayed to Telegram, and tg_notify is not needed. " +
-  "If that message asks to continue in Telegram, call tg_enable.";
-
-// A response cut by a lost connection: the agent is told to go on, as the
-// person would, while the mode is on and the person is away.
-export const CONTINUE_PROMPT =
-  "tg-hub: the connection to the API was lost mid-response (API Error: Connection lost mid-response), " +
-  "so your last response may be incomplete. Continue from where you stopped.";
-export const CUT_NOTE = "🔁 Связь с API оборвалась посреди ответа — агент продолжает сам.";
-// Cuts in a row, with no turn ending normally in between, before it stops
-// and calls the person: the network may be down for good.
-export const MAX_AUTO_CONTINUES = 10;
-export const CUT_LIMIT_NOTE = `⚠️ Связь с API оборвалась посреди ответа ${MAX_AUTO_CONTINUES} раз подряд — сам больше не продолжаю, жду тебя.`;
-
 // One per Claude Code window: follows the session transcript, relays the
 // agent's text to the hub, delivers inbound topic messages to the session.
-// Requests that make the hub call Telegram. The hub retries a flaky network
-// for up to 2 minutes (TelegramApi deadlineMs), so wait a bit longer than that.
-const HUB_TELEGRAM_TIMEOUT_MS = 150_000;
 
 export class PluginCore {
   private sessionId: string;
@@ -205,7 +205,7 @@ export class PluginCore {
     }
     if (!st.isFile()) throw new Error(`${p}: not a file`);
     if (st.size === 0) throw new Error(`${p}: the file is empty, Telegram does not take empty files`);
-    if (st.size > MAX_UPLOAD) throw new Error(`${p}: ${(st.size / 1024 / 1024).toFixed(1)} MB, over the 50 MB a bot may upload`);
+    if (st.size > MAX_UPLOAD) throw new Error(`${p}: ${(st.size / BYTES_PER_MB).toFixed(1)} MB, over the ${MAX_UPLOAD / BYTES_PER_MB} MB a bot may upload`);
     let real = path;
     let state = this.opts.stateDir;
     try {

@@ -22,7 +22,7 @@ const hub = new Hub({
   api: token ? new TelegramApi({ token, base: apiBase(), log }) : undefined,
   config: loadConfig,
   idleMs: idleMs(),
-  pollTimeoutSec: Number(process.env.TG_HUB_POLL_TIMEOUT) || 25,
+  pollTimeoutSec: Number(process.env.TG_HUB_POLL_TIMEOUT) || undefined,
   log,
   onExit: () => process.exit(0),
 });

@@ -6,13 +6,13 @@
 // text the Bot API allows.
 import { arr, field, isObject, str } from "../shared/guards.ts";
 
+const MAX_HEADING = 6;
+
 // The part of Message.rich_message this file reads.
 export type RichMessage = { blocks: unknown };
 
 // Local paths of the photos the hub downloaded, by file_id.
 type Paths = ReadonlyMap<string, string>;
-
-const MAX_HEADING = 6;
 
 // A photo found in `paths` is named by its local path, any other file by its
 // file_id, which download_attachment takes.

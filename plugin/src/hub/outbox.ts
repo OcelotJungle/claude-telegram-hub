@@ -10,6 +10,10 @@ import { entitySchema } from "../shared/markdown.ts";
 import { outFileSchema } from "../shared/media.ts";
 import { blockSchema } from "./rich-out.ts";
 
+// Plugin message ids remembered after their pieces are sent, to recognise a
+// plugin re-sending what the hub took before it crashed.
+const MAX_SEEN = 5000;
+
 // One Telegram send for a session's topic: a piece of text at most one
 // message long, or files (one file or an album) with text as their caption.
 // rich: the piece goes as a rich message, text is its Markdown source.
@@ -34,10 +38,6 @@ const dataSchema: z.ZodType<Data> = z.object({
   ),
   seen: z.array(z.string()),
 });
-
-// Plugin message ids remembered after their pieces are sent, to recognise a
-// plugin re-sending what the hub took before it crashed.
-const MAX_SEEN = 5000;
 
 // The hub's delivery queue, on disk: a piece is written here before the
 // plugin gets its ack and leaves only after Telegram accepted it, so neither a
