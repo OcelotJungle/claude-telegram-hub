@@ -9,7 +9,7 @@ import { TelegramApi } from "../src/hub/telegram.ts";
 import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, MAX_AUTO_CONTINUES, PluginCore } from "../src/plugin/plugin.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { NOTIFY_MARKER } from "../src/transcript/relay.ts";
-import { FakeTelegram, topicMsg } from "./fake-telegram.ts";
+import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { freePort, memLogger, tempDir, waitFor } from "./helpers.ts";
 
 const GROUP = "-1001";
@@ -25,6 +25,7 @@ let transcript: string;
 let config: Config;
 let core: PluginCore | undefined;
 let channel: { content: string; meta: Record<string, string> }[];
+let answers: { requestId: string; behavior: string }[];
 let spoolDir: string;
 let state: string;
 let spawned: number;
@@ -69,6 +70,7 @@ function makeCore(sessionId = SID) {
     fileWaitMs: 3000,
     spawnHub: () => void spawned++,
     emitChannel: (content, meta) => channel.push({ content, meta }),
+    answerPermission: (requestId, behavior) => answers.push({ requestId, behavior }),
     log: pluginLog,
     tailIntervalMs: 30,
   });
@@ -101,6 +103,7 @@ beforeEach(async () => {
   transcript = join(projDir, `${SID}.jsonl`);
   writeFileSync(transcript, line({ type: "ai-title", aiTitle: "Старое имя" }) + line(assistantText("old history", "end_turn")));
   channel = [];
+  answers = [];
   spoolDir = join(state, "spool");
   spawned = 0;
   pluginLog = memLogger();
@@ -229,9 +232,31 @@ describe("PluginCore", () => {
 
   test("a permission request is sent loudly while enabled", async () => {
     const c = await enabledCore();
-    c.permissionRequest({ tool_name: "Bash", description: "git push" });
+    c.permissionRequest({ request_id: "abcde", tool_name: "Bash", description: "git push" });
     await waitFor(() => sent().length === 1);
     expect(sent()[0]).toEqual({ text: "🔐 Нужно подтверждение: Bash — git push", silent: false, topic: 100 });
+  });
+
+  test("a permission request answered in the topic reaches Claude Code", async () => {
+    const c = await enabledCore();
+    c.permissionRequest({ request_id: "abcde", tool_name: "Bash", description: "Push the branch", input_preview: '{"command":"git push"}' });
+    await waitFor(() => sent().length === 1);
+    const msg = fake.callsOf("sendMessage")[0];
+    const head = "🔐 Нужно подтверждение: Bash — Push the branch";
+    expect(msg).toMatchObject({
+      text: `${head}\n\n{"command":"git push"}`,
+      entities: [{ type: "pre", offset: head.length + 2, length: 22 }],
+      disable_notification: false,
+    });
+    const rows = arr(field(field(msg, "reply_markup"), "inline_keyboard"));
+    const allow = arr(rows[0]).find(b => field(b, "text") === "✅ Разрешить");
+    fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data: String(field(allow, "callback_data")) }));
+    await waitFor(() => answers.length === 1, 3000, "answer");
+    expect(answers).toEqual([{ requestId: "abcde", behavior: "allow" }]);
+    await waitFor(() => fake.callsOf("editMessageText").length === 1, 3000, "edit");
+    expect(fake.callsOf("editMessageText")[0]).toMatchObject({ message_id: fake.lastMessageId, text: `${head}\n\n{"command":"git push"}\n\n✅ Разрешено` });
+    expect(fake.callsOf("editMessageText")[0].reply_markup).toBeUndefined();
+    expect(fake.callsOf("answerCallbackQuery")).toEqual([expect.objectContaining({ text: "✅ Разрешено" })]);
   });
 
   test("a rename renames the topic", async () => {

@@ -11,7 +11,7 @@ import { TelegramApi } from "../src/hub/telegram.ts";
 import { Runner } from "../src/mod/commands.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
-import { FakeTelegram, topicMsg } from "./fake-telegram.ts";
+import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { freePort, hasFfmpeg, makeVideo, memLogger, tempDir, waitFor, wsClient } from "./helpers.ts";
 
 const GROUP = "-1001";
@@ -378,6 +378,55 @@ describe("send", () => {
     a.send({ type: "permission", toolName: "Bash", description: "again" });
     await Bun.sleep(100);
     expect(fake.texts().length).toBe(1);
+  });
+
+  test("a deny button sends the answer to the session's window", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send({ type: "permission", requestId: "r1", toolName: "Bash", description: "rm -rf build" });
+    await waitFor(() => fake.texts().length === 1);
+    const data = String(field(arr(arr(field(field(fake.callsOf("sendMessage")[0], "reply_markup"), "inline_keyboard"))[0])[1], "callback_data"));
+    fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
+    expect(await a.next("permissionReply")).toEqual({ type: "permissionReply", requestId: "r1", behavior: "deny" });
+    await waitFor(() => fake.callsOf("editMessageText").length === 1);
+    expect(fake.callsOf("editMessageText")[0].text).toBe("🔐 Нужно подтверждение: Bash — rm -rf build\n\n❌ Отклонено");
+  });
+
+  test("a button pressed by a stranger or outside the group does nothing", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send({ type: "permission", requestId: "r1", toolName: "Bash", description: "rm -rf build" });
+    await waitFor(() => fake.texts().length === 1);
+    const data = String(field(arr(arr(field(field(fake.callsOf("sendMessage")[0], "reply_markup"), "inline_keyboard"))[0])[0], "callback_data"));
+    fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: "666", messageId: fake.lastMessageId, data }));
+    fake.pushUpdate(buttonPress({ chatId: "-1009", fromId: ME, messageId: fake.lastMessageId, data }));
+    await waitFor(() => fake.callsOf("answerCallbackQuery").length === 2);
+    expect(fake.callsOf("answerCallbackQuery").every(c => c.text === undefined)).toBe(true);
+    expect(a.messages.some(m => m.type === "permissionReply")).toBe(false);
+    expect(fake.callsOf("editMessageText")).toEqual([]);
+    expect(log.lines.some(l => l.includes("button press by 666, not allowed"))).toBe(true);
+  });
+
+  test("a button of a prompt the hub does not know loses its keyboard", async () => {
+    await startHub();
+    await enabled("a");
+    fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: 77, data: "p:deadbeef:allow" }));
+    await waitFor(() => fake.callsOf("editMessageReplyMarkup").length === 1);
+    expect(fake.callsOf("editMessageReplyMarkup")[0]).toEqual({ chat_id: GROUP, message_id: 77 });
+    expect(fake.callsOf("answerCallbackQuery")[0]).toMatchObject({ text: "Запрос устарел" });
+  });
+
+  test("a button pressed after the window closed says the session is not active", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send({ type: "permission", requestId: "r1", toolName: "Bash", description: "rm -rf build" });
+    await waitFor(() => fake.texts().length === 1);
+    const data = String(field(arr(arr(field(field(fake.callsOf("sendMessage")[0], "reply_markup"), "inline_keyboard"))[0])[0], "callback_data"));
+    a.close();
+    await waitFor(() => !hub.isConnected("a"));
+    fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
+    await waitFor(() => fake.callsOf("editMessageText").length === 1);
+    expect(fake.callsOf("editMessageText")[0].text).toEndWith("⚠️ Сессия не активна, ответ не доставлен");
   });
 
   test("download saves the file into the inbox", async () => {

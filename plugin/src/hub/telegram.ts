@@ -26,6 +26,8 @@ const UPLOAD_BYTES_PER_MS = 64;
 // Bot API types, generated from its documentation.
 export type Message = TelegramMessage;
 export type Update = TelegramUpdate;
+// An inline keyboard button; data comes back in the callback query.
+export type Button = { text: string; data: string };
 
 // The envelope of every Bot API answer.
 const answerSchema = z.object({
@@ -162,11 +164,28 @@ export class TelegramApi {
   }
 
   getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<Update[]> {
-    return this.call("getUpdates", { offset, timeout: timeoutSec, allowed_updates: ["message"] }, updatesSchema, { signal, retry: false, waitMs: timeoutSec * MS_PER_SECOND });
+    return this.call("getUpdates", { offset, timeout: timeoutSec, allowed_updates: ["message", "callback_query"] }, updatesSchema, { signal, retry: false, waitMs: timeoutSec * MS_PER_SECOND });
   }
 
-  sendMessage(chatId: string, threadId: number, text: string, silent: boolean, entities?: Entity[]): Promise<{ message_id: number }> {
-    return this.call("sendMessage", { chat_id: chatId, message_thread_id: threadId, text, disable_notification: silent, ...(entities?.length ? { entities } : {}) }, sentSchema);
+  sendMessage(chatId: string, threadId: number, text: string, silent: boolean, entities?: Entity[], buttons?: Button[][]): Promise<{ message_id: number }> {
+    return this.call(
+      "sendMessage",
+      { chat_id: chatId, message_thread_id: threadId, text, disable_notification: silent, ...(entities?.length ? { entities } : {}), ...keyboard(buttons) },
+      sentSchema,
+    );
+  }
+
+  // Without buttons the message loses its keyboard.
+  editMessageText(chatId: string, messageId: number, text: string, entities?: Entity[], buttons?: Button[][]): Promise<unknown> {
+    return this.call("editMessageText", { chat_id: chatId, message_id: messageId, text, ...(entities?.length ? { entities } : {}), ...keyboard(buttons) }, z.unknown());
+  }
+
+  removeKeyboard(chatId: string, messageId: number): Promise<unknown> {
+    return this.call("editMessageReplyMarkup", { chat_id: chatId, message_id: messageId }, z.unknown());
+  }
+
+  answerCallbackQuery(id: string, text?: string): Promise<unknown> {
+    return this.call("answerCallbackQuery", { callback_query_id: id, ...(text ? { text } : {}) }, z.unknown());
   }
 
   sendRichMessage(chatId: string, threadId: number, blocks: Block[], silent: boolean): Promise<{ message_id: number }> {
@@ -244,6 +263,11 @@ function videoFields(file: OutFile): { width?: number; height?: number; duration
   const v = file.kind === "video" ? file.video : undefined;
   if (!v?.width || !v.height) return {};
   return { width: v.width, height: v.height, ...(v.duration ? { duration: v.duration } : {}), supports_streaming: true };
+}
+
+function keyboard(buttons: Button[][] | undefined): { reply_markup?: { inline_keyboard: { text: string; callback_data: string }[][] } } {
+  if (!buttons?.length) return {};
+  return { reply_markup: { inline_keyboard: buttons.map(row => row.map(b => ({ text: b.text, callback_data: b.data }))) } };
 }
 
 function thumbOf(file: OutFile): string | undefined {

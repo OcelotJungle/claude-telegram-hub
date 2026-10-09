@@ -30,7 +30,9 @@ export type PluginToHub =
   // Files for the topic; paths are the plugin's copies in outbox-files/.
   // asDocument: every file goes as a document, so Telegram does not recompress images.
   | { type: "sendFiles"; id: string; sessionId: string; files: QueuedFile[]; caption: string; notify: boolean; asDocument?: boolean }
-  | { type: "permission"; toolName: string; description: string }
+  // A permission prompt in the terminal; requestId (older plugins omit it)
+  // lets the topic answer it.
+  | { type: "permission"; requestId?: string; toolName: string; description: string; inputPreview?: string }
   | { type: "title"; title: string }
   | { type: "terminalInput" };
 
@@ -41,7 +43,11 @@ export type HubToPlugin =
   | { type: "ack"; id: string }
   // Every send of a sendFiles message left the hub's queue; error if any failed.
   | { type: "filesSent"; id: string; error?: string }
-  | { type: "switchSession"; sessionId: string; transcriptPath: string; cwd: string };
+  | { type: "switchSession"; sessionId: string; transcriptPath: string; cwd: string }
+  // The answer to a permission prompt, given in the topic.
+  | { type: "permissionReply"; requestId: string; behavior: PermissionBehavior };
+
+export type PermissionBehavior = "allow" | "deny";
 
 
 // Body the SessionStart hook POSTs to /hook.

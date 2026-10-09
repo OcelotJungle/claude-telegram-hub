@@ -50,8 +50,7 @@ const mcp = new Server(
       tools: {},
       experimental: {
         "claude/channel": {},
-        // Only to receive permission_request and tell the topic a confirmation
-        // is waiting. We never answer: confirmations stay in the terminal.
+        // Permission prompts go to the topic, where the user may answer them.
         "claude/channel/permission": {},
       },
     },
@@ -72,6 +71,9 @@ const core = sessionId
       spawnHub: () => spawnHubDetached(hubMain),
       emitChannel: (content, meta) => {
         mcp.notification({ method: "notifications/claude/channel", params: { content, meta } }).catch(e => log.error(`channel notification failed: ${e}`));
+      },
+      answerPermission: (requestId, behavior) => {
+        mcp.notification({ method: "notifications/claude/channel/permission", params: { request_id: requestId, behavior } }).catch(e => log.error(`permission answer failed: ${e}`));
       },
       log,
     })

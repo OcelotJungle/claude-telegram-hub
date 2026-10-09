@@ -75,6 +75,11 @@ export class FakeTelegram {
     this.deletedTopics.add(threadId);
   }
 
+  // The message_id of the last message sent.
+  get lastMessageId(): number {
+    return this.nextMessageId - 1;
+  }
+
   callsOf(method: string): Params[] {
     return this.calls.filter(c => c.method === method).map(c => c.params);
   }
@@ -217,6 +222,20 @@ export function topicMsg(o: {
       ...(isTopic ? { is_topic_message: true } : {}),
       ...(o.text != null ? { text: o.text } : {}),
       ...o.extra,
+    },
+  });
+}
+
+// A press of an inline button under a bot message in the group.
+export function buttonPress(o: { chatId: number | string; fromId: number | string; messageId: number; data: string }): Update {
+  return updateSchema.parse({
+    update_id: 0,
+    callback_query: {
+      id: `cq${messageCounter++}`,
+      from: { id: Number(o.fromId), is_bot: false, first_name: "User" },
+      chat_instance: "1",
+      data: o.data,
+      message: { message_id: o.messageId, date: Math.floor(Date.now() / 1000), chat: { id: Number(o.chatId), type: "supergroup" } },
     },
   });
 }

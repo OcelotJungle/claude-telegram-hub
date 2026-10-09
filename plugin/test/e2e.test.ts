@@ -5,7 +5,8 @@ import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { appendFileSync, mkdirSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { z } from "zod";
-import { FakeTelegram, topicMsg } from "./fake-telegram.ts";
+import { arr, field } from "../src/shared/guards.ts";
+import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { freePort, hubHealth, must, tempDir, waitFor } from "./helpers.ts";
 
 const MAIN = resolve(import.meta.dir, "../src/plugin/main.ts");
@@ -20,6 +21,7 @@ let transcript: string;
 let client: Client;
 let transport: StdioClientTransport;
 const channel: { content: string; meta: Record<string, string> }[] = [];
+const permissionAnswers: { request_id: string; behavior: string }[] = [];
 
 const health = () => hubHealth(port);
 
@@ -60,6 +62,10 @@ beforeEach(async () => {
   client.setNotificationHandler(
     z.object({ method: z.literal("notifications/claude/channel"), params: z.object({ content: z.string(), meta: z.record(z.string(), z.string()) }) }),
     n => void channel.push(n.params),
+  );
+  client.setNotificationHandler(
+    z.object({ method: z.literal("notifications/claude/channel/permission"), params: z.object({ request_id: z.string(), behavior: z.string() }) }),
+    n => void permissionAnswers.push(n.params),
   );
   await client.connect(transport);
 });
@@ -107,7 +113,11 @@ test("a window talks to Telegram through a hub it started itself", async () => {
     params: { request_id: "abcde", tool_name: "Bash", description: "rm build", input_preview: "{}" },
   });
   await waitFor(() => fake.texts().length === 2, 5000, "permission message");
-  expect(fake.texts()[1]).toMatchObject({ text: "🔐 Нужно подтверждение: Bash — rm build", disable_notification: false });
+  expect(fake.texts()[1]).toMatchObject({ text: "🔐 Нужно подтверждение: Bash — rm build\n\n{}", disable_notification: false });
+  const allow = arr(arr(field(field(fake.callsOf("sendMessage")[1], "reply_markup"), "inline_keyboard"))[0])[0];
+  fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data: String(field(allow, "callback_data")) }));
+  await waitFor(() => permissionAnswers.length === 1, 5000, "permission answer");
+  expect(permissionAnswers).toEqual([{ request_id: "abcde", behavior: "allow" }]);
 
   fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "ответ с телефона" }));
   await waitFor(() => channel.length === 1, 5000, "channel notification");

@@ -1,5 +1,5 @@
 import type { Logger } from "../shared/log.ts";
-import type { ChannelMeta, HubToPlugin } from "../shared/protocol.ts";
+import type { ChannelMeta, HubToPlugin, PermissionBehavior } from "../shared/protocol.ts";
 import type { Outgoing } from "../transcript/relay.ts";
 import type { Titles } from "../transcript/tail.ts";
 
@@ -55,6 +55,8 @@ export type PluginOptions = {
   fileWaitMs?: number;
   spawnHub(): void;
   emitChannel(content: string, meta: ChannelMeta): void;
+  // Answers a permission prompt of Claude Code.
+  answerPermission(requestId: string, behavior: PermissionBehavior): void;
   log: Logger;
   tailIntervalMs?: number;
 };
@@ -216,8 +218,15 @@ export class PluginCore {
     return { path, name: basename(path), size: st.size };
   }
 
-  permissionRequest(p: { tool_name: string; description: string }): void {
-    if (this.enabled) this.client.send({ type: "permission", toolName: p.tool_name, description: p.description });
+  permissionRequest(p: { request_id: string; tool_name: string; description: string; input_preview?: string }): void {
+    if (!this.enabled) return;
+    this.client.send({
+      type: "permission",
+      requestId: p.request_id,
+      toolName: p.tool_name,
+      description: p.description,
+      ...(p.input_preview ? { inputPreview: p.input_preview } : {}),
+    });
   }
 
   // /clear or /resume inside the window changed the session (from the
@@ -311,6 +320,10 @@ export class PluginCore {
         return;
       case "switchSession":
         this.switchSession(m.sessionId, m.transcriptPath, m.cwd);
+        return;
+      case "permissionReply":
+        this.log.info(`permission ${m.requestId}: ${m.behavior} from the topic`);
+        this.opts.answerPermission(m.requestId, m.behavior);
         return;
     }
   }

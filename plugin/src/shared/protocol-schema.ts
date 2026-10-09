@@ -27,7 +27,7 @@ export const pluginToHub: z.ZodType<PluginToHub> = z.union([
   z.object({ type: z.literal("req"), id: z.string(), op: z.literal("download"), fileId: z.string() }),
   sendMessage,
   sendFilesMessage,
-  z.object({ type: z.literal("permission"), toolName: z.string(), description: z.string() }),
+  z.object({ type: z.literal("permission"), requestId: z.string().optional(), toolName: z.string(), description: z.string(), inputPreview: z.string().optional() }),
   z.object({ type: z.literal("title"), title: z.string() }),
   z.object({ type: z.literal("terminalInput") }),
 ]);
@@ -39,6 +39,7 @@ export const hubToPlugin: z.ZodType<HubToPlugin> = z.union([
   z.object({ type: z.literal("ack"), id: z.string() }),
   z.object({ type: z.literal("filesSent"), id: z.string(), error: z.string().optional() }),
   z.object({ type: z.literal("switchSession"), sessionId: z.string(), transcriptPath: z.string(), cwd: z.string() }),
+  z.object({ type: z.literal("permissionReply"), requestId: z.string(), behavior: z.enum(["allow", "deny"]) }),
 ]);
 
 export const enableResult: z.ZodType<EnableResult> = z.object({ topicTitle: z.string(), created: z.boolean() });

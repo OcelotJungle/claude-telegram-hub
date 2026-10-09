@@ -1,9 +1,9 @@
 import type { Server, ServerWebSocket } from "bun";
 import type { Config } from "../shared/config.ts";
 import type { Logger } from "../shared/log.ts";
-import type { Formatted } from "../shared/markdown.ts";
+import type { Entity, Formatted } from "../shared/markdown.ts";
 import type { OutFile } from "../shared/media.ts";
-import type { ChannelMeta, EnableResult, HookBody, HubToPlugin, PluginToHub, TopicCommand } from "../shared/protocol.ts";
+import type { ChannelMeta, EnableResult, HookBody, HubToPlugin, PermissionBehavior, PluginToHub, TopicCommand } from "../shared/protocol.ts";
 import type { OutItem, Piece } from "./outbox.ts";
 import type { SessionRecord } from "./sessions.ts";
 import type { Message, TelegramApi, Update } from "./telegram.ts";
@@ -23,7 +23,7 @@ import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { commandReply, hookBody, pluginToHub, sendFilesMessage, sendMessage } from "../shared/protocol-schema.ts";
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
-import { commandOf, routeUpdate } from "./router.ts";
+import { commandOf, routeCallback, routeUpdate } from "./router.ts";
 import { SessionStore, topicName } from "./sessions.ts";
 import { isThreadNotFound, TelegramError } from "./telegram.ts";
 import { richPhotos, richToMarkdown } from "./rich.ts";
@@ -42,6 +42,12 @@ const SEND_RETRY_MAX_MS = 30_000;
 const COMMAND_PICKUP_MS = 10_000;
 // How much of a message the hub cannot read goes into the log.
 const LOGGED_MESSAGE_CHARS = 200;
+// How much of a tool's input a permission message shows.
+const MAX_PREVIEW_CHARS = 1500;
+// Permission prompts the hub remembers for the buttons under them.
+const MAX_PERMISSIONS = 200;
+const PERMISSION_KEY_CHARS = 8;
+const PERMISSION_ANSWERS: Record<PermissionBehavior, string> = { allow: "✅ Разрешено", deny: "❌ Отклонено" };
 const BOT_COMMANDS = [
   { command: "info", description: "Лимиты и контекст сессии" },
   { command: "compact", description: "Сжать контекст; /compact N — окно автокомпакта" },
@@ -118,6 +124,8 @@ export class Hub {
   // Commands from the topic the plugin's module has not taken yet, by session.
   private commands = new Map<string, { cmd: TopicCommand; timer: ReturnType<typeof setTimeout> }[]>();
   private botUsername: string | undefined;
+  // Permission prompts sent to topics, by the key in their buttons' data.
+  private permissions = new Map<string, { sessionId: string; requestId: string } & Formatted>();
   private pumping = new Set<string>();
   // Sessions whose delivery waits for the user to fix the setup.
   private blocked = new Set<string>();
@@ -364,7 +372,7 @@ ${msg.text}`);
         this.send(ws, { type: "ack", id: msg.id });
         return;
       case "permission":
-        if (sid && this.store.get(sid)?.enabled) this.enqueue(sid, `perm-${randomUUID()}`, `🔐 Нужно подтверждение: ${msg.toolName} — ${msg.description}`, true, false);
+        if (sid && this.store.get(sid)?.enabled) this.askPermission(sid, msg);
         return;
       case "title":
         if (sid) void this.chain(sid, () => this.retitle(sid, msg.title));
@@ -457,6 +465,52 @@ ${msg.text}`);
     if (!ws) return;
     const rec = this.store.get(sessionId);
     this.send(ws, { type: "state", enabled: rec?.enabled ?? false, ...(rec ? { topicTitle: topicName(rec.project, rec.title) } : {}) });
+  }
+
+  // --- permissions ----------------------------------------------------------
+
+  // A prompt with a request id gets buttons; the tool's input goes under the
+  // description as code.
+  private askPermission(sessionId: string, msg: Extract<PluginToHub, { type: "permission" }>): void {
+    const head = `🔐 Нужно подтверждение: ${msg.toolName} — ${msg.description}`;
+    const preview = msg.inputPreview && msg.inputPreview.length > MAX_PREVIEW_CHARS ? `${msg.inputPreview.slice(0, MAX_PREVIEW_CHARS)}…` : msg.inputPreview;
+    const f: Formatted = preview ? { text: `${head}\n\n${preview}`, entities: [{ type: "pre", offset: head.length + 2, length: preview.length }] } : { text: head, entities: [] };
+    if (!msg.requestId) return this.enqueue(sessionId, `perm-${randomUUID()}`, f.text, true, false);
+    const key = randomUUID().replaceAll("-", "").slice(0, PERMISSION_KEY_CHARS);
+    this.permissions.set(key, { sessionId, requestId: msg.requestId, ...f });
+    for (const old of this.permissions.keys()) {
+      if (this.permissions.size <= MAX_PERMISSIONS) break;
+      this.permissions.delete(old);
+    }
+    const buttons = [
+      [
+        { text: "✅ Разрешить", data: `p:${key}:allow` },
+        { text: "❌ Отклонить", data: `p:${key}:deny` },
+      ],
+    ];
+    if (this.outbox.add(`perm-${key}`, sessionId, [{ text: f.text, silent: false, buttons, ...(f.entities.length ? { entities: f.entities } : {}) }])) void this.pump(sessionId);
+  }
+
+  // A button under a permission prompt: the answer goes to the session's
+  // window, and the message shows it instead of the buttons.
+  private async onPermissionPress(api: TelegramApi, groupId: string, press: { id: string; data: string; messageId: number; fromId: string }): Promise<void> {
+    const m = press.data.match(/^p:(\w+):(allow|deny)$/);
+    const behavior = m?.[2] === "allow" || m?.[2] === "deny" ? m[2] : undefined;
+    const p = m?.[1] ? this.permissions.get(m[1]) : undefined;
+    if (!m?.[1] || !behavior || !p) {
+      await api.answerCallbackQuery(press.id, "Запрос устарел").catch(e => this.log.warn(`answering a button press failed: ${e}`));
+      await api.removeKeyboard(groupId, press.messageId).catch(e => this.log.warn(`removing the buttons failed: ${e}`));
+      return;
+    }
+    const ws = this.connOf(p.sessionId);
+    const outcome = ws ? PERMISSION_ANSWERS[behavior] : "⚠️ Сессия не активна, ответ не доставлен";
+    if (ws) {
+      this.permissions.delete(m[1]);
+      this.send(ws, { type: "permissionReply", requestId: p.requestId, behavior });
+      this.log.info(`permission ${p.requestId} of session ${p.sessionId}: ${behavior} by ${press.fromId}`);
+    }
+    await api.answerCallbackQuery(press.id, outcome).catch(e => this.log.warn(`answering a button press failed: ${e}`));
+    await api.editMessageText(groupId, press.messageId, `${p.text}\n\n${outcome}`, p.entities).catch(e => this.log.warn(`editing a permission message failed: ${e}`));
   }
 
   // --- delivery -------------------------------------------------------------
@@ -608,7 +662,7 @@ ${msg.text}`);
       return;
     }
     if (!queued) {
-      await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, item.text, item.silent, item.entities));
+      await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, item.text, item.silent, item.entities, item.buttons));
       return;
     }
     const lost = queued.filter(f => !existsSync(f.path));
@@ -797,6 +851,13 @@ ${msg.text}`);
 
   private async handleUpdate(api: TelegramApi, u: Update): Promise<void> {
     const cfg = this.opts.config();
+    const press = routeCallback(u, cfg);
+    if (press?.action === "ignore") {
+      this.log.info(`ignored ${press.reason}`);
+      if (press.id) await api.answerCallbackQuery(press.id).catch(e => this.log.warn(`answering a button press failed: ${e}`));
+      return;
+    }
+    if (press && cfg.groupId) return this.onPermissionPress(api, cfg.groupId, press);
     const route = routeUpdate(u, cfg, this.store, id => this.isConnected(id));
     const m = u.message;
     if (route.action === "ignore") {

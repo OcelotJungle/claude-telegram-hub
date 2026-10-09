@@ -3,6 +3,8 @@ import type { TopicCommand } from "../shared/protocol.ts";
 import type { SessionStore } from "./sessions.ts";
 import type { Message, Update } from "./telegram.ts";
 
+import { z } from "zod";
+
 // Fields every message may carry, whatever its kind.
 const ENVELOPE = new Set([
   "message_id", "date", "edit_date", "chat", "from", "sender_chat", "message_thread_id", "is_topic_message",
@@ -29,6 +31,30 @@ export function routeUpdate(u: Update, cfg: Config, sessions: SessionStore, isCo
   if (!sessionId) return ignore(`topic ${topicId} has no session`);
   if (!isConnected(sessionId)) return { action: "inactive", topicId };
   return { action: "deliver", sessionId, topicId };
+}
+
+// What the hub uses of a button press.
+const callbackSchema = z.object({
+  id: z.string(),
+  from: z.object({ id: z.number() }),
+  data: z.string().optional(),
+  message: z.object({ message_id: z.number(), chat: z.object({ id: z.number() }) }).optional(),
+});
+
+export type CallbackRoute =
+  | { action: "ignore"; reason: string; id?: string }
+  | { action: "press"; id: string; data: string; messageId: number; fromId: string };
+
+// A press counts only on a message of the bot in the group, by an allowed
+// sender; the same rule as for messages.
+export function routeCallback(u: Update, cfg: Config): CallbackRoute | undefined {
+  if (u.callback_query === undefined) return undefined;
+  const parsed = callbackSchema.safeParse(u.callback_query);
+  if (!parsed.success) return { action: "ignore", reason: "callback query of an unknown shape" };
+  const q = parsed.data;
+  if (!q.message || !cfg.groupId || String(q.message.chat.id) !== cfg.groupId) return { action: "ignore", reason: "button press outside the group", id: q.id };
+  if (!cfg.allowFrom.includes(String(q.from.id))) return { action: "ignore", reason: `button press by ${q.from.id}, not allowed`, id: q.id };
+  return { action: "press", id: q.id, data: q.data ?? "", messageId: q.message.message_id, fromId: String(q.from.id) };
 }
 
 // A command the plugin's function hooks module runs instead of the agent:
