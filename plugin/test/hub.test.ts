@@ -1174,6 +1174,30 @@ describe("starting and stopping sessions", () => {
     expect(spawned.length).toBe(1);
   });
 
+  test("the start notices go once the agent starts working", async () => {
+    await closedSession();
+    fake.pushUpdate(msg("first"));
+    await waitFor(() => texts().includes("🚀 Запускаю сессию (аккаунт 2)…"));
+    const starting = fake.lastMessageId;
+    const w = await plugin(SID);
+    await waitFor(() => texts().includes("✅ Сессия запущена"));
+    const started = fake.lastMessageId;
+    await w.next("inbound");
+    await Bun.sleep(100);
+    expect(fake.callsOf("deleteMessage")).toEqual([]);
+    w.send({ type: "busy", busy: true });
+    await waitFor(() => fake.callsOf("deleteMessage").length === 2);
+    expect(fake.callsOf("deleteMessage")).toEqual([
+      { chat_id: GROUP, message_id: starting },
+      { chat_id: GROUP, message_id: started },
+    ]);
+    // Only once.
+    w.send({ type: "busy", busy: false });
+    w.send({ type: "busy", busy: true });
+    await Bun.sleep(100);
+    expect(fake.callsOf("deleteMessage").length).toBe(2);
+  });
+
   test("a session that does not connect in time is reported", async () => {
     await closedSession({ timeoutSec: 0.2 });
     fake.pushUpdate(msg("hello?"));

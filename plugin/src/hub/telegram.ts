@@ -184,6 +184,10 @@ export class TelegramApi {
     return this.call("editMessageReplyMarkup", { chat_id: chatId, message_id: messageId }, z.unknown());
   }
 
+  deleteMessage(chatId: string, messageId: number): Promise<unknown> {
+    return this.call("deleteMessage", { chat_id: chatId, message_id: messageId }, z.unknown());
+  }
+
   answerCallbackQuery(id: string, text?: string): Promise<unknown> {
     return this.call("answerCallbackQuery", { callback_query_id: id, ...(text ? { text } : {}) }, z.unknown());
   }

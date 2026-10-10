@@ -35,6 +35,8 @@ import { richPieces } from "./rich-out.ts";
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath } from "./video.ts";
 
 const INACTIVE_TEXT = "сессия сейчас не активна";
+// The queue id prefix of "starting the session" and "session started".
+const LAUNCH_NOTICE = "launch-";
 // After a launched session says hello, Claude Code still registers the
 // channel; messages sent sooner are lost.
 const READY_DELAY_MS = 1500;
@@ -192,6 +194,9 @@ export class Hub {
   // Sessions whose /stop waits for the module's terminate request: the id of
   // the stop command.
   private stopping = new Map<string, string>();
+  // The start notices sent to a session's topic, by Telegram message id; they
+  // go once its agent starts working.
+  private launchNotices = new Map<string, number[]>();
   private readyTimers = new Set<ReturnType<typeof setTimeout>>();
   // Sessions whose delivery waits for the user to fix the setup.
   private blocked = new Set<string>();
@@ -508,7 +513,9 @@ ${msg.text}`);
       // Shown at once, then renewed by the typing timer.
       case "busy":
         ws.data.busy = msg.busy;
-        if (msg.busy) this.showTyping(ws);
+        if (!msg.busy) return;
+        this.showTyping(ws);
+        if (sid) this.dropLaunchNotices(sid);
         return;
     }
   }
@@ -883,7 +890,8 @@ ${msg.text}`);
       return;
     }
     if (!queued) {
-      await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, item.text, item.silent, item.entities, item.buttons));
+      const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, item.text, item.silent, item.entities, item.buttons));
+      if (item.id.startsWith(LAUNCH_NOTICE)) this.launchNoticeSent(sessionId, sent.message_id);
       return;
     }
     const lost = queued.filter(f => !existsSync(f.path));
@@ -1227,7 +1235,7 @@ ${msg.text}`);
       this.notice(sessionId, `⚠️ Сессия не запустилась за ${sec} с`, true);
     }, sec * MS_PER_SECOND);
     this.launches.set(sessionId, { account: acc, held, timer });
-    this.notice(sessionId, `🚀 Запускаю сессию (аккаунт ${acc})…`, false);
+    this.launchNotice(sessionId, `🚀 Запускаю сессию (аккаунт ${acc})…`);
   }
 
   // A window of the session connected: a start it waited for is done, and
@@ -1243,7 +1251,7 @@ ${msg.text}`);
       this.store.setWhere(sessionId, undefined, l.account);
     }
     this.log.info(`session ${sessionId} started, ${l.held.length} held message(s) to deliver`);
-    this.notice(sessionId, "✅ Сессия запущена", false);
+    this.launchNotice(sessionId, "✅ Сессия запущена");
     if (!l.held.length) return;
     const t = setTimeout(() => {
       this.readyTimers.delete(t);
@@ -1276,6 +1284,25 @@ ${msg.text}`);
   // The hub's own word in a session's topic, in order with the rest.
   private notice(sessionId: string, text: string, loud: boolean): void {
     this.enqueue(sessionId, `hub-${randomUUID()}`, text, loud, false);
+  }
+
+  // A silent notice needed only until the session's agent starts working.
+  private launchNotice(sessionId: string, text: string): void {
+    this.enqueue(sessionId, `${LAUNCH_NOTICE}${randomUUID()}`, text, false, false);
+  }
+
+  private launchNoticeSent(sessionId: string, messageId: number): void {
+    this.launchNotices.set(sessionId, [...(this.launchNotices.get(sessionId) ?? []), messageId]);
+    if (this.connOf(sessionId)?.data.busy) this.dropLaunchNotices(sessionId);
+  }
+
+  private dropLaunchNotices(sessionId: string): void {
+    const ids = this.launchNotices.get(sessionId);
+    const api = this.opts.api;
+    const groupId = this.opts.config().groupId;
+    if (!ids || !api || !groupId) return;
+    this.launchNotices.delete(sessionId);
+    for (const id of ids) api.deleteMessage(groupId, id).catch(e => this.log.warn(`deleting start notice ${id} failed: ${e}`));
   }
 
   // Photos inside are downloaded like a photo message; a photo that fails keeps
