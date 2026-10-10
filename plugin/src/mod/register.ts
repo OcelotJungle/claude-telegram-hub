@@ -1,5 +1,5 @@
 // tg-hub's function hooks module (hooks.json → modules): runs /info and
-// /compact sent to the session's topic. Claude Code delivers channel
+// /compact sent to the session's topic, and gets the session ready for /stop. Claude Code delivers channel
 // messages with slash commands skipped, so the hub keeps them, and this
 // module, inside the session, takes them over localhost HTTP. The logic is in
 // commands.ts; here are only the engine's `$` calls, which the engine allows

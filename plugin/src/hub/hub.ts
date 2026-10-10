@@ -22,7 +22,7 @@ import { field } from "../shared/guards.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
-import { commandReply, hookBody, pluginToHub, sendFilesMessage, sendMessage } from "../shared/protocol-schema.ts";
+import { commandReply, hookBody, pluginToHub, sendFilesMessage, sendMessage, terminateRequest } from "../shared/protocol-schema.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
@@ -189,6 +189,9 @@ export class Hub {
   private launches = new Map<string, { account: string; held: Message[]; timer: ReturnType<typeof setTimeout> }>();
   // Sessions told to end, until their window goes.
   private stops = new Map<string, ReturnType<typeof setTimeout>>();
+  // Sessions whose /stop waits for the module's terminate request: the id of
+  // the stop command.
+  private stopping = new Map<string, string>();
   private readyTimers = new Set<ReturnType<typeof setTimeout>>();
   // Sessions whose delivery waits for the user to fix the setup.
   private blocked = new Set<string>();
@@ -279,7 +282,15 @@ export class Hub {
       this.onHook(body.data);
       return new Response("ok");
     }
-    if (url.pathname === "/commands" && req.method === "GET") return Response.json(this.takeCommands(url.searchParams.get("session") ?? ""));
+    if (url.pathname === "/commands" && req.method === "GET") {
+      return Response.json(this.takeCommands(url.searchParams.get("session") ?? "", url.searchParams.get("stop") === "1"));
+    }
+    if (url.pathname === "/terminate" && req.method === "POST") {
+      const r = terminateRequest.safeParse(await req.json().catch(() => undefined));
+      if (!r.success) return new Response("bad terminate request", { status: 400 });
+      if (this.stopping.get(r.data.sessionId) === r.data.id) this.terminate(r.data.sessionId);
+      return new Response("ok");
+    }
     if (url.pathname === "/reply" && req.method === "POST") {
       const r = commandReply.safeParse(await req.json().catch(() => undefined));
       if (!r.success) return new Response("bad reply", { status: 400 });
@@ -294,23 +305,33 @@ export class Hub {
   // Waits for the session's module; a window without one (an older Claude
   // Code, a window still on the old plugin) never takes it, and the user is
   // told so.
-  private queueCommand(sessionId: string, c: Omit<TopicCommand, "id">): void {
+  // A stop not taken in time ends the window at once.
+  private queueCommand(sessionId: string, c: Omit<TopicCommand, "id">): string {
     const cmd = { id: randomUUID(), ...c };
     const ms = this.opts.commandPickupMs ?? COMMAND_PICKUP_MS;
     const timer = setTimeout(() => {
       this.commands.set(sessionId, (this.commands.get(sessionId) ?? []).filter(e => e.cmd !== cmd));
       this.log.warn(`/${cmd.name} for session ${sessionId} was not taken in ${ms} ms`);
+      if (cmd.name === "stop") {
+        if (this.stopping.get(sessionId) === cmd.id) this.terminate(sessionId);
+        return;
+      }
       this.enqueue(sessionId, `cmd-${cmd.id}-lost`, `⚠️ /${cmd.name} не выполнена: окно не забрало её за ${ms / MS_PER_SECOND} с. Команды выполняет модуль плагина — перезапусти окно.`, true, false);
     }, ms);
     this.commands.set(sessionId, [...(this.commands.get(sessionId) ?? []), { cmd, timer }]);
     this.log.info(`/${cmd.name} for session ${sessionId}`);
+    return cmd.id;
   }
 
-  private takeCommands(sessionId: string): TopicCommand[] {
+  // An older module does not know stop: it stays queued for its timeout.
+  private takeCommands(sessionId: string, takesStop: boolean): TopicCommand[] {
     const queued = this.commands.get(sessionId) ?? [];
-    this.commands.delete(sessionId);
-    for (const e of queued) clearTimeout(e.timer);
-    return queued.map(e => e.cmd);
+    const taken = queued.filter(e => takesStop || e.cmd.name !== "stop");
+    const left = queued.filter(e => !taken.includes(e));
+    if (left.length) this.commands.set(sessionId, left);
+    else this.commands.delete(sessionId);
+    for (const e of taken) clearTimeout(e.timer);
+    return taken.map(e => e.cmd);
   }
 
   private async registerCommands(api: TelegramApi): Promise<void> {
@@ -332,6 +353,7 @@ export class Hub {
     this.conns.delete(ws);
     const sid = ws.data.sessionId;
     if (sid) this.log.info(`window for session ${sid} disconnected`);
+    if (sid && !this.connOf(sid)) this.stopping.delete(sid);
     const stop = sid ? this.stops.get(sid) : undefined;
     if (sid && stop && !this.connOf(sid)) {
       clearTimeout(stop);
@@ -1088,7 +1110,10 @@ ${msg.text}`);
       return;
     }
     const cmd = m.text !== undefined ? commandOf(m.text, this.botUsername) : undefined;
-    if (cmd) return this.queueCommand(sessionId, cmd);
+    if (cmd) {
+      this.queueCommand(sessionId, cmd);
+      return;
+    }
     this.setEnabled(sessionId, true);
     const { content, meta } = await this.inboundOf(api, m);
     if (ws.data.reportsSeen) this.reactLater(m.message_id);
@@ -1140,9 +1165,23 @@ ${msg.text}`);
       if (this.launches.has(sessionId)) return this.notice(sessionId, "Сессия уже запускается", false);
       return this.launch(sessionId, cmd.args || undefined, []);
     }
-    const ws = this.connOf(sessionId);
-    if (!ws) return this.notice(sessionId, "Сессия не запущена", false);
+    if (!this.connOf(sessionId)) return this.notice(sessionId, "Сессия не запущена", false);
     if (this.stops.has(sessionId)) return;
+    if (this.stopping.has(sessionId)) {
+      this.log.info(`second /stop for session ${sessionId}: not waiting for the module`);
+      return this.terminate(sessionId);
+    }
+    // The module compacts the session first if it has to.
+    this.stopping.set(sessionId, this.queueCommand(sessionId, { name: "stop", args: cmd.args }));
+  }
+
+  private terminate(sessionId: string): void {
+    this.stopping.delete(sessionId);
+    const queued = this.commands.get(sessionId) ?? [];
+    for (const e of queued.filter(e => e.cmd.name === "stop")) clearTimeout(e.timer);
+    this.commands.set(sessionId, queued.filter(e => e.cmd.name !== "stop"));
+    const ws = this.connOf(sessionId);
+    if (!ws || this.stops.has(sessionId)) return;
     this.log.info(`stopping session ${sessionId} from the topic`);
     this.send(ws, { type: "terminate" });
     const ms = this.opts.stopTimeoutMs ?? STOP_TIMEOUT_MS;

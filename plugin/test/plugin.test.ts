@@ -110,6 +110,8 @@ beforeEach(async () => {
     cardEditMs: 50,
     typingEveryMs: 50,
     reactionDelayMs: 50,
+    // No module polls here: /stop ends the window once nobody takes it.
+    commandPickupMs: 100,
     log: memLogger(),
     onExit() {},
   });

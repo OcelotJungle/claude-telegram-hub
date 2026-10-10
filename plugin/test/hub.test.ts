@@ -1246,8 +1246,9 @@ describe("starting and stopping sessions", () => {
     await waitFor(() => texts().some(t => t.startsWith("⚠️ Автозапуск не настроен")));
   });
 
+  // These windows have no module: /stop ends them once nobody takes it.
   test("/stop ends the session's window", async () => {
-    await startHub();
+    await startHub({ commandPickupMs: 50 });
     const a = await enabled(SID);
     fake.pushUpdate(msg("/stop"));
     await a.next("terminate");
@@ -1256,7 +1257,7 @@ describe("starting and stopping sessions", () => {
   });
 
   test("/stop that does not end the window is reported", async () => {
-    await startHub({ stopTimeoutMs: 200 });
+    await startHub({ stopTimeoutMs: 200, commandPickupMs: 50 });
     const a = await enabled(SID);
     fake.pushUpdate(msg("/stop"));
     await a.next("terminate");
@@ -1309,11 +1310,11 @@ describe("commands", () => {
 
   // The mod of one window, with the engine faked: what it ran, and what
   // `run` answers.
-  function mod(sessionId: string, answer: (command: string, args: string) => Promise<{ text?: string }> = async () => ({})) {
+  function mod(sessionId: string, answer: (command: string, args: string) => Promise<{ text?: string }> = async () => ({}), usage = () => USAGE) {
     const ran: [string, string][] = [];
     const runner = new Runner(`http://127.0.0.1:${port}`, {
       sessionId: async () => sessionId,
-      usage: async () => USAGE,
+      usage: async () => usage(),
       run: (command, args) => {
         ran.push([command, args]);
         return answer(command, args);
@@ -1486,6 +1487,92 @@ describe("commands", () => {
     await waitFor(() => sentText(t => t === "once"));
     await Bun.sleep(100);
     expect(fake.texts().filter(p => p.text === "once").length).toBe(1);
+  });
+
+  const SMALL: Usage = { context: { tokens: 50_000, window: 1_000_000 }, rateLimits: [] };
+  const terminated = (c: { messages: { type: string }[] }) => c.messages.some(m => m.type === "terminate");
+
+  // A compact command that ends when the test lets it.
+  function held() {
+    let release = () => {};
+    const done = new Promise<void>(r => (release = r));
+    return {
+      release: () => release(),
+      answer: async () => {
+        await done;
+        return {};
+      },
+    };
+  }
+
+  test("/stop of a session with little context ends it with no compaction", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const { runner, ran } = mod("a", undefined, () => SMALL);
+    command("/stop");
+    await waitFor(async () => {
+      await runner.poll();
+      return terminated(a);
+    });
+    expect(ran).toEqual([]);
+  });
+
+  test("/stop of a session with more than 120k compacts it first, then ends it", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const h = held();
+    const { runner, ran } = mod("a", h.answer);
+    command("/stop");
+    const started = await reply(runner, t => t.startsWith("🗜"));
+    expect(started.text).toBe("🗜 В контексте 128k токенов: сожму его, когда агент закончит ход, и завершу сессию. Повторный /stop завершит сразу.");
+    expect(started.disable_notification).toBe(true);
+    expect(ran).toEqual([["compact", ""]]);
+    await Bun.sleep(100);
+    expect(terminated(a)).toBe(false);
+    await runner.compacted({ tokensBefore: 128_000, tokensAfter: 20_000 });
+    h.release();
+    await a.next("terminate");
+    await waitFor(() => sentText(t => t === "✅ Контекст сжат: 128k → 20k токенов."));
+  });
+
+  test("/stop waits for a /compact from the topic", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const h = held();
+    let usage = USAGE;
+    const { runner, ran } = mod("a", h.answer, () => usage);
+    command("/compact");
+    await reply(runner, t => t.startsWith("🗜"));
+    command("/stop");
+    await reply(runner, t => t.startsWith("⏳"));
+    await Bun.sleep(100);
+    expect(terminated(a)).toBe(false);
+    usage = SMALL;
+    h.release();
+    await a.next("terminate");
+    expect(ran).toEqual([["compact", ""]]);
+  });
+
+  test("a second /stop ends the window without waiting", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const { runner } = mod("a", held().answer);
+    command("/stop");
+    await reply(runner, t => t.startsWith("🗜"));
+    command("/stop");
+    await a.next("terminate");
+  });
+
+  test("an older module never gets /stop, and the window ends once nobody takes it", async () => {
+    await startHub({ commandPickupMs: 150 });
+    const a = await enabled("a");
+    command("/stop");
+    const answers = new Set<string>();
+    await waitFor(async () => {
+      answers.add(await (await fetch(`http://127.0.0.1:${port}/commands?session=a`)).text());
+      return terminated(a);
+    }, 3000);
+    expect([...answers]).toEqual(["[]"]);
   });
 
   test("the hub puts the commands into the bot menu", async () => {

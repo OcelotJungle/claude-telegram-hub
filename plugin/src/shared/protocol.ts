@@ -7,9 +7,12 @@ export const PROTOCOL_VERSION = 1;
 export const DEFAULT_PORT = 47613;
 
 // A command from the topic, which the plugin's function hooks module takes
-// from the hub (GET /commands?session=<id>) and answers (POST /reply).
-export type TopicCommand = { id: string; name: "info" | "compact"; args: string };
+// from the hub (GET /commands?session=<id>) and answers (POST /reply). stop
+// goes only to a module that asks with &stop=1; once it is ready for the
+// window to end, it says so with POST /terminate.
+export type TopicCommand = { id: string; name: "info" | "compact" | "stop"; args: string };
 export type CommandReply = { sessionId: string; id: string; text: string; notify: boolean };
+export type TerminateRequest = { sessionId: string; id: string };
 
 export type ChannelMeta = Record<string, string>;
 

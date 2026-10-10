@@ -1,8 +1,11 @@
 // What the plugin's function hooks module does with commands from the topic.
 // The module runs inside Claude Code with no Node: everything outside comes
 // in as Deps (the engine's `$` calls), so this file imports nothing but types.
-import type { CommandReply, TopicCommand } from "../shared/protocol.ts";
+import type { TopicCommand } from "../shared/protocol.ts";
 
+// /stop of a session with more context than this compacts it first, so a
+// resume does not cache all of it again.
+const STOP_COMPACT_TOKENS = 120_000;
 const LIMIT_NAMES: Record<string, string> = { five_hour: "5 часов", seven_day: "Неделя" };
 // The order of the limits in /info; others go after these.
 const LIMIT_ORDER = ["five_hour", "seven_day"];
@@ -38,11 +41,14 @@ export type Deps = {
 
 export class Runner {
   private polling = false;
-  // Replies the hub has not taken yet, oldest first; retried on every poll.
-  private unsent: CommandReply[] = [];
+  // Replies and terminate requests the hub has not taken yet, oldest first;
+  // retried on every poll.
+  private unsent: { path: string; body: string }[] = [];
   private flushing: Promise<void> | undefined;
   // /compact commands from the topic waiting for their compaction.
   private compacting: { sessionId: string; id: string }[] = [];
+  // Compact commands still running; a /stop waits for them.
+  private running = new Set<Promise<void>>();
   private replies = new Map<string, number>();
 
   constructor(
@@ -58,7 +64,7 @@ export class Runner {
     try {
       await this.flush();
       const sessionId = await this.deps.sessionId();
-      const res = await this.deps.http(`${this.base}/commands?session=${encodeURIComponent(sessionId)}`);
+      const res = await this.deps.http(`${this.base}/commands?session=${encodeURIComponent(sessionId)}&stop=1`);
       if (res.status !== 200) return;
       for (const cmd of topicCommands(res.text)) void this.execute(sessionId, cmd);
     } catch {
@@ -88,6 +94,7 @@ export class Runner {
       }
       return;
     }
+    if (cmd.name === "stop") return this.stop(to);
     const window = autocompactArg(cmd.args);
     if (window !== undefined) {
       try {
@@ -98,17 +105,53 @@ export class Runner {
       }
       return;
     }
+    await this.compact(to, cmd.args, "🗜 Компакт запущен: начнётся, как только агент закончит текущий ход.");
+  }
+
+  // The compact command resolves once the compaction is over.
+  private async compact(to: { sessionId: string; id: string }, args: string, started: string): Promise<void> {
     this.compacting.push(to);
-    await this.reply(to, "🗜 Компакт запущен: начнётся, как только агент закончит текущий ход.", false);
+    const run = (async () => {
+      await this.reply(to, started, false);
+      try {
+        const res = await this.deps.run("compact", args);
+        // The command printed something and no compaction reported yet: it
+        // ended without one (nothing to compact). Silent: the compaction hook
+        // reports.
+        const text = res.text?.trim();
+        if (text && this.drop(to)) await this.reply(to, `Компакт: ${text}`, true);
+      } catch (e) {
+        if (this.drop(to)) await this.reply(to, `⚠️ Компакт не запустился: ${message(e)}`, true);
+      }
+    })();
+    this.running.add(run);
+    await run;
+    this.running.delete(run);
+  }
+
+  // The window ends once the compactions asked for are over; with much
+  // context, after one more. A second /stop in the topic does not wait.
+  private async stop(to: { sessionId: string; id: string }): Promise<void> {
+    if (this.running.size) {
+      await this.reply(to, "⏳ Завершу сессию, когда закончится компакт. Повторный /stop завершит сразу.", false);
+      await Promise.all(this.running);
+    }
+    const used = await this.contextTokens();
+    if (used !== undefined && used > STOP_COMPACT_TOKENS) {
+      await this.compact(to, "", `🗜 В контексте ${tokens(used)} токенов: сожму его, когда агент закончит ход, и завершу сессию. Повторный /stop завершит сразу.`);
+    }
+    this.unsent.push({ path: "/terminate", body: JSON.stringify({ sessionId: to.sessionId, id: to.id }) });
+    await this.flush();
+  }
+
+  // The status line's figure, else the local estimate (right after a
+  // compaction); undefined when the engine cannot tell.
+  private async contextTokens(): Promise<number | undefined> {
     try {
-      const res = await this.deps.run("compact", cmd.args);
-      // The command printed something and no compaction reported yet: it
-      // ended without one (nothing to compact). Silent: the compaction hook
-      // reports.
-      const text = res.text?.trim();
-      if (text && this.drop(to)) await this.reply(to, `Компакт: ${text}`, true);
-    } catch (e) {
-      if (this.drop(to)) await this.reply(to, `⚠️ Компакт не запустился: ${message(e)}`, true);
+      const u = await this.deps.usage();
+      return u.context.tokens ?? u.context.breakdown?.totalTokens;
+    } catch {
+      return undefined;
     }
   }
 
@@ -122,7 +165,7 @@ export class Runner {
   private async reply(to: { sessionId: string; id: string }, text: string, notify: boolean): Promise<void> {
     const n = this.replies.get(to.id) ?? 0;
     this.replies.set(to.id, n + 1);
-    this.unsent.push({ sessionId: to.sessionId, id: `${to.id}.${n}`, text, notify });
+    this.unsent.push({ path: "/reply", body: JSON.stringify({ sessionId: to.sessionId, id: `${to.id}.${n}`, text, notify }) });
     await this.flush();
   }
 
@@ -134,9 +177,9 @@ export class Runner {
   }
 
   private async send(): Promise<void> {
-    while (this.unsent.length) {
+    for (let head = this.unsent[0]; head; head = this.unsent[0]) {
       try {
-        const res = await this.deps.http(`${this.base}/reply`, { method: "POST", body: JSON.stringify(this.unsent[0]) });
+        const res = await this.deps.http(`${this.base}${head.path}`, { method: "POST", body: head.body });
         if (res.status !== 200) return;
       } catch {
         return;
@@ -214,5 +257,5 @@ function topicCommands(json: string): TopicCommand[] {
 function isTopicCommand(v: unknown): v is TopicCommand {
   if (typeof v !== "object" || v === null) return false;
   const name = "name" in v ? v.name : undefined;
-  return "id" in v && typeof v.id === "string" && (name === "info" || name === "compact") && "args" in v && typeof v.args === "string";
+  return "id" in v && typeof v.id === "string" && (name === "info" || name === "compact" || name === "stop") && "args" in v && typeof v.args === "string";
 }
