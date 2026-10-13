@@ -42,7 +42,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     filesDir: join(dir, "outbox-files"),
     inboxDir: join(dir, "inbox"),
     ...(o.videoTools ? { videoTools: o.videoTools } : {}),
-    api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === "string" ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500 }),
+    api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === "string" ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, sendAttemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500 }),
     config: () => config,
     idleMs: o.idleMs ?? 60_000,
     commandPickupMs: o.commandPickupMs ?? 3000,

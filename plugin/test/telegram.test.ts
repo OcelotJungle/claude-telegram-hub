@@ -59,7 +59,7 @@ describe("TelegramApi", () => {
   // attempt hangs, the next one may get through, and then the connection is reused.
   describe("flaky network", () => {
     const flaky = (o: object = {}) =>
-      new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 100, networkRetryMs: 5, ...o });
+      new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 100, sendAttemptTimeoutMs: 100, networkRetryMs: 5, ...o });
 
     test("a hung attempt is abandoned quickly and retried", async () => {
       fake.hangNext("sendMessage");
@@ -69,6 +69,17 @@ describe("TelegramApi", () => {
       expect(fake.callsOf("sendMessage").length).toBe(2);
     });
 
+    // An edit is safe to repeat; a send that took long may already be in the chat.
+    test("a slow answer to a send is waited for, so the message is not posted twice", async () => {
+      fake.delayNext("sendMessage", 300);
+      fake.delayNext("editMessageText", 300);
+      const slow = flaky({ sendAttemptTimeoutMs: 1000 });
+      await slow.sendMessage("-100", 7, "hi", true);
+      await slow.editMessageText("-100", 1, "edited");
+      expect(fake.callsOf("sendMessage").length).toBe(1);
+      expect(fake.callsOf("editMessageText").length).toBe(2);
+    });
+
     test("network failures are retried past maxAttempts until the deadline", async () => {
       fake.hangNext("sendMessage", 4);
       await flaky({ deadlineMs: 5000 }).sendMessage("-100", 7, "hi", true);
@@ -76,7 +87,7 @@ describe("TelegramApi", () => {
     });
 
     test("network failures give up at the deadline", async () => {
-      const dead = new TelegramApi({ token: "x", base: "http://127.0.0.1:1", attemptTimeoutMs: 100, networkRetryMs: 5, deadlineMs: 300 });
+      const dead = new TelegramApi({ token: "x", base: "http://127.0.0.1:1", attemptTimeoutMs: 100, sendAttemptTimeoutMs: 100, networkRetryMs: 5, deadlineMs: 300 });
       const started = Date.now();
       await expect(dead.sendMessage("-100", 1, "x", true)).rejects.toThrow();
       expect(Date.now() - started).toBeLessThan(1500);

@@ -28,6 +28,7 @@ export class FakeTelegram {
   private activePoll: { abort: (r: Response) => void } | undefined;
   private failures = new Map<string, Failure[]>();
   private hangs = new Map<string, number>();
+  private delays = new Map<string, number>();
   private deletedTopics = new Set<number>();
   files = new Map<string, { path: string; body: Uint8Array }>();
 
@@ -65,6 +66,11 @@ export class FakeTelegram {
   // the network silently drops.
   hangNext(method: string, count = 1): void {
     this.hangs.set(method, (this.hangs.get(method) ?? 0) + count);
+  }
+
+  // The next call of `method` is answered only after `ms`, like a slow network.
+  delayNext(method: string, ms: number): void {
+    this.delays.set(method, ms);
   }
 
   clearHangs(): void {
@@ -110,6 +116,11 @@ export class FakeTelegram {
     if (hang > 0) {
       this.hangs.set(method, hang - 1);
       return new Promise<Response>(() => {});
+    }
+    const delay = this.delays.get(method);
+    if (delay !== undefined) {
+      this.delays.delete(method);
+      await Bun.sleep(delay);
     }
 
     const fail = this.failures.get(method)?.shift();

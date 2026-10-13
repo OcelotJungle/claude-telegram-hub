@@ -16,6 +16,7 @@ const MAX_ATTEMPTS = 5;
 const BASE_DELAY_MS = 1000;
 const MAX_DELAY_MS = 15_000;
 const ATTEMPT_TIMEOUT_MS = 5000;
+const SEND_ATTEMPT_TIMEOUT_MS = 60_000;
 const NETWORK_RETRY_MS = 300;
 const DEADLINE_MS = 120_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
@@ -83,6 +84,9 @@ type ApiOptions = {
   // an attempt that gets no answer is abandoned quickly instead of waiting for
   // the OS connect timeout (~21 s on Windows), and retried until the deadline.
   attemptTimeoutMs?: number;
+  // A send that may already be in the chat is not abandoned that quickly: a
+  // slow answer to it is waited for, as a retry would post the message twice.
+  sendAttemptTimeoutMs?: number;
   networkRetryMs?: number;
   deadlineMs?: number;
 };
@@ -93,6 +97,7 @@ export class TelegramApi {
   private maxAttempts: number;
   private baseDelayMs: number;
   private attemptTimeoutMs: number;
+  private sendAttemptTimeoutMs: number;
   private networkRetryMs: number;
   private deadlineMs: number;
 
@@ -102,6 +107,7 @@ export class TelegramApi {
     this.maxAttempts = opts.maxAttempts ?? MAX_ATTEMPTS;
     this.baseDelayMs = opts.baseDelayMs ?? BASE_DELAY_MS;
     this.attemptTimeoutMs = opts.attemptTimeoutMs ?? ATTEMPT_TIMEOUT_MS;
+    this.sendAttemptTimeoutMs = opts.sendAttemptTimeoutMs ?? SEND_ATTEMPT_TIMEOUT_MS;
     this.networkRetryMs = opts.networkRetryMs ?? NETWORK_RETRY_MS;
     this.deadlineMs = opts.deadlineMs ?? DEADLINE_MS;
   }
@@ -109,14 +115,15 @@ export class TelegramApi {
   // Retries network errors until the deadline, and 5xx and 429 (honouring
   // retry_after) up to maxAttempts; other API errors are thrown at once.
   // `waitMs` is how long Telegram may legitimately hold the request (long poll).
-  async call<T>(method: string, params: Body, result: z.ZodType<T>, o: { signal?: AbortSignal; retry?: boolean; waitMs?: number } = {}): Promise<T> {
+  async call<T>(method: string, params: Body, result: z.ZodType<T>, o: { signal?: AbortSignal; retry?: boolean; waitMs?: number; sends?: boolean } = {}): Promise<T> {
     const deadline = Date.now() + this.deadlineMs;
+    const timeoutMs = (o.sends ? this.sendAttemptTimeoutMs : this.attemptTimeoutMs) + (o.waitMs ?? 0);
     let apiFailures = 0;
     let netFailures = 0;
     for (;;) {
       let wait: number;
       try {
-        const answer = await this.callOnce(method, params, result, this.attemptTimeoutMs + (o.waitMs ?? 0), o.signal);
+        const answer = await this.callOnce(method, params, result, timeoutMs, o.signal);
         if (netFailures) this.log.info(`telegram ${method} got through after ${netFailures} failed attempt(s)`);
         return answer;
       } catch (e) {
@@ -172,6 +179,7 @@ export class TelegramApi {
       "sendMessage",
       { chat_id: chatId, message_thread_id: threadId, text, disable_notification: silent, ...(entities?.length ? { entities } : {}), ...keyboard(buttons) },
       sentSchema,
+      { sends: true },
     );
   }
 
@@ -204,7 +212,7 @@ export class TelegramApi {
   }
 
   sendRichMessage(chatId: string, threadId: number, blocks: Block[], silent: boolean): Promise<{ message_id: number }> {
-    return this.call("sendRichMessage", { chat_id: chatId, message_thread_id: threadId, rich_message: { blocks }, disable_notification: silent }, sentSchema);
+    return this.call("sendRichMessage", { chat_id: chatId, message_thread_id: threadId, rich_message: { blocks }, disable_notification: silent }, sentSchema, { sends: true });
   }
 
   // One file by the method of its kind, several as a media group with the
@@ -241,7 +249,7 @@ export class TelegramApi {
     };
     const method = single ? `send${single.kind.charAt(0).toUpperCase()}${single.kind.slice(1)}` : "sendMediaGroup";
     const bytes = files.reduce((n, file) => n + file.size, 0);
-    return this.call(method, form, z.unknown(), { waitMs: bytes / UPLOAD_BYTES_PER_MS });
+    return this.call(method, form, z.unknown(), { waitMs: bytes / UPLOAD_BYTES_PER_MS, sends: true });
   }
 
   setMyCommands(commands: { command: string; description: string }[], signal?: AbortSignal): Promise<true> {
@@ -249,7 +257,7 @@ export class TelegramApi {
   }
 
   createForumTopic(chatId: string, name: string): Promise<{ message_thread_id: number; name: string }> {
-    return this.call("createForumTopic", { chat_id: chatId, name }, topicSchema);
+    return this.call("createForumTopic", { chat_id: chatId, name }, topicSchema, { sends: true });
   }
 
   editForumTopic(chatId: string, threadId: number, name: string): Promise<true> {
