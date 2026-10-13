@@ -65,7 +65,7 @@ const CARD_EDIT_MS = 5000;
 // Edits of all cards together go at most this often. Telegram lets a group
 // have about 20 messages a minute, and a dozen subagents editing their cards
 // every few seconds would use it all up and hold back the agent's own text.
-const CARD_GAP_MS = 4000;
+const CARD_GAP_MS = 6000;
 // Cards remembered for editing; the oldest are forgotten past this.
 const MAX_CARDS = 200;
 const TOO_MANY_REQUESTS = 429;

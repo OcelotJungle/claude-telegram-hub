@@ -10,7 +10,7 @@ import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, interruptPrompt, MAX_AUTO_CO
 import { arr, field } from "../src/shared/guards.ts";
 import { NOTIFY_MARKER } from "../src/transcript/relay.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
-import { freePort, memLogger, tempDir, waitFor } from "./helpers.ts";
+import { freePort, memLogger, NO_PACE, tempDir, waitFor } from "./helpers.ts";
 
 const GROUP = "-1001";
 const ME = "123456789";
@@ -103,7 +103,7 @@ beforeEach(async () => {
     outboxFile: join(state, "outbox.json"),
     filesDir: join(state, "outbox-files"),
     inboxDir: join(state, "inbox"),
-    api: new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2 }),
+    api: new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, groupPace: NO_PACE }),
     config: () => config,
     idleMs: 60_000,
     pollTimeoutSec: 1,

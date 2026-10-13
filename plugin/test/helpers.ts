@@ -7,6 +7,9 @@ import { createServer } from "net";
 import { z } from "zod";
 import { hubToPlugin } from "../src/shared/protocol-schema.ts";
 
+// A group pace that never holds a call, for tests that are not about it.
+export const NO_PACE = { count: 1_000_000, perMs: 1 };
+
 export function tempDir(prefix = "tghub-"): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }

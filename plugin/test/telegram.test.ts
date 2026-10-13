@@ -57,6 +57,31 @@ describe("TelegramApi", () => {
     await send;
   });
 
+  test("posts and edits keep to the group's pace; other calls do not wait", async () => {
+    const paced = new TelegramApi({ token: fake.token, base: fake.url, groupPace: { count: 2, perMs: 300 } });
+    const started = Date.now();
+    const posts = [paced.sendMessage("-100", 7, "1", true), paced.editMessageText("-100", 1, "2"), paced.sendMessage("-100", 7, "3", true)];
+    await paced.sendTyping("-100", 7);
+    expect(Date.now() - started).toBeLessThan(250);
+    await Promise.all(posts);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(280);
+  });
+
+  test("failed attempts of a call do not use up the pace", async () => {
+    const paced = new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, groupPace: { count: 2, perMs: 60_000 } });
+    fake.failNext("sendMessage", { code: 502, description: "Bad Gateway" });
+    fake.failNext("sendMessage", { code: 502, description: "Bad Gateway" });
+    await paced.sendMessage("-100", 7, "a", true);
+    await paced.sendMessage("-100", 7, "b", true);
+    expect(fake.callsOf("sendMessage").length).toBe(4);
+  });
+
+  test("a send waiting for the pace goes before a waiting edit", async () => {
+    const paced = new TelegramApi({ token: fake.token, base: fake.url, groupPace: { count: 1, perMs: 150 } });
+    await Promise.all([paced.sendMessage("-100", 7, "a", true), paced.editMessageText("-100", 1, "e"), paced.sendMessage("-100", 7, "b", true)]);
+    expect(fake.calls.map(c => c.method)).toEqual(["sendMessage", "sendMessage", "editMessageText"]);
+  });
+
   test("5xx is retried", async () => {
     fake.failNext("createForumTopic", { code: 502, description: "Bad Gateway" });
     const t = await api.createForumTopic("-100", "proj · title");

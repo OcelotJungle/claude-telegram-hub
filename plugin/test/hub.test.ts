@@ -12,7 +12,7 @@ import { Runner } from "../src/mod/commands.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
-import { freePort, hasFfmpeg, makeVideo, memLogger, must, tempDir, waitFor, wsClient } from "./helpers.ts";
+import { freePort, hasFfmpeg, makeVideo, memLogger, must, NO_PACE, tempDir, waitFor, wsClient } from "./helpers.ts";
 
 const GROUP = "-1001";
 const ME = "123456789";
@@ -42,7 +42,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     filesDir: join(dir, "outbox-files"),
     inboxDir: join(dir, "inbox"),
     ...(o.videoTools ? { videoTools: o.videoTools } : {}),
-    api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === "string" ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, sendAttemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500 }),
+    api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === "string" ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, sendAttemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500, groupPace: NO_PACE }),
     config: () => config,
     idleMs: o.idleMs ?? 60_000,
     commandPickupMs: o.commandPickupMs ?? 3000,

@@ -2,6 +2,7 @@ import type { TelegramMessage, TelegramUpdate } from "@gramio/types";
 import type { Logger } from "../shared/log.ts";
 import type { Entity } from "../shared/markdown.ts";
 import type { OutFile } from "../shared/media.ts";
+import type { Priority } from "./pace.ts";
 import type { Block } from "./rich-out.ts";
 
 import { mkdirSync, writeFileSync } from "fs";
@@ -10,6 +11,7 @@ import { z } from "zod";
 import { API_BASE } from "../shared/config.ts";
 import { field } from "../shared/guards.ts";
 import { nullLogger } from "../shared/log.ts";
+import { Pace } from "./pace.ts";
 
 const MS_PER_SECOND = 1000;
 const MAX_ATTEMPTS = 5;
@@ -23,6 +25,11 @@ const DOWNLOAD_TIMEOUT_MS = 120_000;
 // An upload attempt may take as long as sending its bytes at this rate
 // (64 KB/s), on top of the usual attempt timeout.
 const UPLOAD_BYTES_PER_MS = 64;
+// Telegram lets a bot post about 20 messages a minute in a group, edits
+// included; past that it answers 429 and makes the bot wait some 40 s. So
+// posts and edits are paced here instead of running into the limit.
+const GROUP_POSTS = 20;
+const GROUP_POSTS_PER_MS = 60_000;
 
 // Bot API types, generated from its documentation.
 export type Message = TelegramMessage;
@@ -89,11 +96,28 @@ type ApiOptions = {
   sendAttemptTimeoutMs?: number;
   networkRetryMs?: number;
   deadlineMs?: number;
+  groupPace?: { count: number; perMs: number };
 };
 
 // Calls that go on while the bot waits out a flood limit: polling, and
 // answers to button presses, which are not messages in a chat.
 const FLOOD_FREE = new Set(["getUpdates", "getMe", "answerCallbackQuery"]);
+// Calls that put something in the group or change it, and so count towards
+// its limit; a new message goes before an edit.
+const PACED: Record<string, Priority> = {
+  sendMessage: "send",
+  sendRichMessage: "send",
+  sendPhoto: "send",
+  sendVideo: "send",
+  sendAudio: "send",
+  sendAnimation: "send",
+  sendDocument: "send",
+  sendMediaGroup: "send",
+  createForumTopic: "send",
+  editMessageText: "edit",
+  editMessageReplyMarkup: "edit",
+  editForumTopic: "edit",
+};
 
 export class TelegramApi {
   private base: string;
@@ -106,6 +130,7 @@ export class TelegramApi {
   private deadlineMs: number;
   // Until when Telegram asked the bot to wait (429 retry_after).
   private floodUntil = 0;
+  private pace: Pace;
 
   constructor(private opts: ApiOptions) {
     this.base = opts.base ?? API_BASE;
@@ -116,6 +141,7 @@ export class TelegramApi {
     this.sendAttemptTimeoutMs = opts.sendAttemptTimeoutMs ?? SEND_ATTEMPT_TIMEOUT_MS;
     this.networkRetryMs = opts.networkRetryMs ?? NETWORK_RETRY_MS;
     this.deadlineMs = opts.deadlineMs ?? DEADLINE_MS;
+    this.pace = new Pace(opts.groupPace?.count ?? GROUP_POSTS, opts.groupPace?.perMs ?? GROUP_POSTS_PER_MS);
   }
 
   // When the current flood wait ends; in the past if there is none.
@@ -128,7 +154,11 @@ export class TelegramApi {
   // `waitMs` is how long Telegram may legitimately hold the request (long poll).
   // A 429 holds every call to chats until retry_after passes: more requests
   // meanwhile only get more 429s. A call without retries is not held but fails.
+  // A paced call takes one slot of the group's pace, whatever its attempts:
+  // during an outage they mostly never reach Telegram.
   async call<T>(method: string, params: Body, result: z.ZodType<T>, o: { signal?: AbortSignal; retry?: boolean; waitMs?: number; sends?: boolean } = {}): Promise<T> {
+    const priority = PACED[method];
+    if (priority) await this.pace.take(priority);
     const deadline = Date.now() + this.deadlineMs;
     const timeoutMs = (o.sends ? this.sendAttemptTimeoutMs : this.attemptTimeoutMs) + (o.waitMs ?? 0);
     let apiFailures = 0;
