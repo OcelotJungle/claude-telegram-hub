@@ -31,7 +31,7 @@ const clients: { close(): void }[] = [];
 
 type HubExtras = { spawn?(command: string[]): void; projectsDir?: string; stopTimeoutMs?: number; defaultAccount?(): Promise<string | undefined> };
 
-async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number } & HubExtras = {}) {
+async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number } & HubExtras = {}) {
   port = await freePort();
   hub = new Hub({
     port,
@@ -52,7 +52,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     sendRetryMaxMs: 50,
     cardEditMs: o.cardEditMs ?? 50,
     cardGapMs: o.cardGapMs ?? 0,
-    typingEveryMs: 50,
+    typingEveryMs: o.typingEveryMs ?? 50,
     reactionDelayMs: o.reactionDelayMs ?? 50,
     readyDelayMs: 50,
     ...(o.spawn ? { spawn: o.spawn } : {}),
@@ -245,6 +245,21 @@ describe("inbound", () => {
     const shown = fake.callsOf("sendChatAction").length;
     await Bun.sleep(200);
     expect(fake.callsOf("sendChatAction").length).toBe(shown);
+  });
+
+  // Some networks let few new connections through: parallel requests hang,
+  // while one connection, reused, takes them in turn.
+  test("typing in several topics goes one request at a time", async () => {
+    await startHub({ typingEveryMs: 60_000 });
+    const a = await enabled("a");
+    const b = await enabled("b");
+    fake.delayNext("sendChatAction", 300);
+    a.send({ type: "busy", busy: true });
+    b.send({ type: "busy", busy: true });
+    await Bun.sleep(150);
+    expect(fake.callsOf("sendChatAction").length).toBe(1);
+    await waitFor(() => fake.callsOf("sendChatAction").length === 2);
+    expect(new Set(fake.callsOf("sendChatAction").map(c => c.message_thread_id)).size).toBe(2);
   });
 
   test("no typing while the mode is off", async () => {

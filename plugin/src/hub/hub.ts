@@ -218,6 +218,11 @@ export class Hub {
   private typingTimer: ReturnType<typeof setInterval> | undefined;
   // Sessions whose last "typing…" failed: the next failure is not logged.
   private typingFailed = new Set<string>();
+  // "typing…" goes one request at a time: some networks let few new
+  // connections through, so parallel requests hang while one connection,
+  // reused, takes them in turn. A session is queued once.
+  private typingQueue: Promise<void> = Promise.resolve();
+  private typingQueued = new Set<string>();
   private abort = new AbortController();
   private running = false;
   private log: Logger;
@@ -537,14 +542,18 @@ ${msg.text}`);
     const rec = sid ? this.store.get(sid) : undefined;
     const api = this.opts.api;
     const groupId = this.opts.config().groupId;
-    if (!sid || !rec?.enabled || !api || !groupId) return;
-    api.sendTyping(groupId, rec.topicId).then(
-      () => this.typingFailed.delete(sid),
-      e => {
-        if (!this.typingFailed.has(sid)) this.log.warn(`showing typing in the topic of session ${sid} failed: ${e}`);
-        this.typingFailed.add(sid);
-      },
-    );
+    if (!sid || !rec?.enabled || !api || !groupId || this.typingQueued.has(sid)) return;
+    this.typingQueued.add(sid);
+    this.typingQueue = this.typingQueue.then(() => {
+      this.typingQueued.delete(sid);
+      return api.sendTyping(groupId, rec.topicId).then(
+        () => void this.typingFailed.delete(sid),
+        e => {
+          if (!this.typingFailed.has(sid)) this.log.warn(`showing typing in the topic of session ${sid} failed: ${e}`);
+          this.typingFailed.add(sid);
+        },
+      );
+    });
   }
 
   private async handleRequest(ws: WS, msg: Extract<PluginToHub, { type: "req" }>): Promise<void> {
