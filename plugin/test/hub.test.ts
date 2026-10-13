@@ -1197,39 +1197,66 @@ describe("starting and stopping sessions", () => {
     const w = await plugin(SID);
     expect((await w.next("inbound")).content).toBe("first");
     expect((await w.next("inbound", m => m.content === "second")).content).toBe("second");
-    await waitFor(() => texts().includes("✅ Сессия запущена"));
+    await waitFor(() => fake.callsOf("editMessageText").some(c => c.text === "✅ Сессия запущена"));
     expect(spawned.length).toBe(1);
   });
 
-  test("the start notices go once the agent starts working", async () => {
+  test("the start notice is one message: edited once the session starts, gone once the agent works", async () => {
     await closedSession();
     fake.pushUpdate(msg("first"));
     await waitFor(() => texts().includes("🚀 Запускаю сессию (аккаунт 2)…"));
-    const starting = fake.lastMessageId;
+    const notice = fake.lastMessageId;
     const w = await plugin(SID);
-    await waitFor(() => texts().includes("✅ Сессия запущена"));
-    const started = fake.lastMessageId;
+    await waitFor(() => fake.callsOf("editMessageText").length === 1);
+    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: notice, text: "✅ Сессия запущена" }]);
     await w.next("inbound");
     await Bun.sleep(100);
+    expect(texts().filter(t => /[Сс]есси/.test(t))).toEqual(["🚀 Запускаю сессию (аккаунт 2)…"]);
     expect(fake.callsOf("deleteMessage")).toEqual([]);
     w.send({ type: "busy", busy: true });
-    await waitFor(() => fake.callsOf("deleteMessage").length === 2);
-    expect(fake.callsOf("deleteMessage")).toEqual([
-      { chat_id: GROUP, message_id: starting },
-      { chat_id: GROUP, message_id: started },
-    ]);
+    await waitFor(() => fake.callsOf("deleteMessage").length === 1);
+    expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: notice }]);
     // Only once.
     w.send({ type: "busy", busy: false });
     w.send({ type: "busy", busy: true });
     await Bun.sleep(100);
-    expect(fake.callsOf("deleteMessage").length).toBe(2);
+    expect(fake.callsOf("deleteMessage").length).toBe(1);
   });
 
-  test("a session that does not connect in time is reported", async () => {
+  test("a start notice still on its way is edited as soon as it is in the topic", async () => {
+    await closedSession();
+    fake.delayNext("sendMessage", 300);
+    fake.pushUpdate(msg("first"));
+    await waitFor(() => fake.callsOf("sendMessage").length === 1);
+    await plugin(SID);
+    await waitFor(() => fake.callsOf("editMessageText").length === 1);
+    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: fake.lastMessageId, text: "✅ Сессия запущена" }]);
+  });
+
+  test("a start notice still queued goes already saying the session started", async () => {
+    await closedSession();
+    for (let i = 0; i < 8; i++) fake.failNext("sendMessage", { code: 403, description: "Forbidden: bot is not a member" });
+    fake.pushUpdate(msg("first"));
+    await waitFor(() => fake.callsOf("sendMessage").length === 1);
+    await plugin(SID);
+    // Failed attempts are among the calls too: the first said "starting".
+    await waitFor(() => fake.callsOf("sendMessage").length === 9, 3000);
+    await Bun.sleep(100);
+    const notices = texts().filter(t => /[Сс]есси/.test(t));
+    expect(notices[0]).toBe("🚀 Запускаю сессию (аккаунт 2)…");
+    expect(notices.at(-1)).toBe("✅ Сессия запущена");
+    expect(fake.callsOf("editMessageText")).toEqual([]);
+  });
+
+  test("a session that does not connect in time is reported, and the start notice goes", async () => {
     await closedSession({ timeoutSec: 0.2 });
     fake.pushUpdate(msg("hello?"));
+    await waitFor(() => texts().includes("🚀 Запускаю сессию (аккаунт 2)…"));
+    const notice = fake.lastMessageId;
     await waitFor(() => texts().includes("⚠️ Сессия не запустилась за 0.2 с"), 3000);
     expect(fake.texts().at(-1)).toMatchObject({ disable_notification: false });
+    await waitFor(() => fake.callsOf("deleteMessage").length === 1);
+    expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: notice }]);
   });
 
   test("/run starts on the account given, and not twice", async () => {
@@ -1282,7 +1309,7 @@ describe("starting and stopping sessions", () => {
     expect(spawned[0]?.[5]).toBe("2");
     const w = await wsClient(port, { type: "hello", v: PROTOCOL_VERSION, windowKey: "w-started", sessionId: SID, cwd: CWD });
     clients.push(w);
-    await waitFor(() => texts().includes("✅ Сессия запущена"));
+    await waitFor(() => [...texts(), ...fake.callsOf("editMessageText").map(c => c.text)].includes("✅ Сессия запущена"));
     expect(new SessionStore(join(dir, "sessions.json")).get(SID)?.account).toBe("2");
   });
 

@@ -133,6 +133,14 @@ export class Outbox {
     this.save();
   }
 
+  setText(id: string, text: string): void {
+    const item = this.data.items.find(i => i.id === id);
+    if (!item) return;
+    item.text = text;
+    delete item.entities;
+    this.save();
+  }
+
   setFiles(id: string, files: OutFile[]): void {
     const item = this.data.items.find(i => i.id === id);
     if (!item) return;

@@ -35,8 +35,9 @@ import { richPieces } from "./rich-out.ts";
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath } from "./video.ts";
 
 const INACTIVE_TEXT = "сессия сейчас не активна";
-// The queue id prefix of "starting the session" and "session started".
+// The queue id prefix of the start notice, "starting the session".
 const LAUNCH_NOTICE = "launch-";
+const LAUNCHED_TEXT = "✅ Сессия запущена";
 // After a launched session says hello, Claude Code still registers the
 // channel; messages sent sooner are lost.
 const READY_DELAY_MS = 1500;
@@ -201,9 +202,12 @@ export class Hub {
   // Sessions whose /stop waits for the module's terminate request: the id of
   // the stop command.
   private stopping = new Map<string, string>();
-  // The start notices sent to a session's topic, by Telegram message id; they
-  // go once its agent starts working.
-  private launchNotices = new Map<string, number[]>();
+  // The start notices sent to a session's topic: Telegram message id and the
+  // text it shows. They go once its agent starts working.
+  private launchNotices = new Map<string, { id: number; text: string }[]>();
+  // How the latest start of a session ended: the start notice then reads
+  // "started", or leaves the topic as the loud failure notice comes.
+  private launchEnds = new Map<string, "started" | "failed">();
   private readyTimers = new Set<ReturnType<typeof setTimeout>>();
   // Sessions whose delivery waits for the user to fix the setup.
   private blocked = new Set<string>();
@@ -909,8 +913,9 @@ ${msg.text}`);
       return;
     }
     if (!queued) {
-      const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, item.text, item.silent, item.entities, item.buttons));
-      if (item.id.startsWith(LAUNCH_NOTICE)) this.launchNoticeSent(sessionId, sent.message_id);
+      const { text } = item;
+      const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, text, item.silent, item.entities, item.buttons));
+      if (item.id.startsWith(LAUNCH_NOTICE)) this.launchNoticeSent(sessionId, sent.message_id, text);
       return;
     }
     const lost = queued.filter(f => !existsSync(f.path));
@@ -1251,9 +1256,11 @@ ${msg.text}`);
       const l = this.launches.get(sessionId);
       this.launches.delete(sessionId);
       this.log.warn(`session ${sessionId} did not connect in ${sec} s; ${l?.held.length ?? 0} held message(s) dropped`);
+      this.launchEnded(sessionId, "failed");
       this.notice(sessionId, `⚠️ Сессия не запустилась за ${sec} с`, true);
     }, sec * MS_PER_SECOND);
     this.launches.set(sessionId, { account: acc, held, timer });
+    this.launchEnds.delete(sessionId);
     this.launchNotice(sessionId, `🚀 Запускаю сессию (аккаунт ${acc})…`);
   }
 
@@ -1270,7 +1277,7 @@ ${msg.text}`);
       this.store.setWhere(sessionId, undefined, l.account);
     }
     this.log.info(`session ${sessionId} started, ${l.held.length} held message(s) to deliver`);
-    this.launchNotice(sessionId, "✅ Сессия запущена");
+    this.launchEnded(sessionId, "started");
     if (!l.held.length) return;
     const t = setTimeout(() => {
       this.readyTimers.delete(t);
@@ -1310,18 +1317,41 @@ ${msg.text}`);
     this.enqueue(sessionId, `${LAUNCH_NOTICE}${randomUUID()}`, text, false, false);
   }
 
-  private launchNoticeSent(sessionId: string, messageId: number): void {
-    this.launchNotices.set(sessionId, [...(this.launchNotices.get(sessionId) ?? []), messageId]);
-    if (this.connOf(sessionId)?.data.busy) this.dropLaunchNotices(sessionId);
+  private launchNoticeSent(sessionId: string, messageId: number, text: string): void {
+    const notice = { id: messageId, text };
+    this.launchNotices.set(sessionId, [...(this.launchNotices.get(sessionId) ?? []), notice]);
+    const end = this.launchEnds.get(sessionId);
+    if (this.connOf(sessionId)?.data.busy || end === "failed") this.dropLaunchNotices(sessionId);
+    else if (end === "started") this.editLaunchNotice(notice);
+  }
+
+  // The start notice is one message: a queued one changes in place, one in
+  // the topic is edited, and a failed start takes it away.
+  private launchEnded(sessionId: string, end: "started" | "failed"): void {
+    this.launchEnds.set(sessionId, end);
+    for (const item of this.outbox.items().filter(i => i.sessionId === sessionId && i.id.startsWith(LAUNCH_NOTICE))) {
+      if (end === "started") this.outbox.setText(item.id, LAUNCHED_TEXT);
+      else this.outbox.remove(item.id);
+    }
+    if (end === "failed") return this.dropLaunchNotices(sessionId);
+    for (const notice of this.launchNotices.get(sessionId) ?? []) this.editLaunchNotice(notice);
+  }
+
+  private editLaunchNotice(notice: { id: number; text: string }): void {
+    const api = this.opts.api;
+    const groupId = this.opts.config().groupId;
+    if (notice.text === LAUNCHED_TEXT || !api || !groupId) return;
+    notice.text = LAUNCHED_TEXT;
+    api.editMessageText(groupId, notice.id, LAUNCHED_TEXT).catch(e => this.log.warn(`editing start notice ${notice.id} failed: ${e}`));
   }
 
   private dropLaunchNotices(sessionId: string): void {
-    const ids = this.launchNotices.get(sessionId);
+    const notices = this.launchNotices.get(sessionId);
     const api = this.opts.api;
     const groupId = this.opts.config().groupId;
-    if (!ids || !api || !groupId) return;
+    if (!notices || !api || !groupId) return;
     this.launchNotices.delete(sessionId);
-    for (const id of ids) api.deleteMessage(groupId, id).catch(e => this.log.warn(`deleting start notice ${id} failed: ${e}`));
+    for (const { id } of notices) api.deleteMessage(groupId, id).catch(e => this.log.warn(`deleting start notice ${id} failed: ${e}`));
   }
 
   // Photos inside are downloaded like a photo message; a photo that fails keeps
