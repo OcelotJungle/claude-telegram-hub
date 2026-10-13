@@ -262,6 +262,18 @@ describe("inbound", () => {
     expect(new Set(fake.callsOf("sendChatAction").map(c => c.message_thread_id)).size).toBe(2);
   });
 
+  test("failing typing is logged once, and how long it failed once it works again", async () => {
+    await startHub();
+    const a = await enabled("a");
+    for (let i = 0; i < 3; i++) fake.failNext("sendChatAction", { code: 500, description: "Internal" });
+    a.send({ type: "busy", busy: true });
+    await waitFor(() => log.lines.some(l => l.includes("works again")));
+    expect(log.lines.filter(l => l.includes("typing"))).toEqual([
+      "WARN showing typing in the topic of session a failed: Error: Telegram 500: Internal",
+      "INFO typing in the topic of session a works again after 3 failed attempt(s)",
+    ]);
+  });
+
   test("no typing while the mode is off", async () => {
     await startHub();
     const a = await enabled("a");

@@ -216,8 +216,9 @@ export class Hub {
   private idleExpired = false;
   private spoolTimer: ReturnType<typeof setInterval> | undefined;
   private typingTimer: ReturnType<typeof setInterval> | undefined;
-  // Sessions whose last "typing…" failed: the next failure is not logged.
-  private typingFailed = new Set<string>();
+  // Sessions whose "typing…" fails, with the failures in a row: only the
+  // first is logged, and the count once it works again.
+  private typingFailed = new Map<string, number>();
   // "typing…" goes one request at a time: some networks let few new
   // connections through, so parallel requests hang while one connection,
   // reused, takes them in turn. A session is queued once.
@@ -547,10 +548,16 @@ ${msg.text}`);
     this.typingQueue = this.typingQueue.then(() => {
       this.typingQueued.delete(sid);
       return api.sendTyping(groupId, rec.topicId).then(
-        () => void this.typingFailed.delete(sid),
+        () => {
+          const failures = this.typingFailed.get(sid);
+          if (!failures) return;
+          this.typingFailed.delete(sid);
+          this.log.info(`typing in the topic of session ${sid} works again after ${failures} failed attempt(s)`);
+        },
         e => {
-          if (!this.typingFailed.has(sid)) this.log.warn(`showing typing in the topic of session ${sid} failed: ${e}`);
-          this.typingFailed.add(sid);
+          const failures = this.typingFailed.get(sid) ?? 0;
+          if (!failures) this.log.warn(`showing typing in the topic of session ${sid} failed: ${e}`);
+          this.typingFailed.set(sid, failures + 1);
         },
       );
     });
