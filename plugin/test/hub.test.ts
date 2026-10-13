@@ -31,7 +31,7 @@ const clients: { close(): void }[] = [];
 
 type HubExtras = { spawn?(command: string[]): void; projectsDir?: string; stopTimeoutMs?: number; defaultAccount?(): Promise<string | undefined> };
 
-async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; reactionDelayMs?: number } & HubExtras = {}) {
+async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number } & HubExtras = {}) {
   port = await freePort();
   hub = new Hub({
     port,
@@ -51,6 +51,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     sendRetryBaseMs: 10,
     sendRetryMaxMs: 50,
     cardEditMs: o.cardEditMs ?? 50,
+    cardGapMs: o.cardGapMs ?? 0,
     typingEveryMs: 50,
     reactionDelayMs: o.reactionDelayMs ?? 50,
     readyDelayMs: 50,
@@ -1105,6 +1106,32 @@ describe("subagent cards", () => {
     await waitFor(() => fake.callsOf("editMessageText").length === 1, 2000);
     await Bun.sleep(100);
     expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual(["v4"]);
+  });
+
+  test("edits of many cards share one pace", async () => {
+    await startHub({ cardGapMs: 300 });
+    const a = await enabled("a");
+    for (const id of ["x-0", "y-0", "z-0"]) a.send(card(id, `${id} v1`));
+    await waitFor(() => fake.texts().length === 3);
+    for (const id of ["x-0", "y-0", "z-0"]) a.send(card(id, `${id} v2`));
+    await Bun.sleep(400);
+    expect(fake.callsOf("editMessageText").length).toBeLessThanOrEqual(2);
+    await waitFor(() => fake.callsOf("editMessageText").length === 3, 3000);
+  });
+
+  test("card edits wait while the session's text is being delivered", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send(card("x-0", "v1"));
+    await waitFor(() => fake.texts().length === 1);
+    fake.hangNext("sendMessage", 3);
+    a.send({ type: "send", id: "t1", sessionId: "a", text: "urgent", notify: false });
+    await Bun.sleep(100);
+    a.send(card("x-0", "v2"));
+    // The card's own send and four attempts of the text.
+    await waitFor(() => fake.callsOf("sendMessage").length === 5 && fake.callsOf("editMessageText").length === 1, 5000);
+    const order = fake.calls.map(c => c.method);
+    expect(order.indexOf("editMessageText")).toBeGreaterThan(order.lastIndexOf("sendMessage"));
   });
 
   test("a card changed while queued is sent as its latest version", async () => {

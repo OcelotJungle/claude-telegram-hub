@@ -62,6 +62,10 @@ const PERMISSION_KEY_CHARS = 8;
 const PERMISSION_ANSWERS: Record<PermissionBehavior, string> = { allow: "✅ Разрешено", deny: "❌ Отклонено" };
 // A subagent card is edited at most this often; versions in between are skipped.
 const CARD_EDIT_MS = 5000;
+// Edits of all cards together go at most this often. Telegram lets a group
+// have about 20 messages a minute, and a dozen subagents editing their cards
+// every few seconds would use it all up and hold back the agent's own text.
+const CARD_GAP_MS = 4000;
 // Cards remembered for editing; the oldest are forgotten past this.
 const MAX_CARDS = 200;
 const TOO_MANY_REQUESTS = 429;
@@ -118,6 +122,7 @@ export type HubOptions = {
   sendRetryBaseMs?: number;
   sendRetryMaxMs?: number;
   cardEditMs?: number;
+  cardGapMs?: number;
   typingEveryMs?: number;
   reactionDelayMs?: number;
   // Where Claude Code keeps transcripts, to find the cwd of a session the hub
@@ -182,6 +187,8 @@ export class Hub {
   // Subagent cards by `${sessionId}:${cardId}`: text is the latest Markdown
   // version, shown what the message holds now (undefined until it is sent).
   private cards = new Map<string, Card>();
+  // The earliest time the next card edit may go, hub-wide.
+  private nextCardEdit = 0;
   private pumping = new Set<string>();
   // The latest reaction change of a topic message, by message id.
   private reactions = new Map<number, Promise<void>>();
@@ -697,15 +704,27 @@ ${msg.text}`);
       card.done = card.final;
       return;
     }
-    const wait = Math.max(0, card.lastEdit + (this.opts.cardEditMs ?? CARD_EDIT_MS) - Date.now());
-    card.timer = setTimeout(() => {
-      card.timer = undefined;
-      void this.editCard(key, card);
-    }, wait);
+    this.cardTimer(key, card, card.lastEdit + (this.opts.cardEditMs ?? CARD_EDIT_MS));
+  }
+
+  // Takes the next free slot for a card edit, no earlier than `earliest` and
+  // not during a flood wait.
+  private cardTimer(key: string, card: Card, earliest: number): void {
+    const at = Math.max(earliest, this.nextCardEdit, this.opts.api?.floodEndsAt() ?? 0);
+    this.nextCardEdit = at + (this.opts.cardGapMs ?? CARD_GAP_MS);
+    card.timer = setTimeout(
+      () => {
+        card.timer = undefined;
+        void this.editCard(key, card);
+      },
+      Math.max(0, at - Date.now()),
+    );
   }
 
   private async editCard(key: string, card: Card): Promise<void> {
     if (!this.running || card.messageId === undefined || !this.opts.api) return;
+    // The session's text goes first; the card takes a later slot.
+    if (this.pumping.size || this.opts.api.floodEndsAt() > Date.now()) return this.cardTimer(key, card, Date.now());
     const text = card.text;
     const f = cardFormat(text);
     card.editing = true;

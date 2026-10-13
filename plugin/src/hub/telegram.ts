@@ -91,6 +91,10 @@ type ApiOptions = {
   deadlineMs?: number;
 };
 
+// Calls that go on while the bot waits out a flood limit: polling, and
+// answers to button presses, which are not messages in a chat.
+const FLOOD_FREE = new Set(["getUpdates", "getMe", "answerCallbackQuery"]);
+
 export class TelegramApi {
   private base: string;
   private log: Logger;
@@ -100,6 +104,8 @@ export class TelegramApi {
   private sendAttemptTimeoutMs: number;
   private networkRetryMs: number;
   private deadlineMs: number;
+  // Until when Telegram asked the bot to wait (429 retry_after).
+  private floodUntil = 0;
 
   constructor(private opts: ApiOptions) {
     this.base = opts.base ?? API_BASE;
@@ -112,21 +118,34 @@ export class TelegramApi {
     this.deadlineMs = opts.deadlineMs ?? DEADLINE_MS;
   }
 
+  // When the current flood wait ends; in the past if there is none.
+  floodEndsAt(): number {
+    return this.floodUntil;
+  }
+
   // Retries network errors until the deadline, and 5xx and 429 (honouring
   // retry_after) up to maxAttempts; other API errors are thrown at once.
   // `waitMs` is how long Telegram may legitimately hold the request (long poll).
+  // A 429 holds every call to chats until retry_after passes: more requests
+  // meanwhile only get more 429s. A call without retries is not held but fails.
   async call<T>(method: string, params: Body, result: z.ZodType<T>, o: { signal?: AbortSignal; retry?: boolean; waitMs?: number; sends?: boolean } = {}): Promise<T> {
     const deadline = Date.now() + this.deadlineMs;
     const timeoutMs = (o.sends ? this.sendAttemptTimeoutMs : this.attemptTimeoutMs) + (o.waitMs ?? 0);
     let apiFailures = 0;
     let netFailures = 0;
     for (;;) {
+      const flood = FLOOD_FREE.has(method) ? 0 : this.floodUntil - Date.now();
+      if (flood > 0) {
+        if (o.retry === false) throw new TelegramError(429, "Too Many Requests: waiting out the flood limit", Math.ceil(flood / MS_PER_SECOND));
+        await Bun.sleep(flood);
+      }
       let wait: number;
       try {
         const answer = await this.callOnce(method, params, result, timeoutMs, o.signal);
         if (netFailures) this.log.info(`telegram ${method} got through after ${netFailures} failed attempt(s)`);
         return answer;
       } catch (e) {
+        if (e instanceof TelegramError && e.code === 429 && e.retryAfter != null) this.floodUntil = Math.max(this.floodUntil, Date.now() + e.retryAfter * MS_PER_SECOND);
         if (o.retry === false || o.signal?.aborted) throw e;
         if (e instanceof TelegramError) {
           if (!(e.code === 429 || e.code >= 500) || ++apiFailures >= this.maxAttempts) throw e;

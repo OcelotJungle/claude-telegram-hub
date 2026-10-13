@@ -108,6 +108,7 @@ beforeEach(async () => {
     idleMs: 60_000,
     pollTimeoutSec: 1,
     cardEditMs: 50,
+    cardGapMs: 0,
     typingEveryMs: 50,
     reactionDelayMs: 50,
     // No module polls here: /stop ends the window once nobody takes it.

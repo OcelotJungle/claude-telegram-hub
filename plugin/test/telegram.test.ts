@@ -34,6 +34,29 @@ describe("TelegramApi", () => {
     expect(fake.callsOf("sendMessage").length).toBe(2);
   });
 
+  test("after a 429 the other calls to chats wait out retry_after too", async () => {
+    fake.failNext("sendMessage", { code: 429, description: "Too Many Requests: retry after 1", retry_after: 1 });
+    const started = Date.now();
+    const send = api.sendMessage("-100", 7, "hi", true);
+    await Bun.sleep(100);
+    expect(api.floodEndsAt()).toBeGreaterThan(Date.now());
+    await api.editMessageText("-100", 1, "edited");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    await send;
+    expect(fake.callsOf("editMessageText").length).toBe(1);
+  });
+
+  test("a call without retries fails during a flood wait without asking Telegram", async () => {
+    fake.failNext("sendMessage", { code: 429, description: "Too Many Requests: retry after 1", retry_after: 1 });
+    const send = api.sendMessage("-100", 7, "hi", true);
+    await Bun.sleep(100);
+    const err = await api.sendTyping("-100", 7).catch(e => e);
+    expect(err instanceof TelegramError && err.code).toBe(429);
+    expect(fake.callsOf("sendChatAction")).toEqual([]);
+    expect(await api.getUpdates(0, 0)).toEqual([]);
+    await send;
+  });
+
   test("5xx is retried", async () => {
     fake.failNext("createForumTopic", { code: 502, description: "Bad Gateway" });
     const t = await api.createForumTopic("-100", "proj · title");
