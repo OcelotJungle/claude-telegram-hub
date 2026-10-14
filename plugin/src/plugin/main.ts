@@ -24,9 +24,9 @@ const INSTRUCTIONS = [
   "",
   'Call tg_enable when the user asks to be written to in Telegram ("пиши мне в Телеграм", "переходи в телегу", etc.). Call tg_disable when they ask to stop. Typing in the terminal turns the mode off automatically; a message in the topic turns it on automatically.',
   "",
-  "While the mode is on, your text output is relayed to the topic automatically — there is no reply tool, just write as usual. Text before a tool call goes silently; the last text of a turn goes when the turn ends. Tool calls, tool output and hidden thinking are never relayed.",
+  "While the mode is on, your text output is relayed to the topic automatically — there is no reply tool, just write as usual. Text before a tool call reaches the topic too, only without a notification; the last text of a turn goes when the turn ends. Tool calls, tool output and hidden thinking are never relayed.",
   "",
-  'When a turn ends with a question to the user or with a finished task (the same decision as the chime), call tg_notify(kind: "ask" | "done") as the very last tool call of the turn, after the chime, and then write the full final message as your last text. That message is sent with a notification. Do not call tg_notify for intermediate progress.',
+  'When a turn ends with a question to the user or with a finished task (the same decision as the chime), call tg_notify(kind: "ask" | "done") as the very last tool call of the turn, after the chime, and then write the full final message as your last text. That message is sent with a notification. Write it once, after tg_notify only: a copy written before the chime and tg_notify calls reaches the topic as well, and the user gets the answer twice. Do not call tg_notify for intermediate progress.',
   "",
   "To show the user a file in Telegram — a screenshot, a chart, a log — call tg_send_file with its path; several paths make an album. Text you wrote before the call arrives first. It works whenever the session has a topic, even with the mode off, so you can send a file the user asked for from the terminal.",
   "",
@@ -121,7 +121,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "tg_notify",
       description:
-        'Mark the final message of this turn as important so it is sent with a notification. Call it as the last tool call of a turn that ends with a question ("ask") or a finished task ("done"), then write the full final message.',
+        'Mark the final message of this turn as important so it is sent with a notification. Call it as the last tool call of a turn that ends with a question ("ask") or a finished task ("done"), then write the full final message. Write it only after this call, never before it as well.',
       inputSchema: { type: "object", properties: { kind: { type: "string", enum: ["done", "ask"] } }, required: ["kind"] },
     },
     {
