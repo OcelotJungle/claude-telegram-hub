@@ -21,6 +21,7 @@ export const register: Register = on => {
       sessionId: () => $.session.id(),
       usage: () => $.session.usage({ breakdown: "summary" }),
       run: (command, args) => $.command.run({ command, args }),
+      compact: instructions => $.session.compact(instructions === undefined ? undefined : { instructions }),
       http: (url, init) => $.http.fetch(url, init),
       now: () => Date.now(),
     });
@@ -29,11 +30,13 @@ export const register: Register = on => {
     return result;
   });
 
-  // The main conversation's compactions only: a precompute installs nothing,
-  // a subagent's is its own.
-  on("session.compact", async ($, e, next) => {
-    const result = await next(e);
-    if (e.trigger !== "precompute" && e.agentId === undefined) await runner?.compacted(result);
-    return result;
+  // The main loop's turns: a compaction from the topic waits for none to run.
+  on("turn.start", async ($, e, next) => {
+    if (e.agentId === undefined) runner?.turn(true);
+    return next(e);
+  });
+  on("turn.complete", async ($, e, next) => {
+    if (e.agentId === undefined) runner?.turn(false);
+    return next(e);
   });
 };

@@ -1,5 +1,5 @@
 import type { VideoTools } from "../src/hub/video.ts";
-import type { Usage } from "../src/mod/commands.ts";
+import type { Compaction, Usage } from "../src/mod/commands.ts";
 import type { Config } from "../src/shared/config.ts";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -18,6 +18,8 @@ const GROUP = "-1001";
 const ME = "123456789";
 // A session folder that exists: the repository itself.
 const CWD = join(import.meta.dir, "..", "..");
+// More polls than a compaction is tried with no turn running.
+const COMPACT_POLLS = 5;
 const DEFAULT_DIR = "C:\\Users\\me\\.claude";
 
 let fake: FakeTelegram;
@@ -1413,10 +1415,18 @@ describe("commands", () => {
     rateLimits: [{ kind: "five_hour", percentUsed: 30 }],
   };
 
-  // The mod of one window, with the engine faked: what it ran, and what
-  // `run` answers.
-  function mod(sessionId: string, answer: (command: string, args: string) => Promise<{ text?: string }> = async () => ({}), usage = () => USAGE) {
+  const COMPACTED: Compaction = { tokensBefore: 180_000, tokensAfter: 24_000 };
+
+  // The mod of one window, with the engine faked: the commands it ran and
+  // the compactions it asked for, and what `run` and `compact` answer.
+  function mod(
+    sessionId: string,
+    answer: (command: string, args: string) => Promise<{ text?: string }> = async () => ({}),
+    usage = () => USAGE,
+    compaction: () => Promise<Compaction> = async () => COMPACTED,
+  ) {
     const ran: [string, string][] = [];
+    const compacted: (string | undefined)[] = [];
     const runner = new Runner(`http://127.0.0.1:${port}`, {
       sessionId: async () => sessionId,
       usage: async () => usage(),
@@ -1424,13 +1434,17 @@ describe("commands", () => {
         ran.push([command, args]);
         return answer(command, args);
       },
+      compact: instructions => {
+        compacted.push(instructions);
+        return compaction();
+      },
       http: async (url, init) => {
         const r = await fetch(url, init);
         return { status: r.status, text: await r.text() };
       },
       now: () => Date.now(),
     });
-    return { runner, ran };
+    return { runner, ran, compacted };
   }
 
   const command = (text: string, threadId = 100) => fake.pushUpdate(topicMsg({ chatId: GROUP, threadId, fromId: ME, text }));
@@ -1498,50 +1512,66 @@ describe("commands", () => {
     expect(ran).toEqual([]);
   });
 
-  test("/compact runs the compact command, says so silently and reports the result from the compaction", async () => {
+  test("/compact compacts once no turn runs, says so silently and reports the result with sound", async () => {
     await startHub();
     await enabled("a");
-    const { runner, ran } = mod("a");
+    const { runner, ran, compacted } = mod("a");
+    runner.turn(true);
     command("/compact keep the plan");
     const started = await reply(runner, t => t.startsWith("🗜"));
     expect(started.disable_notification).toBe(true);
-    expect(ran).toEqual([["compact", "keep the plan"]]);
-    await runner.compacted({ tokensBefore: 180_000, tokensAfter: 24_000 });
+    await runner.poll();
+    await Bun.sleep(50);
+    expect(compacted).toStrictEqual([]);
+    runner.turn(false);
     const done = await reply(runner, t => t.startsWith("✅"));
     expect(done.text).toBe("✅ Контекст сжат: 180k → 24k токенов.");
     expect(done.disable_notification).toBe(false);
-    // A later compaction nobody asked for from Telegram is not reported.
-    await runner.compacted({ tokensBefore: 300_000, tokensAfter: 20_000 });
-    await runner.poll();
-    expect(fake.texts().filter(p => p.text.startsWith("✅")).length).toBe(1);
+    expect(compacted).toStrictEqual(["keep the plan"]);
+    expect(ran).toEqual([]);
   });
 
   test("a skipped compaction gives the reason", async () => {
     await startHub();
     await enabled("a");
-    const { runner } = mod("a");
+    const { runner } = mod("a", undefined, undefined, async () => ({ skip: "a hook vetoed it" }));
     command("/compact");
-    await reply(runner, t => t.startsWith("🗜"));
-    await runner.compacted({ skip: "a hook vetoed it" });
     expect((await reply(runner, t => t.startsWith("⚠️"))).text).toBe("⚠️ Компакт пропущен: a hook vetoed it");
   });
 
-  test("a compact command that ends with its own text and no compaction reports that text", async () => {
+  test("a compaction that keeps failing with no turn running gives the reason", async () => {
     await startHub();
     await enabled("a");
-    const { runner } = mod("a", async () => ({ text: "Not enough messages to compact." }));
-    command("/compact");
-    expect((await reply(runner, t => t.startsWith("Компакт:"))).text).toBe("Компакт: Not enough messages to compact.");
-  });
-
-  test("a compact command that fails to start gives the reason", async () => {
-    await startHub();
-    await enabled("a");
-    const { runner } = mod("a", async () => {
-      throw new Error("no session is bound");
+    const { runner, compacted } = mod("a", undefined, undefined, async () => {
+      throw new Error("Not enough messages to compact.");
     });
     command("/compact");
-    expect((await reply(runner, t => t.startsWith("⚠️"))).text).toBe("⚠️ Компакт не запустился: no session is bound");
+    expect((await reply(runner, t => t.startsWith("⚠️"))).text).toBe("⚠️ Компакт не выполнен: Not enough messages to compact.");
+    expect(compacted).toStrictEqual([undefined, undefined, undefined]);
+  });
+
+  test("a compaction refused as turns start runs once they end, however many times", async () => {
+    await startHub();
+    await enabled("a");
+    const { runner, compacted } = mod("a", undefined, undefined, async () => {
+      if (compacted.length > COMPACT_POLLS) return COMPACTED;
+      runner.turn(true);
+      throw new Error("a turn is running");
+    });
+    command("/compact");
+    await reply(runner, t => t.startsWith("🗜"));
+    for (let i = 1; i <= COMPACT_POLLS; i++) {
+      await waitFor(async () => {
+        await runner.poll();
+        return compacted.length === i;
+      });
+      // No retry while the turn runs.
+      await runner.poll();
+      expect(compacted.length).toBe(i);
+      runner.turn(false);
+    }
+    await reply(runner, t => t.startsWith("✅"));
+    expect(sentText(t => t.startsWith("⚠️"))).toBeUndefined();
   });
 
   test("/compact N sets the autocompact window and answers with the text of the command", async () => {
@@ -1563,6 +1593,7 @@ describe("commands", () => {
       sessionId: async () => "a",
       usage: async () => USAGE,
       run: async () => ({}),
+      compact: async () => COMPACTED,
       http: async (url, init) => {
         ran.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
         if (init?.method === "POST" && down) throw new Error("connection refused");
@@ -1597,15 +1628,15 @@ describe("commands", () => {
   const SMALL: Usage = { context: { tokens: 50_000, window: 1_000_000 }, rateLimits: [] };
   const terminated = (c: { messages: { type: string }[] }) => c.messages.some(m => m.type === "terminate");
 
-  // A compact command that ends when the test lets it.
-  function held() {
+  // A compaction that ends when the test lets it.
+  function held(result: Compaction = COMPACTED) {
     let release = () => {};
     const done = new Promise<void>(r => (release = r));
     return {
       release: () => release(),
       answer: async () => {
         await done;
-        return {};
+        return result;
       },
     };
   }
@@ -1613,28 +1644,31 @@ describe("commands", () => {
   test("/stop of a session with little context ends it with no compaction", async () => {
     await startHub();
     const a = await enabled("a");
-    const { runner, ran } = mod("a", undefined, () => SMALL);
+    const { runner, compacted } = mod("a", undefined, () => SMALL);
     command("/stop");
     await waitFor(async () => {
       await runner.poll();
       return terminated(a);
     });
-    expect(ran).toEqual([]);
+    expect(compacted).toStrictEqual([]);
   });
 
-  test("/stop of a session with more than 120k compacts it first, then ends it", async () => {
+  test("/stop of a session with more than 120k compacts it first, reports it, then ends it", async () => {
     await startHub();
     const a = await enabled("a");
-    const h = held();
-    const { runner, ran } = mod("a", h.answer);
+    const h = held({ tokensBefore: 128_000, tokensAfter: 20_000 });
+    const { runner, compacted } = mod("a", undefined, undefined, h.answer);
     command("/stop");
     const started = await reply(runner, t => t.startsWith("🗜"));
     expect(started.text).toBe("🗜 В контексте 128k токенов: сожму его, когда агент закончит ход, и завершу сессию. Повторный /stop завершит сразу.");
     expect(started.disable_notification).toBe(true);
-    expect(ran).toEqual([["compact", ""]]);
+    await waitFor(async () => {
+      await runner.poll();
+      return compacted.length;
+    });
+    expect(compacted).toStrictEqual([undefined]);
     await Bun.sleep(100);
     expect(terminated(a)).toBe(false);
-    await runner.compacted({ tokensBefore: 128_000, tokensAfter: 20_000 });
     h.release();
     await a.next("terminate");
     await waitFor(() => sentText(t => t === "✅ Контекст сжат: 128k → 20k токенов."));
@@ -1645,7 +1679,7 @@ describe("commands", () => {
     const a = await enabled("a");
     const h = held();
     let usage = USAGE;
-    const { runner, ran } = mod("a", h.answer, () => usage);
+    const { runner, compacted } = mod("a", undefined, () => usage, h.answer);
     command("/compact");
     await reply(runner, t => t.startsWith("🗜"));
     command("/stop");
@@ -1655,13 +1689,13 @@ describe("commands", () => {
     usage = SMALL;
     h.release();
     await a.next("terminate");
-    expect(ran).toEqual([["compact", ""]]);
+    expect(compacted).toStrictEqual([undefined]);
   });
 
   test("a second /stop ends the window without waiting", async () => {
     await startHub();
     const a = await enabled("a");
-    const { runner } = mod("a", held().answer);
+    const { runner } = mod("a", undefined, undefined, held().answer);
     command("/stop");
     await reply(runner, t => t.startsWith("🗜"));
     command("/stop");

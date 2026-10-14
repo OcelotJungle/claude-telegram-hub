@@ -15,6 +15,9 @@ const MS_PER_MINUTE = 60_000;
 const MINUTES_PER_HOUR = 60;
 const HOURS_PER_DAY = 24;
 const PERCENT = 100;
+// Polls in a row on which the compaction failed with no turn running before
+// the failure is reported: a turn may start just as it is tried.
+const COMPACT_TRIES = 3;
 
 // The part of the engine's SessionUsage that /info shows.
 export type Usage = {
@@ -35,6 +38,8 @@ export type Deps = {
   // Runs a slash command as if typed in the terminal: queued until the
   // session is idle.
   run(command: string, args: string): Promise<{ text?: string }>;
+  // Compacts the conversation; rejects while a turn runs.
+  compact(instructions: string | undefined): Promise<Compaction>;
   http(url: string, init?: { method?: string; body?: string }): Promise<{ status: number; text: string }>;
   now(): number;
 };
@@ -45,8 +50,12 @@ export class Runner {
   // retried on every poll.
   private unsent: { path: string; body: string }[] = [];
   private flushing: Promise<void> | undefined;
-  // /compact commands from the topic waiting for their compaction.
-  private compacting: { sessionId: string; id: string }[] = [];
+  // Compactions asked for from the topic, oldest first, each run once no
+  // turn runs; `failed` counts the tries that failed with none running.
+  private compactions: { to: { sessionId: string; id: string }; args: string; failed: number; done: () => void }[] = [];
+  private compacting = false;
+  // Whether a main-loop turn runs, from the module's turn hooks.
+  private turnRuns = false;
   // Compact commands still running; a /stop waits for them.
   private running = new Set<Promise<void>>();
   private replies = new Map<string, number>();
@@ -59,6 +68,7 @@ export class Runner {
   // Called by the module's timer. Commands run without blocking the next
   // poll: a compaction waits for the turn to end.
   async poll(): Promise<void> {
+    void this.compactNext();
     if (this.polling) return;
     this.polling = true;
     try {
@@ -74,14 +84,9 @@ export class Runner {
     }
   }
 
-  // Called from the module's session.compact hook with what the compaction
-  // came to; reported only when a /compact from the topic asked for it.
-  async compacted(c: Compaction): Promise<void> {
-    const asked = this.compacting.shift();
-    if (!asked) return;
-    if (c.skip !== undefined) return this.reply(asked, `⚠️ Компакт пропущен: ${c.skip}`, true);
-    const sizes = c.tokensBefore !== undefined && c.tokensAfter !== undefined ? `: ${tokens(c.tokensBefore)} → ${tokens(c.tokensAfter)} токенов` : "";
-    await this.reply(asked, `✅ Контекст сжат${sizes}.`, true);
+  // Called from the module's turn hooks when a main-loop turn starts and ends.
+  turn(runs: boolean): void {
+    this.turnRuns = runs;
   }
 
   private async execute(sessionId: string, cmd: TopicCommand): Promise<void> {
@@ -108,25 +113,37 @@ export class Runner {
     await this.compact(to, cmd.args, "🗜 Компакт запущен: начнётся, как только агент закончит текущий ход.");
   }
 
-  // The compact command resolves once the compaction is over.
+  // Resolves once the compaction is over and its result is handed to the hub.
   private async compact(to: { sessionId: string; id: string }, args: string, started: string): Promise<void> {
-    this.compacting.push(to);
     const run = (async () => {
       await this.reply(to, started, false);
-      try {
-        const res = await this.deps.run("compact", args);
-        // The command printed something and no compaction reported yet: it
-        // ended without one (nothing to compact). Silent: the compaction hook
-        // reports.
-        const text = res.text?.trim();
-        if (text && this.drop(to)) await this.reply(to, `Компакт: ${text}`, true);
-      } catch (e) {
-        if (this.drop(to)) await this.reply(to, `⚠️ Компакт не запустился: ${message(e)}`, true);
-      }
+      await new Promise<void>(done => this.compactions.push({ to, args, failed: 0, done }));
     })();
     this.running.add(run);
     await run;
     this.running.delete(run);
+  }
+
+  // The engine's own result, not the session.compact hook: the compact
+  // command this module ran never reached the module's hook. One at a time,
+  // between turns.
+  private async compactNext(): Promise<void> {
+    const head = this.compactions[0];
+    if (!head || this.compacting || this.turnRuns) return;
+    this.compacting = true;
+    let text: string | undefined;
+    try {
+      text = compactionText(await this.deps.compact(head.args || undefined));
+    } catch (e) {
+      // Failed with a turn running, or one just starting: tried again.
+      if (!this.turnRuns && ++head.failed >= COMPACT_TRIES) text = `⚠️ Компакт не выполнен: ${message(e)}`;
+    }
+    if (text !== undefined) {
+      this.compactions.shift();
+      await this.reply(head.to, text, true);
+      head.done();
+    }
+    this.compacting = false;
   }
 
   // The window ends once the compactions asked for are over; with much
@@ -153,13 +170,6 @@ export class Runner {
     } catch {
       return undefined;
     }
-  }
-
-  private drop(to: { id: string }): boolean {
-    const i = this.compacting.findIndex(c => c.id === to.id);
-    if (i < 0) return false;
-    this.compacting.splice(i, 1);
-    return true;
   }
 
   private async reply(to: { sessionId: string; id: string }, text: string, notify: boolean): Promise<void> {
@@ -216,6 +226,12 @@ export function infoText(u: Usage, now: number): string {
   lines.push(`Автокомпакт: окно ${tokens(b.rawMaxTokens)}${b.autoCompactThreshold !== undefined ? `, срабатывает на ${tokens(b.autoCompactThreshold)}` : ""}`);
   if (used !== undefined) lines.push(`Использовано ${Math.round((used / limit) * PERCENT)}% до автокомпакта`);
   return lines.join("\n");
+}
+
+export function compactionText(c: Compaction): string {
+  if (c.skip !== undefined) return `⚠️ Компакт пропущен: ${c.skip}`;
+  const sizes = c.tokensBefore !== undefined && c.tokensAfter !== undefined ? `: ${tokens(c.tokensBefore)} → ${tokens(c.tokensAfter)} токенов` : "";
+  return `✅ Контекст сжат${sizes}.`;
 }
 
 export function tokens(n: number): string {

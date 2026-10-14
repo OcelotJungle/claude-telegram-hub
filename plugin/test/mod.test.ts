@@ -91,7 +91,8 @@ describe("replies", () => {
     const runner = new Runner("http://hub", {
       sessionId: async () => "s",
       usage: async () => usage(),
-      run: async () => ({ text: "Not enough messages to compact." }),
+      run: async () => ({}),
+      compact: async () => ({ skip: "nothing to compact" }),
       http: async (url, init) => {
         if (init?.method !== "POST") {
           const list = commands;
@@ -106,6 +107,8 @@ describe("replies", () => {
     });
     await runner.poll();
     // The next tick of the module's timer, while the first reply is posted.
+    await runner.poll();
+    await Bun.sleep(150);
     await runner.poll();
     await Bun.sleep(150);
     await runner.poll();
