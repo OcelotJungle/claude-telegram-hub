@@ -37,6 +37,14 @@ export const CUT_NOTE = "🔁 Сбой связи с API — агент прод
 // and calls the person: the network may be down for good.
 export const MAX_AUTO_CONTINUES = 10;
 export const CUT_LIMIT_NOTE = `⚠️ Сбой связи с API ${MAX_AUTO_CONTINUES} раз подряд — сам больше не продолжаю, жду тебя.`;
+// Telegram refused files after tg_send_file returned: the agent fixes it, the
+// topic is not told.
+export function filesRejectedPrompt(error: string): string {
+  return (
+    `tg-hub: Telegram did not take files you sent earlier with tg_send_file: ${error}. ` +
+    "The topic was not told. Deal with it yourself: for example, make the files smaller and send them again."
+  );
+}
 // Requests that make the hub call Telegram. The hub retries a flaky network
 // for up to 2 minutes (TelegramApi deadlineMs), so wait a bit longer than that.
 const HUB_TELEGRAM_TIMEOUT_MS = 150_000;
@@ -416,6 +424,11 @@ export class PluginCore {
       case "permissionReply":
         this.log.info(`permission ${m.requestId}: ${m.behavior} from the topic`);
         this.opts.answerPermission(m.requestId, m.behavior);
+        return;
+      case "filesSent":
+        // tg_send_file returned before the hub was done; a late success is
+        // what the agent was told to expect.
+        if (m.error) this.opts.emitChannel(filesRejectedPrompt(m.error), { user: "tg-hub", reason: "files_rejected" });
         return;
       case "terminate":
         this.log.info(`session ${this.sessionId}: /stop from the topic, ending Claude Code`);

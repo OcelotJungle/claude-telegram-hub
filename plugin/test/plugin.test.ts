@@ -6,7 +6,7 @@ import { join } from "path";
 import { z } from "zod";
 import { Hub } from "../src/hub/hub.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
-import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, interruptPrompt, MAX_AUTO_CONTINUES, PluginCore } from "../src/plugin/plugin.ts";
+import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, filesRejectedPrompt, interruptPrompt, MAX_AUTO_CONTINUES, PluginCore } from "../src/plugin/plugin.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { NOTIFY_MARKER } from "../src/transcript/relay.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
@@ -679,5 +679,15 @@ describe("tg_send_file", () => {
     const c = await enabledCore();
     fake.hangNext("sendDocument", 1000);
     expect(await c.sendFiles([file("a.txt")])).toContain("queued");
+  });
+
+  test("a rejection after the call returned reaches the agent, not the topic", async () => {
+    const c = await enabledCore();
+    fake.delayNext("sendDocument", 3500);
+    fake.failNext("sendDocument", { code: 413, description: "Request Entity Too Large" });
+    expect(await c.sendFiles([file("a.txt")])).toContain("queued");
+    await waitFor(() => channel.length === 1, 3000, "rejection prompt");
+    expect(channel[0]).toEqual({ content: filesRejectedPrompt("a.txt: Request Entity Too Large"), meta: { user: "tg-hub", reason: "files_rejected" } });
+    expect(sent()).toEqual([]);
   });
 });

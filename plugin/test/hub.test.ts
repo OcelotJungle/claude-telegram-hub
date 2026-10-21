@@ -968,13 +968,13 @@ describe("files", () => {
     expect(log.lines.some(l => l.startsWith("WARN") && l.includes("clip.mp4"))).toBe(true);
   });
 
-  test("files Telegram rejects are reported to the plugin and in the topic, and their copies removed", async () => {
+  test("files Telegram rejects are reported to the plugin, not in the topic, and their copies removed", async () => {
     await startHub();
     const a = await enabled("a");
     fake.failNext("sendDocument", { code: 400, description: "Bad Request: file is too big" });
     sendFiles(a, "f1", [queued("f1", "huge.bin")]);
     expect((await done(a, "f1")).error).toBe("huge.bin: Bad Request: file is too big");
-    expect(fake.texts().map(s => s.text)).toEqual(["⚠️ Telegram не принял файл huge.bin: Bad Request: file is too big"]);
+    expect(fake.texts()).toEqual([]);
     expect(existsSync(join(dir, "outbox-files", "f1"))).toBe(false);
     expect(log.lines.some(l => l.startsWith("ERROR") && l.includes("huge.bin"))).toBe(true);
   });
@@ -986,8 +986,8 @@ describe("files", () => {
     fake.failNext("sendVideo", { code: 413, description: "Request Entity Too Large" });
     sendFiles(a, "f1", [queued("f1", "1.mp4"), queued("f1", "2.mp4")], { caption: "cap", notify: true });
     expect((await done(a, "f1")).error).toBe("1.mp4: Request Entity Too Large");
-    expect(sends()).toEqual(["sendMediaGroup", "sendVideo", "sendMessage", "sendVideo"]);
-    expect(fake.texts().map(s => s.text)).toEqual(["⚠️ Telegram не принял файл 1.mp4: Request Entity Too Large"]);
+    expect(sends()).toEqual(["sendMediaGroup", "sendVideo", "sendVideo"]);
+    expect(fake.texts()).toEqual([]);
     expect(fake.callsOf("sendVideo")[1]).toMatchObject({ video: { file: "2.mp4" } });
     expect(log.lines.some(l => l.startsWith("WARN") && l.includes("one by one"))).toBe(true);
   });
@@ -998,8 +998,7 @@ describe("files", () => {
     const gone = { path: join(dir, "outbox-files", "f1", "0-gone.png"), name: "gone.png", size: 3 };
     sendFiles(a, "f1", [gone]);
     expect((await done(a, "f1")).error).toContain("gone.png");
-    expect(fake.texts()[0].text).toStartWith("⚠️ Telegram не принял файл gone.png");
-    expect(sends()).toEqual(["sendMessage"]);
+    expect(sends()).toEqual([]);
   });
 
   test("files a closing window left in spool/ are sent", async () => {

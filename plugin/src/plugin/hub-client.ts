@@ -230,7 +230,10 @@ export class HubClient {
       return;
     }
     if (m.type === "filesSent") {
-      this.fileWaiters.get(m.id)?.({ ...(m.error ? { error: m.error } : {}) });
+      const waiter = this.fileWaiters.get(m.id);
+      // Nobody waits any more: the call ended before the hub was done.
+      if (!waiter) this.opts.onMessage(m);
+      else waiter({ ...(m.error ? { error: m.error } : {}) });
       return;
     }
     if (m.type === "res") {

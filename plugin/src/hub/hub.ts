@@ -990,13 +990,14 @@ ${msg.text}`);
   }
 
   // Explicit beats silent: the topic learns that a message is missing, the
-  // log keeps its text.
+  // log keeps its text. Files the agent sent are the agent's to fix: it hears
+  // of them through filesSent, the topic does not.
   private reject(item: OutItem, reason: string): void {
     if (item.files) {
       this.log.error(`Telegram did not take files for session ${item.sessionId}: ${reason}\n--- files ---\n${names(item.files)}\n--- end ---`);
       this.fileMessages.get(messageOf(item.id))?.errors.push(`${names(item.files)}: ${reason}`);
-      this.dropFiles(item.files);
-      this.outbox.replaceWithNotice(item.id, `⚠️ Telegram не принял ${item.files.length === 1 ? "файл" : "файлы"} ${names(item.files)}: ${reason}`);
+      this.outbox.remove(item.id);
+      this.settled(item);
       return;
     }
     this.log.error(`Telegram rejected a message for session ${item.sessionId}: ${reason}\n--- text ---\n${item.text}\n--- end ---`);
