@@ -4,6 +4,7 @@ import type { TranscriptEvent } from "./parse.ts";
 import { readdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
+import { field } from "../shared/guards.ts";
 import { nullLogger } from "../shared/log.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { parseAgentRecord } from "./parse.ts";
@@ -22,12 +23,19 @@ const AGENT_FILE = /^agent-(.+)\.jsonl$/;
 // Markdown specials in names the card shows as they are.
 const MD_SPECIAL = /[\\`*_[\]()#+\-.!|~>]/g;
 const CONTINUED = "⬇️ продолжение ниже";
+// A text that starts with a Markdown block (heading, list, quote, code)
+// gets its time on a line of its own, so the block stays one.
+const STARTS_WITH_BLOCK = /^(#{1,6} |[-*+] |\d+[.)] |>|```)/;
+const CLOCK_PAD = 2;
 
 // A subagent's card as Markdown. final: its last version (the agent stopped,
 // or the card is full and continues in the next one).
 export type Card = { id: string; text: string; final: boolean };
 
 type Status = "running" | "done" | "failed" | "stopped";
+
+// A text of the agent and when it wrote it (ms).
+type Entry = { at: number; text: string };
 
 // <status> of a task notification.
 const TASK_STATUSES: Record<string, Status> = { completed: "done", failed: "failed", killed: "stopped" };
@@ -55,7 +63,7 @@ class Agent {
   private tools = 0;
   private lastTool: string | undefined;
   private part = 0;
-  private texts: string[] = [];
+  private texts: Entry[] = [];
   private seen = false;
   private shown = false;
   private dirty = false;
@@ -75,7 +83,8 @@ class Agent {
       fromStart,
       onRecord: rec => {
         this.idle = false;
-        for (const ev of parseAgentRecord(rec)) this.feed(ev);
+        const at = recordTime(rec) ?? env.now();
+        for (const ev of parseAgentRecord(rec)) this.feed(ev, at);
       },
       onIdle: () => {
         this.idle = true;
@@ -112,29 +121,29 @@ class Agent {
     this.lastSent = this.env.now();
   }
 
-  private feed(ev: TranscriptEvent): void {
+  private feed(ev: TranscriptEvent, at: number): void {
     if (ev.kind !== "text" && ev.kind !== "tool_use" && ev.kind !== "turn_end") return;
     // A stopped agent got a new message (SendMessage): a new run, a new card.
     if (this.status !== "running" && ev.messageId !== this.endMessage) this.reopen();
     this.seen = true;
     this.dirty = true;
-    if (ev.kind === "text") this.addText(ev.text);
+    if (ev.kind === "text") this.addText(ev.text, at);
     else if (ev.kind === "tool_use") {
       this.tools++;
       this.lastTool = ev.detail ? `${ev.name} ${ev.detail}` : ev.name;
     } else this.finish("done", ev.messageId);
   }
 
-  private addText(t: string): void {
+  private addText(t: string, at: number): void {
     const trimmed = t.trim();
-    const text = trimmed.length > MAX_CARD_TEXT ? `${trimmed.slice(0, MAX_CARD_TEXT)}…` : trimmed;
-    if (this.texts.length && toTelegram(this.render([...this.texts, text], this.statusLine())).text.length > MAX_CARD) {
+    const entry = { at, text: trimmed.length > MAX_CARD_TEXT ? `${trimmed.slice(0, MAX_CARD_TEXT)}…` : trimmed };
+    if (this.texts.length && toTelegram(this.render([...this.texts, entry], this.statusLine())).text.length > MAX_CARD) {
       if (this.shown) this.env.send({ id: this.cardId(), text: this.render(this.texts, CONTINUED), final: true });
       this.part++;
       this.texts = [];
       this.shown = false;
     }
-    this.texts.push(text);
+    this.texts.push(entry);
   }
 
   private reopen(): void {
@@ -153,10 +162,10 @@ class Agent {
     return `${this.id}-${this.part}`;
   }
 
-  private render(texts: string[], status: string): string {
+  private render(texts: Entry[], status: string): string {
     const m = this.meta;
     const head = [`🤖 **${escapeMd(m?.agentType ?? "Субагент")}**`, ...[m?.description, m?.model].filter(s => s !== undefined && s !== "").map(s => escapeMd(s ?? ""))].join(" · ");
-    return [`${head}\n${status}`, ...texts].join("\n\n");
+    return [`${head}\n${status}`, ...texts.map(e => `\`${clock(e.at)}\`${STARTS_WITH_BLOCK.test(e.text) ? "\n" : " "}${e.text}`)].join("\n\n");
   }
 
   private statusLine(): string {
@@ -243,6 +252,19 @@ export class SubagentWatcher {
       return [];
     }
   }
+}
+
+// When a transcript record was written (ms), from its timestamp.
+function recordTime(rec: unknown): number | undefined {
+  const ts = field(rec, "timestamp");
+  const ms = typeof ts === "string" ? Date.parse(ts) : NaN;
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+// Local wall-clock time, as 18:39.
+export function clock(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(CLOCK_PAD, "0")}:${String(d.getMinutes()).padStart(CLOCK_PAD, "0")}`;
 }
 
 function escapeMd(s: string): string {

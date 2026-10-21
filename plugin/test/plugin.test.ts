@@ -357,12 +357,13 @@ describe("PluginCore", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "agent-a1.meta.json"), JSON.stringify({ agentType: "Explore", description: "Find it" }));
     const agent = join(dir, "agent-a1.jsonl");
-    appendFileSync(agent, line({ ...assistantText("Looking", "tool_use", "s1"), isSidechain: true }));
+    const timestamp = new Date(2026, 9, 21, 18, 39).toISOString();
+    appendFileSync(agent, line({ ...assistantText("Looking", "tool_use", "s1"), isSidechain: true, timestamp }));
     await waitFor(() => sent().length === 1, 3000, "card");
-    expect(sent()[0]).toEqual({ text: "🤖 Explore · Find it\n⏳ 0 с · 0 действий\n\nLooking", silent: true, topic: 100 });
-    appendFileSync(agent, line({ ...assistantText("Found", "end_turn", "s2"), isSidechain: true }));
+    expect(sent()[0]).toEqual({ text: "🤖 Explore · Find it\n⏳ 0 с · 0 действий\n\n18:39 Looking", silent: true, topic: 100 });
+    appendFileSync(agent, line({ ...assistantText("Found", "end_turn", "s2"), isSidechain: true, timestamp }));
     await waitFor(() => fake.callsOf("editMessageText").some(c => String(c.text).includes("✅ готово")), 3000, "final edit");
-    expect(String(fake.callsOf("editMessageText").at(-1)?.text)).toEndWith("Looking\n\nFound");
+    expect(String(fake.callsOf("editMessageText").at(-1)?.text)).toEndWith("18:39 Looking\n\n18:39 Found");
     expect(sent().length).toBe(1);
   });
 
