@@ -527,9 +527,10 @@ describe("note to the agent that the mode went off", () => {
   });
 });
 
-describe("a response cut by a lost connection", () => {
+describe("a turn ended by a failed connection to the API", () => {
   const ERROR = "API Error: Connection lost mid-response. The response above may be incomplete.";
   const cut = () => ({ ...assistantText(ERROR, "stop_sequence"), error: "server_error", truncatedAfterOutput: true, isApiErrorMessage: true });
+  const UNREACHABLE = "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)";
 
   test("the agent is told to continue, and the topic is told it does", async () => {
     await enabledCore();
@@ -542,6 +543,13 @@ describe("a response cut by a lost connection", () => {
       { text: ERROR, silent: true, topic: 100 },
       { text: CUT_NOTE, silent: true, topic: 100 },
     ]);
+  });
+
+  test("a request that never reached the API is continued too", async () => {
+    await enabledCore();
+    append({ ...assistantText(UNREACHABLE, "stop_sequence"), error: "server_error", isApiErrorMessage: true });
+    await waitFor(() => channel.length === 1, 3000, "continue prompt");
+    expect(channel[0]?.content).toBe(CONTINUE_PROMPT);
   });
 
   test("with the mode off the person at the terminal decides", async () => {

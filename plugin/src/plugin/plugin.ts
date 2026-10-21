@@ -27,16 +27,16 @@ const MODE_OFF_NOTE =
   "Your text is no longer relayed to Telegram, and tg_notify is not needed. " +
   "If that message asks to continue in Telegram, call tg_enable.";
 
-// A response cut by a lost connection: the agent is told to go on, as the
-// person would, while the mode is on and the person is away.
+// A turn ended by a failed connection to the API: the agent is told to go
+// on, as the person would, while the mode is on and the person is away.
 export const CONTINUE_PROMPT =
-  "tg-hub: the connection to the API was lost mid-response (API Error: Connection lost mid-response), " +
-  "so your last response may be incomplete. Continue from where you stopped.";
-export const CUT_NOTE = "🔁 Связь с API оборвалась посреди ответа — агент продолжает сам.";
+  "tg-hub: your last turn ended with an API connection error (the API Error message above), " +
+  "so your last response may be missing or incomplete. Continue from where you stopped.";
+export const CUT_NOTE = "🔁 Сбой связи с API — агент продолжает сам.";
 // Cuts in a row, with no turn ending normally in between, before it stops
 // and calls the person: the network may be down for good.
 export const MAX_AUTO_CONTINUES = 10;
-export const CUT_LIMIT_NOTE = `⚠️ Связь с API оборвалась посреди ответа ${MAX_AUTO_CONTINUES} раз подряд — сам больше не продолжаю, жду тебя.`;
+export const CUT_LIMIT_NOTE = `⚠️ Сбой связи с API ${MAX_AUTO_CONTINUES} раз подряд — сам больше не продолжаю, жду тебя.`;
 // Requests that make the hub call Telegram. The hub retries a flaky network
 // for up to 2 minutes (TelegramApi deadlineMs), so wait a bit longer than that.
 const HUB_TELEGRAM_TIMEOUT_MS = 150_000;

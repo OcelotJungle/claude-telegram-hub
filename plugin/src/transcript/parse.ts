@@ -18,8 +18,8 @@ export type TranscriptEvent =
   | { kind: "text"; text: string; messageId: string }
   // detail: what the call works on, for a status line.
   | { kind: "tool_use"; name: string; messageId: string; detail?: string }
-  // cut: the connection to the API was lost mid-response, the turn ended on
-  // it and the answer may be incomplete.
+  // cut: the connection to the API failed, before or during the response,
+  // and the turn ended on it: the answer is missing or incomplete.
   | { kind: "turn_end"; messageId: string; cut?: true }
   | { kind: "terminal_input" }
   | { kind: "title"; source: "custom" | "agent" | "ai"; title: string }
@@ -94,9 +94,11 @@ function parseAssistant(r: Rec): TranscriptEvent[] {
   // Every record of a split message carries the final stop_reason; the relay
   // de-duplicates turn_end by messageId.
   if (typeof msg.stop_reason === "string" && msg.stop_reason !== "tool_use") {
-    // Claude Code's own message for a lost connection, "API Error: Connection
-    // lost mid-response…"; it retries other errors itself.
-    const cut = r.isApiErrorMessage === true && r.truncatedAfterOutput === true;
+    // Claude Code's own message for a failed connection: "API Error: Connection
+    // lost mid-response…", "Can't reach the API server… (ENOTFOUND)",
+    // "Connection refused…". It ends the turn after its own retries run out;
+    // other errors (rate_limit, invalid_request…) are not the network's.
+    const cut = r.isApiErrorMessage === true && r.error === "server_error";
     out.push(cut ? { kind: "turn_end", messageId, cut } : { kind: "turn_end", messageId });
   }
   return out;

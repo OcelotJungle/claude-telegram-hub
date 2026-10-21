@@ -109,8 +109,19 @@ describe("API errors", () => {
     ]);
   });
 
-  test("other API errors just end the turn", () => {
+  // Observed in Claude Code: no output came, the turn ends after retries.
+  test("a request that never reached the API is a turn end marked cut", () => {
+    const rec = {
+      ...assistant("e1", "stop_sequence", text("API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)")),
+      error: "server_error",
+      isApiErrorMessage: true,
+    };
+    expect(parseRecord(rec)[1]).toEqual({ kind: "turn_end", messageId: "e1", cut: true });
+  });
+
+  test("API errors that are not the network's just end the turn", () => {
     expect(parseRecord(apiError({ truncatedAfterOutput: undefined, error: "rate_limit" }))[1]).toEqual({ kind: "turn_end", messageId: "e1" });
+    expect(parseRecord(apiError({ truncatedAfterOutput: undefined, error: "invalid_request" }))[1]).toEqual({ kind: "turn_end", messageId: "e1" });
   });
 
   test("a subagent's cut response is ignored", () => {
