@@ -979,6 +979,19 @@ describe("files", () => {
     expect(log.lines.some(l => l.startsWith("ERROR") && l.includes("huge.bin"))).toBe(true);
   });
 
+  test("an album Telegram finds too large goes again file by file, not retried forever", async () => {
+    await startHub();
+    const a = await enabled("a");
+    fake.failNext("sendMediaGroup", { code: 413, description: "Request Entity Too Large" });
+    fake.failNext("sendVideo", { code: 413, description: "Request Entity Too Large" });
+    sendFiles(a, "f1", [queued("f1", "1.mp4"), queued("f1", "2.mp4")], { caption: "cap", notify: true });
+    expect((await done(a, "f1")).error).toBe("1.mp4: Request Entity Too Large");
+    expect(sends()).toEqual(["sendMediaGroup", "sendVideo", "sendMessage", "sendVideo"]);
+    expect(fake.texts().map(s => s.text)).toEqual(["⚠️ Telegram не принял файл 1.mp4: Request Entity Too Large"]);
+    expect(fake.callsOf("sendVideo")[1]).toMatchObject({ video: { file: "2.mp4" } });
+    expect(log.lines.some(l => l.startsWith("WARN") && l.includes("one by one"))).toBe(true);
+  });
+
   test("a copy gone from disk is reported like a rejection, not retried forever", async () => {
     await startHub();
     const a = await enabled("a");

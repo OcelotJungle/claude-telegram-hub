@@ -51,13 +51,15 @@ function family(kind: FileKind): string | undefined {
 }
 
 // Splits files into Telegram sends, keeping their order: consecutive files of
-// one family share an album of up to 10.
+// one family share an album of up to 10. The upload limit holds for a whole
+// request (Telegram answers 413), so an album stays within it.
 export function albums(files: OutFile[]): OutFile[][] {
   const out: OutFile[][] = [];
   for (const file of files) {
     const last = out.at(-1);
     const fam = family(file.kind);
-    if (last && fam && family(last[0].kind) === fam && last.length < MAX_ALBUM) last.push(file);
+    const fits = last !== undefined && last.length < MAX_ALBUM && last.reduce((sum, f) => sum + f.size, file.size) <= MAX_UPLOAD;
+    if (last && fam && family(last[0].kind) === fam && fits) last.push(file);
     else out.push([file]);
   }
   return out;

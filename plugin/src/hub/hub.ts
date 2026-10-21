@@ -52,6 +52,8 @@ const POLL_RETRY_BASE_MS = 1000;
 const MAX_POLL_DELAY_MS = 15_000;
 const SEND_RETRY_BASE_MS = 1000;
 const SEND_RETRY_MAX_MS = 30_000;
+// Telegram's answer to an upload over its size limit: Request Entity Too Large.
+const TOO_LARGE = 413;
 const COMMAND_PICKUP_MS = 10_000;
 // How much of a message the hub cannot read goes into the log.
 const LOGGED_MESSAGE_CHARS = 200;
@@ -159,6 +161,8 @@ function classify(e: unknown): Failure {
   if (e instanceof LostFileError) return "rejected";
   if (!(e instanceof TelegramError)) return "retry";
   if (e.code === 401 || e.code === 403 || e.code === 404) return "setup";
+  // The upload is over Telegram's size limit: the same request never passes.
+  if (e.code === TOO_LARGE) return "rejected";
   if (e.code === 400) {
     return /chat not found|not enough rights|have no rights|CHAT_WRITE_FORBIDDEN|CHAT_ADMIN_REQUIRED|bot was kicked|upgraded to a supergroup/i.test(e.description) ? "setup" : "rejected";
   }
@@ -969,6 +973,12 @@ ${msg.text}`);
       const files = item.files.map(f => (f.kind === "photo" ? { ...f, kind: "document" as const } : f));
       const caption = { text: item.text, entities: item.entities ?? [] };
       this.outbox.replace(item.id, albums(files).map((g, i) => filesPiece(g, i === 0 ? caption : undefined, !item.silent && i === 0)));
+      return;
+    }
+    if (item.files && item.files.length > 1 && e instanceof TelegramError && e.code === TOO_LARGE) {
+      this.log.warn(`Telegram rejected an album for session ${item.sessionId} as too large (${why}); sending its files one by one`);
+      const caption = { text: item.text, entities: item.entities ?? [] };
+      this.outbox.replace(item.id, item.files.map((f, i) => filesPiece([f], i === 0 ? caption : undefined, !item.silent && i === 0)));
       return;
     }
     if (item.entities?.length) {

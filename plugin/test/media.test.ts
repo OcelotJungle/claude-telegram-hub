@@ -42,6 +42,13 @@ describe("albums", () => {
     expect(albums(files).map(g => g.length)).toEqual([10, 10, 3]);
   });
 
+  test("an album stays within the upload limit as a whole", () => {
+    const big = (name: string, mb: number): OutFile => ({ ...f(name), size: mb * MB });
+    const files = [big("1.mp4", 28), big("2.mp4", 28), big("3.mp4", 20), big("4.mp4", 2)];
+    expect(names(albums(files))).toEqual([["1.mp4"], ["2.mp4", "3.mp4", "4.mp4"]]);
+    expect(albums([big("1.mp4", 25), big("2.mp4", 25)]).length).toBe(1);
+  });
+
   test("an animation always goes alone", () => {
     expect(names(albums([f("1.png"), f("a.gif"), f("b.gif"), f("2.png")]))).toEqual([["1.png"], ["a.gif"], ["b.gif"], ["2.png"]]);
   });
