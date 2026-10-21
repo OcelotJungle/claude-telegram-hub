@@ -62,7 +62,7 @@ describe("SubagentWatcher", () => {
     write(assistant("m1", "tool_use", tool("Read", { file_path: "C:\\src\\parse.ts" })));
     s.advance(SEND_EVERY_MS);
     expect(s.cards).toEqual([
-      { id: "a1-0", final: false, text: "🤖 **Explore** · Find the parser · haiku\n⏳ 0 с · 1 действие · `Read parse.ts`\n\n`18:39` Looking around" },
+      { id: "a1-0", final: false, text: "🤖 **Explore** · Find the parser · haiku\n⏳ 0 с · 1 действие · `Read parse.ts`\n\n`[18:39]` Looking around" },
     ]);
     write(assistant("m2", "tool_use", tool("Grep", { pattern: "x" })));
     s.advance(SECOND);
@@ -77,7 +77,7 @@ describe("SubagentWatcher", () => {
     expect(s.cards.at(-1)).toEqual({
       id: "a1-0",
       final: true,
-      text: "🤖 **Explore** · Find the parser · haiku\n✅ готово за 5 с · 2 действия\n\n`18:39` Looking around\n\n`18:39` Found it",
+      text: "🤖 **Explore** · Find the parser · haiku\n✅ готово за 5 с · 2 действия\n\n`[18:39]` Looking around\n\n`[18:39]` Found it",
     });
   });
 
@@ -167,7 +167,7 @@ describe("SubagentWatcher", () => {
     expect(s.cards.map(c => c.id)).toEqual(["a1-0"]);
     write(assistant("m2", "tool_use", text(chunk)));
     s.advance(SECOND);
-    expect(s.cards[1]).toEqual({ id: "a1-0", final: true, text: `🤖 **Субагент**\n⬇️ продолжение ниже\n\n\`18:39\` ${chunk}\n\n\`18:39\` ${chunk}` });
+    expect(s.cards[1]).toEqual({ id: "a1-0", final: true, text: `🤖 **Субагент**\n⬇️ продолжение ниже\n\n\`[18:39]\` ${chunk}\n\n\`[18:39]\` ${chunk}` });
     s.advance(SEND_EVERY_MS);
     expect(s.cards[2]).toMatchObject({ id: "a1-1", final: false });
     expect(s.cards.every(c => c.text.length <= MAX_CARD)).toBe(true);
@@ -183,7 +183,7 @@ describe("SubagentWatcher", () => {
     expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true });
     write(assistant("m2", "tool_use", text("second run")));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)).toEqual({ id: "a1-1", final: false, text: "🤖 **Субагент**\n⏳ 0 с · 0 действий\n\n`18:39` second run" });
+    expect(s.cards.at(-1)).toEqual({ id: "a1-1", final: false, text: "🤖 **Субагент**\n⏳ 0 с · 0 действий\n\n`[18:39]` second run" });
   });
 
   test("each text shows when the agent wrote it, by its record's time", () => {
@@ -194,7 +194,7 @@ describe("SubagentWatcher", () => {
     write(line({ type: "assistant", timestamp: at(17, 2), message: { id: "m1", role: "assistant", content: [text("Full run started")], stop_reason: "tool_use" } }));
     write(line({ type: "assistant", timestamp: at(18, 5), message: { id: "m2", role: "assistant", content: [text("## Results\n\n- ok")], stop_reason: "tool_use" } }));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards[0]?.text).toEndWith("\n\n`17:02` Full run started\n\n`18:05`\n## Results\n\n- ok");
+    expect(s.cards[0]?.text).toEndWith("\n\n`[17:02]` Full run started\n\n`[18:05]`\n## Results\n\n- ok");
   });
 
   test("Markdown in the description is shown as it is", () => {

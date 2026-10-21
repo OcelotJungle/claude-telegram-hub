@@ -165,7 +165,7 @@ class Agent {
   private render(texts: Entry[], status: string): string {
     const m = this.meta;
     const head = [`🤖 **${escapeMd(m?.agentType ?? "Субагент")}**`, ...[m?.description, m?.model].filter(s => s !== undefined && s !== "").map(s => escapeMd(s ?? ""))].join(" · ");
-    return [`${head}\n${status}`, ...texts.map(e => `\`${clock(e.at)}\`${STARTS_WITH_BLOCK.test(e.text) ? "\n" : " "}${e.text}`)].join("\n\n");
+    return [`${head}\n${status}`, ...texts.map(e => `\`[${clock(e.at)}]\`${STARTS_WITH_BLOCK.test(e.text) ? "\n" : " "}${e.text}`)].join("\n\n");
   }
 
   private statusLine(): string {
