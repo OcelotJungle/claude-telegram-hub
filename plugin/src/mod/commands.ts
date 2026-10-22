@@ -1,7 +1,7 @@
 // What the plugin's function hooks module does with commands from the topic.
 // The module runs inside Claude Code with no Node: everything outside comes
 // in as Deps (the engine's `$` calls), so this file imports nothing but types.
-import type { TopicCommand } from "../shared/protocol.ts";
+import type { LimitsReading, RateLimit, TopicCommand } from "../shared/protocol.ts";
 
 // /stop of a session with more context than this compacts it first, so a
 // resume does not cache all of it again.
@@ -15,6 +15,8 @@ const MS_PER_MINUTE = 60_000;
 const MINUTES_PER_HOUR = 60;
 const HOURS_PER_DAY = 24;
 const PERCENT = 100;
+// Limits read longer ago than this say how old they are.
+const STALE_LIMITS_MS = 60_000;
 // Polls in a row on which the compaction failed with no turn running before
 // the failure is reported: a turn may start just as it is tried.
 const COMPACT_TRIES = 3;
@@ -26,7 +28,7 @@ export type Usage = {
     window: number;
     breakdown?: { totalTokens: number; rawMaxTokens: number; autoCompactThreshold?: number; isAutoCompactEnabled: boolean };
   };
-  rateLimits: { kind: string; percentUsed: number; resetsAt?: string }[];
+  rateLimits: RateLimit[];
 };
 
 // The part of the engine's session.compact result the report needs.
@@ -84,6 +86,18 @@ export class Runner {
     }
   }
 
+  // Called from the module's session.measure hook: the session read the
+  // account's rate limits, which the hub keeps for the other sessions' /info.
+  async measured(rateLimits: RateLimit[]): Promise<void> {
+    if (!rateLimits.length) return;
+    try {
+      const sessionId = await this.deps.sessionId();
+      await this.deps.http(`${this.base}/limits`, { method: "POST", body: JSON.stringify({ sessionId, at: this.deps.now(), rateLimits }) });
+    } catch {
+      // The hub is down: /info shows the session's own reading.
+    }
+  }
+
   // Called from the module's turn hooks when a main-loop turn starts and ends.
   turn(runs: boolean): void {
     this.turnRuns = runs;
@@ -93,7 +107,9 @@ export class Runner {
     const to = { sessionId, id: cmd.id };
     if (cmd.name === "info") {
       try {
-        await this.reply(to, infoText(await this.deps.usage(), this.deps.now()), true);
+        const usage = await this.deps.usage();
+        const shared = await this.sharedLimits(sessionId);
+        await this.reply(to, shared ? infoText({ ...usage, rateLimits: shared.rateLimits }, this.deps.now(), shared.at) : infoText(usage, this.deps.now()), true);
       } catch (e) {
         await this.reply(to, `⚠️ /info не выполнена: ${message(e)}`, true);
       }
@@ -161,6 +177,19 @@ export class Runner {
     await this.flush();
   }
 
+  // The freshest reading of the account's rate limits any session posted;
+  // undefined when the hub has none or cannot be asked.
+  private async sharedLimits(sessionId: string): Promise<LimitsReading | undefined> {
+    try {
+      const res = await this.deps.http(`${this.base}/limits?session=${encodeURIComponent(sessionId)}`);
+      if (res.status !== 200) return undefined;
+      const v: unknown = JSON.parse(res.text);
+      return isLimitsReading(v) && v.rateLimits.length ? v : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   // The status line's figure, else the local estimate (right after a
   // compaction); undefined when the engine cannot tell.
   private async contextTokens(): Promise<number | undefined> {
@@ -199,11 +228,13 @@ export class Runner {
   }
 }
 
-export function infoText(u: Usage, now: number): string {
+// limitsAt: when the limits were read, if known.
+export function infoText(u: Usage, now: number, limitsAt?: number): string {
   const lines: string[] = [];
   if (!u.rateLimits.length) lines.push("Лимиты: нет данных — появятся после первого ответа модели");
   else {
-    lines.push("**Лимиты**");
+    const age = limitsAt === undefined ? 0 : now - limitsAt;
+    lines.push(age >= STALE_LIMITS_MS ? `**Лимиты** (данные ${duration(age)} назад)` : "**Лимиты**");
     const order = (kind: string) => (LIMIT_ORDER.includes(kind) ? LIMIT_ORDER.indexOf(kind) : LIMIT_ORDER.length);
     for (const l of [...u.rateLimits].sort((a, b) => order(a.kind) - order(b.kind))) {
       const left = l.resetsAt ? Date.parse(l.resetsAt) - now : NaN;
@@ -268,6 +299,17 @@ function message(e: unknown): string {
 function topicCommands(json: string): TopicCommand[] {
   const list: unknown = JSON.parse(json);
   return Array.isArray(list) ? list.filter(isTopicCommand) : [];
+}
+
+function isLimitsReading(v: unknown): v is LimitsReading {
+  if (typeof v !== "object" || v === null || !("at" in v) || typeof v.at !== "number" || !("rateLimits" in v) || !Array.isArray(v.rateLimits)) return false;
+  return v.rateLimits.every(isRateLimit);
+}
+
+function isRateLimit(v: unknown): v is RateLimit {
+  if (typeof v !== "object" || v === null) return false;
+  if (!("kind" in v) || typeof v.kind !== "string" || !("percentUsed" in v) || typeof v.percentUsed !== "number") return false;
+  return !("resetsAt" in v) || v.resetsAt === undefined || typeof v.resetsAt === "string";
 }
 
 function isTopicCommand(v: unknown): v is TopicCommand {

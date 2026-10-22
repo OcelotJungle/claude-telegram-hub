@@ -1626,6 +1626,27 @@ describe("commands", () => {
     expect(fake.texts().filter(p => p.text.startsWith("Лимиты")).length).toBe(1);
   });
 
+  test("/limits answers the freshest reading of the sessions on the account", async () => {
+    await startHub();
+    await plugin("a");
+    await plugin("b");
+    const other = await wsClient(port, { ...hello("c"), configDir: "C:\\p\\sessions\\1-other_mail.com" });
+    clients.push(other);
+    await other.next("state");
+    const reading = (at: number, percentUsed: number) => ({ at, rateLimits: [{ kind: "five_hour", percentUsed }] });
+    const post = (sessionId: string, at: number, percent: number) =>
+      fetch(`http://127.0.0.1:${port}/limits`, { method: "POST", body: JSON.stringify({ sessionId, ...reading(at, percent) }) });
+    const get = async (sessionId: string): Promise<unknown> => (await fetch(`http://127.0.0.1:${port}/limits?session=${sessionId}`)).json();
+    await post("a", 1000, 10);
+    await post("b", 5000, 50);
+    await post("c", 9000, 90);
+    expect(await get("a")).toEqual(reading(5000, 50));
+    expect(await get("b")).toEqual(reading(5000, 50));
+    expect(await get("c")).toEqual(reading(9000, 90));
+    expect(await get("nobody")).toBeNull();
+    expect((await fetch(`http://127.0.0.1:${port}/limits`, { method: "POST", body: "{}" })).status).toBe(400);
+  });
+
   test("the same reply posted twice is sent once", async () => {
     await startHub();
     await enabled("a");

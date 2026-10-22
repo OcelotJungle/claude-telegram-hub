@@ -3,7 +3,7 @@ import type { Config } from "../shared/config.ts";
 import type { Logger } from "../shared/log.ts";
 import type { Entity, Formatted } from "../shared/markdown.ts";
 import type { OutFile } from "../shared/media.ts";
-import type { ChannelMeta, EnableResult, HookBody, HubToPlugin, PermissionBehavior, PluginToHub, TopicCommand } from "../shared/protocol.ts";
+import type { ChannelMeta, EnableResult, HookBody, HubToPlugin, LimitsReading, PermissionBehavior, PluginToHub, TopicCommand } from "../shared/protocol.ts";
 import type { OutItem, Piece } from "./outbox.ts";
 import type { SessionRecord } from "./sessions.ts";
 import type { Message, TelegramApi, Update } from "./telegram.ts";
@@ -22,7 +22,7 @@ import { field } from "../shared/guards.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
-import { commandReply, hookBody, pluginToHub, sendFilesMessage, sendMessage, terminateRequest } from "../shared/protocol-schema.ts";
+import { commandReply, hookBody, limitsPost, pluginToHub, sendFilesMessage, sendMessage, terminateRequest } from "../shared/protocol-schema.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
@@ -186,6 +186,8 @@ export class Hub {
   private heldResults = new Map<string, HubToPlugin[]>();
   // Commands from the topic the plugin's module has not taken yet, by session.
   private commands = new Map<string, { cmd: TopicCommand; timer: ReturnType<typeof setTimeout> }[]>();
+  // The latest rate-limit reading of each session, with its account then.
+  private limits = new Map<string, LimitsReading & { account?: string }>();
   private botUsername: string | undefined;
   // Permission prompts sent to topics, by the key in their buttons' data.
   private permissions = new Map<string, { sessionId: string; requestId: string } & Formatted>();
@@ -317,6 +319,15 @@ export class Hub {
       if (this.stopping.get(r.data.sessionId) === r.data.id) this.terminate(r.data.sessionId);
       return new Response("ok");
     }
+    if (url.pathname === "/limits" && req.method === "POST") {
+      const r = limitsPost.safeParse(await req.json().catch(() => undefined));
+      if (!r.success) return new Response("bad limits", { status: 400 });
+      const { sessionId, ...reading } = r.data;
+      const account = this.accountOf(sessionId);
+      this.limits.set(sessionId, { ...reading, ...(account ? { account } : {}) });
+      return new Response("ok");
+    }
+    if (url.pathname === "/limits" && req.method === "GET") return Response.json(this.freshestLimits(url.searchParams.get("session") ?? "") ?? null);
     if (url.pathname === "/reply" && req.method === "POST") {
       const r = commandReply.safeParse(await req.json().catch(() => undefined));
       if (!r.success) return new Response("bad reply", { status: 400 });
@@ -347,6 +358,22 @@ export class Hub {
     this.commands.set(sessionId, [...(this.commands.get(sessionId) ?? []), { cmd, timer }]);
     this.log.info(`/${cmd.name} for session ${sessionId}`);
     return cmd.id;
+  }
+
+  // The freshest rate-limit reading of the sessions on this session's account;
+  // with the account unknown, only the session's own.
+  private freshestLimits(sessionId: string): LimitsReading | undefined {
+    const account = this.accountOf(sessionId);
+    let best: LimitsReading | undefined;
+    for (const [sid, r] of this.limits) {
+      const same = sid === sessionId || (account !== undefined && (this.accountOf(sid) ?? r.account) === account);
+      if (same && r.rateLimits.length && (!best || r.at > best.at)) best = { at: r.at, rateLimits: r.rateLimits };
+    }
+    return best;
+  }
+
+  private accountOf(sessionId: string): string | undefined {
+    return this.connOf(sessionId)?.data.account ?? this.store.get(sessionId)?.account;
   }
 
   // An older module does not know stop: it stays queued for its timeout.

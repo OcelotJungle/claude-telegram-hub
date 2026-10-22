@@ -14,6 +14,14 @@ export type TopicCommand = { id: string; name: "info" | "compact" | "stop"; args
 export type CommandReply = { sessionId: string; id: string; text: string; notify: boolean };
 export type TerminateRequest = { sessionId: string; id: string };
 
+// Rate limits are the account's, but a session knows them only from its own
+// last API response. Each module posts its readings (POST /limits, `at` in
+// ms), and /info takes the freshest one of the sessions on its account
+// (GET /limits?session=<id>, answered with a reading or null).
+export type RateLimit = { kind: string; percentUsed: number; resetsAt?: string };
+export type LimitsReading = { at: number; rateLimits: RateLimit[] };
+export type LimitsPost = LimitsReading & { sessionId: string };
+
 export type ChannelMeta = Record<string, string>;
 
 export type QueuedFile = { path: string; name: string; size: number };

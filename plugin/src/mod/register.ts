@@ -30,6 +30,13 @@ export const register: Register = on => {
     return result;
   });
 
+  // The account's rate limits as this session read them, for /info in the
+  // sessions that have been idle since.
+  on("session.measure", async ($, e, next) => {
+    void runner?.measured(e.rateLimits);
+    return next(e);
+  });
+
   // The main loop's turns: a compaction from the topic waits for none to run.
   on("turn.start", async ($, e, next) => {
     if (e.agentId === undefined) runner?.turn(true);

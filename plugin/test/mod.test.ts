@@ -72,6 +72,11 @@ describe("/info text", () => {
     expect(text).toContain("spend_limit: 12%\n");
   });
 
+  test("limits read over a minute ago say how old they are", () => {
+    expect(infoText(usage({ tokens: 1 }), NOW, NOW - 59_000)).toStartWith("**Лимиты**\n");
+    expect(infoText(usage({ tokens: 1 }), NOW, NOW - 72 * 60_000)).toStartWith("**Лимиты** (данные 1 ч 12 мин назад)\n");
+  });
+
   test("without a breakdown only the status line figure is shown", () => {
     const text = infoText(usage({ tokens: 20_000, breakdown: null }), NOW);
     expect(text.endsWith("**Контекст**\nСейчас: 20k токенов")).toBe(true);
@@ -113,6 +118,58 @@ describe("replies", () => {
     await Bun.sleep(150);
     await runner.poll();
     expect(posted).toEqual(["c1.0", "c1.1"]);
+  });
+});
+
+describe("limits shared through the hub", () => {
+  const OWN = [{ kind: "five_hour", percentUsed: 30, resetsAt: "2026-01-01T13:00:00.000Z" }];
+  const FRESH = [{ kind: "five_hour", percentUsed: 64, resetsAt: "2026-01-01T13:00:00.000Z" }];
+
+  function runner(answer: () => { status: number; text: string }) {
+    const posted: { path: string; body: unknown }[] = [];
+    let commands = [{ id: "c1", name: "info", args: "" }];
+    const r = new Runner("http://hub", {
+      sessionId: async () => "s",
+      usage: async () => usage({ tokens: 1, limits: OWN }),
+      run: async () => ({}),
+      compact: async () => ({}),
+      http: async (url, init) => {
+        if (init?.method === "POST") {
+          posted.push({ path: new URL(url).pathname, body: JSON.parse(init.body ?? "null") });
+          return { status: 200, text: "ok" };
+        }
+        if (new URL(url).pathname === "/limits") return answer();
+        const list = commands;
+        commands = [];
+        return { status: 200, text: JSON.stringify(list) };
+      },
+      now: () => NOW,
+    });
+    const info = () => String(field(posted.find(p => p.path === "/reply")?.body, "text"));
+    return { r, posted, info };
+  }
+
+  test("/info shows the freshest reading of the account, with its age", async () => {
+    const s = runner(() => ({ status: 200, text: JSON.stringify({ at: NOW - 5 * 60_000, rateLimits: FRESH }) }));
+    await s.r.poll();
+    await Bun.sleep(50);
+    expect(s.info()).toStartWith("**Лимиты** (данные 5 мин назад)\n5 часов: 64%");
+  });
+
+  test("without a reading in the hub /info shows the session's own", async () => {
+    for (const answer of [() => ({ status: 200, text: "null" }), () => ({ status: 500, text: "" }), () => ({ status: 200, text: "{\"at\":\"x\"}" })]) {
+      const s = runner(answer);
+      await s.r.poll();
+      await Bun.sleep(50);
+      expect(s.info()).toStartWith("**Лимиты**\n5 часов: 30%");
+    }
+  });
+
+  test("a reading of the session is posted to the hub; an empty one is not", async () => {
+    const s = runner(() => ({ status: 200, text: "null" }));
+    await s.r.measured([]);
+    await s.r.measured(FRESH);
+    expect(s.posted).toEqual([{ path: "/limits", body: { sessionId: "s", at: NOW, rateLimits: FRESH } }]);
   });
 });
 
