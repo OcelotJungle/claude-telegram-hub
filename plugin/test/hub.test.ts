@@ -30,6 +30,7 @@ const WAIT_MS = 5000;
 const IDLE_MS = 300;
 const SETTLE_MS = 300;
 const OLD_COMMAND_S = 5 * 60;
+const MS_PER_S = 1000;
 const FILE_LIMIT = 200;
 const LAUNCH_TIMEOUT_S = 30;
 // How long a test hub waits for windows before it delivers results of runs
@@ -1855,11 +1856,30 @@ describe("topic commands", () => {
       },
     });
     await enabled(SID);
-    fake.pushUpdate(msg("/exec npm run migrate", { date: Math.floor(Date.now() / 1000) - OLD_COMMAND_S }));
+    fake.pushUpdate(msg("/exec npm run migrate", { date: Math.floor(Date.now() / MS_PER_S) - OLD_COMMAND_S }));
     const card = await waitFor(() => fake.callsOf("sendMessage").find(c => String(c.text).startsWith("⏸ Команда пришла 5 мин назад, пока хаб был выключен")), WAIT_MS, "pending card");
     expect(buttonsOf(card).some(d => d.endsWith(":run"))).toBe(true);
     expect(spawned).toBe(0);
   });
+
+  test("the run button starts an old command", async () => {
+    const specs: string[] = [];
+    await startHub({
+      spawnRunner: file => {
+        specs.push(file);
+        return process.pid;
+      },
+    });
+    await enabled(SID);
+    fake.pushUpdate(msg("/exec npm run migrate", { date: Math.floor(Date.now() / MS_PER_S) - OLD_COMMAND_S }));
+    const card = await waitFor(() => fake.callsOf("sendMessage").find(c => buttonsOf(c).some(d => d.endsWith(":run"))), WAIT_MS, "pending card");
+    const data = must(buttonsOf(card).find(d => d.endsWith(":run")), "run button");
+    fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
+    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Запускаю"), WAIT_MS, "answer");
+    expect(specs).toHaveLength(1);
+    const running = await waitFor(() => fake.callsOf("editMessageText").find(c => String(c.text).startsWith("▶ PowerShell")), WAIT_MS, "running card");
+    expect(buttonsOf(running).some(d => d.endsWith(":stop"))).toBe(true);
+  }, 3 * WAIT_MS);
 
   test("multi-line /cmd is refused", async () => {
     await startHub();
