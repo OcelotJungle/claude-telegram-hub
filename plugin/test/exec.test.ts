@@ -32,11 +32,12 @@ afterEach(() => {
 
 // Fake deps: runners are only their spec files, which the test plays out by
 // writing the log and the exit file itself.
-function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number } = {}) {
+// alive: runner pids alive from the start, for a manager that finds runs on disk.
+function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; bootedAt?: number; alive?: number[] } = {}) {
   const dir = o.dir ?? tempDir("tghub-exec-");
   if (o.dir === undefined) dirs.push(dir);
   const specs: RunnerSpec[] = [];
-  const alive = new Set<number>();
+  const alive = new Set<number>(o.alive);
   const killed: number[] = [];
   const cards: CardCall[] = [];
   const notices: { text: string; loud: boolean }[] = [];
@@ -68,6 +69,7 @@ function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number } = {
     cardMs: 50,
     maxAgeMs: 2 * MIN_MS,
     fileLimit: o.fileLimit,
+    bootedAt: () => o.bootedAt ?? NOW - 60 * MIN_MS * 24,
     log: memLogger(),
   };
   const execs = new Execs(deps);
@@ -209,14 +211,25 @@ describe("Execs", () => {
     const t = setup();
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     t.execs.stop();
-    const t2 = setup({ dir: t.dir });
-    t2.alive.add(FIRST_PID + 1);
+    const t2 = setup({ dir: t.dir, alive: [FIRST_PID + 1] });
     t.finish(0, 0);
     await waitFor(() => t2.reports[0], 2000, "report");
     await Bun.sleep(100);
     expect(t2.reports).toHaveLength(1);
     expect(t.reports).toHaveLength(0);
     expect(t2.lastCard().markdown).toStartWith("✅ код 0");
+  });
+
+  test("a run from before the machine started ends as lost, whoever has its pid now", async () => {
+    const dir = tempDir("tghub-exec-");
+    dirs.push(dir);
+    const rec: ExecRecord = { id: "abcd1234", sessionId: SID, messageId: 1, shell: "cmd", text: "x", cwd: "C:\\proj", state: "running", startedAt: NOW - 60 * MIN_MS, pid: 4242, reported: false };
+    saveExecs(join(dir, "execs.json"), [rec]);
+    const t = setup({ dir, bootedAt: NOW - 10 * MIN_MS, alive: [4242] });
+    await waitFor(() => t.cards.find(c => c.final), 2000, "final card");
+    expect(t.lastCard().markdown).toStartWith("⚠️ прервана: процесс исчез");
+    expect(t.execs.press("abcd1234", "stop")).toBe("Команда уже закончилась");
+    expect(t.killed).toEqual([]);
   });
 
   test("an unreported result goes again when the session connects", async () => {

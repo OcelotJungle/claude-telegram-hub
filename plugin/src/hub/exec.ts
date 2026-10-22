@@ -10,6 +10,7 @@ import type { Logger } from "../shared/log.ts";
 
 import { randomBytes } from "crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync } from "fs";
+import { uptime } from "os";
 import { join } from "path";
 import { loadExecs, saveExecs } from "./exec-store.ts";
 import { SHELL_NAMES, shellRun, writeShellFiles } from "./exec-shell.ts";
@@ -57,6 +58,8 @@ export type ExecDeps = {
   maxAgeMs: number;
   // The largest file Telegram takes; TELEGRAM_FILE_LIMIT when not given.
   fileLimit?: number;
+  // When the machine started; from os.uptime() when not given.
+  bootedAt?(): number;
   log: Logger;
 };
 
@@ -70,6 +73,8 @@ export class Execs {
     this.recs = loadExecs(this.deps.file);
     this.timers.push(setInterval(() => this.check(), this.deps.checkMs));
     this.timers.push(setInterval(() => this.editCards(), this.deps.cardMs));
+    // At once: a run gone while no hub watched never gets a stop button press.
+    this.check();
   }
 
   // Only the timers: the runners go on and a next manager picks them up.
@@ -128,6 +133,10 @@ export class Execs {
     for (const rec of this.recs) {
       if (rec.sessionId === sessionId && rec.state === "ended" && !rec.reported) this.report(rec);
     }
+  }
+
+  private bootedAt(): number {
+    return this.deps.bootedAt ? this.deps.bootedAt() : Date.now() - uptime() * MS_PER_SECOND;
   }
 
   private path(id: string, ext: string): string {
@@ -196,7 +205,10 @@ export class Execs {
         this.ended(rec, exit);
         continue;
       }
-      if (rec.pid !== undefined && this.deps.alive(rec.pid)) continue;
+      // A runner from before the machine started is gone, whoever has its
+      // pid now: that one is neither waited for nor killed.
+      const beforeBoot = (rec.startedAt ?? 0) < this.bootedAt();
+      if (rec.pid !== undefined && !beforeBoot && this.deps.alive(rec.pid)) continue;
       // The runner may have written the file just before it exited.
       if (existsSync(exit)) this.ended(rec, exit);
       else this.end(rec, rec.stopping ? { kind: "stopped", at: this.deps.now() } : { kind: "lost", at: this.deps.now(), reason: LOST_REASON });
