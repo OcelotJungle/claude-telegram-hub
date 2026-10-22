@@ -9,7 +9,7 @@ import type { ChannelMeta } from "../shared/protocol.ts";
 import type { Logger } from "../shared/log.ts";
 
 import { randomBytes } from "crypto";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync } from "fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync } from "fs";
 import { join } from "path";
 import { loadExecs, saveExecs } from "./exec-store.ts";
 import { SHELL_NAMES, shellRun, writeShellFiles } from "./exec-shell.ts";
@@ -155,6 +155,7 @@ export class Execs {
         exit: this.path(rec.id, "exit.json"),
       };
       const specFile = this.path(rec.id, "spec.json");
+      mkdirSync(this.deps.dir, { recursive: true });
       writeFileSync(specFile, JSON.stringify(spec));
       rec.pid = this.deps.spawnRunner(specFile);
       rec.state = "running";

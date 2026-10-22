@@ -27,6 +27,8 @@ export function paths() {
     filesDir: join(stateDir, "outbox-files"),
     logFile: join(stateDir, "hub.log"),
     inboxDir: join(stateDir, "inbox"),
+    execDir: join(stateDir, "exec"),
+    execsFile: join(stateDir, "execs.json"),
   };
 }
 
@@ -78,8 +80,13 @@ export function loadToken(): string | undefined {
 // and its arguments, with {cwd}, {account} and {session} put in.
 export type Launch = { command: string[]; timeoutSec: number };
 
+// Topic commands: bash is the Git Bash /bash runs in.
+export type ExecConfig = { bash?: string };
+
 // launchError: config.json has a launch section that is not valid.
-export type Config = { groupId?: string; allowFrom: string[]; launch?: Launch; launchError?: string };
+export type Config = { groupId?: string; allowFrom: string[]; launch?: Launch; launchError?: string; exec?: ExecConfig };
+
+const execSchema: z.ZodType<ExecConfig> = z.object({ bash: z.string().min(1).optional() });
 
 const launchSchema: z.ZodType<Launch> = z.object({
   command: z.array(z.string()).min(1),
@@ -102,5 +109,8 @@ export function loadConfig(): Config {
     if (parsed.success) cfg.launch = parsed.data;
     else cfg.launchError = z.prettifyError(parsed.error);
   }
+  // A broken exec section is left out: /bash then looks in the default place.
+  const exec = execSchema.safeParse(field(raw, "exec"));
+  if (exec.success && exec.data.bash !== undefined) cfg.exec = exec.data;
   return cfg;
 }

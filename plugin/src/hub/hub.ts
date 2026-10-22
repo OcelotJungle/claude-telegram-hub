@@ -6,14 +6,15 @@ import type { OutFile } from "../shared/media.ts";
 import type { ChannelMeta, EnableResult, HookBody, HubToPlugin, LimitsReading, PermissionBehavior, PluginToHub, TopicCommand } from "../shared/protocol.ts";
 import type { OutItem, Piece } from "./outbox.ts";
 import type { SessionRecord } from "./sessions.ts";
-import type { Message, TelegramApi, Update } from "./telegram.ts";
+import type { Button, Message, TelegramApi, Update } from "./telegram.ts";
 import type { RichMessage } from "./rich.ts";
 import type { HubCommand } from "./router.ts";
 import type { VideoTools } from "./video.ts";
+import type { ExecShell } from "./exec-shell.ts";
 
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { randomUUID } from "crypto";
-import { existsSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, unlinkSync } from "fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync } from "fs";
 import { dirname, join } from "path";
 import { z } from "zod";
 import { chunk } from "../shared/chunk.ts";
@@ -34,6 +35,10 @@ import { isThreadNotFound, TelegramError } from "./telegram.ts";
 import { richPhotos, richToMarkdown } from "./rich.ts";
 import { richPieces } from "./rich-out.ts";
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath } from "./video.ts";
+import { EXEC_CARD_MS, EXEC_CHECK_MS, EXEC_MAX_AGE_MS, Execs } from "./exec.ts";
+import { freshEnv } from "./exec-env.ts";
+import { spawnRunner } from "./exec-runner.ts";
+import { DEFAULT_BASH, findPowershell } from "./exec-shell.ts";
 
 const INACTIVE_TEXT = "сессия сейчас не активна";
 // The queue id prefix of the start notice, "starting the session".
@@ -87,7 +92,11 @@ const BOT_COMMANDS = [
   { command: "compact", description: "Сжать контекст; /compact N — окно автокомпакта" },
   { command: "run", description: "Запустить сессию; /run N — на аккаунте N" },
   { command: "stop", description: "Завершить сессию" },
+  { command: "exec", description: "Команда в PowerShell в папке сессии" },
+  { command: "cmd", description: "Команда в cmd в папке сессии" },
+  { command: "bash", description: "Команда в Git Bash в папке сессии" },
 ];
+const EXEC_NOT_SET = "⚠️ Команды оболочки в этом хабе не настроены";
 
 type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; busy?: boolean; reportsSeen?: boolean };
 type WS = ServerWebSocket<Conn>;
@@ -101,7 +110,13 @@ type Card = {
   lastEdit: number;
   editing: boolean;
   timer?: ReturnType<typeof setTimeout>;
+  // Go with the first send and every edit; an edit without them takes them off.
+  buttons?: Button[][];
 };
+type Inbound = { content: string; meta: ChannelMeta; onSent(): void };
+// What a starting session gets once it connects: topic messages and the
+// results of topic commands.
+type Held = { message: Message } | { inbound: Inbound };
 
 export type HubOptions = {
   port: number;
@@ -142,6 +157,17 @@ export type HubOptions = {
   // asked of defaultAccount (cswap by default).
   defaultConfigDir?: string;
   defaultAccount?(): Promise<string | undefined>;
+  // Topic commands (/exec, /cmd, /bash): their logs and runs; without them
+  // the commands answer that they are not set up.
+  execDir?: string;
+  execsFile?: string;
+  execCheckMs?: number;
+  execCardMs?: number;
+  execMaxAgeMs?: number;
+  // The largest log file sent whole; Telegram's limit by default.
+  execFileLimit?: number;
+  // Starts a command's runner; the detached exec-runner by default.
+  spawnRunner?(specFile: string): number;
   log: Logger;
   onExit(): void;
 };
@@ -205,7 +231,8 @@ export class Hub {
   // Topic messages handed to a session whose ✍ is not on yet, by message id.
   private reactionTimers = new Map<number, ReturnType<typeof setTimeout>>();
   // Sessions being started from the topic, with the messages they will get.
-  private launches = new Map<string, { account: string; held: Message[]; timer: ReturnType<typeof setTimeout> }>();
+  private launches = new Map<string, { account: string; held: Held[]; timer: ReturnType<typeof setTimeout> }>();
+  private execs: Execs | undefined;
   // Sessions told to end, until their window goes.
   private stops = new Map<string, ReturnType<typeof setTimeout>>();
   // Sessions whose /stop waits for the module's terminate request: the id of
@@ -245,8 +272,38 @@ export class Hub {
     // version as an edit, a "not modified" answer being no error.
     if (opts.cardsFile) {
       for (const [key, c] of loadCards(opts.cardsFile)) {
-        this.cards.set(key, { text: c.text, final: c.done, done: c.done, ...(c.messageId !== undefined ? { messageId: c.messageId } : {}), ...(c.done ? { shown: c.text } : {}), lastEdit: 0, editing: false });
+        this.cards.set(key, {
+          text: c.text,
+          final: c.done,
+          done: c.done,
+          ...(c.messageId !== undefined ? { messageId: c.messageId } : {}),
+          ...(c.done ? { shown: c.text } : {}),
+          ...(c.buttons ? { buttons: c.buttons } : {}),
+          lastEdit: 0,
+          editing: false,
+        });
       }
+    }
+    if (opts.execDir && opts.execsFile) {
+      this.execs = new Execs({
+        dir: opts.execDir,
+        file: opts.execsFile,
+        shells: () => ({ powershell: findPowershell(), bash: this.bashPath() }),
+        env: () => freshEnv(this.log),
+        spawnRunner: opts.spawnRunner ?? spawnRunner,
+        alive: isAlive,
+        kill: killTree,
+        card: (sid, cardId, markdown, final, buttons) => this.upsertCard(sid, cardId, markdown, final, buttons),
+        notice: (sid, text, loud) => this.notice(sid, text, loud),
+        sendFile: (sid, path, name, loud) => this.sendExecFile(sid, path, name, loud),
+        report: (sid, content, meta, onSent) => this.reportExec(sid, { content, meta, onSent }),
+        now: () => Date.now(),
+        checkMs: opts.execCheckMs ?? EXEC_CHECK_MS,
+        cardMs: opts.execCardMs ?? EXEC_CARD_MS,
+        maxAgeMs: opts.execMaxAgeMs ?? EXEC_MAX_AGE_MS,
+        ...(opts.execFileLimit ? { fileLimit: opts.execFileLimit } : {}),
+        log: opts.log,
+      });
     }
   }
 
@@ -276,6 +333,8 @@ export class Hub {
     this.typingTimer = setInterval(() => {
       for (const ws of this.conns) if (ws.data.busy) this.showTyping(ws);
     }, this.opts.typingEveryMs ?? TYPING_EVERY_MS);
+    // Before armIdle: commands still running keep the hub up.
+    this.execs?.start();
     this.armIdle();
     if (this.opts.api) void this.pollLoop(this.opts.api);
     else this.log.error("no TELEGRAM_BOT_TOKEN — not polling Telegram");
@@ -295,6 +354,8 @@ export class Hub {
     for (const t of this.stops.values()) clearTimeout(t);
     for (const t of this.readyTimers) clearTimeout(t);
     for (const t of this.reactionTimers.values()) clearTimeout(t);
+    // The commands go on; the next hub picks them up.
+    this.execs?.stop();
     this.server?.stop(true);
     this.log.info("hub stopped");
   }
@@ -427,9 +488,10 @@ export class Hub {
   }
 
   // With idleMs 0, or a launch command to start sessions from the topic, the
-  // hub stays up with no window at all.
+  // hub stays up with no window at all; and while a topic command runs, so
+  // its result reaches the topic.
   private alwaysOn(): boolean {
-    return this.opts.idleMs <= 0 || this.opts.config().launch !== undefined;
+    return this.opts.idleMs <= 0 || this.opts.config().launch !== undefined || (this.execs?.running() ?? 0) > 0;
   }
 
   private armIdle(): void {
@@ -738,26 +800,32 @@ ${msg.text}`);
   // among the session's messages; later versions edit that message, at most
   // every CARD_EDIT_MS.
   private onCard(msg: Extract<PluginToHub, { type: "card" }>): void {
-    if (!this.store.get(msg.sessionId)) return;
-    const key = `${msg.sessionId}:${msg.id}`;
+    this.upsertCard(msg.sessionId, msg.id, msg.text, msg.final);
+  }
+
+  // A subagent's card or a topic command's: buttons, when given, go under it.
+  private upsertCard(sessionId: string, cardId: string, markdown: string, final: boolean, buttons?: Button[][]): void {
+    if (!this.store.get(sessionId)) return;
+    const key = `${sessionId}:${cardId}`;
     const card = this.cards.get(key);
     // A finished card stays finished: a late version changes nothing.
     if (card?.done) return;
     if (card) {
-      card.text = msg.text;
-      card.final = msg.final;
+      card.text = markdown;
+      card.final = final;
+      card.buttons = buttons;
       if (card.messageId !== undefined) this.scheduleCardEdit(key, card);
       return;
     }
-    this.cards.set(key, { text: msg.text, final: msg.final, done: false, lastEdit: 0, editing: false });
+    this.cards.set(key, { text: markdown, final, done: false, lastEdit: 0, editing: false, ...(buttons ? { buttons } : {}) });
     for (const old of this.cards.keys()) {
       if (this.cards.size <= MAX_CARDS) break;
       this.cards.delete(old);
     }
     this.saveCards();
-    const [first] = textPieces(msg.text, true);
+    const [first] = textPieces(markdown, true);
     // The outbox remembers sent ids: a card sent anew needs a new one.
-    if (first && this.outbox.add(`card-${randomUUID()}`, msg.sessionId, [{ ...first, card: key }])) void this.pump(msg.sessionId);
+    if (first && this.outbox.add(`card-${randomUUID()}`, sessionId, [{ ...first, card: key }])) void this.pump(sessionId);
   }
 
   // On the card's creation, first send and end: its text in between is the
@@ -765,7 +833,10 @@ ${msg.text}`);
   private saveCards(): void {
     if (!this.opts.cardsFile) return;
     try {
-      saveCards(this.opts.cardsFile, [...this.cards].map(([key, c]) => [key, { text: c.text, done: c.done, ...(c.messageId !== undefined ? { messageId: c.messageId } : {}) }]));
+      saveCards(
+        this.opts.cardsFile,
+        [...this.cards].map(([key, c]) => [key, { text: c.text, done: c.done, ...(c.messageId !== undefined ? { messageId: c.messageId } : {}), ...(c.buttons ? { buttons: c.buttons } : {}) }]),
+      );
     } catch (e) {
       this.log.warn(`saving subagent cards failed: ${e}`);
     }
@@ -805,7 +876,7 @@ ${msg.text}`);
     const f = cardFormat(text);
     card.editing = true;
     try {
-      await this.opts.api.editMessageText(this.requireGroup(), card.messageId, f.text, f.entities);
+      await this.opts.api.editMessageText(this.requireGroup(), card.messageId, f.text, f.entities, card.buttons);
       card.shown = text;
     } catch (e) {
       if (e instanceof TelegramError && /message is not modified/i.test(e.description)) card.shown = text;
@@ -978,7 +1049,8 @@ ${msg.text}`);
       // The card may have changed while it waited in the queue.
       const text = card.text;
       const f = cardFormat(text);
-      const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, f.text, true, f.entities));
+      const buttons = card.buttons;
+      const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, f.text, true, f.entities, buttons));
       card.messageId = sent.message_id;
       card.shown = text;
       card.lastEdit = Date.now();
@@ -1191,6 +1263,7 @@ ${msg.text}`);
       if (press.id) await api.answerCallbackQuery(press.id).catch(e => this.log.warn(`answering a button press failed: ${e}`));
       return;
     }
+    if (press?.data.startsWith("x:")) return this.onExecPress(api, press);
     if (press && cfg.groupId) return this.onPermissionPress(api, cfg.groupId, press);
     const route = routeUpdate(u, cfg, this.store, id => this.isConnected(id));
     const m = u.message;
@@ -1200,15 +1273,10 @@ ${msg.text}`);
     }
     if (!m) return;
     const hubCmd = m.text !== undefined ? hubCommandOf(m.text, this.botUsername) : undefined;
-    if (hubCmd) return this.onHubCommand(route.sessionId, hubCmd);
+    if (hubCmd) return this.onHubCommand(route.sessionId, hubCmd, m);
     if (route.action === "inactive") {
-      const pending = this.launches.get(route.sessionId);
-      if (pending) {
-        if (pending.held.length < MAX_HELD) pending.held.push(m);
-        else this.log.warn(`session ${route.sessionId} is starting and holds ${MAX_HELD} messages; message ${m.message_id} dropped`);
-        return;
-      }
-      if (cfg.launch) return this.launch(route.sessionId, undefined, [m]);
+      if (this.hold(route.sessionId, { message: m })) return;
+      if (cfg.launch) return this.launch(route.sessionId, undefined, [{ message: m }]);
       const text = cfg.launchError ? `${INACTIVE_TEXT}; автозапуск не работает: секция launch в config.json с ошибкой` : INACTIVE_TEXT;
       if (cfg.groupId) await api.sendMessage(cfg.groupId, route.topicId, text, false).catch(e => this.log.warn(`inactive notice failed: ${e}`));
       return;
@@ -1272,7 +1340,18 @@ ${msg.text}`);
 
   // --- starting and stopping sessions --------------------------------------
 
-  private onHubCommand(sessionId: string, cmd: HubCommand): void {
+  // A starting session keeps what comes for it until it connects; false when
+  // the session is not starting.
+  private hold(sessionId: string, h: Held): boolean {
+    const pending = this.launches.get(sessionId);
+    if (!pending) return false;
+    if (pending.held.length < MAX_HELD) pending.held.push(h);
+    else this.log.warn(`session ${sessionId} is starting and holds ${MAX_HELD} messages; ${"message" in h ? `message ${h.message.message_id}` : "a command result"} dropped`);
+    return true;
+  }
+
+  private onHubCommand(sessionId: string, cmd: HubCommand, m: Message): void {
+    if (cmd.name === "exec" || cmd.name === "cmd" || cmd.name === "bash") return this.onExecCommand(sessionId, cmd.name, cmd.args, m);
     if (cmd.name === "run") {
       if (this.connOf(sessionId)) return this.notice(sessionId, "Сессия уже работает", false);
       if (this.launches.has(sessionId)) return this.notice(sessionId, "Сессия уже запускается", false);
@@ -1310,7 +1389,7 @@ ${msg.text}`);
   // Runs the configured command for a session without a window: the account
   // given, else the one it ran on last; with neither it does not start. The
   // messages wait until the session connects; one start at a time.
-  private launch(sessionId: string, account: string | undefined, held: Message[]): void {
+  private launch(sessionId: string, account: string | undefined, held: Held[]): void {
     const cfg = this.opts.config();
     const rec = this.store.get(sessionId);
     if (!rec) return;
@@ -1348,9 +1427,14 @@ ${msg.text}`);
   // A window of the session connected: a start it waited for is done, and
   // the held messages go once Claude Code is ready for them. A window that
   // does not name its account runs on the one it was started on.
+  // Command results the agent has not got go after the held messages, so one
+  // held for this start is not sent twice.
   private launched(ws: WS, sessionId: string): void {
     const l = this.launches.get(sessionId);
-    if (!l) return;
+    if (!l) {
+      if (this.execs) this.whenReady(() => this.execs?.connected(sessionId));
+      return;
+    }
     clearTimeout(l.timer);
     this.launches.delete(sessionId);
     if (!ws.data.account) {
@@ -1359,20 +1443,95 @@ ${msg.text}`);
     }
     this.log.info(`session ${sessionId} started, ${l.held.length} held message(s) to deliver`);
     this.launchEnded(sessionId, "started");
-    if (!l.held.length) return;
+    if (!l.held.length && !this.execs) return;
+    this.whenReady(async () => {
+      for (const h of l.held) {
+        try {
+          if ("message" in h) await this.deliver(this.requireApi(), sessionId, h.message);
+          else this.deliverInbound(sessionId, h.inbound);
+        } catch (e) {
+          this.log.error(`delivering held ${"message" in h ? `message ${h.message.message_id}` : "command result"} to session ${sessionId} failed: ${e}`);
+        }
+      }
+      this.execs?.connected(sessionId);
+    });
+  }
+
+  // Runs once Claude Code is ready for channel messages.
+  private whenReady(fn: () => void | Promise<void>): void {
     const t = setTimeout(() => {
       this.readyTimers.delete(t);
-      void (async () => {
-        for (const m of l.held) {
-          try {
-            await this.deliver(this.requireApi(), sessionId, m);
-          } catch (e) {
-            this.log.error(`delivering held message ${m.message_id} to session ${sessionId} failed: ${e}`);
-          }
-        }
-      })();
+      void fn();
     }, this.opts.readyDelayMs ?? READY_DELAY_MS);
     this.readyTimers.add(t);
+  }
+
+  // --- topic commands -------------------------------------------------------
+
+  private bashPath(): string {
+    return this.opts.config().exec?.bash ?? DEFAULT_BASH;
+  }
+
+  // /exec, /cmd or /bash: the text runs in the session's folder, with or
+  // without its window.
+  private onExecCommand(sessionId: string, name: "exec" | "cmd" | "bash", text: string, m: Message): void {
+    if (!this.execs) return this.notice(sessionId, EXEC_NOT_SET, false);
+    if (!text) return this.enqueue(sessionId, `hub-${randomUUID()}`, "Напиши команду: `/exec npm run migrate`", false);
+    // cmd /c runs only up to the first line break.
+    if (name === "cmd" && /[\r\n]/.test(text)) return this.notice(sessionId, "/cmd выполняет одну строку. Для нескольких — /exec или /bash", false);
+    const bash = this.bashPath();
+    if (name === "bash" && !existsSync(bash)) return this.notice(sessionId, `Git Bash не найден: ${bash}. Укажи exec.bash в config.json`, false);
+    const rec = this.store.get(sessionId);
+    const cwd = rec?.cwd ?? (this.opts.projectsDir ? sessionCwd(sessionId, this.opts.projectsDir) : undefined);
+    if (!cwd) return this.notice(sessionId, "⚠️ Не знаю, в какой папке запускать команду: её нет ни в записи хаба, ни в транскрипте", true);
+    const shell: ExecShell = name === "exec" ? "powershell" : name;
+    this.log.info(`/${name} for session ${sessionId}, message ${m.message_id}`);
+    this.execs.command(sessionId, shell, text, cwd, { messageId: m.message_id, date: m.date });
+  }
+
+  private async onExecPress(api: TelegramApi, press: { id: string; data: string; fromId: string }): Promise<void> {
+    const m = press.data.match(/^x:(\w+):(stop|run)$/);
+    const action = m?.[2] === "stop" || m?.[2] === "run" ? m[2] : undefined;
+    const answer = !m?.[1] || !action ? "Запуск не найден" : this.execs ? this.execs.press(m[1], action) : EXEC_NOT_SET;
+    if (m?.[1] && action) this.log.info(`exec ${m[1]}: ${action} pressed by ${press.fromId}: ${answer}`);
+    await api.answerCallbackQuery(press.id, answer).catch(e => this.log.warn(`answering a button press failed: ${e}`));
+  }
+
+  // A command's result reaches the agent as a topic message would: at once
+  // with a window, after the start with a session starting or startable.
+  private reportExec(sessionId: string, inbound: Inbound): void {
+    if (this.connOf(sessionId)) this.deliverInbound(sessionId, inbound);
+    else if (this.hold(sessionId, { inbound })) {
+      // Goes once the session connects.
+    } else if (this.opts.config().launch) this.launch(sessionId, undefined, [{ inbound }]);
+    else {
+      this.notice(sessionId, "⚠️ Сессия не запущена: результат команды агенту не доставлен", true);
+      inbound.onSent();
+    }
+    // The last command ended: the hub may go idle again.
+    if (!this.execs?.running()) this.armIdle();
+  }
+
+  private deliverInbound(sessionId: string, inbound: Inbound): void {
+    const ws = this.connOf(sessionId);
+    if (!ws) {
+      this.log.warn(`session ${sessionId} has no window, command result not delivered`);
+      return;
+    }
+    this.setEnabled(sessionId, true);
+    this.send(ws, { type: "inbound", content: inbound.content, meta: inbound.meta });
+    inbound.onSent();
+    this.log.info(`command result ${inbound.meta.exec_id ?? "?"} → session ${sessionId}`);
+  }
+
+  // The hub's own copy goes, as for files from a window.
+  private sendExecFile(sessionId: string, path: string, name: string, loud: boolean): void {
+    const id = randomUUID();
+    const copy = join(this.opts.filesDir, id, name);
+    mkdirSync(dirname(copy), { recursive: true });
+    copyFileSync(path, copy);
+    const file: OutFile = { path: copy, name, size: statSync(copy).size, kind: "document" };
+    if (this.outbox.add(`exec-${id}`, sessionId, [filesPiece([file], undefined, loud)])) void this.pump(sessionId);
   }
 
   // A window on the default login does not name its account in its config
@@ -1497,6 +1656,27 @@ ${msg.text}`);
       attach("sticker", m.sticker);
     }
     return { content: content ?? "", meta };
+  }
+}
+
+// A topic command's runner and everything it started.
+function killTree(pid: number): void {
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], { windowsHide: true });
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {}
+}
+
+// EPERM: the process is there, only not ours to signal.
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return field(e, "code") === "EPERM";
   }
 }
 

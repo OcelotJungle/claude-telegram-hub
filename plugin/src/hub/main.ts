@@ -22,6 +22,8 @@ const hub = new Hub({
   spoolDir: p.spoolDir,
   filesDir: p.filesDir,
   inboxDir: p.inboxDir,
+  execDir: p.execDir,
+  execsFile: p.execsFile,
   // Every cswap profile links its projects/ here.
   projectsDir: join(homedir(), ".claude", "projects"),
   api: token ? new TelegramApi({ token, base: apiBase(), log }) : undefined,

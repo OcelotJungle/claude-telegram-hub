@@ -1,16 +1,23 @@
 // The hub's subagent cards on disk, so a restarted hub goes on editing the
 // messages it sent instead of sending each card anew.
+import type { Button } from "./telegram.ts";
+
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname } from "path";
 import { z } from "zod";
 
 // text: the card's latest Markdown, which a card still in the queue is sent
-// with. done: its final version is shown.
-export type SavedCard = { text: string; done: boolean; messageId?: number };
+// with. done: its final version is shown. buttons: the keyboard under it.
+export type SavedCard = { text: string; done: boolean; messageId?: number; buttons?: Button[][] };
 
 const fileSchema: z.ZodType<Record<string, SavedCard>> = z.record(
   z.string(),
-  z.object({ text: z.string(), done: z.boolean(), messageId: z.number().optional() }),
+  z.object({
+    text: z.string(),
+    done: z.boolean(),
+    messageId: z.number().optional(),
+    buttons: z.array(z.array(z.object({ text: z.string(), data: z.string() }))).optional(),
+  }),
 );
 
 // The cards by `${sessionId}:${cardId}`, oldest first; none when the file is

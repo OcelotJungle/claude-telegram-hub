@@ -145,6 +145,18 @@ describe("config", () => {
     expect(loadConfig().launch).toEqual({ command: ["cswap.exe", "run", "{account}"], timeoutSec: 90 });
   });
 
+  test("exec.bash is read", () => {
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], exec: { bash: "D:\\Git\\bin\\bash.exe" } }));
+    expect(loadConfig().exec).toEqual({ bash: "D:\\Git\\bin\\bash.exe" });
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], exec: { bash: 5 } }));
+    expect(loadConfig().exec).toBeUndefined();
+  });
+
+  test("the exec folder and runs file are in the state dir", () => {
+    expect(paths().execDir).toBe(join(dir, "exec"));
+    expect(paths().execsFile).toBe(join(dir, "execs.json"));
+  });
+
   test("a broken launch section is reported, not used", () => {
     writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], launch: { command: "cswap.exe run 1" } }));
     const cfg = loadConfig();

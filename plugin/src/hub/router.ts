@@ -66,12 +66,19 @@ export function commandOf(text: string, botUsername: string | undefined): Omit<T
 }
 
 // A command the hub runs itself: `/run [account]` starts the topic's session,
-// `/stop` ends it.
-export type HubCommand = { name: "run" | "stop"; args: string };
+// `/stop` ends it, `/exec`, `/cmd` and `/bash` run their text in a shell in
+// the session's folder.
+export type HubCommand = { name: "run" | "stop" | "exec" | "cmd" | "bash"; args: string };
+
+const HUB_COMMANDS: readonly HubCommand["name"][] = ["run", "stop", "exec", "cmd", "bash"];
+
+function isHubCommandName(name: string): name is HubCommand["name"] {
+  return HUB_COMMANDS.some(n => n === name);
+}
 
 export function hubCommandOf(text: string, botUsername: string | undefined): HubCommand | undefined {
   const c = parseCommand(text, botUsername);
-  return c && (c.name === "run" || c.name === "stop") ? { name: c.name, args: c.args } : undefined;
+  return c && isHubCommandName(c.name) ? { name: c.name, args: c.args } : undefined;
 }
 
 function parseCommand(text: string, botUsername: string | undefined): { name: string; args: string } | undefined {

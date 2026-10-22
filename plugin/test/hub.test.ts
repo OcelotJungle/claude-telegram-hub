@@ -31,7 +31,14 @@ let log: ReturnType<typeof memLogger>;
 let exited: boolean;
 const clients: { close(): void }[] = [];
 
-type HubExtras = { spawn?(command: string[]): void; projectsDir?: string; stopTimeoutMs?: number; defaultAccount?(): Promise<string | undefined> };
+type HubExtras = {
+  spawn?(command: string[]): void;
+  projectsDir?: string;
+  stopTimeoutMs?: number;
+  defaultAccount?(): Promise<string | undefined>;
+  spawnRunner?(specFile: string): number;
+  execFileLimit?: number;
+};
 
 async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number } & HubExtras = {}) {
   port = await freePort();
@@ -63,6 +70,12 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     ...(o.stopTimeoutMs ? { stopTimeoutMs: o.stopTimeoutMs } : {}),
     defaultConfigDir: DEFAULT_DIR,
     defaultAccount: o.defaultAccount ?? (async () => undefined),
+    execDir: join(dir, "exec"),
+    execsFile: join(dir, "execs.json"),
+    execCheckMs: 20,
+    execCardMs: 100,
+    ...(o.spawnRunner ? { spawnRunner: o.spawnRunner } : {}),
+    ...(o.execFileLimit ? { execFileLimit: o.execFileLimit } : {}),
     log,
     onExit: () => {
       exited = true;
@@ -1772,6 +1785,133 @@ describe("commands", () => {
   test("the hub puts the commands into the bot menu", async () => {
     await startHub();
     const call = await waitFor(() => fake.callsOf("setMyCommands")[0]);
-    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "run", "stop"]);
+    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "run", "stop", "exec", "cmd", "bash"]);
   });
+});
+
+describe("topic commands", () => {
+  const SID = "11111111-2222-3333-4444-555555555555";
+  const RUN_MS = 15_000;
+  const msg = (text: string, extra?: Record<string, unknown>) => topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text, ...(extra ? { extra } : {}) });
+  const texts = () => fake.texts().map(t => t.text);
+  // What the topic has shown: messages sent and their edits.
+  const shown = () => [...fake.callsOf("sendMessage"), ...fake.callsOf("editMessageText")].map(c => String(c.text));
+  const buttonsOf = (call: object) =>
+    arr(field(field(call, "reply_markup"), "inline_keyboard"))
+      .flatMap(row => arr(row))
+      .map(b => String(field(b, "callback_data")));
+
+  // A session with a topic and no window, as the hub finds it on disk.
+  const closedSession = () => new SessionStore(join(dir, "sessions.json")).set(SID, { topicId: 100, title: "T", project: "p", enabled: true, cwd: CWD, account: "2" });
+
+  test("/cmd runs in the session folder, shows a card and wakes the agent", async () => {
+    await startHub();
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("/cmd echo привет && cd && exit /b 3"));
+    const inbound = await a.next("inbound", m => m.meta.source === "exec", RUN_MS);
+    expect(inbound.meta.exit_code).toBe("3");
+    expect(inbound.content).toContain("❌ код 3");
+    expect(inbound.content).toContain("привет");
+    expect(inbound.content).toContain(CWD);
+    expect(inbound.content).toContain(join(dir, "exec", `${inbound.meta.exec_id}.log`));
+    await waitFor(() => shown().find(t => t.startsWith("❌ код 3") && t.includes("привет")), 5000, "final card");
+  }, RUN_MS + 5000);
+
+  test("a stop button ends a running command", async () => {
+    await startHub();
+    await enabled(SID);
+    fake.pushUpdate(msg("/cmd ping -n 30 127.0.0.1"));
+    const card = await waitFor(() => fake.callsOf("sendMessage").find(c => buttonsOf(c).some(d => d.startsWith("x:"))), 5000, "card with a stop button");
+    const data = must(buttonsOf(card).find(d => d.endsWith(":stop")), "stop button");
+    fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
+    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Останавливаю"), 5000, "answer");
+    const end = await waitFor(() => fake.callsOf("editMessageText").find(c => String(c.text).startsWith("⏹ остановлена")), 5000, "stopped card");
+    expect(field(end, "reply_markup")).toBeUndefined();
+    fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
+    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Команда уже закончилась"), 5000, "second answer");
+  }, RUN_MS);
+
+  test("an old /exec waits for the run button", async () => {
+    let spawned = 0;
+    await startHub({
+      spawnRunner: () => {
+        spawned++;
+        return 1;
+      },
+    });
+    await enabled(SID);
+    fake.pushUpdate(msg("/exec npm run migrate", { date: Math.floor(Date.now() / 1000) - 5 * 60 }));
+    const card = await waitFor(() => fake.callsOf("sendMessage").find(c => String(c.text).startsWith("⏸ Команда пришла 5 мин назад, пока хаб был выключен")), 5000, "pending card");
+    expect(buttonsOf(card).some(d => d.endsWith(":run"))).toBe(true);
+    expect(spawned).toBe(0);
+  });
+
+  test("multi-line /cmd is refused", async () => {
+    await startHub();
+    await enabled(SID);
+    fake.pushUpdate(msg("/cmd echo a\necho b"));
+    await waitFor(() => texts().includes("/cmd выполняет одну строку. Для нескольких — /exec или /bash"), 5000, "refusal");
+  });
+
+  test("empty /exec asks for a command", async () => {
+    await startHub();
+    await enabled(SID);
+    fake.pushUpdate(msg("/exec"));
+    await waitFor(() => texts().includes("Напиши команду: /exec npm run migrate"), 5000, "hint");
+  });
+
+  test("/bash without Git Bash says where it looked", async () => {
+    config = { ...config, exec: { bash: join(dir, "no-bash.exe") } };
+    await startHub();
+    await enabled(SID);
+    fake.pushUpdate(msg("/bash ls"));
+    await waitFor(() => texts().includes(`Git Bash не найден: ${join(dir, "no-bash.exe")}. Укажи exec.bash в config.json`), 5000, "notice");
+  });
+
+  test("a result for a session without a window and without launch says it was not delivered", async () => {
+    closedSession();
+    await startHub();
+    fake.pushUpdate(msg("/cmd echo hi"));
+    await waitFor(() => texts().includes("⚠️ Сессия не запущена: результат команды агенту не доставлен"), RUN_MS, "notice");
+    expect(shown().some(t => t.startsWith("✅ код 0"))).toBe(true);
+  }, RUN_MS + 5000);
+
+  test("a result for a closed session with launch starts it and reaches the agent once", async () => {
+    closedSession();
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: ["wt.exe", "{session}"], timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c) });
+    fake.pushUpdate(msg("/cmd echo hi"));
+    await waitFor(() => spawned.length === 1, RUN_MS, "session start");
+    const w = await plugin(SID);
+    const inbound = await w.next("inbound", m => m.meta.source === "exec", 5000);
+    expect(inbound.meta.exit_code).toBe("0");
+    await Bun.sleep(300);
+    expect(w.messages.filter(m => m.type === "inbound").length).toBe(1);
+    expect(texts()).not.toContain("⚠️ Сессия не запущена: результат команды агенту не доставлен");
+  }, RUN_MS + 10_000);
+
+  test("the hub does not exit idle while a command runs", async () => {
+    closedSession();
+    fake.pushUpdate(msg("/cmd ping -n 3 127.0.0.1"));
+    await startHub({ idleMs: 300 });
+    await waitFor(() => shown().some(t => t.startsWith("▶ cmd")), 5000, "running card");
+    await Bun.sleep(600);
+    expect(exited).toBe(false);
+    await waitFor(() => exited, RUN_MS, "idle exit once the command ended");
+    expect(shown().some(t => t.startsWith("✅ код 0"))).toBe(true);
+  }, RUN_MS + 5000);
+
+  test("a log over the Telegram limit goes as its last 50 MB", async () => {
+    await startHub({ execFileLimit: 200 });
+    await enabled(SID);
+    fake.pushUpdate(msg("/cmd for /l %i in (1,1,40) do @echo line %i"));
+    const doc = await waitFor(() => fake.callsOf("sendDocument")[0], RUN_MS, "log file");
+    const file = field(doc, "document");
+    expect(String(field(file, "file"))).toEndWith(".log");
+    const body = String(field(file, "body"));
+    expect(body).toStartWith("[лог обрезан");
+    expect(body).toContain("line 40");
+    expect(Number(field(file, "size"))).toBeLessThanOrEqual(200);
+  }, RUN_MS + 5000);
 });
