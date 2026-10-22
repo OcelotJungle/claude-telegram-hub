@@ -44,6 +44,8 @@ type Entry = { at: number; text: string };
 
 // <status> of a task notification.
 const TASK_STATUSES: Record<string, Status> = { completed: "done", failed: "failed", killed: "stopped" };
+// The tool a subagent ends its run with, its report going to its caller.
+const HANDBACK_TOOL = "SubagentHandback";
 
 const metaSchema = z.object({ agentType: z.string().optional(), description: z.string().optional(), model: z.string().optional() });
 type Meta = z.infer<typeof metaSchema>;
@@ -150,6 +152,9 @@ class Agent {
     else if (ev.kind === "tool_use") {
       this.tools++;
       this.lastTool = ev.detail ? `${ev.name} ${ev.detail}` : ev.name;
+      // A subagent that hands its report back stops there, with no turn end
+      // in its transcript; a SendMessage later resumes it like any end.
+      if (ev.name === HANDBACK_TOOL) this.finish("done", ev.messageId);
     } else this.finish("done", ev.messageId);
   }
 

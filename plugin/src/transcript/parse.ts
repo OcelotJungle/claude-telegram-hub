@@ -52,13 +52,14 @@ export function parseRecord(r: unknown): TranscriptEvent[] {
     case "user":
       if (isTerminalInput(r)) return [{ kind: "terminal_input" }];
       if (isOurChannel(r.origin)) return channelSeen(contentText(r));
-      return INTERRUPTED.test(contentText(r)) ? [{ kind: "interrupted" }] : taskStatus(r);
+      return INTERRUPTED.test(contentText(r)) ? [{ kind: "interrupted" }] : taskStatus(contentText(r));
     // A message typed while the agent works is absorbed into the running turn.
     case "attachment": {
       const a = r.attachment;
       if (field(a, "type") !== "queued_command") return [];
       if (field(field(a, "origin"), "kind") === "human") return [{ kind: "terminal_input" }];
       const prompt = field(a, "prompt");
+      if (field(field(a, "origin"), "kind") === "task-notification") return typeof prompt === "string" ? taskStatus(prompt) : [];
       return isOurChannel(field(a, "origin")) && typeof prompt === "string" ? channelSeen(prompt) : [];
     }
     case "custom-title":
@@ -133,9 +134,9 @@ function toolDetail(input: unknown): string | undefined {
 }
 
 // Claude Code tells the agent a background task stopped with a prompt
-// holding a <task-notification>.
-function taskStatus(r: Rec): TranscriptEvent[] {
-  const text = contentText(r);
+// holding a <task-notification>: a prompt of its own when the agent is idle,
+// a queued command absorbed into the running turn otherwise.
+function taskStatus(text: string): TranscriptEvent[] {
   if (!text.includes("<task-notification>")) return [];
   const taskId = text.match(/<task-id>([^<]+)<\/task-id>/)?.[1];
   const status = text.match(/<status>([^<]+)<\/status>/)?.[1];

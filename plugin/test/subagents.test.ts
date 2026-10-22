@@ -141,6 +141,18 @@ describe("SubagentWatcher", () => {
     expect(s.cards).toEqual([]);
   });
 
+  test("an agent that hands its report back is done", () => {
+    const s = setup();
+    s.w.start();
+    const write = s.agent("a1");
+    write(assistant("m1", "tool_use", tool("Read", { file_path: "a.ts" })));
+    write(assistant("m2", "tool_use", tool("SubagentHandback", { message: "All fixed." })));
+    s.advance(SEND_EVERY_MS);
+    expect(s.cards.at(-1)?.text).toContain("✅ готово за 0 с · 2 действия");
+    s.advance(SETTLE_MS);
+    expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true });
+  });
+
   test("a killed background agent ends with its status", () => {
     const s = setup();
     s.w.start();

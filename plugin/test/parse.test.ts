@@ -179,6 +179,12 @@ describe("user records", () => {
     expect(parseRecord(rec)).toEqual([]);
   });
 
+  test("a task notification absorbed mid-turn tells which task stopped", () => {
+    const prompt = "<task-notification>\n<task-id>a1b2c3</task-id>\n<status>completed</status>\n<summary>Agent done</summary>\n</task-notification>";
+    const rec = { type: "attachment", attachment: { type: "queued_command", prompt, commandMode: "task-notification", origin: { kind: "task-notification", producer: "session-task" } } };
+    expect(parseRecord(rec)).toEqual([{ kind: "task_status", taskId: "a1b2c3", status: "completed" }]);
+  });
+
   test("other attachments are not terminal input", () => {
     expect(parseRecord({ type: "attachment", attachment: { type: "edited_text_file", origin: { kind: "human" } } })).toEqual([]);
     expect(parseRecord({ type: "attachment" })).toEqual([]);
