@@ -1,0 +1,420 @@
+// Topic command runs: starts them through the detached runner, follows them by
+// their files only, keeps their cards and hands each result to the agent. A
+// restarted hub loads execs.json and goes on as if it never stopped.
+import type { ExecRecord } from "./exec-store.ts";
+import type { ExecShell, ShellPaths } from "./exec-shell.ts";
+import type { RunnerSpec } from "./exec-runner.ts";
+import type { Button } from "./telegram.ts";
+import type { ChannelMeta } from "../shared/protocol.ts";
+import type { Logger } from "../shared/log.ts";
+
+import { randomBytes } from "crypto";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync } from "fs";
+import { join } from "path";
+import { loadExecs, saveExecs } from "./exec-store.ts";
+import { SHELL_NAMES, shellRun, writeShellFiles } from "./exec-shell.ts";
+import { exitInfoSchema } from "./exec-runner.ts";
+
+export const EXEC_CARD_MS = 60_000;
+export const EXEC_CARD_LINES = 10;
+export const EXEC_AGENT_LINES = 30;
+export const MAX_EXECS = 50;
+export const EXEC_MAX_AGE_MS = 120_000;
+export const EXEC_CHECK_MS = 1000;
+export const TELEGRAM_FILE_LIMIT = 50 * 1024 * 1024;
+const ID_BYTES = 4;
+const TAIL_BYTES = 64 * 1024;
+const LINE_MAX = 300;
+const TEXT_MAX = 200;
+const MIN_FENCE = 3;
+const MS_PER_SECOND = 1000;
+const SECONDS_PER_MINUTE = 60;
+const MINUTES_PER_HOUR = 60;
+const MS_PER_MINUTE = MS_PER_SECOND * SECONDS_PER_MINUTE;
+const COPY_CHUNK = 1024 * 1024;
+const BYTES_PER_MB = 1024 * 1024;
+// The first bytes of a UTF-8 character's continuation: 10xxxxxx.
+const UTF8_CONT_MASK = 0xc0;
+const UTF8_CONT = 0x80;
+const LOST_REASON = "процесс исчез";
+
+export type ExecDeps = {
+  dir: string;
+  file: string;
+  shells(): ShellPaths;
+  env(): Record<string, string>;
+  spawnRunner(specFile: string): number;
+  alive(pid: number): boolean;
+  kill(pid: number): void;
+  card(sessionId: string, cardId: string, markdown: string, final: boolean, buttons?: Button[][]): void;
+  notice(sessionId: string, text: string, loud: boolean): void;
+  // Copies the file before it returns: the copy is what goes.
+  sendFile(sessionId: string, path: string, name: string, loud: boolean): void;
+  report(sessionId: string, content: string, meta: ChannelMeta, onSent: () => void): void;
+  now(): number;
+  checkMs: number;
+  cardMs: number;
+  maxAgeMs: number;
+  // The largest file Telegram takes; TELEGRAM_FILE_LIMIT when not given.
+  fileLimit?: number;
+  log: Logger;
+};
+
+export class Execs {
+  private recs: ExecRecord[] = [];
+  private timers: ReturnType<typeof setInterval>[] = [];
+
+  constructor(private deps: ExecDeps) {}
+
+  start(): void {
+    this.recs = loadExecs(this.deps.file);
+    this.timers.push(setInterval(() => this.check(), this.deps.checkMs));
+    this.timers.push(setInterval(() => this.editCards(), this.deps.cardMs));
+  }
+
+  // Only the timers: the runners go on and a next manager picks them up.
+  stop(): void {
+    for (const t of this.timers) clearInterval(t);
+    this.timers = [];
+  }
+
+  running(): number {
+    return this.recs.filter(r => r.state === "running").length;
+  }
+
+  command(sessionId: string, shell: ExecShell, text: string, cwd: string, msg: { messageId: number; date: number }): void {
+    // Telegram may hand a restarted hub the same message again.
+    if (this.recs.some(r => r.messageId === msg.messageId)) return;
+    const sentAt = msg.date * MS_PER_SECOND;
+    const rec: ExecRecord = {
+      id: randomBytes(ID_BYTES).toString("hex"),
+      sessionId,
+      messageId: msg.messageId,
+      shell,
+      text,
+      cwd,
+      state: "pending",
+      sentAt,
+      reported: false,
+    };
+    this.recs.push(rec);
+    this.prune();
+    if (this.deps.now() - sentAt > this.deps.maxAgeMs) {
+      this.save();
+      this.showCard(rec);
+      return;
+    }
+    this.launch(rec);
+  }
+
+  press(id: string, action: "stop" | "run"): string {
+    const rec = this.recs.find(r => r.id === id);
+    if (!rec) return "Запуск не найден";
+    if (rec.state === "ended") return "Команда уже закончилась";
+    if (action === "run") {
+      if (rec.state === "running") return "Команда уже запущена";
+      this.launch(rec);
+      return "Запускаю";
+    }
+    if (rec.state === "pending" || rec.pid === undefined) return "Команда ещё не запущена";
+    rec.stopping = true;
+    this.save();
+    this.deps.kill(rec.pid);
+    return "Останавливаю";
+  }
+
+  // Results the agent has not got go again once its session is back.
+  connected(sessionId: string): void {
+    for (const rec of this.recs) {
+      if (rec.sessionId === sessionId && rec.state === "ended" && !rec.reported) this.report(rec);
+    }
+  }
+
+  private path(id: string, ext: string): string {
+    return join(this.deps.dir, `${id}.${ext}`);
+  }
+
+  private save(): void {
+    try {
+      saveExecs(this.deps.file, this.recs);
+    } catch (e) {
+      this.deps.log.error(`exec: saving runs failed: ${e}`);
+    }
+  }
+
+  private launch(rec: ExecRecord): void {
+    try {
+      const run = shellRun(rec.shell, rec.text, this.deps.dir, rec.id, this.deps.shells());
+      writeShellFiles(run);
+      const spec: RunnerSpec = {
+        argv: run.argv,
+        verbatim: run.verbatim,
+        cwd: rec.cwd,
+        env: { ...this.deps.env(), ...run.env },
+        log: this.path(rec.id, "log"),
+        exit: this.path(rec.id, "exit.json"),
+      };
+      const specFile = this.path(rec.id, "spec.json");
+      writeFileSync(specFile, JSON.stringify(spec));
+      rec.pid = this.deps.spawnRunner(specFile);
+      rec.state = "running";
+      rec.startedAt = this.deps.now();
+      this.deps.log.info(`exec ${rec.id}: started ${rec.shell} in ${rec.cwd}, runner ${rec.pid}`);
+      this.save();
+      this.showCard(rec);
+    } catch (e) {
+      this.deps.log.error(`exec ${rec.id}: start failed: ${e}`);
+      rec.startedAt = this.deps.now();
+      this.end(rec, { kind: "lost", at: this.deps.now(), reason: `не запустилось: ${e instanceof Error ? e.message : String(e)}` });
+    }
+  }
+
+  // Drops the oldest ended runs, with their files, past MAX_EXECS.
+  private prune(): void {
+    let extra = this.recs.length - MAX_EXECS;
+    if (extra <= 0) return;
+    let names: string[] = [];
+    try {
+      names = readdirSync(this.deps.dir);
+    } catch {}
+    this.recs = this.recs.filter(r => {
+      if (extra <= 0 || r.state !== "ended") return true;
+      extra--;
+      for (const n of names) {
+        if (n.startsWith(`${r.id}.`)) rmSync(join(this.deps.dir, n), { force: true });
+      }
+      return false;
+    });
+  }
+
+  private check(): void {
+    for (const rec of this.recs) {
+      if (rec.state !== "running") continue;
+      const exit = this.path(rec.id, "exit.json");
+      if (existsSync(exit)) {
+        this.ended(rec, exit);
+        continue;
+      }
+      if (rec.pid !== undefined && this.deps.alive(rec.pid)) continue;
+      // The runner may have written the file just before it exited.
+      if (existsSync(exit)) this.ended(rec, exit);
+      else this.end(rec, rec.stopping ? { kind: "stopped", at: this.deps.now() } : { kind: "lost", at: this.deps.now(), reason: LOST_REASON });
+    }
+  }
+
+  private ended(rec: ExecRecord, exitFile: string): void {
+    let info;
+    try {
+      info = exitInfoSchema.parse(JSON.parse(readFileSync(exitFile, "utf8")));
+    } catch (e) {
+      this.deps.log.warn(`exec ${rec.id}: unreadable exit file: ${e}`);
+      return;
+    }
+    const at = info.endedAt;
+    if (info.error !== undefined) this.end(rec, { kind: "lost", at, reason: `не запустилось: ${info.error}` });
+    else if (rec.stopping) this.end(rec, { kind: "stopped", at });
+    else if (info.code === null) this.end(rec, { kind: "lost", at, reason: LOST_REASON });
+    else this.end(rec, { kind: "exit", code: info.code, at });
+  }
+
+  private end(rec: ExecRecord, end: NonNullable<ExecRecord["end"]>): void {
+    rec.state = "ended";
+    rec.end = end;
+    this.deps.log.info(`exec ${rec.id}: ended ${end.kind}${end.code === undefined ? "" : ` ${end.code}`}`);
+    this.save();
+    const log = this.path(rec.id, "log");
+    this.showCard(rec);
+    const loud = !(end.kind === "exit" && end.code === 0);
+    if (!fitsCard(log)) {
+      try {
+        this.deps.sendFile(rec.sessionId, this.fileToSend(rec.id, log), `${rec.id}.log`, loud);
+      } catch (e) {
+        this.deps.log.warn(`exec ${rec.id}: sending the log failed: ${e}`);
+      }
+    }
+    this.report(rec);
+  }
+
+  // The log, or a copy of its last bytes with a note when Telegram would
+  // refuse the whole of it.
+  private fileToSend(id: string, log: string): string {
+    const limit = this.deps.fileLimit ?? TELEGRAM_FILE_LIMIT;
+    const size = statSync(log).size;
+    if (size <= limit) return log;
+    const note = Buffer.from(`[лог обрезан: здесь последние ${mb(limit)} из ${mb(size)}]\n`);
+    const copy = this.path(id, "tail.log");
+    copyTail(log, copy, note, Math.max(0, limit - note.length));
+    return copy;
+  }
+
+  private report(rec: ExecRecord): void {
+    const log = this.path(rec.id, "log");
+    const meta: ChannelMeta = { source: "exec", exec_id: rec.id, ts: new Date(rec.end?.at ?? this.deps.now()).toISOString() };
+    if (rec.end?.kind === "exit" && rec.end.code !== undefined) meta.exit_code = String(rec.end.code);
+    this.deps.report(rec.sessionId, execReportText(rec, logTail(log, EXEC_AGENT_LINES), log), meta, () => {
+      rec.reported = true;
+      this.save();
+    });
+  }
+
+  private editCards(): void {
+    for (const rec of this.recs) if (rec.state === "running") this.showCard(rec);
+  }
+
+  private showCard(rec: ExecRecord): void {
+    const tail = rec.state === "pending" ? "" : logTail(this.path(rec.id, "log"), EXEC_CARD_LINES);
+    const buttons: Button[][] | undefined =
+      rec.state === "running"
+        ? [[{ text: "⏹ Остановить", data: `x:${rec.id}:stop` }]]
+        : rec.state === "pending"
+          ? [[{ text: "▶ Запустить", data: `x:${rec.id}:run` }]]
+          : undefined;
+    this.deps.card(rec.sessionId, `exec-${rec.id}`, execCardText(rec, tail, this.deps.now()), rec.state === "ended", buttons);
+  }
+}
+
+function mb(bytes: number): string {
+  return `${Math.round(bytes / BYTES_PER_MB)} МБ`;
+}
+
+// The note, then the last `bytes` of the file, from a character's start.
+function copyTail(src: string, dest: string, note: Buffer, bytes: number): void {
+  const size = statSync(src).size;
+  const inFd = openSync(src, "r");
+  const outFd = openSync(dest, "w");
+  try {
+    writeSync(outFd, note);
+    let pos = Math.max(0, size - bytes);
+    const buf = Buffer.alloc(COPY_CHUNK);
+    let first = true;
+    while (pos < size) {
+      const n = readSync(inFd, buf, 0, Math.min(COPY_CHUNK, size - pos), pos);
+      if (n <= 0) break;
+      let start = 0;
+      if (first) {
+        while (start < n && ((buf[start] ?? 0) & UTF8_CONT_MASK) === UTF8_CONT) start++;
+        first = false;
+      }
+      writeSync(outFd, buf, start, n - start);
+      pos += n;
+    }
+  } finally {
+    closeSync(inFd);
+    closeSync(outFd);
+  }
+}
+
+// The log's lines as a terminal would leave them: a progress bar's line is
+// what follows its last carriage return.
+function screenLines(text: string): string[] {
+  const lines = text.split("\n").map(l => {
+    const line = l.endsWith("\r") ? l.slice(0, -1) : l;
+    return line.slice(line.lastIndexOf("\r") + 1);
+  });
+  while (lines.length > 0 && lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+function readEnd(path: string, bytes: number): { text: string; whole: boolean } | undefined {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return undefined;
+  }
+  try {
+    const size = statSync(path).size;
+    const n = Math.min(size, bytes);
+    const buf = Buffer.alloc(n);
+    const read = readSync(fd, buf, 0, n, size - n);
+    return { text: buf.subarray(0, read).toString("utf8"), whole: n === size };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+export function logTail(path: string, lines: number): string {
+  const end = readEnd(path, TAIL_BYTES);
+  if (!end) return "";
+  const all = screenLines(end.text);
+  // A read from the middle starts in the middle of a line.
+  if (!end.whole) all.shift();
+  return all
+    .slice(-lines)
+    .map(l => (l.length > LINE_MAX ? `${l.slice(0, LINE_MAX - 1)}…` : l))
+    .join("\n");
+}
+
+// Whether the card's tail already shows the whole log.
+function fitsCard(path: string): boolean {
+  const end = readEnd(path, TAIL_BYTES);
+  if (!end) return true;
+  if (!end.whole) return false;
+  const lines = screenLines(end.text);
+  return lines.length <= EXEC_CARD_LINES && lines.every(l => l.length <= LINE_MAX);
+}
+
+export function duration(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / MS_PER_SECOND));
+  if (s < SECONDS_PER_MINUTE) return `${s} с`;
+  const m = Math.floor(s / SECONDS_PER_MINUTE);
+  if (m < MINUTES_PER_HOUR) return `${m} мин ${String(s % SECONDS_PER_MINUTE).padStart(2, "0")} с`;
+  return `${Math.floor(m / MINUTES_PER_HOUR)} ч ${String(m % MINUTES_PER_HOUR).padStart(2, "0")} мин`;
+}
+
+function longestRun(text: string, ch: string): number {
+  let best = 0;
+  let cur = 0;
+  for (const c of text) {
+    cur = c === ch ? cur + 1 : 0;
+    best = Math.max(best, cur);
+  }
+  return best;
+}
+
+// The command as one inline code span: newlines shown as ↵, cut at
+// TEXT_MAX, delimited by more backticks than any run inside.
+function inlineCode(text: string): string {
+  const flat = text.replace(/\r?\n/g, " ↵ ");
+  const cut = flat.length > TEXT_MAX ? `${flat.slice(0, TEXT_MAX)}…` : flat;
+  const ticks = "`".repeat(longestRun(cut, "`") + 1);
+  const pad = cut.startsWith("`") || cut.endsWith("`") ? " " : "";
+  return `${ticks}${pad}${cut}${pad}${ticks}`;
+}
+
+function outcome(rec: ExecRecord): string {
+  const end = rec.end;
+  if (!end) return "";
+  if (end.kind === "stopped") return "⏹ остановлена";
+  if (end.kind === "lost") return `⚠️ прервана: ${end.reason ?? LOST_REASON}`;
+  return end.code === 0 ? "✅ код 0" : `❌ код ${end.code}`;
+}
+
+export function execCardText(rec: ExecRecord, tail: string, now: number): string {
+  let head: string;
+  if (rec.state === "pending") {
+    const minutes = Math.round((now - (rec.sentAt ?? now)) / MS_PER_MINUTE);
+    head = `⏸ Команда пришла ${minutes} мин назад, пока хаб был выключен`;
+  } else if (rec.state === "running") {
+    head = `▶ ${SHELL_NAMES[rec.shell]} · ${duration(now - (rec.startedAt ?? now))}`;
+  } else {
+    head = `${outcome(rec)} · ${duration((rec.end?.at ?? now) - (rec.startedAt ?? now))}`;
+  }
+  const lines = [head, inlineCode(rec.text)];
+  if (tail) {
+    const fence = "`".repeat(Math.max(MIN_FENCE, longestRun(tail, "`") + 1));
+    lines.push(fence, tail, fence);
+  }
+  return lines.join("\n");
+}
+
+export function execReportText(rec: ExecRecord, tail: string, logPath: string): string {
+  const took = duration((rec.end?.at ?? 0) - (rec.startedAt ?? rec.end?.at ?? 0));
+  return [
+    `Команда из топика закончилась: ${outcome(rec)} за ${took}.`,
+    `Оболочка: ${SHELL_NAMES[rec.shell]}, папка: ${rec.cwd}`,
+    `Команда: ${rec.text}`,
+    `Полный лог: ${logPath}`,
+    tail ? `Последние ${EXEC_AGENT_LINES} строк:\n${tail}` : "Вывода не было.",
+  ].join("\n");
+}
