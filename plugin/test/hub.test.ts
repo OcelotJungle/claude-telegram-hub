@@ -21,6 +21,16 @@ const CWD = join(import.meta.dir, "..", "..");
 // More polls than a compaction is tried with no turn running.
 const COMPACT_POLLS = 5;
 const DEFAULT_DIR = "C:\\Users\\me\\.claude";
+// Topic commands: a real command's run, a wait for what it shows, the idle
+// time a test hub exits after, a pause for what must not come, the age of a
+// command from while the hub was off, a test file limit, a launch timeout.
+const RUN_MS = 15_000;
+const WAIT_MS = 5000;
+const IDLE_MS = 300;
+const SETTLE_MS = 300;
+const OLD_COMMAND_S = 5 * 60;
+const FILE_LIMIT = 200;
+const LAUNCH_TIMEOUT_S = 30;
 
 let fake: FakeTelegram;
 let hub: Hub;
@@ -1791,7 +1801,6 @@ describe("commands", () => {
 
 describe("topic commands", () => {
   const SID = "11111111-2222-3333-4444-555555555555";
-  const RUN_MS = 15_000;
   const msg = (text: string, extra?: Record<string, unknown>) => topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text, ...(extra ? { extra } : {}) });
   const texts = () => fake.texts().map(t => t.text);
   // What the topic has shown: messages sent and their edits.
@@ -1814,21 +1823,21 @@ describe("topic commands", () => {
     expect(inbound.content).toContain("привет");
     expect(inbound.content).toContain(CWD);
     expect(inbound.content).toContain(join(dir, "exec", `${inbound.meta.exec_id}.log`));
-    await waitFor(() => shown().find(t => t.startsWith("❌ код 3") && t.includes("привет")), 5000, "final card");
-  }, RUN_MS + 5000);
+    await waitFor(() => shown().find(t => t.startsWith("❌ код 3") && t.includes("привет")), WAIT_MS, "final card");
+  }, RUN_MS + WAIT_MS);
 
   test("a stop button ends a running command", async () => {
     await startHub();
     await enabled(SID);
     fake.pushUpdate(msg("/cmd ping -n 30 127.0.0.1"));
-    const card = await waitFor(() => fake.callsOf("sendMessage").find(c => buttonsOf(c).some(d => d.startsWith("x:"))), 5000, "card with a stop button");
+    const card = await waitFor(() => fake.callsOf("sendMessage").find(c => buttonsOf(c).some(d => d.startsWith("x:"))), WAIT_MS, "card with a stop button");
     const data = must(buttonsOf(card).find(d => d.endsWith(":stop")), "stop button");
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
-    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Останавливаю"), 5000, "answer");
-    const end = await waitFor(() => fake.callsOf("editMessageText").find(c => String(c.text).startsWith("⏹ остановлена")), 5000, "stopped card");
+    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Останавливаю"), WAIT_MS, "answer");
+    const end = await waitFor(() => fake.callsOf("editMessageText").find(c => String(c.text).startsWith("⏹ остановлена")), WAIT_MS, "stopped card");
     expect(field(end, "reply_markup")).toBeUndefined();
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
-    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Команда уже закончилась"), 5000, "second answer");
+    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Команда уже закончилась"), WAIT_MS, "second answer");
   }, RUN_MS);
 
   test("an old /exec waits for the run button", async () => {
@@ -1840,8 +1849,8 @@ describe("topic commands", () => {
       },
     });
     await enabled(SID);
-    fake.pushUpdate(msg("/exec npm run migrate", { date: Math.floor(Date.now() / 1000) - 5 * 60 }));
-    const card = await waitFor(() => fake.callsOf("sendMessage").find(c => String(c.text).startsWith("⏸ Команда пришла 5 мин назад, пока хаб был выключен")), 5000, "pending card");
+    fake.pushUpdate(msg("/exec npm run migrate", { date: Math.floor(Date.now() / 1000) - OLD_COMMAND_S }));
+    const card = await waitFor(() => fake.callsOf("sendMessage").find(c => String(c.text).startsWith("⏸ Команда пришла 5 мин назад, пока хаб был выключен")), WAIT_MS, "pending card");
     expect(buttonsOf(card).some(d => d.endsWith(":run"))).toBe(true);
     expect(spawned).toBe(0);
   });
@@ -1850,14 +1859,14 @@ describe("topic commands", () => {
     await startHub();
     await enabled(SID);
     fake.pushUpdate(msg("/cmd echo a\necho b"));
-    await waitFor(() => texts().includes("/cmd выполняет одну строку. Для нескольких — /exec или /bash"), 5000, "refusal");
+    await waitFor(() => texts().includes("/cmd выполняет одну строку. Для нескольких — /exec или /bash"), WAIT_MS, "refusal");
   });
 
   test("empty /exec asks for a command", async () => {
     await startHub();
     await enabled(SID);
     fake.pushUpdate(msg("/exec"));
-    await waitFor(() => texts().includes("Напиши команду: /exec npm run migrate"), 5000, "hint");
+    await waitFor(() => texts().includes("Напиши команду: /exec npm run migrate"), WAIT_MS, "hint");
   });
 
   test("/bash without Git Bash says where it looked", async () => {
@@ -1865,7 +1874,7 @@ describe("topic commands", () => {
     await startHub();
     await enabled(SID);
     fake.pushUpdate(msg("/bash ls"));
-    await waitFor(() => texts().includes(`Git Bash не найден: ${join(dir, "no-bash.exe")}. Укажи exec.bash в config.json`), 5000, "notice");
+    await waitFor(() => texts().includes(`Git Bash не найден: ${join(dir, "no-bash.exe")}. Укажи exec.bash в config.json`), WAIT_MS, "notice");
   });
 
   test("a result for a session without a window and without launch says it was not delivered", async () => {
@@ -1873,37 +1882,38 @@ describe("topic commands", () => {
     await startHub();
     fake.pushUpdate(msg("/cmd echo hi"));
     await waitFor(() => texts().includes("⚠️ Сессия не запущена: результат команды агенту не доставлен"), RUN_MS, "notice");
-    expect(shown().some(t => t.startsWith("✅ код 0"))).toBe(true);
-  }, RUN_MS + 5000);
+    // The final card is an edit, cardEditMs after the end.
+    await waitFor(() => shown().some(t => t.startsWith("✅ код 0")), WAIT_MS, "final card");
+  }, RUN_MS + WAIT_MS);
 
   test("a result for a closed session with launch starts it and reaches the agent once", async () => {
     closedSession();
     const spawned: string[][] = [];
-    config = { ...config, launch: { command: ["wt.exe", "{session}"], timeoutSec: 30 } };
+    config = { ...config, launch: { command: ["wt.exe", "{session}"], timeoutSec: LAUNCH_TIMEOUT_S } };
     await startHub({ spawn: c => void spawned.push(c) });
     fake.pushUpdate(msg("/cmd echo hi"));
     await waitFor(() => spawned.length === 1, RUN_MS, "session start");
     const w = await plugin(SID);
-    const inbound = await w.next("inbound", m => m.meta.source === "exec", 5000);
+    const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
     expect(inbound.meta.exit_code).toBe("0");
-    await Bun.sleep(300);
+    await Bun.sleep(SETTLE_MS);
     expect(w.messages.filter(m => m.type === "inbound").length).toBe(1);
     expect(texts()).not.toContain("⚠️ Сессия не запущена: результат команды агенту не доставлен");
-  }, RUN_MS + 10_000);
+  }, RUN_MS + 2 * WAIT_MS);
 
   test("the hub does not exit idle while a command runs", async () => {
     closedSession();
     fake.pushUpdate(msg("/cmd ping -n 3 127.0.0.1"));
-    await startHub({ idleMs: 300 });
-    await waitFor(() => shown().some(t => t.startsWith("▶ cmd")), 5000, "running card");
-    await Bun.sleep(600);
+    await startHub({ idleMs: IDLE_MS });
+    await waitFor(() => shown().some(t => t.startsWith("▶ cmd")), WAIT_MS, "running card");
+    await Bun.sleep(IDLE_MS * 2);
     expect(exited).toBe(false);
-    await waitFor(() => exited, RUN_MS, "idle exit once the command ended");
-    expect(shown().some(t => t.startsWith("✅ код 0"))).toBe(true);
-  }, RUN_MS + 5000);
+    await waitFor(() => shown().some(t => t.startsWith("✅ код 0")), RUN_MS, "final card");
+    await waitFor(() => exited, WAIT_MS, "idle exit once the command ended");
+  }, RUN_MS + WAIT_MS);
 
   test("a log over the Telegram limit goes as its last 50 MB", async () => {
-    await startHub({ execFileLimit: 200 });
+    await startHub({ execFileLimit: FILE_LIMIT });
     await enabled(SID);
     fake.pushUpdate(msg("/cmd for /l %i in (1,1,40) do @echo line %i"));
     const doc = await waitFor(() => fake.callsOf("sendDocument")[0], RUN_MS, "log file");
@@ -1912,6 +1922,6 @@ describe("topic commands", () => {
     const body = String(field(file, "body"));
     expect(body).toStartWith("[лог обрезан");
     expect(body).toContain("line 40");
-    expect(Number(field(file, "size"))).toBeLessThanOrEqual(200);
-  }, RUN_MS + 5000);
+    expect(Number(field(file, "size"))).toBeLessThanOrEqual(FILE_LIMIT);
+  }, RUN_MS + WAIT_MS);
 });

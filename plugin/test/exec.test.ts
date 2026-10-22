@@ -16,6 +16,17 @@ const SID = "s1";
 const FIRST_PID = 1000;
 const MIN_MS = 60_000;
 const NOW = 1_800_000_000_000;
+// A wait for what a check brings, a pause for what must not come, the fake
+// manager's timer periods, a run of 1 min 05 s, a log longer than the agent's
+// tail, a test file limit and a line well over it.
+const WAIT_MS = 2000;
+const SETTLE_MS = 100;
+const CHECK_MS = 10;
+const CARD_MS = 50;
+const RUN_1_05_MS = 65_000;
+const LOG_LINES = 40;
+const FILE_LIMIT = 200;
+const BIG_LINE_CHARS = 500;
 
 type CardCall = { sessionId: string; cardId: string; markdown: string; final: boolean; buttons?: Button[][] };
 type ReportCall = { sessionId: string; content: string; meta: ChannelMeta; onSent: () => void };
@@ -65,8 +76,8 @@ function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; boot
       if (o.sendOnSent !== false) onSent();
     },
     now: () => clock.now,
-    checkMs: 10,
-    cardMs: 50,
+    checkMs: CHECK_MS,
+    cardMs: CARD_MS,
     maxAgeMs: 2 * MIN_MS,
     fileLimit: o.fileLimit,
     bootedAt: () => o.bootedAt ?? NOW - 60 * MIN_MS * 24,
@@ -100,13 +111,13 @@ describe("Execs", () => {
     expect(first.buttons).toEqual([[{ text: "⏹ Остановить", data: `x:${idOf(first.cardId)}:stop` }]]);
     expect(t.execs.running()).toBe(1);
     appendFileSync(t.spec().log, "a\nb\n");
-    await waitFor(() => t.cards.find(c => c.markdown.includes("b") && !c.final), 2000, "card with b");
-    t.clock.now += 65_000;
+    await waitFor(() => t.cards.find(c => c.markdown.includes("b") && !c.final), WAIT_MS, "card with b");
+    t.clock.now += RUN_1_05_MS;
     t.finish(0, 0);
-    const last = await waitFor(() => t.cards.find(c => c.final), 2000, "final card");
+    const last = await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
     expect(last.markdown).toStartWith("✅ код 0 · 1 мин 05 с");
     expect(last.buttons).toBeUndefined();
-    await Bun.sleep(100);
+    await Bun.sleep(SETTLE_MS);
     expect(t.reports).toHaveLength(1);
     expect(t.reports[0]?.meta.source).toBe("exec");
     expect(t.reports[0]?.meta.exit_code).toBe("0");
@@ -118,9 +129,9 @@ describe("Execs", () => {
   test("a failing command reports its code loudly with the log file", async () => {
     const t = setup();
     t.execs.command(SID, "powershell", "npm run x", "C:\\proj", msg(1));
-    appendFileSync(t.spec().log, Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n") + "\n");
+    appendFileSync(t.spec().log, Array.from({ length: LOG_LINES }, (_, i) => `line ${i + 1}`).join("\n") + "\n");
     t.finish(0, 2);
-    const report = await waitFor(() => t.reports[0], 2000, "report");
+    const report = await waitFor(() => t.reports[0], WAIT_MS, "report");
     expect(t.lastCard().markdown).toStartWith("❌ код 2");
     expect(t.files).toEqual([{ path: t.spec().log, name: `${report.meta.exec_id}.log`, loud: true }]);
     expect(report.content).toStartWith("Команда из топика закончилась: ❌ код 2 за 0 с.");
@@ -128,23 +139,23 @@ describe("Execs", () => {
     expect(report.content).toContain("Команда: npm run x");
     expect(report.content).toContain(`Полный лог: ${t.spec().log}`);
     expect(report.content).toContain("line 11\n");
-    expect(report.content).toContain("line 40");
+    expect(report.content).toContain(`line ${LOG_LINES}`);
     expect(report.content).not.toContain("line 10\n");
     expect(report.meta.exit_code).toBe("2");
   });
 
   test("a log over the file limit goes as its last bytes, whole characters, with a note", async () => {
-    const t = setup({ fileLimit: 200 });
+    const t = setup({ fileLimit: FILE_LIMIT });
     // One byte apart, so one of the two cuts falls inside a character.
     for (const [n, last] of ["конец\n", "конец!\n"].entries()) {
       t.execs.command(SID, "cmd", "x", "C:\\proj", msg(n + 1));
-      appendFileSync(t.spec(n).log, `${"я".repeat(500)}\n${last}`);
+      appendFileSync(t.spec(n).log, `${"я".repeat(BIG_LINE_CHARS)}\n${last}`);
       t.finish(n, 1);
-      const sent = await waitFor(() => t.files[n], 2000, "sent file");
+      const sent = await waitFor(() => t.files[n], WAIT_MS, "sent file");
       expect(sent.path).not.toBe(t.spec(n).log);
       expect(sent.name).toEndWith(".log");
       const bytes = readFileSync(sent.path);
-      expect(bytes.length).toBeLessThanOrEqual(200);
+      expect(bytes.length).toBeLessThanOrEqual(FILE_LIMIT);
       const text = bytes.toString("utf8");
       expect(text).toStartWith("[лог обрезан");
       expect(text).not.toContain("\uFFFD");
@@ -182,7 +193,7 @@ describe("Execs", () => {
     expect(t.execs.press(id, "stop")).toBe("Останавливаю");
     expect(t.killed).toEqual([FIRST_PID + 1]);
     t.alive.clear();
-    await waitFor(() => t.cards.find(c => c.final), 2000, "final card");
+    await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
     expect(t.lastCard().markdown).toStartWith("⏹ остановлена");
     expect(t.execs.press(id, "stop")).toBe("Команда уже закончилась");
     expect(t.execs.press(id, "run")).toBe("Команда уже закончилась");
@@ -192,9 +203,9 @@ describe("Execs", () => {
     const t = setup();
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     t.alive.clear();
-    await waitFor(() => t.cards.find(c => c.final), 2000, "final card");
+    await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
     expect(t.lastCard().markdown).toStartWith("⚠️ прервана: процесс исчез");
-    const report = await waitFor(() => t.reports[0], 2000, "report");
+    const report = await waitFor(() => t.reports[0], WAIT_MS, "report");
     expect(report.content).toContain("⚠️ прервана: процесс исчез");
     expect(report.meta.exit_code).toBeUndefined();
   });
@@ -203,7 +214,7 @@ describe("Execs", () => {
     const t = setup();
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     t.finish(0, null, "spawn ENOENT");
-    await waitFor(() => t.cards.find(c => c.final), 2000, "final card");
+    await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
     expect(t.lastCard().markdown).toStartWith("⚠️ прервана: не запустилось: spawn ENOENT");
   });
 
@@ -213,8 +224,8 @@ describe("Execs", () => {
     t.execs.stop();
     const t2 = setup({ dir: t.dir, alive: [FIRST_PID + 1] });
     t.finish(0, 0);
-    await waitFor(() => t2.reports[0], 2000, "report");
-    await Bun.sleep(100);
+    await waitFor(() => t2.reports[0], WAIT_MS, "report");
+    await Bun.sleep(SETTLE_MS);
     expect(t2.reports).toHaveLength(1);
     expect(t.reports).toHaveLength(0);
     expect(t2.lastCard().markdown).toStartWith("✅ код 0");
@@ -226,7 +237,7 @@ describe("Execs", () => {
     const rec: ExecRecord = { id: "abcd1234", sessionId: SID, messageId: 1, shell: "cmd", text: "x", cwd: "C:\\proj", state: "running", startedAt: NOW - 60 * MIN_MS, pid: 4242, reported: false };
     saveExecs(join(dir, "execs.json"), [rec]);
     const t = setup({ dir, bootedAt: NOW - 10 * MIN_MS, alive: [4242] });
-    await waitFor(() => t.cards.find(c => c.final), 2000, "final card");
+    await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
     expect(t.lastCard().markdown).toStartWith("⚠️ прервана: процесс исчез");
     expect(t.execs.press("abcd1234", "stop")).toBe("Команда уже закончилась");
     expect(t.killed).toEqual([]);
@@ -236,7 +247,7 @@ describe("Execs", () => {
     const t = setup({ sendOnSent: false });
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     t.finish(0, 0);
-    await waitFor(() => t.reports[0], 2000, "report");
+    await waitFor(() => t.reports[0], WAIT_MS, "report");
     t.execs.connected("other");
     expect(t.reports).toHaveLength(1);
     t.execs.connected(SID);
@@ -250,7 +261,7 @@ describe("Execs", () => {
     const t = setup();
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     appendFileSync(t.spec().log, "```js\nx\n10%\r50%\r100%\r\n");
-    const card = await waitFor(() => t.cards.find(c => c.markdown.includes("100%") && !c.final), 2000, "card");
+    const card = await waitFor(() => t.cards.find(c => c.markdown.includes("100%") && !c.final), WAIT_MS, "card");
     expect(card.markdown).toContain("\n````\n```js\nx\n100%\n````");
     expect(card.markdown).not.toContain("50%");
   });
