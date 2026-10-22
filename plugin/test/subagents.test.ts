@@ -3,7 +3,7 @@ import type { Card } from "../src/transcript/subagents.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
-import { MAX_CARD, SubagentWatcher } from "../src/transcript/subagents.ts";
+import { MAX_CARD, SETTLE_MS, SubagentWatcher } from "../src/transcript/subagents.ts";
 import { tempDir } from "./helpers.ts";
 
 const SEND_EVERY_MS = 3000;
@@ -70,15 +70,31 @@ describe("SubagentWatcher", () => {
     s.advance(SEND_EVERY_MS);
     expect(s.cards.at(-1)?.text).toContain("⏳ 4 с · 2 действия · `Grep x`");
     write(assistant("m3", "end_turn", text("Found it")));
-    // The final version waits until the file has nothing more to read.
+    s.advance(SEND_EVERY_MS);
+    const done = "🤖 **Explore** · Find the parser · haiku\n✅ готово за 7 с · 2 действия\n\n`[18:39]` Looking around\n\n`[18:39]` Found it";
+    expect(s.cards.at(-1)).toEqual({ id: "a1-0", final: false, text: done });
+    // The card closes once the agent has not gone on for SETTLE_MS.
+    s.advance(SETTLE_MS - SECOND);
+    expect(s.cards.at(-1)?.final).toBe(false);
     s.advance(SECOND);
-    expect(s.cards.length).toBe(2);
-    s.advance(SECOND);
-    expect(s.cards.at(-1)).toEqual({
-      id: "a1-0",
-      final: true,
-      text: "🤖 **Explore** · Find the parser · haiku\n✅ готово за 5 с · 2 действия\n\n`[18:39]` Looking around\n\n`[18:39]` Found it",
-    });
+    expect(s.cards.at(-1)).toEqual({ id: "a1-0", final: true, text: done });
+  });
+
+  test("an agent that goes on after a turn end keeps its card", () => {
+    const s = setup();
+    s.w.start();
+    const write = s.agent("a1");
+    write(assistant("m1", "tool_use", tool("Bash", { command: "make" })));
+    // Claude Code's record when only the auto mode classifier's response broke off.
+    write(line({ type: "assistant", isApiErrorMessage: true, error: "server_error", message: { id: "e1", role: "assistant", content: [text("API Error: The response stopped arriving.")], stop_reason: "stop_sequence" } }));
+    s.advance(SEND_EVERY_MS);
+    expect(s.cards.at(-1)?.text).toContain("✅ готово");
+    write(assistant("m2", "tool_use", text("Build done")));
+    s.advance(SEND_EVERY_MS);
+    const last = s.cards.at(-1)?.text ?? "";
+    expect(last).toContain("⏳ 3 с · 1 действие");
+    expect(last).toEndWith("Build done");
+    expect(s.cards.every(c => c.id === "a1-0" && !c.final)).toBe(true);
   });
 
   test("a running card's time goes on while the agent writes nothing", () => {
@@ -106,7 +122,7 @@ describe("SubagentWatcher", () => {
     const write = s.agent("a1");
     write(assistant("m1", "end_turn", text("done")));
     s.advance(SEND_EVERY_MS);
-    s.advance(SECOND);
+    s.advance(SETTLE_MS);
     expect(s.cards.at(-1)).toMatchObject({ final: true });
     const sent = s.cards.length;
     s.advance(MINUTE);
@@ -152,7 +168,7 @@ describe("SubagentWatcher", () => {
     allowed = false;
     write(assistant("m2", "end_turn", text("two")));
     s.advance(SEND_EVERY_MS);
-    s.advance(SECOND);
+    s.advance(SETTLE_MS);
     expect(s.cards.at(-1)).toMatchObject({ final: true, text: expect.stringContaining("two") });
   });
 
@@ -179,11 +195,11 @@ describe("SubagentWatcher", () => {
     const write = s.agent("a1");
     write(assistant("m1", "end_turn", text("first run")));
     s.advance(SEND_EVERY_MS);
-    s.advance(SECOND);
+    s.advance(SETTLE_MS);
     expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true });
     write(assistant("m2", "tool_use", text("second run")));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)).toEqual({ id: "a1-1", final: false, text: "🤖 **Субагент**\n⏳ 0 с · 0 действий\n\n`[18:39]` second run" });
+    expect(s.cards.at(-1)).toEqual({ id: "a1-1", final: false, text: "🤖 **Субагент**\n⏳ 0 с · 0 действий\n\n`[18:41]` second run" });
   });
 
   test("each text shows when the agent wrote it, by its record's time", () => {

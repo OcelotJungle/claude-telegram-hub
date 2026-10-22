@@ -12,6 +12,11 @@ import { TranscriptTailer } from "./tail.ts";
 
 const SCAN_MS = 1000;
 const SEND_EVERY_MS = 3000;
+// A turn end in the agent's own transcript is not always its end: Claude Code
+// writes an API error record as one when only the auto mode classifier's
+// response broke off, and a stop hook can send the agent on. An agent that
+// goes on within this long keeps its card; its card is closed only after it.
+export const SETTLE_MS = 120_000;
 // One text of a subagent in its card is cut to this.
 export const MAX_CARD_TEXT = 1500;
 // A card stays one Telegram message (4096 characters) with room for its
@@ -66,6 +71,11 @@ class Agent {
   private texts: Entry[] = [];
   private seen = false;
   private shown = false;
+  // The final version is sent: the card is closed.
+  private sealed = false;
+  // The agent's end came from its task notification, not its transcript: it
+  // will not go on, and its card closes without waiting.
+  private certain = false;
   private dirty = false;
   private idle = false;
   private lastSent = 0;
@@ -94,8 +104,10 @@ class Agent {
     this.tailer.open();
   }
 
-  finish(status: Status, messageId?: string): void {
-    if (!this.seen || this.status === status) return;
+  finish(status: Status, messageId?: string, certain = false): void {
+    if (!this.seen) return;
+    if (certain) this.certain = true;
+    if (this.status === status) return;
     this.status = status;
     this.endMessage = messageId;
     this.ended = this.env.now();
@@ -105,10 +117,12 @@ class Agent {
   tick(): void {
     this.tailer.pollNow();
     this.meta ??= this.readMeta();
-    const final = this.status !== "running";
+    if (this.sealed) return;
+    const stopped = this.status !== "running";
+    const final = stopped && (this.certain || this.env.now() - (this.ended ?? 0) >= SETTLE_MS);
     // A running card's time goes on even while the agent writes nothing, as
     // when it thinks for long, so the card shows it is alive.
-    if (!this.dirty && (final || !this.shown)) return;
+    if (!this.dirty && !final && (stopped || !this.shown)) return;
     if (!this.shown && !this.env.canStart()) return;
     // The final message comes in several records: wait until all are read.
     if (final ? !this.idle : this.env.now() - this.lastSent < this.env.sendEveryMs) return;
@@ -117,14 +131,19 @@ class Agent {
     if (!final && text === this.sentText) return;
     this.env.send({ id: this.cardId(), text, final });
     this.shown = true;
+    this.sealed = final;
     this.sentText = text;
     this.lastSent = this.env.now();
   }
 
   private feed(ev: TranscriptEvent, at: number): void {
     if (ev.kind !== "text" && ev.kind !== "tool_use" && ev.kind !== "turn_end") return;
-    // A stopped agent got a new message (SendMessage): a new run, a new card.
-    if (this.status !== "running" && ev.messageId !== this.endMessage) this.reopen();
+    if (this.status !== "running" && ev.messageId !== this.endMessage) {
+      // A closed card stays as it is: the agent got a new message
+      // (SendMessage), a new run goes into a new card.
+      if (this.sealed) this.reopen();
+      else this.resume();
+    }
     this.seen = true;
     this.dirty = true;
     if (ev.kind === "text") this.addText(ev.text, at);
@@ -146,10 +165,20 @@ class Agent {
     this.texts.push(entry);
   }
 
+  // The agent went on before its card closed: the same run, the same card.
+  private resume(): void {
+    this.status = "running";
+    this.endMessage = undefined;
+    this.ended = undefined;
+    this.certain = false;
+  }
+
   private reopen(): void {
     this.part++;
     this.texts = [];
     this.shown = false;
+    this.sealed = false;
+    this.certain = false;
     this.status = "running";
     this.endMessage = undefined;
     this.started = this.env.now();
@@ -237,7 +266,7 @@ export class SubagentWatcher {
   // From a task notification in the main transcript.
   taskStatus(taskId: string, status: string): void {
     const s = TASK_STATUSES[status];
-    if (s) this.agents.get(taskId)?.finish(s);
+    if (s) this.agents.get(taskId)?.finish(s, undefined, true);
   }
 
   tick(): void {
