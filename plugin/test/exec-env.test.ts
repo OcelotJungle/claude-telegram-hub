@@ -5,13 +5,42 @@ const sz = (value: string) => ({ type: "REG_SZ" as const, value });
 const expand = (value: string) => ({ type: "REG_EXPAND_SZ" as const, value });
 
 describe("mergeEnv", () => {
-  test("drops Claude Code variables", () => {
+  test("takes from the hub only the system variables a new window gets", () => {
     const env = mergeEnv(
-      { CLAUDE_CONFIG_DIR: "c", CLAUDECODE: "1", TG_HUB_PORT: "1", anthropic_api_key: "k", USERPROFILE: "C:\\Users\\me" },
+      {
+        CLAUDE_CONFIG_DIR: "c",
+        TG_HUB_PORT: "1",
+        TMPDIR: "C:\\proj\\.tmp",
+        FOO: "bar",
+        USERPROFILE: "C:\\Users\\me",
+        SYSTEMROOT: "C:\\Windows",
+        "ProgramFiles(x86)": "C:\\Program Files (x86)",
+        PROCESSOR_ARCHITECTURE: "AMD64",
+        ComSpec: "C:\\Windows\\system32\\cmd.exe",
+        PATH: "old",
+      },
+      {},
       {},
       {},
     );
-    expect(env).toEqual({ USERPROFILE: "C:\\Users\\me" });
+    expect(env).toEqual({
+      USERPROFILE: "C:\\Users\\me",
+      SYSTEMROOT: "C:\\Windows",
+      "ProgramFiles(x86)": "C:\\Program Files (x86)",
+      PROCESSOR_ARCHITECTURE: "AMD64",
+      ComSpec: "C:\\Windows\\system32\\cmd.exe",
+    });
+  });
+
+  test("Volatile Environment comes after machine and before user", () => {
+    const env = mergeEnv(
+      {},
+      { LOGONSERVER: sz("\\\\OLD"), APPDATA: sz("machine") },
+      { TEMP: expand("%APPDATA%\\..\\Local\\Temp") },
+      { LOGONSERVER: sz("\\\\DC"), APPDATA: sz("C:\\Users\\me\\AppData\\Roaming") },
+    );
+    expect(env.LOGONSERVER).toBe("\\\\DC");
+    expect(env.TEMP).toBe("C:\\Users\\me\\AppData\\Roaming\\..\\Local\\Temp");
   });
 
   test("registry wins, user over machine, case-insensitively", () => {
@@ -19,20 +48,21 @@ describe("mergeEnv", () => {
       { Temp: "X", USERPROFILE: "C:\\Users\\me" },
       { TEMP: expand("%SystemRoot%\\TEMP") },
       { TEMP: expand("%userprofile%\\AppData\\Local\\Temp") },
+      {},
     );
     expect(env.TEMP).toBe("C:\\Users\\me\\AppData\\Local\\Temp");
     expect(Object.keys(env).filter(k => k.toLowerCase() === "temp")).toEqual(["TEMP"]);
   });
 
   test("an unknown variable stays as is", () => {
-    expect(mergeEnv({}, { X: expand("%NOPE%\\a") }, {}).X).toBe("%NOPE%\\a");
+    expect(mergeEnv({}, { X: expand("%NOPE%\\a") }, {}, {}).X).toBe("%NOPE%\\a");
   });
 
   test("Path joins machine and user", () => {
-    const env = mergeEnv({ PATH: "old" }, { Path: sz("C:\\Windows") }, { Path: expand("%HOME%\\bin") });
-    expect(env.Path).toBe("C:\\Windows;%HOME%\\bin");
+    const env = mergeEnv({ PATH: "old" }, { Path: sz("C:\\Windows") }, { Path: expand("%USERPROFILE%\\bin") }, {});
+    expect(env.Path).toBe("C:\\Windows;%USERPROFILE%\\bin");
     expect(Object.keys(env).filter(k => k.toLowerCase() === "path")).toEqual(["Path"]);
-    const home = mergeEnv({ HOME: "C:\\Users\\me" }, { Path: sz("C:\\Windows") }, { Path: expand("%HOME%\\bin") });
+    const home = mergeEnv({ USERPROFILE: "C:\\Users\\me" }, { Path: sz("C:\\Windows") }, { Path: expand("%USERPROFILE%\\bin") }, {});
     expect(home.Path).toBe("C:\\Windows;C:\\Users\\me\\bin");
   });
 });
@@ -55,9 +85,16 @@ describe("parseRegQuery", () => {
 });
 
 describe("freshEnv", () => {
-  test.skipIf(process.platform !== "win32")("freshEnv on this machine has a Path and no CLAUDE variables", () => {
-    const env = freshEnv();
+  test.skipIf(process.platform !== "win32")("freshEnv on this machine has a Path and nothing else of the hub's", () => {
+    process.env.TG_EXEC_TEST_LEAK = "1";
+    let env: Record<string, string>;
+    try {
+      env = freshEnv();
+    } finally {
+      delete process.env.TG_EXEC_TEST_LEAK;
+    }
     const names = Object.keys(env);
+    expect(env.TG_EXEC_TEST_LEAK).toBeUndefined();
     expect(names.find(k => k.toLowerCase() === "path")).toBeDefined();
     expect(names.filter(k => /^(CLAUDE|TG_HUB_|ANTHROPIC_)/i.test(k))).toEqual([]);
     expect(env.SystemRoot ?? env.SYSTEMROOT).toBeDefined();
