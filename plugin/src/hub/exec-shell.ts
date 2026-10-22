@@ -35,7 +35,9 @@ export function findPowershell(): string {
 // which the preference would turn into an error and code 1.
 // With 'Stop', 5.1 turns a native command's stderr redirected by 2>&1 or
 // 2>$null into an error that ends the run; a statement that redirects stderr
-// runs under 'Continue', and only its exit code counts.
+// runs under 'Continue', and only its exit code counts. The preference it had
+// comes back after it, whatever the user set it to. Statements in a data
+// section are left alone: its restricted language refuses the check.
 function psWrapper(userFile: string, runFile: string): string {
   const q = (s: string) => `'${s.replaceAll("'", "''")}'`;
   return [
@@ -46,27 +48,42 @@ function psWrapper(userFile: string, runFile: string): string {
     `$tgAst = [Management.Automation.Language.Parser]::ParseFile(${q(userFile)}, [ref]$null, [ref]$tgErrs)`,
     "if ($tgErrs) { $tgErrs | ForEach-Object { [Console]::Error.WriteLine($_.ToString()) }; exit 1 }",
     "$tgBase = $tgAst.Extent.StartOffset",
+    "$tgN = 0",
     "$tgEdits = foreach ($s in $tgAst.FindAll({ param($n)",
-    "  $n -is [Management.Automation.Language.PipelineBaseAst] -and",
-    "  ($n.Parent -is [Management.Automation.Language.StatementBlockAst] -or $n.Parent -is [Management.Automation.Language.NamedBlockAst])",
+    "  if (-not ($n -is [Management.Automation.Language.PipelineBaseAst])) { return $false }",
+    "  if (-not ($n.Parent -is [Management.Automation.Language.StatementBlockAst] -or $n.Parent -is [Management.Automation.Language.NamedBlockAst])) { return $false }",
+    "  for ($p = $n.Parent; $p; $p = $p.Parent) { if ($p -is [Management.Automation.Language.DataStatementAst]) { return $false } }",
+    "  $true",
     "}, $true)) {",
+    "  $tgN++",
     "  $redirected = $s.Find({ param($r)",
     "    $r -is [Management.Automation.Language.RedirectionAst] -and ($r.FromStream -eq 'Error' -or $r.FromStream -eq 'All')",
     "  }, $false)",
     "  $before = '$global:LASTEXITCODE = 0; '",
     "  $after = '; if ($LASTEXITCODE) { exit $LASTEXITCODE }'",
+    // One variable per statement: a nested one in $( ) shares the scope.
     "  if ($redirected) {",
-    "    $before += \"`$ErrorActionPreference = 'Continue'; \"",
-    "    $after = \"; `$ErrorActionPreference = 'Stop'\" + $after",
+    "    $before += \"`$tgEap$tgN = `$ErrorActionPreference; `$ErrorActionPreference = 'Continue'; try { \"",
+    "    $after = \" } finally { `$ErrorActionPreference = `$tgEap$tgN }\" + $after",
     "  }",
-    "  [pscustomobject]@{ At = $s.Extent.StartOffset - $tgBase; Text = $before }",
-    "  [pscustomobject]@{ At = $s.Extent.EndOffset - $tgBase; Text = $after }",
+    "  [pscustomobject]@{ At = $s.Extent.StartOffset - $tgBase; Order = 1; Text = $before }",
+    "  [pscustomobject]@{ At = $s.Extent.EndOffset - $tgBase; Order = 1; Text = $after }",
     "}",
+    // A marker at the end of what runs last tells a script that ran to its
+    // end from one that called exit. With named blocks that is the end
+    // block's body, or an end block of its own; text after them would not parse.
+    "$tgMarker = \"`r`n`$global:TgExecDone = `$true`r`n\"",
+    "$tgEnd = $tgAst.EndBlock",
+    "$tgNamed = $tgAst.BeginBlock -or $tgAst.ProcessBlock -or $tgAst.DynamicParamBlock -or ($tgEnd -and -not $tgEnd.Unnamed)",
+    "$tgTail = ''",
+    "if (-not $tgNamed) { $tgTail = $tgMarker }",
+    "elseif (-not $tgEnd) { $tgTail = \"`r`nend {$tgMarker}`r`n\" }",
+    // Before the closing brace; at a tie the statement's own check goes first.
+    "else { $tgEdits = @($tgEdits) + [pscustomobject]@{ At = $tgEnd.Extent.EndOffset - 1 - $tgBase; Order = 0; Text = $tgMarker } }",
     "$tgText = New-Object Text.StringBuilder $tgAst.Extent.Text",
-    "foreach ($e in @($tgEdits | Sort-Object At -Descending)) { [void]$tgText.Insert($e.At, $e.Text) }",
-    // A marker after the last line tells a script that ran to its end from
-    // one that called exit.
-    "[void]$tgText.Append(\"`r`n`$global:TgExecDone = `$true`r`n\")",
+    "$tgSorted = @($tgEdits | Sort-Object @{ Expression = 'At'; Descending = $true }, @{ Expression = 'Order'; Descending = $false })",
+    "foreach ($e in $tgSorted) { [void]$tgText.Insert($e.At, $e.Text) }",
+    "[void]$tgText.Append($tgTail)",
     `[IO.File]::WriteAllText(${q(runFile)}, $tgText.ToString(), (New-Object Text.UTF8Encoding $true))`,
     "$global:TgExecDone = $false",
     "$global:LASTEXITCODE = 0",

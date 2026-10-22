@@ -121,6 +121,35 @@ describe("powershell", () => {
     expect(r.out).not.toContain("после");
   }, SHELL_TIMEOUT_MS);
 
+  test("a stderr redirect keeps the user's own error preference", () => {
+    const r = run("powershell", "$ErrorActionPreference = 'Continue'; cmd /c \"echo e 1>&2\" 2>&1 | Out-Null; Get-Item C:\\нет-такого; echo дальше");
+    expect(r.code).toBe(0);
+    expect(lastLine(r.out)).toBe("дальше");
+  }, SHELL_TIMEOUT_MS);
+
+  test("powershell runs begin, process and end blocks", () => {
+    const r = run("powershell", "begin { echo b } process { echo p } end { echo e }");
+    expect(r.code).toBe(0);
+    expect(r.out.trim().split(/\r?\n/).map(l => l.trim())).toEqual(["b", "p", "e"]);
+  }, SHELL_TIMEOUT_MS);
+
+  test("powershell stops in an end block whose last statement touches its brace", () => {
+    const r = run("powershell", "end { echo e; cmd /c exit 7}");
+    expect(r.code).toBe(7);
+  }, SHELL_TIMEOUT_MS);
+
+  test("powershell runs begin and process blocks without an end block", () => {
+    const r = run("powershell", "begin { echo b } process { echo p }");
+    expect(r.code).toBe(0);
+    expect(r.out.trim().split(/\r?\n/).map(l => l.trim())).toEqual(["b", "p"]);
+  }, SHELL_TIMEOUT_MS);
+
+  test("powershell leaves data sections as written", () => {
+    const r = run("powershell", '$d = data { "x" }; $d');
+    expect(r.code).toBe(0);
+    expect(lastLine(r.out)).toBe("x");
+  }, SHELL_TIMEOUT_MS);
+
   test("powershell goes on past an error the user silenced", () => {
     const r = run("powershell", "Get-Item C:\\нет-такого -ErrorAction SilentlyContinue; echo дальше");
     expect(r.code).toBe(0);
