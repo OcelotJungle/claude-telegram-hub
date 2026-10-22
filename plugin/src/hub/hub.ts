@@ -1496,7 +1496,7 @@ ${msg.text}`);
     if (!cwd) return this.notice(sessionId, "⚠️ Не знаю, в какой папке запускать команду: её нет ни в записи хаба, ни в транскрипте", true);
     const shell: ExecShell = name === "exec" ? "powershell" : name;
     this.log.info(`/${name} for session ${sessionId}, message ${m.message_id}`);
-    this.execs.command(sessionId, shell, text, cwd, { messageId: m.message_id, date: m.date });
+    this.execs.command(sessionId, shell, text, cwd, { chatId: String(m.chat.id), messageId: m.message_id, date: m.date });
   }
 
   private async onExecPress(api: TelegramApi, press: { id: string; data: string; fromId: string }): Promise<void> {

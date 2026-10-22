@@ -6,12 +6,14 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname } from "path";
 import { z } from "zod";
 
-// pending: came while the hub was off, waits for its button. sentAt: the
+// pending: came while the hub was off, waits for its button. chatId and
+// messageId: the command message's. sentAt: the
 // command message's date. pid: the runner's. stopping: the stop button was
 // pressed. end.reason: why a lost run was lost. reported: the agent has it.
 export type ExecRecord = {
   id: string;
   sessionId: string;
+  chatId?: string;
   messageId: number;
   shell: ExecShell;
   text: string;
@@ -29,6 +31,7 @@ const fileSchema: z.ZodType<ExecRecord[]> = z.array(
   z.object({
     id: z.string(),
     sessionId: z.string(),
+    chatId: z.string().optional(),
     messageId: z.number(),
     shell: z.enum(["powershell", "cmd", "bash"]),
     text: z.string(),

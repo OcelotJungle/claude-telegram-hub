@@ -59,6 +59,7 @@ function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; aliv
   const files: { path: string; name: string; loud: boolean }[] = [];
   const reports: ReportCall[] = [];
   const clock = { now: NOW };
+  const log = memLogger();
   const deps: ExecDeps = {
     dir,
     file: join(dir, "execs.json"),
@@ -84,7 +85,7 @@ function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; aliv
     cardMs: CARD_MS,
     maxAgeMs: 2 * MIN_MS,
     fileLimit: o.fileLimit,
-    log: memLogger(),
+    log,
   };
   const execs = new Execs(deps);
   managers.push(execs);
@@ -97,7 +98,7 @@ function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; aliv
   };
   // The runner's last heartbeat, as its file's time.
   const beat = (n: number, at: number) => utimesSync(spec(n).alive, at / MS_PER_S, at / MS_PER_S);
-  return { dir, deps, execs, specs, alive, killed, cards, notices, files, reports, clock, spec, lastCard, finish, beat };
+  return { dir, deps, execs, specs, alive, killed, cards, notices, files, reports, clock, log, spec, lastCard, finish, beat };
 }
 
 // Moves the fake clock in steps short enough not to look like a sleep, a few
@@ -109,7 +110,8 @@ async function walk(clock: { now: number }, ms: number): Promise<void> {
   }
 }
 
-const msg = (messageId: number, ageMs = 0) => ({ messageId, date: Math.floor((NOW - ageMs) / 1000) });
+const CHAT = "-1001";
+const msg = (messageId: number, ageMs = 0, chatId = CHAT) => ({ chatId, messageId, date: Math.floor((NOW - ageMs) / MS_PER_S) });
 const idOf = (cardId: string) => cardId.replace(/^exec-/, "");
 
 describe("Execs", () => {
@@ -182,6 +184,34 @@ describe("Execs", () => {
     t.execs.command(SID, "cmd", "echo", "C:\\proj", msg(7));
     t.execs.command(SID, "cmd", "echo", "C:\\proj", msg(7));
     expect(t.specs).toHaveLength(1);
+    expect(t.log.lines.some(l => l.includes("message 7") && l.includes("already"))).toBe(true);
+  });
+
+  test("the same message id in another chat is another command", () => {
+    const t = setup();
+    t.execs.command(SID, "cmd", "echo", "C:\\proj", msg(7));
+    t.execs.command(SID, "cmd", "echo", "C:\\proj", msg(7, 0, "-1002"));
+    expect(t.specs).toHaveLength(2);
+  });
+
+  test("a command that ends on its own after stop was pressed keeps its code", async () => {
+    const t = setup();
+    t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
+    const id = idOf(t.lastCard().cardId);
+    expect(t.execs.press(id, "stop")).toBe("Останавливаю");
+    t.finish(0, 0);
+    await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
+    expect(t.lastCard().markdown).toStartWith("✅ код 0");
+  });
+
+  test("stop after the exit file is there kills nothing and shows the code", () => {
+    const t = setup();
+    t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
+    const id = idOf(t.lastCard().cardId);
+    t.finish(0, 2);
+    expect(t.execs.press(id, "stop")).toBe("Команда уже закончилась");
+    expect(t.killed).toEqual([]);
+    expect(t.lastCard().markdown).toStartWith("❌ код 2");
   });
 
   test("an old command waits for the button", () => {

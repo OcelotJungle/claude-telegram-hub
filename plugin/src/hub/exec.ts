@@ -105,13 +105,19 @@ export class Execs {
     return this.recs.filter(r => r.state === "running").length;
   }
 
-  command(sessionId: string, shell: ExecShell, text: string, cwd: string, msg: { messageId: number; date: number }): void {
-    // Telegram may hand a restarted hub the same message again.
-    if (this.recs.some(r => r.messageId === msg.messageId)) return;
+  command(sessionId: string, shell: ExecShell, text: string, cwd: string, msg: { chatId: string; messageId: number; date: number }): void {
+    // Telegram may hand a restarted hub the same message again. Message ids
+    // count per chat; a run saved without its chat matches any.
+    const same = this.recs.find(r => r.messageId === msg.messageId && (r.chatId ?? msg.chatId) === msg.chatId);
+    if (same) {
+      this.deps.log.info(`exec: message ${msg.messageId} in chat ${msg.chatId} already ran as ${same.id}, skipped`);
+      return;
+    }
     const sentAt = msg.date * MS_PER_SECOND;
     const rec: ExecRecord = {
       id: randomBytes(ID_BYTES).toString("hex"),
       sessionId,
+      chatId: msg.chatId,
       messageId: msg.messageId,
       shell,
       text,
@@ -266,7 +272,9 @@ export class Execs {
     }
     const at = info.endedAt;
     if (info.error !== undefined) this.end(rec, { kind: "lost", at, reason: `не запустилось: ${info.error}` }, quiet);
-    else if (rec.stopping) this.end(rec, { kind: "stopped", at }, quiet);
+    // After a stop, a non-zero code is most likely the kill's; a run that
+    // ended before the press never got killed (see press).
+    else if (rec.stopping && info.code !== 0) this.end(rec, { kind: "stopped", at }, quiet);
     else if (info.code === null) this.end(rec, { kind: "lost", at, reason: LOST_REASON }, quiet);
     else this.end(rec, { kind: "exit", code: info.code, at }, quiet);
   }
