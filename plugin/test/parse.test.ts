@@ -93,7 +93,7 @@ describe("assistant records", () => {
 });
 
 describe("API errors", () => {
-  // Observed in Claude Code: a synthetic message ends the turn.
+  // Observed in Claude Code: a synthetic message.
   const apiError = (o: object = {}) => ({
     ...assistant("e1", "stop_sequence", text("API Error: Connection lost mid-response. The response above may be incomplete.")),
     error: "server_error",
@@ -102,21 +102,19 @@ describe("API errors", () => {
     ...o,
   });
 
-  test("a response cut mid-way is its text, then a turn end marked cut", () => {
-    expect(parseRecord(apiError())).toEqual([
-      { kind: "text", text: "API Error: Connection lost mid-response. The response above may be incomplete.", messageId: "e1" },
-      { kind: "turn_end", messageId: "e1", cut: true },
-    ]);
-  });
-
-  // Observed in Claude Code: no output came, the turn ends after retries.
-  test("a request that never reached the API is a turn end marked cut", () => {
-    const rec = {
+  test("a failed connection is an API error, without its text: the turn may yet go on", () => {
+    expect(parseRecord(apiError())).toEqual([{ kind: "api_error", messageId: "e1" }]);
+    const unreachable = {
       ...assistant("e1", "stop_sequence", text("API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)")),
       error: "server_error",
       isApiErrorMessage: true,
     };
-    expect(parseRecord(rec)[1]).toEqual({ kind: "turn_end", messageId: "e1", cut: true });
+    expect(parseRecord(unreachable)).toEqual([{ kind: "api_error", messageId: "e1" }]);
+  });
+
+  test("Claude Code closing the turn is turn_closed", () => {
+    expect(parseRecord({ type: "system", subtype: "turn_duration", durationMs: 1000 })).toEqual([{ kind: "turn_closed" }]);
+    expect(parseRecord({ type: "system", subtype: "stop_hook_summary" })).toEqual([]);
   });
 
   test("API errors that are not the network's just end the turn", () => {
@@ -281,5 +279,5 @@ test("garbage is ignored", () => {
   expect(parseRecord(null)).toEqual([]);
   expect(parseRecord("str")).toEqual([]);
   expect(parseRecord({ type: "assistant" })).toEqual([]);
-  expect(parseRecord({ type: "system", subtype: "turn_duration" })).toEqual([]);
+  expect(parseRecord({ type: "system", subtype: "local_command" })).toEqual([]);
 });

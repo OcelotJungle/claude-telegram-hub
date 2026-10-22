@@ -137,7 +137,7 @@ class Agent {
   }
 
   private feed(ev: TranscriptEvent, at: number): void {
-    if (ev.kind !== "text" && ev.kind !== "tool_use" && ev.kind !== "turn_end") return;
+    if (ev.kind !== "text" && ev.kind !== "tool_use" && ev.kind !== "turn_end" && ev.kind !== "api_error") return;
     if (this.status !== "running" && ev.messageId !== this.endMessage) {
       // A closed card stays as it is: the agent got a new message
       // (SendMessage), a new run goes into a new card.

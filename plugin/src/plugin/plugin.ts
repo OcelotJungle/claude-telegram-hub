@@ -133,6 +133,8 @@ export class PluginCore {
   private noteOwed = false;
   // Responses cut since a turn last ended normally.
   private cuts = 0;
+  // The message of an API error record that may yet end the turn.
+  private apiError: string | undefined;
   // The agent is in a turn and not waiting for the user.
   private busy = false;
   // Topic messages reach the session one after another, in the order they came.
@@ -331,7 +333,7 @@ export class PluginCore {
   }
 
   private onRecord(rec: unknown): void {
-    for (const ev of parseRecord(rec)) {
+    for (const ev of parseRecord(rec).flatMap(e => this.settleApiError(e))) {
       this.flush(this.relay.feed(ev));
       if (ev.kind === "terminal_input" && this.enabled) {
         this.client.send({ type: "terminalInput" });
@@ -356,6 +358,22 @@ export class PluginCore {
       const busy = busyAfter(ev);
       if (busy !== undefined) this.setBusy(busy);
     }
+  }
+
+  // An API error record ends the turn, cut, only if Claude Code closes the
+  // turn before the agent goes on.
+  private settleApiError(ev: TranscriptEvent): TranscriptEvent[] {
+    if (ev.kind === "api_error") {
+      this.apiError = ev.messageId;
+      return [];
+    }
+    const pending = this.apiError;
+    if (ev.kind === "turn_closed") {
+      this.apiError = undefined;
+      return pending === undefined ? [] : [{ kind: "turn_end", messageId: pending, cut: true }];
+    }
+    if ("messageId" in ev) this.apiError = undefined;
+    return [ev];
   }
 
   // The topic shows the bot typing while the agent is busy.

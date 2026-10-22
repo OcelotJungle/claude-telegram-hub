@@ -21,6 +21,13 @@ export type TranscriptEvent =
   // cut: the connection to the API failed, before or during the response,
   // and the turn ended on it: the answer is missing or incomplete.
   | { kind: "turn_end"; messageId: string; cut?: true }
+  // Claude Code's record of a failed connection to the API. The turn may go
+  // on: the record is written as well when only the auto mode classifier's
+  // response broke off, or before Claude Code retries the request itself. It
+  // ended the turn only if turn_closed comes before the turn goes on.
+  | { kind: "api_error"; messageId: string }
+  // Claude Code closed the turn (system record turn_duration).
+  | { kind: "turn_closed" }
   | { kind: "terminal_input" }
   | { kind: "title"; source: "custom" | "agent" | "ai"; title: string }
   // A thinking block with text whose kind is neither thinking nor narration:
@@ -60,6 +67,8 @@ export function parseRecord(r: unknown): TranscriptEvent[] {
       return title("agent", r.agentName);
     case "ai-title":
       return title("ai", r.aiTitle);
+    case "system":
+      return r.subtype === "turn_duration" ? [{ kind: "turn_closed" }] : [];
     default:
       return [];
   }
@@ -75,6 +84,12 @@ function parseAssistant(r: Rec): TranscriptEvent[] {
   const msg = r.message;
   if (!isObject(msg) || typeof msg.id !== "string" || !Array.isArray(msg.content)) return [];
   const messageId = msg.id;
+  // Claude Code's own message for a failed connection: "API Error: Connection
+  // lost mid-response…", "The response stopped arriving…", "Can't reach the
+  // API server… (ENOTFOUND)", "Connection refused…". Its text is not the
+  // agent's; other errors (rate_limit, invalid_request…) are not the
+  // network's, their text is news for the person and they end the turn.
+  if (r.isApiErrorMessage === true && r.error === "server_error") return [{ kind: "api_error", messageId }];
   const out: TranscriptEvent[] = [];
   for (const block of arr(msg.content)) {
     if (!isObject(block)) continue;
@@ -93,14 +108,7 @@ function parseAssistant(r: Rec): TranscriptEvent[] {
   }
   // Every record of a split message carries the final stop_reason; the relay
   // de-duplicates turn_end by messageId.
-  if (typeof msg.stop_reason === "string" && msg.stop_reason !== "tool_use") {
-    // Claude Code's own message for a failed connection: "API Error: Connection
-    // lost mid-response…", "Can't reach the API server… (ENOTFOUND)",
-    // "Connection refused…". It ends the turn after its own retries run out;
-    // other errors (rate_limit, invalid_request…) are not the network's.
-    const cut = r.isApiErrorMessage === true && r.error === "server_error";
-    out.push(cut ? { kind: "turn_end", messageId, cut } : { kind: "turn_end", messageId });
-  }
+  if (typeof msg.stop_reason === "string" && msg.stop_reason !== "tool_use") out.push({ kind: "turn_end", messageId });
   return out;
 }
 

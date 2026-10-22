@@ -530,33 +530,46 @@ describe("note to the agent that the mode went off", () => {
 
 describe("a turn ended by a failed connection to the API", () => {
   const ERROR = "API Error: Connection lost mid-response. The response above may be incomplete.";
-  const cut = () => ({ ...assistantText(ERROR, "stop_sequence"), error: "server_error", truncatedAfterOutput: true, isApiErrorMessage: true });
+  const apiError = (text = ERROR) => ({ ...assistantText(text, "stop_sequence"), error: "server_error", isApiErrorMessage: true });
+  const closed = { type: "system", subtype: "turn_duration", durationMs: 1000 };
+  // The error record, then Claude Code closing the turn on it.
+  const cut = (): object[] => [apiError(), closed];
   const UNREACHABLE = "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)";
 
   test("the agent is told to continue, and the topic is told it does", async () => {
     await enabledCore();
-    append(assistantText("Правлю тест", "tool_use", "r1"), assistantTool("Edit", "r1"), cut());
+    append(assistantText("Правлю тест", "tool_use", "r1"), assistantTool("Edit", "r1"), ...cut());
     await waitFor(() => channel.length === 1, 3000, "continue prompt");
     expect(channel[0]).toEqual({ content: CONTINUE_PROMPT, meta: { user: "tg-hub", reason: "response_cut" } });
-    await waitFor(() => sent().length === 3, 3000, "three messages");
+    await waitFor(() => sent().length === 2, 3000, "two messages");
     expect(sent()).toEqual([
       { text: "Правлю тест", silent: true, topic: 100 },
-      { text: ERROR, silent: true, topic: 100 },
       { text: CUT_NOTE, silent: true, topic: 100 },
     ]);
   });
 
   test("a request that never reached the API is continued too", async () => {
     await enabledCore();
-    append({ ...assistantText(UNREACHABLE, "stop_sequence"), error: "server_error", isApiErrorMessage: true });
+    append(apiError(UNREACHABLE), closed);
     await waitFor(() => channel.length === 1, 3000, "continue prompt");
     expect(channel[0]?.content).toBe(CONTINUE_PROMPT);
+  });
+
+  // Observed in Claude Code: the auto mode classifier's response broke
+  // off, the tool call got its result and the turn went on.
+  test("an API error after which the turn goes on is neither a cut nor a turn end", async () => {
+    await enabledCore();
+    append(assistantText("Пишу файл", "tool_use", "r1"), assistantTool("Write", "r1"), apiError("API Error: The response stopped arriving."));
+    append(assistantText("Записал", "tool_use", "r2"), assistantTool("Bash", "r2"), assistantText("Готово", "end_turn", "r3"), closed);
+    await waitFor(() => sent().length === 3, 3000, "three messages");
+    expect(sent().map(s => s.text)).toEqual(["Пишу файл", "Записал", "Готово"]);
+    expect(channel).toEqual([]);
   });
 
   test("with the mode off the person at the terminal decides", async () => {
     const c = makeCore();
     await waitFor(() => hub.isConnected(SID), 3000, "plugin connected");
-    append(cut());
+    append(...cut());
     await Bun.sleep(300);
     expect(c.enabled).toBe(false);
     expect(channel).toEqual([]);
@@ -564,18 +577,18 @@ describe("a turn ended by a failed connection to the API", () => {
 
   test(`after ${MAX_AUTO_CONTINUES} cuts in a row it stops and calls the person; a normal turn end starts the count over`, async () => {
     await enabledCore();
-    for (let i = 0; i < MAX_AUTO_CONTINUES; i++) append(cut());
+    for (let i = 0; i < MAX_AUTO_CONTINUES; i++) append(...cut());
     await waitFor(() => channel.length === MAX_AUTO_CONTINUES, 3000, "continue prompts");
-    append(cut());
+    append(...cut());
     await waitFor(() => sent().some(s => s.text === CUT_LIMIT_NOTE), 3000, "limit note");
     expect(sent().find(s => s.text === CUT_LIMIT_NOTE)?.silent).toBe(false);
     expect(channel.length).toBe(MAX_AUTO_CONTINUES);
-    append(assistantText("дальше сам", "end_turn"), cut());
+    append(assistantText("дальше сам", "end_turn"), closed, ...cut());
     await waitFor(() => channel.length === MAX_AUTO_CONTINUES + 1, 3000, "continue after a normal turn");
   });
 
   test("a cut written before the window started is history", async () => {
-    appendFileSync(transcript, line(cut()));
+    appendFileSync(transcript, cut().map(line).join(""));
     await enabledCore();
     append(assistantText("новый ход", "end_turn"));
     await waitFor(() => sent().length === 1, 3000, "new turn");
