@@ -22,6 +22,7 @@ export function paths() {
     configFile: join(stateDir, "config.json"),
     sessionsFile: join(stateDir, "sessions.json"),
     outboxFile: join(stateDir, "outbox.json"),
+    cardsFile: join(stateDir, "cards.json"),
     spoolDir: join(stateDir, "spool"),
     filesDir: join(stateDir, "outbox-files"),
     logFile: join(stateDir, "hub.log"),

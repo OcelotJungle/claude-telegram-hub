@@ -18,6 +18,7 @@ const hub = new Hub({
   port: hubPort(),
   sessionsFile: p.sessionsFile,
   outboxFile: p.outboxFile,
+  cardsFile: p.cardsFile,
   spoolDir: p.spoolDir,
   filesDir: p.filesDir,
   inboxDir: p.inboxDir,

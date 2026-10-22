@@ -39,6 +39,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     port,
     sessionsFile: join(dir, "sessions.json"),
     outboxFile: join(dir, "outbox.json"),
+    cardsFile: join(dir, "cards.json"),
     spoolDir: join(dir, "spool"),
     spoolScanMs: 50,
     filesDir: join(dir, "outbox-files"),
@@ -1132,6 +1133,27 @@ describe("subagent cards", () => {
     await Bun.sleep(150);
     expect(fake.texts().length).toBe(1);
     expect(fake.callsOf("editMessageText").length).toBe(1);
+  });
+
+  test("a restarted hub goes on editing the cards it sent", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send(card("x-0", "v1"));
+    await waitFor(() => fake.texts().length === 1);
+    const x = fake.lastMessageId;
+    a.send(card("y-0", "done", true));
+    await waitFor(() => fake.texts().length === 2);
+    await hub.stop();
+    await startHub();
+    const b = await enabled("a");
+    b.send(card("x-0", "v2"));
+    await waitFor(() => fake.callsOf("editMessageText").length === 1);
+    expect(fake.callsOf("editMessageText")[0]).toMatchObject({ message_id: x, text: "v2" });
+    // A finished card stays finished.
+    b.send(card("y-0", "late", true));
+    await Bun.sleep(150);
+    expect(fake.texts().length).toBe(2);
+    expect(fake.callsOf("editMessageText").map(c => c.message_id)).toEqual([x]);
   });
 
   test("edits are throttled, and only the latest version goes", async () => {

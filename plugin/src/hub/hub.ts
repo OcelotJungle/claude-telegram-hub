@@ -23,6 +23,7 @@ import { toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { commandReply, hookBody, limitsPost, pluginToHub, sendFilesMessage, sendMessage, terminateRequest } from "../shared/protocol-schema.ts";
+import { loadCards, saveCards } from "./cards.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
@@ -106,6 +107,8 @@ export type HubOptions = {
   port: number;
   sessionsFile: string;
   outboxFile: string;
+  // Where subagent cards are kept across restarts; in memory only without it.
+  cardsFile?: string;
   // Where a closing window leaves the text it could not hand to a hub.
   spoolDir?: string;
   spoolScanMs?: number;
@@ -238,6 +241,13 @@ export class Hub {
     this.store = new SessionStore(opts.sessionsFile);
     this.log = opts.log;
     this.outbox = new Outbox(opts.outboxFile, opts.log);
+    // A card's edits go on after a restart; one not yet shown gets its next
+    // version as an edit, a "not modified" answer being no error.
+    if (opts.cardsFile) {
+      for (const [key, c] of loadCards(opts.cardsFile)) {
+        this.cards.set(key, { text: c.text, final: c.done, done: c.done, ...(c.messageId !== undefined ? { messageId: c.messageId } : {}), ...(c.done ? { shown: c.text } : {}), lastEdit: 0, editing: false });
+      }
+    }
   }
 
   start(): boolean {
@@ -744,15 +754,30 @@ ${msg.text}`);
       if (this.cards.size <= MAX_CARDS) break;
       this.cards.delete(old);
     }
+    this.saveCards();
     const [first] = textPieces(msg.text, true);
     // The outbox remembers sent ids: a card sent anew needs a new one.
     if (first && this.outbox.add(`card-${randomUUID()}`, msg.sessionId, [{ ...first, card: key }])) void this.pump(msg.sessionId);
   }
 
+  // On the card's creation, first send and end: its text in between is the
+  // plugin's to send again.
+  private saveCards(): void {
+    if (!this.opts.cardsFile) return;
+    try {
+      saveCards(this.opts.cardsFile, [...this.cards].map(([key, c]) => [key, { text: c.text, done: c.done, ...(c.messageId !== undefined ? { messageId: c.messageId } : {}) }]));
+    } catch (e) {
+      this.log.warn(`saving subagent cards failed: ${e}`);
+    }
+  }
+
   private scheduleCardEdit(key: string, card: Card): void {
     if (card.timer || card.editing) return;
     if (card.text === card.shown) {
-      card.done = card.final;
+      if (card.final && !card.done) {
+        card.done = true;
+        this.saveCards();
+      }
       return;
     }
     this.cardTimer(key, card, card.lastEdit + (this.opts.cardEditMs ?? CARD_EDIT_MS));
@@ -786,6 +811,7 @@ ${msg.text}`);
       if (e instanceof TelegramError && /message is not modified/i.test(e.description)) card.shown = text;
       else if (e instanceof TelegramError && /message to edit not found/i.test(e.description)) {
         this.cards.delete(key);
+        this.saveCards();
         return;
       } else if (e instanceof TelegramError && e.code !== TOO_MANY_REQUESTS) {
         // Retrying the same version cannot help; the next one may.
@@ -956,6 +982,7 @@ ${msg.text}`);
       card.messageId = sent.message_id;
       card.shown = text;
       card.lastEdit = Date.now();
+      this.saveCards();
       this.scheduleCardEdit(item.card, card);
       return;
     }
