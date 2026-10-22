@@ -292,6 +292,24 @@ describe("Execs", () => {
     expect(t.lastCard().markdown).toStartWith("⚠️ прервана: процесс исчез");
   });
 
+  test("a run that ended while no manager watched waits for its window, then for the sweep", async () => {
+    const t = setup();
+    t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
+    t.execs.command("s2", "cmd", "y", "C:\\proj", msg(2));
+    t.execs.stop();
+    t.finish(0, 0);
+    t.finish(1, 0);
+    const t2 = setup({ dir: t.dir, alive: [FIRST_PID + 1, FIRST_PID + 2] });
+    expect(t2.cards.filter(c => c.final)).toHaveLength(2);
+    expect(t2.reports).toHaveLength(0);
+    t2.execs.connected(SID);
+    expect(t2.reports.map(r => r.sessionId)).toEqual([SID]);
+    t2.execs.sweep(sid => sid === SID);
+    expect(t2.reports.map(r => r.sessionId)).toEqual([SID, "s2"]);
+    t2.execs.sweep(() => false);
+    expect(t2.reports).toHaveLength(2);
+  });
+
   test("an unreported result goes again when the session connects", async () => {
     const t = setup({ sendOnSent: false });
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));

@@ -69,6 +69,9 @@ export class Execs {
   // gap in the checks the machine slept, and the runners slept with it.
   private lastCheck: number | undefined;
   private graceUntil = 0;
+  // Runs found ended at start: their results wait for the windows to
+  // reconnect, then for sweep().
+  private endedWhileOff = new Set<string>();
 
   constructor(private deps: ExecDeps) {}
 
@@ -77,7 +80,19 @@ export class Execs {
     this.timers.push(setInterval(() => this.check(), this.deps.checkMs));
     this.timers.push(setInterval(() => this.editCards(), this.deps.cardMs));
     // At once: a run gone while no hub watched never gets a stop button press.
-    this.check();
+    // Its result is not reported yet: a window about to reconnect gets it.
+    this.check(true);
+  }
+
+  // After the start's grace: results of runs that ended while no hub watched
+  // go to the sessions that still have no window, so they launch or get the
+  // notice; those with a window got them on connect.
+  sweep(hasWindow: (sessionId: string) => boolean): void {
+    for (const rec of this.recs) {
+      if (!this.endedWhileOff.has(rec.id) || rec.reported || hasWindow(rec.sessionId)) continue;
+      this.report(rec);
+    }
+    this.endedWhileOff.clear();
   }
 
   // Only the timers: the runners go on and a next manager picks them up.
@@ -219,7 +234,8 @@ export class Execs {
     });
   }
 
-  private check(): void {
+  // quiet: the runs that ended are not reported; see start().
+  private check(quiet = false): void {
     const now = this.deps.now();
     if (this.lastCheck !== undefined && now - this.lastCheck > HEARTBEAT_MS) this.graceUntil = now + HEARTBEAT_STALE_MS;
     this.lastCheck = now;
@@ -227,7 +243,7 @@ export class Execs {
       if (rec.state !== "running") continue;
       const exit = this.path(rec.id, "exit.json");
       if (existsSync(exit)) {
-        this.ended(rec, exit);
+        this.ended(rec, exit, quiet);
         continue;
       }
       // A runner without a fresh heartbeat is gone, whoever has its pid now
@@ -235,12 +251,12 @@ export class Execs {
       // neither waited for nor killed.
       if (rec.pid !== undefined && this.beating(rec) && this.deps.alive(rec.pid)) continue;
       // The runner may have written the file just before it exited.
-      if (existsSync(exit)) this.ended(rec, exit);
-      else this.end(rec, rec.stopping ? { kind: "stopped", at: this.deps.now() } : { kind: "lost", at: this.deps.now(), reason: LOST_REASON });
+      if (existsSync(exit)) this.ended(rec, exit, quiet);
+      else this.end(rec, rec.stopping ? { kind: "stopped", at: this.deps.now() } : { kind: "lost", at: this.deps.now(), reason: LOST_REASON }, quiet);
     }
   }
 
-  private ended(rec: ExecRecord, exitFile: string): void {
+  private ended(rec: ExecRecord, exitFile: string, quiet: boolean): void {
     let info;
     try {
       info = exitInfoSchema.parse(JSON.parse(readFileSync(exitFile, "utf8")));
@@ -249,13 +265,13 @@ export class Execs {
       return;
     }
     const at = info.endedAt;
-    if (info.error !== undefined) this.end(rec, { kind: "lost", at, reason: `не запустилось: ${info.error}` });
-    else if (rec.stopping) this.end(rec, { kind: "stopped", at });
-    else if (info.code === null) this.end(rec, { kind: "lost", at, reason: LOST_REASON });
-    else this.end(rec, { kind: "exit", code: info.code, at });
+    if (info.error !== undefined) this.end(rec, { kind: "lost", at, reason: `не запустилось: ${info.error}` }, quiet);
+    else if (rec.stopping) this.end(rec, { kind: "stopped", at }, quiet);
+    else if (info.code === null) this.end(rec, { kind: "lost", at, reason: LOST_REASON }, quiet);
+    else this.end(rec, { kind: "exit", code: info.code, at }, quiet);
   }
 
-  private end(rec: ExecRecord, end: NonNullable<ExecRecord["end"]>): void {
+  private end(rec: ExecRecord, end: NonNullable<ExecRecord["end"]>, quiet = false): void {
     rec.state = "ended";
     rec.end = end;
     this.deps.log.info(`exec ${rec.id}: ended ${end.kind}${end.code === undefined ? "" : ` ${end.code}`}`);
@@ -270,7 +286,8 @@ export class Execs {
         this.deps.log.warn(`exec ${rec.id}: sending the log failed: ${e}`);
       }
     }
-    this.report(rec);
+    if (quiet) this.endedWhileOff.add(rec.id);
+    else this.report(rec);
   }
 
   // The log, or a copy of its last bytes with a note when Telegram would

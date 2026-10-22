@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { Hub } from "../src/hub/hub.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
+import { saveExecs } from "../src/hub/exec-store.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
 import { Runner } from "../src/mod/commands.ts";
 import { arr, field } from "../src/shared/guards.ts";
@@ -31,6 +32,9 @@ const SETTLE_MS = 300;
 const OLD_COMMAND_S = 5 * 60;
 const FILE_LIMIT = 200;
 const LAUNCH_TIMEOUT_S = 30;
+// How long a test hub waits for windows before it delivers results of runs
+// that ended while it was off.
+const EXEC_GRACE_MS = 300;
 
 let fake: FakeTelegram;
 let hub: Hub;
@@ -48,6 +52,7 @@ type HubExtras = {
   defaultAccount?(): Promise<string | undefined>;
   spawnRunner?(specFile: string): number;
   execFileLimit?: number;
+  execGraceMs?: number;
 };
 
 async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number } & HubExtras = {}) {
@@ -86,6 +91,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     execCardMs: 100,
     ...(o.spawnRunner ? { spawnRunner: o.spawnRunner } : {}),
     ...(o.execFileLimit ? { execFileLimit: o.execFileLimit } : {}),
+    execGraceMs: o.execGraceMs ?? EXEC_GRACE_MS,
     log,
     onExit: () => {
       exited = true;
@@ -1875,6 +1881,51 @@ describe("topic commands", () => {
     await enabled(SID);
     fake.pushUpdate(msg("/bash ls"));
     await waitFor(() => texts().includes(`Git Bash не найден: ${join(dir, "no-bash.exe")}. Укажи exec.bash в config.json`), WAIT_MS, "notice");
+  });
+
+  // A run that ended while no hub watched: running on disk, its exit file there.
+  const endedWhileOff = () => {
+    const id = "abcd1234";
+    const execDir = join(dir, "exec");
+    mkdirSync(execDir, { recursive: true });
+    writeFileSync(join(execDir, `${id}.log`), "hi\n");
+    writeFileSync(join(execDir, `${id}.exit.json`), JSON.stringify({ code: 0, endedAt: Date.now() }));
+    saveExecs(join(dir, "execs.json"), [{ id, sessionId: SID, messageId: 1, shell: "cmd", text: "echo hi", cwd: CWD, state: "running", startedAt: Date.now(), pid: 1, reported: false }]);
+  };
+
+  test("a result that came while the hub was off goes once to the window that reconnects", async () => {
+    closedSession();
+    endedWhileOff();
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: ["wt.exe", "{session}"], timeoutSec: LAUNCH_TIMEOUT_S } };
+    await startHub({ spawn: c => void spawned.push(c) });
+    const w = await plugin(SID);
+    const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
+    expect(inbound.meta.exec_id).toBe("abcd1234");
+    await Bun.sleep(EXEC_GRACE_MS * 2);
+    expect(w.messages.filter(m => m.type === "inbound").length).toBe(1);
+    expect(spawned).toEqual([]);
+    expect(texts()).not.toContain("⚠️ Сессия не запущена: результат команды агенту не доставлен");
+  });
+
+  test("a result that came while the hub was off starts the session once no window came", async () => {
+    closedSession();
+    endedWhileOff();
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: ["wt.exe", "{session}"], timeoutSec: LAUNCH_TIMEOUT_S } };
+    await startHub({ spawn: c => void spawned.push(c) });
+    await Bun.sleep(EXEC_GRACE_MS / 2);
+    expect(spawned).toEqual([]);
+    await waitFor(() => spawned.length === 1, WAIT_MS, "session start");
+  });
+
+  test("a result that came while the hub was off says it was not delivered once no window came", async () => {
+    closedSession();
+    endedWhileOff();
+    await startHub();
+    await Bun.sleep(EXEC_GRACE_MS / 2);
+    expect(texts()).not.toContain("⚠️ Сессия не запущена: результат команды агенту не доставлен");
+    await waitFor(() => texts().includes("⚠️ Сессия не запущена: результат команды агенту не доставлен"), WAIT_MS, "notice");
   });
 
   test("a result for a session without a window and without launch says it was not delivered", async () => {
