@@ -59,6 +59,11 @@ export type ExecDeps = {
   maxAgeMs: number;
   // The largest file Telegram takes; TELEGRAM_FILE_LIMIT when not given.
   fileLimit?: number;
+  // Whether the session has a window connected now.
+  hasWindow(sessionId: string): boolean;
+  // How long after the start windows get to reconnect before results of runs
+  // that ended meanwhile go on without them; none when not given.
+  graceMs?: number;
   log: Logger;
 };
 
@@ -69,9 +74,11 @@ export class Execs {
   // gap in the checks the machine slept, and the runners slept with it.
   private lastCheck: number | undefined;
   private graceUntil = 0;
-  // Runs found ended at start: their results wait for the windows to
-  // reconnect, then for sweep().
-  private endedWhileOff = new Set<string>();
+  // Runs that ended at start or in its grace with no window: their results
+  // wait for the windows to reconnect, then for sweep().
+  private deferred = new Set<string>();
+  private deferUntil = 0;
+  private sweepTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private deps: ExecDeps) {}
 
@@ -79,26 +86,30 @@ export class Execs {
     this.recs = loadExecs(this.deps.file);
     this.timers.push(setInterval(() => this.check(), this.deps.checkMs));
     this.timers.push(setInterval(() => this.editCards(), this.deps.cardMs));
+    const grace = this.deps.graceMs ?? 0;
+    this.deferUntil = this.deps.now() + grace;
     // At once: a run gone while no hub watched never gets a stop button press.
     // Its result is not reported yet: a window about to reconnect gets it.
     this.check(true);
+    this.sweepTimer = setTimeout(() => this.sweep(), grace);
   }
 
-  // After the start's grace: results of runs that ended while no hub watched
-  // go to the sessions that still have no window, so they launch or get the
-  // notice; those with a window got them on connect.
-  sweep(hasWindow: (sessionId: string) => boolean): void {
+  // After the start's grace: deferred results go to the sessions that still
+  // have no window, so they launch or get the notice; a window that connected
+  // got them on connect, and one connecting now gets them so.
+  sweep(): void {
     for (const rec of this.recs) {
-      if (!this.endedWhileOff.has(rec.id) || rec.reported || hasWindow(rec.sessionId)) continue;
+      if (!this.deferred.has(rec.id) || rec.reported || this.deps.hasWindow(rec.sessionId)) continue;
       this.report(rec);
     }
-    this.endedWhileOff.clear();
+    this.deferred.clear();
   }
 
   // Only the timers: the runners go on and a next manager picks them up.
   stop(): void {
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
+    clearTimeout(this.sweepTimer);
   }
 
   running(): number {
@@ -294,7 +305,10 @@ export class Execs {
         this.deps.log.warn(`exec ${rec.id}: sending the log failed: ${e}`);
       }
     }
-    if (quiet) this.endedWhileOff.add(rec.id);
+    // In the start's grace a session without a window may be reconnecting:
+    // reporting now would launch a second copy of it or say "not delivered".
+    const inGrace = this.deps.now() < this.deferUntil && !this.deps.hasWindow(rec.sessionId);
+    if (quiet || inGrace) this.deferred.add(rec.id);
     else this.report(rec);
   }
 

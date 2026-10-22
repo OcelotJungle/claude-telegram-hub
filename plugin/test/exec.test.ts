@@ -29,6 +29,9 @@ const FILE_LIMIT = 200;
 const BIG_LINE_CHARS = 500;
 const MS_PER_S = 1000;
 const CHECKS_PER_STEP = 3;
+// A start's grace no test outlasts, and one a test waits out.
+const LONG_GRACE_MS = 60_000;
+const SHORT_GRACE_MS = 100;
 // Long enough for any heartbeat to go stale.
 const LONG_AGO_MS = 10 * MIN_MS;
 
@@ -48,11 +51,13 @@ afterEach(() => {
 // Fake deps: runners are only their spec files, which the test plays out by
 // writing the log and the exit file itself.
 // alive: runner pids alive from the start, for a manager that finds runs on disk.
-function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; alive?: number[] } = {}) {
+// windows: sessions with a window; graceMs: the start's grace, none by default.
+function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; alive?: number[]; windows?: string[]; graceMs?: number } = {}) {
   const dir = o.dir ?? tempDir("tghub-exec-");
   if (o.dir === undefined) dirs.push(dir);
   const specs: RunnerSpec[] = [];
   const alive = new Set<number>(o.alive);
+  const windows = new Set<string>(o.windows);
   const killed: number[] = [];
   const cards: CardCall[] = [];
   const notices: { text: string; loud: boolean }[] = [];
@@ -85,6 +90,8 @@ function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; aliv
     cardMs: CARD_MS,
     maxAgeMs: 2 * MIN_MS,
     fileLimit: o.fileLimit,
+    hasWindow: sid => windows.has(sid),
+    graceMs: o.graceMs,
     log,
   };
   const execs = new Execs(deps);
@@ -98,7 +105,7 @@ function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; aliv
   };
   // The runner's last heartbeat, as its file's time.
   const beat = (n: number, at: number) => utimesSync(spec(n).alive, at / MS_PER_S, at / MS_PER_S);
-  return { dir, deps, execs, specs, alive, killed, cards, notices, files, reports, clock, log, spec, lastCard, finish, beat };
+  return { dir, deps, execs, specs, alive, windows, killed, cards, notices, files, reports, clock, log, spec, lastCard, finish, beat };
 }
 
 // Moves the fake clock in steps short enough not to look like a sleep, a few
@@ -329,15 +336,41 @@ describe("Execs", () => {
     t.execs.stop();
     t.finish(0, 0);
     t.finish(1, 0);
-    const t2 = setup({ dir: t.dir, alive: [FIRST_PID + 1, FIRST_PID + 2] });
+    const t2 = setup({ dir: t.dir, alive: [FIRST_PID + 1, FIRST_PID + 2], graceMs: LONG_GRACE_MS });
     expect(t2.cards.filter(c => c.final)).toHaveLength(2);
     expect(t2.reports).toHaveLength(0);
+    t2.windows.add(SID);
     t2.execs.connected(SID);
     expect(t2.reports.map(r => r.sessionId)).toEqual([SID]);
-    t2.execs.sweep(sid => sid === SID);
+    t2.execs.sweep();
     expect(t2.reports.map(r => r.sessionId)).toEqual([SID, "s2"]);
-    t2.execs.sweep(() => false);
+    t2.execs.sweep();
     expect(t2.reports).toHaveLength(2);
+  });
+
+  test("a run that ends in the start's grace waits for its window, one with a window does not", async () => {
+    const t = setup();
+    t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
+    t.execs.command("s2", "cmd", "y", "C:\\proj", msg(2));
+    t.execs.stop();
+    const t2 = setup({ dir: t.dir, alive: [FIRST_PID + 1, FIRST_PID + 2], windows: ["s2"], graceMs: LONG_GRACE_MS });
+    t.finish(0, 0);
+    t.finish(1, 0);
+    await waitFor(() => t2.cards.filter(c => c.final).length === 2, WAIT_MS, "final cards");
+    expect(t2.reports.map(r => r.sessionId)).toEqual(["s2"]);
+    t2.windows.add(SID);
+    t2.execs.connected(SID);
+    expect(t2.reports.map(r => r.sessionId)).toEqual(["s2", SID]);
+  });
+
+  test("the grace ends with a sweep of its own", async () => {
+    const t = setup();
+    t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
+    t.execs.stop();
+    t.finish(0, 0);
+    const t2 = setup({ dir: t.dir, graceMs: SHORT_GRACE_MS });
+    expect(t2.reports).toHaveLength(0);
+    await waitFor(() => t2.reports[0], WAIT_MS, "report after the grace");
   });
 
   test("an unreported result goes again when the session connects", async () => {

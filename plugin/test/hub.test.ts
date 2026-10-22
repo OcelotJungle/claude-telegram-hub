@@ -36,6 +36,8 @@ const LAUNCH_TIMEOUT_S = 30;
 // How long a test hub waits for windows before it delivers results of runs
 // that ended while it was off.
 const EXEC_GRACE_MS = 300;
+// A grace long enough to end a run and connect a window inside it.
+const LONG_GRACE_MS = 2000;
 
 let fake: FakeTelegram;
 let hub: Hub;
@@ -1927,6 +1929,30 @@ describe("topic commands", () => {
     expect(spawned).toEqual([]);
     expect(texts()).not.toContain("⚠️ Сессия не запущена: результат команды агенту не доставлен");
   });
+
+  test("a run that ends during the start's grace waits for the reconnecting window", async () => {
+    closedSession();
+    const id = "abcd1234";
+    const execDir = join(dir, "exec");
+    mkdirSync(execDir, { recursive: true });
+    writeFileSync(join(execDir, `${id}.log`), "hi\n");
+    // A live runner: our own pid, a fresh heartbeat.
+    writeFileSync(join(execDir, `${id}.alive`), "");
+    saveExecs(join(dir, "execs.json"), [{ id, sessionId: SID, messageId: 1, shell: "cmd", text: "echo hi", cwd: CWD, state: "running", startedAt: Date.now(), pid: process.pid, reported: false }]);
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: ["wt.exe", "{session}"], timeoutSec: LAUNCH_TIMEOUT_S } };
+    await startHub({ spawn: c => void spawned.push(c), execGraceMs: LONG_GRACE_MS });
+    await Bun.sleep(SETTLE_MS);
+    expect(shown().some(t => t.startsWith("▶ cmd"))).toBe(true);
+    writeFileSync(join(execDir, `${id}.exit.json`), JSON.stringify({ code: 0, endedAt: Date.now() }));
+    await waitFor(() => shown().some(t => t.startsWith("✅ код 0")), WAIT_MS, "final card");
+    const w = await plugin(SID);
+    const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
+    expect(inbound.meta.exec_id).toBe(id);
+    await Bun.sleep(LONG_GRACE_MS);
+    expect(w.messages.filter(m => m.type === "inbound").length).toBe(1);
+    expect(spawned).toEqual([]);
+  }, LONG_GRACE_MS + 3 * WAIT_MS);
 
   test("a result that came while the hub was off starts the session once no window came", async () => {
     closedSession();

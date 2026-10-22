@@ -256,7 +256,6 @@ export class Hub {
   // Idle time is up, but the queue is still being delivered.
   private idleExpired = false;
   private spoolTimer: ReturnType<typeof setInterval> | undefined;
-  private execSweepTimer: ReturnType<typeof setTimeout> | undefined;
   private typingTimer: ReturnType<typeof setInterval> | undefined;
   // Sessions whose "typing…" fails, with the failures in a row: only the
   // first is logged, and the count once it works again.
@@ -308,6 +307,8 @@ export class Hub {
         cardMs: opts.execCardMs ?? EXEC_CARD_MS,
         maxAgeMs: opts.execMaxAgeMs ?? EXEC_MAX_AGE_MS,
         ...(opts.execFileLimit ? { fileLimit: opts.execFileLimit } : {}),
+        hasWindow: sid => this.connOf(sid) !== undefined,
+        graceMs: opts.execGraceMs ?? EXEC_GRACE_MS,
         log: opts.log,
       });
     }
@@ -341,9 +342,6 @@ export class Hub {
     }, this.opts.typingEveryMs ?? TYPING_EVERY_MS);
     // Before armIdle: commands still running keep the hub up.
     this.execs?.start();
-    if (this.execs) {
-      this.execSweepTimer = setTimeout(() => this.execs?.sweep(sid => this.connOf(sid) !== undefined), this.opts.execGraceMs ?? EXEC_GRACE_MS);
-    }
     this.armIdle();
     if (this.opts.api) void this.pollLoop(this.opts.api);
     else this.log.error("no TELEGRAM_BOT_TOKEN — not polling Telegram");
@@ -356,7 +354,6 @@ export class Hub {
     this.abort.abort();
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.spoolTimer) clearInterval(this.spoolTimer);
-    if (this.execSweepTimer) clearTimeout(this.execSweepTimer);
     if (this.typingTimer) clearInterval(this.typingTimer);
     for (const queued of this.commands.values()) for (const e of queued) clearTimeout(e.timer);
     for (const card of this.cards.values()) clearTimeout(card.timer);
