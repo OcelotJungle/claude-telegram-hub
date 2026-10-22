@@ -452,6 +452,8 @@ describe("send", () => {
     a.send({ type: "send", id: "x2", text: "done", notify: true });
     await a.next("ack", m => m.id === "x2");
     expect(a.messages.some(m => m.type === "ack" && m.id === "x1")).toBe(true);
+    // The ack comes when the text is queued; the send follows.
+    await waitFor(() => fake.callsOf("sendMessage").length === 2, WAIT_MS, "both sends");
     expect(fake.callsOf("sendMessage")).toEqual([
       { chat_id: GROUP, message_thread_id: 100, text: "working", disable_notification: true },
       { chat_id: GROUP, message_thread_id: 100, text: "done", disable_notification: false },
