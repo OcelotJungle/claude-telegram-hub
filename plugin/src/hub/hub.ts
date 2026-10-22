@@ -12,7 +12,7 @@ import type { HubCommand } from "./router.ts";
 import type { VideoTools } from "./video.ts";
 import type { ExecShell } from "./exec-shell.ts";
 
-import { spawn, spawnSync } from "child_process";
+import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync } from "fs";
 import { dirname, join } from "path";
@@ -37,7 +37,7 @@ import { richPieces } from "./rich-out.ts";
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath } from "./video.ts";
 import { EXEC_CARD_MS, EXEC_CHECK_MS, EXEC_MAX_AGE_MS, Execs } from "./exec.ts";
 import { freshEnv } from "./exec-env.ts";
-import { spawnRunner } from "./exec-runner.ts";
+import { isAlive, killTree, spawnRunner } from "./exec-runner.ts";
 import { DEFAULT_BASH, findPowershell } from "./exec-shell.ts";
 
 const INACTIVE_TEXT = "сессия сейчас не активна";
@@ -1656,27 +1656,6 @@ ${msg.text}`);
       attach("sticker", m.sticker);
     }
     return { content: content ?? "", meta };
-  }
-}
-
-// A topic command's runner and everything it started.
-function killTree(pid: number): void {
-  if (process.platform === "win32") {
-    spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], { windowsHide: true });
-    return;
-  }
-  try {
-    process.kill(-pid, "SIGKILL");
-  } catch {}
-}
-
-// EPERM: the process is there, only not ours to signal.
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return field(e, "code") === "EPERM";
   }
 }
 

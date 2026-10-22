@@ -9,12 +9,11 @@ import type { ChannelMeta } from "../shared/protocol.ts";
 import type { Logger } from "../shared/log.ts";
 
 import { randomBytes } from "crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync } from "fs";
-import { uptime } from "os";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "fs";
 import { join } from "path";
 import { loadExecs, saveExecs } from "./exec-store.ts";
 import { SHELL_NAMES, shellRun, writeShellFiles } from "./exec-shell.ts";
-import { exitInfoSchema } from "./exec-runner.ts";
+import { exitInfoSchema, HEARTBEAT_MS } from "./exec-runner.ts";
 
 export const EXEC_CARD_MS = 60_000;
 export const EXEC_CARD_LINES = 10;
@@ -23,6 +22,8 @@ export const MAX_EXECS = 50;
 export const EXEC_MAX_AGE_MS = 120_000;
 export const EXEC_CHECK_MS = 1000;
 export const TELEGRAM_FILE_LIMIT = 50 * 1024 * 1024;
+// A runner is gone once its heartbeat is this old: a few missed beats.
+export const HEARTBEAT_STALE_MS = 3 * HEARTBEAT_MS;
 const ID_BYTES = 4;
 const TAIL_BYTES = 64 * 1024;
 const LINE_MAX = 300;
@@ -58,14 +59,16 @@ export type ExecDeps = {
   maxAgeMs: number;
   // The largest file Telegram takes; TELEGRAM_FILE_LIMIT when not given.
   fileLimit?: number;
-  // When the machine started; from os.uptime() when not given.
-  bootedAt?(): number;
   log: Logger;
 };
 
 export class Execs {
   private recs: ExecRecord[] = [];
   private timers: ReturnType<typeof setInterval>[] = [];
+  // The last check, and till when a stale heartbeat still counts: after a
+  // gap in the checks the machine slept, and the runners slept with it.
+  private lastCheck: number | undefined;
+  private graceUntil = 0;
 
   constructor(private deps: ExecDeps) {}
 
@@ -122,6 +125,12 @@ export class Execs {
       return "Запускаю";
     }
     if (rec.state === "pending" || rec.pid === undefined) return "Команда ещё не запущена";
+    // A run that ended, or whose runner is gone, is not killed: its pid may
+    // belong to another process by now.
+    if (existsSync(this.path(rec.id, "exit.json")) || !this.beating(rec)) {
+      this.check();
+      return "Команда уже закончилась";
+    }
     rec.stopping = true;
     this.save();
     this.deps.kill(rec.pid);
@@ -135,8 +144,15 @@ export class Execs {
     }
   }
 
-  private bootedAt(): number {
-    return this.deps.bootedAt ? this.deps.bootedAt() : Date.now() - uptime() * MS_PER_SECOND;
+  // Whether the run's runner touched its heartbeat file lately.
+  private beating(rec: ExecRecord): boolean {
+    const now = this.deps.now();
+    if (now < this.graceUntil) return true;
+    try {
+      return now - statSync(this.path(rec.id, "alive")).mtimeMs < HEARTBEAT_STALE_MS;
+    } catch {
+      return false;
+    }
   }
 
   private path(id: string, ext: string): string {
@@ -162,9 +178,15 @@ export class Execs {
         env: { ...this.deps.env(), ...run.env },
         log: this.path(rec.id, "log"),
         exit: this.path(rec.id, "exit.json"),
+        alive: this.path(rec.id, "alive"),
+        heartbeatMs: HEARTBEAT_MS,
       };
       const specFile = this.path(rec.id, "spec.json");
       mkdirSync(this.deps.dir, { recursive: true });
+      // The first beat, so a runner still starting counts as alive.
+      const at = this.deps.now() / MS_PER_SECOND;
+      writeFileSync(spec.alive, "");
+      utimesSync(spec.alive, at, at);
       writeFileSync(specFile, JSON.stringify(spec));
       rec.pid = this.deps.spawnRunner(specFile);
       rec.state = "running";
@@ -198,6 +220,9 @@ export class Execs {
   }
 
   private check(): void {
+    const now = this.deps.now();
+    if (this.lastCheck !== undefined && now - this.lastCheck > HEARTBEAT_MS) this.graceUntil = now + HEARTBEAT_STALE_MS;
+    this.lastCheck = now;
     for (const rec of this.recs) {
       if (rec.state !== "running") continue;
       const exit = this.path(rec.id, "exit.json");
@@ -205,10 +230,10 @@ export class Execs {
         this.ended(rec, exit);
         continue;
       }
-      // A runner from before the machine started is gone, whoever has its
-      // pid now: that one is neither waited for nor killed.
-      const beforeBoot = (rec.startedAt ?? 0) < this.bootedAt();
-      if (rec.pid !== undefined && !beforeBoot && this.deps.alive(rec.pid)) continue;
+      // A runner without a fresh heartbeat is gone, whoever has its pid now
+      // (after a reboot, a sign-out, a Fast Startup shutdown): that one is
+      // neither waited for nor killed.
+      if (rec.pid !== undefined && this.beating(rec) && this.deps.alive(rec.pid)) continue;
       // The runner may have written the file just before it exited.
       if (existsSync(exit)) this.ended(rec, exit);
       else this.end(rec, rec.stopping ? { kind: "stopped", at: this.deps.now() } : { kind: "lost", at: this.deps.now(), reason: LOST_REASON });

@@ -5,11 +5,11 @@ import type { Button } from "../src/hub/telegram.ts";
 import type { ChannelMeta } from "../src/shared/protocol.ts";
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
-import { Execs, execCardText, logTail, MAX_EXECS } from "../src/hub/exec.ts";
+import { Execs, execCardText, HEARTBEAT_STALE_MS, logTail, MAX_EXECS } from "../src/hub/exec.ts";
 import { loadExecs, saveExecs } from "../src/hub/exec-store.ts";
-import { runnerSpecSchema } from "../src/hub/exec-runner.ts";
+import { HEARTBEAT_MS, runnerSpecSchema } from "../src/hub/exec-runner.ts";
 import { memLogger, must, tempDir, waitFor } from "./helpers.ts";
 
 const SID = "s1";
@@ -27,6 +27,10 @@ const RUN_1_05_MS = 65_000;
 const LOG_LINES = 40;
 const FILE_LIMIT = 200;
 const BIG_LINE_CHARS = 500;
+const MS_PER_S = 1000;
+const CHECKS_PER_STEP = 3;
+// Long enough for any heartbeat to go stale.
+const LONG_AGO_MS = 10 * MIN_MS;
 
 type CardCall = { sessionId: string; cardId: string; markdown: string; final: boolean; buttons?: Button[][] };
 type ReportCall = { sessionId: string; content: string; meta: ChannelMeta; onSent: () => void };
@@ -44,7 +48,7 @@ afterEach(() => {
 // Fake deps: runners are only their spec files, which the test plays out by
 // writing the log and the exit file itself.
 // alive: runner pids alive from the start, for a manager that finds runs on disk.
-function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; bootedAt?: number; alive?: number[] } = {}) {
+function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; alive?: number[] } = {}) {
   const dir = o.dir ?? tempDir("tghub-exec-");
   if (o.dir === undefined) dirs.push(dir);
   const specs: RunnerSpec[] = [];
@@ -80,7 +84,6 @@ function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; boot
     cardMs: CARD_MS,
     maxAgeMs: 2 * MIN_MS,
     fileLimit: o.fileLimit,
-    bootedAt: () => o.bootedAt ?? NOW - 60 * MIN_MS * 24,
     log: memLogger(),
   };
   const execs = new Execs(deps);
@@ -92,7 +95,18 @@ function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; boot
     const s = spec(n);
     writeFileSync(s.exit, JSON.stringify({ code, endedAt: clock.now, ...(error === undefined ? {} : { error }) }));
   };
-  return { dir, deps, execs, specs, alive, killed, cards, notices, files, reports, clock, spec, lastCard, finish };
+  // The runner's last heartbeat, as its file's time.
+  const beat = (n: number, at: number) => utimesSync(spec(n).alive, at / MS_PER_S, at / MS_PER_S);
+  return { dir, deps, execs, specs, alive, killed, cards, notices, files, reports, clock, spec, lastCard, finish, beat };
+}
+
+// Moves the fake clock in steps short enough not to look like a sleep, a few
+// checks apart.
+async function walk(clock: { now: number }, ms: number): Promise<void> {
+  for (let left = ms; left > 0; left -= HEARTBEAT_MS / 2) {
+    clock.now += Math.min(left, HEARTBEAT_MS / 2);
+    await Bun.sleep(CHECK_MS * CHECKS_PER_STEP);
+  }
 }
 
 const msg = (messageId: number, ageMs = 0) => ({ messageId, date: Math.floor((NOW - ageMs) / 1000) });
@@ -231,16 +245,51 @@ describe("Execs", () => {
     expect(t2.lastCard().markdown).toStartWith("✅ код 0");
   });
 
-  test("a run from before the machine started ends as lost, whoever has its pid now", async () => {
+  test("a launch gives the runner its heartbeat file", () => {
+    const t = setup();
+    t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
+    expect(existsSync(t.spec().alive)).toBe(true);
+    expect(t.spec().heartbeatMs).toBeGreaterThan(0);
+  });
+
+  test("a run whose heartbeat stopped ends as lost, whoever has its pid now", async () => {
     const dir = tempDir("tghub-exec-");
     dirs.push(dir);
-    const rec: ExecRecord = { id: "abcd1234", sessionId: SID, messageId: 1, shell: "cmd", text: "x", cwd: "C:\\proj", state: "running", startedAt: NOW - 60 * MIN_MS, pid: 4242, reported: false };
+    const rec: ExecRecord = { id: "abcd1234", sessionId: SID, messageId: 1, shell: "cmd", text: "x", cwd: "C:\\proj", state: "running", startedAt: NOW - LONG_AGO_MS, pid: 4242, reported: false };
     saveExecs(join(dir, "execs.json"), [rec]);
-    const t = setup({ dir, bootedAt: NOW - 10 * MIN_MS, alive: [4242] });
+    writeFileSync(join(dir, "abcd1234.alive"), "");
+    utimesSync(join(dir, "abcd1234.alive"), (NOW - LONG_AGO_MS) / MS_PER_S, (NOW - LONG_AGO_MS) / MS_PER_S);
+    const t = setup({ dir, alive: [4242] });
     await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
     expect(t.lastCard().markdown).toStartWith("⚠️ прервана: процесс исчез");
     expect(t.execs.press("abcd1234", "stop")).toBe("Команда уже закончилась");
     expect(t.killed).toEqual([]);
+  });
+
+  test("stop on a run whose heartbeat went stale kills nothing and ends it as lost", () => {
+    const t = setup();
+    t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
+    const id = idOf(t.lastCard().cardId);
+    t.beat(0, NOW - LONG_AGO_MS);
+    expect(t.execs.press(id, "stop")).toBe("Команда уже закончилась");
+    expect(t.killed).toEqual([]);
+    expect(t.lastCard().markdown).toStartWith("⚠️ прервана: процесс исчез");
+  });
+
+  test("a run the hub slept through waits for its next heartbeat", async () => {
+    const t = setup();
+    t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
+    // The machine slept: the clock jumps, the heartbeat is old.
+    t.clock.now += LONG_AGO_MS;
+    await Bun.sleep(SETTLE_MS);
+    expect(t.execs.running()).toBe(1);
+    t.beat(0, t.clock.now);
+    await walk(t.clock, HEARTBEAT_STALE_MS / 2);
+    expect(t.execs.running()).toBe(1);
+    // No beat for the whole grace: the runner is gone.
+    await walk(t.clock, HEARTBEAT_STALE_MS);
+    await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
+    expect(t.lastCard().markdown).toStartWith("⚠️ прервана: процесс исчез");
   });
 
   test("an unreported result goes again when the session connects", async () => {
