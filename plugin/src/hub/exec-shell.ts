@@ -25,27 +25,54 @@ export function findPowershell(): string {
   return Bun.which("pwsh") ?? "powershell.exe";
 }
 
-// Runs the user's file statement by statement, dot-sourced so variables and
-// functions live on, and stops at the first native command that exits non-zero
-// or the first error. Windows PowerShell 5.1 has no
-// $PSNativeCommandUseErrorActionPreference, so the check is done here.
-function psWrapper(userFile: string): string {
-  const quoted = userFile.replaceAll("'", "''");
+// Stops the user's script at the first native command that exits non-zero or
+// the first cmdlet error. Windows PowerShell 5.1 has no
+// $PSNativeCommandUseErrorActionPreference, so the wrapper rewrites the script:
+// every statement in a block, nested ones included, gets a LASTEXITCODE check
+// after it, and the rewritten script runs once, whole, so using, param,
+// functions and scopes work as written. On pwsh 7.3+ the same check covers
+// what that preference would do, and keeps the native command's own code,
+// which the preference would turn into an error and code 1.
+// With 'Stop', 5.1 turns a native command's stderr redirected by 2>&1 or
+// 2>$null into an error that ends the run; a statement that redirects stderr
+// runs under 'Continue', and only its exit code counts.
+function psWrapper(userFile: string, runFile: string): string {
+  const q = (s: string) => `'${s.replaceAll("'", "''")}'`;
   return [
     "$ErrorActionPreference = 'Stop'",
     "[Console]::OutputEncoding = [Text.Encoding]::UTF8",
     "$OutputEncoding = [Text.Encoding]::UTF8",
-    "$errs = $null",
-    `$ast = [Management.Automation.Language.Parser]::ParseFile('${quoted}', [ref]$null, [ref]$errs)`,
-    "if ($errs) { $errs | ForEach-Object { [Console]::Error.WriteLine($_.ToString()) }; exit 1 }",
-    "try {",
-    "  foreach ($st in $ast.EndBlock.Statements) {",
-    "    $global:LASTEXITCODE = 0",
-    "    . ([scriptblock]::Create($st.Extent.Text))",
-    "    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+    "$tgErrs = $null",
+    `$tgAst = [Management.Automation.Language.Parser]::ParseFile(${q(userFile)}, [ref]$null, [ref]$tgErrs)`,
+    "if ($tgErrs) { $tgErrs | ForEach-Object { [Console]::Error.WriteLine($_.ToString()) }; exit 1 }",
+    "$tgBase = $tgAst.Extent.StartOffset",
+    "$tgEdits = foreach ($s in $tgAst.FindAll({ param($n)",
+    "  $n -is [Management.Automation.Language.PipelineBaseAst] -and",
+    "  ($n.Parent -is [Management.Automation.Language.StatementBlockAst] -or $n.Parent -is [Management.Automation.Language.NamedBlockAst])",
+    "}, $true)) {",
+    "  $redirected = $s.Find({ param($r)",
+    "    $r -is [Management.Automation.Language.RedirectionAst] -and ($r.FromStream -eq 'Error' -or $r.FromStream -eq 'All')",
+    "  }, $false)",
+    "  $before = '$global:LASTEXITCODE = 0; '",
+    "  $after = '; if ($LASTEXITCODE) { exit $LASTEXITCODE }'",
+    "  if ($redirected) {",
+    "    $before += \"`$ErrorActionPreference = 'Continue'; \"",
+    "    $after = \"; `$ErrorActionPreference = 'Stop'\" + $after",
     "  }",
-    "} catch { [Console]::Error.WriteLine($_.ToString()); exit 1 }",
-    "exit 0",
+    "  [pscustomobject]@{ At = $s.Extent.StartOffset - $tgBase; Text = $before }",
+    "  [pscustomobject]@{ At = $s.Extent.EndOffset - $tgBase; Text = $after }",
+    "}",
+    "$tgText = New-Object Text.StringBuilder $tgAst.Extent.Text",
+    "foreach ($e in @($tgEdits | Sort-Object At -Descending)) { [void]$tgText.Insert($e.At, $e.Text) }",
+    // A marker after the last line tells a script that ran to its end from
+    // one that called exit.
+    "[void]$tgText.Append(\"`r`n`$global:TgExecDone = `$true`r`n\")",
+    `[IO.File]::WriteAllText(${q(runFile)}, $tgText.ToString(), (New-Object Text.UTF8Encoding $true))`,
+    "$global:TgExecDone = $false",
+    "$global:LASTEXITCODE = 0",
+    `try { & ${q(runFile)} } catch { [Console]::Error.WriteLine($_.ToString()); exit 1 }`,
+    "if ($global:TgExecDone) { exit 0 }",
+    "exit $LASTEXITCODE",
     "",
   ].join("\r\n");
 }
@@ -55,6 +82,8 @@ export function shellRun(shell: ExecShell, text: string, dir: string, id: string
   if (shell === "powershell") {
     const user = join(dir, `${id}.user.ps1`);
     const wrapper = join(dir, `${id}.ps1`);
+    // The user's script as rewritten by the wrapper.
+    const rewritten = join(dir, `${id}.run.ps1`);
     return {
       // No -NoProfile: the profile loads as in a new window.
       argv: [paths.powershell, "-NoLogo", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", wrapper],
@@ -62,7 +91,7 @@ export function shellRun(shell: ExecShell, text: string, dir: string, id: string
       // With no BOM, Windows PowerShell 5.1 reads a script in the ANSI code page.
       files: [
         { path: user, content: text, bom: true },
-        { path: wrapper, content: psWrapper(user), bom: true },
+        { path: wrapper, content: psWrapper(user, rewritten), bom: true },
       ],
       env: {},
     };

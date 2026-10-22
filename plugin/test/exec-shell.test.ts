@@ -17,7 +17,7 @@ afterEach(() => {
 });
 
 // Runs the user's text the way the runner would, in a fresh temp folder.
-function run(shell: ExecShell, text: string): { code: number | null; out: string; dir: string } {
+function run(shell: ExecShell, text: string): { code: number | null; out: string; err: string; dir: string } {
   const dir = tempDir("tghub-shell-");
   dirs.push(dir);
   const r: ShellRun = shellRun(shell, text, dir, "abcd1234", { powershell: findPowershell(), bash: DEFAULT_BASH });
@@ -32,7 +32,7 @@ function run(shell: ExecShell, text: string): { code: number | null; out: string
     encoding: "utf8",
     timeout: SHELL_TIMEOUT_MS,
   });
-  return { code: res.status, out: res.stdout, dir };
+  return { code: res.status, out: res.stdout, err: res.stderr, dir };
 }
 
 const lastLine = (out: string) => out.trim().split(/\r?\n/).at(-1)?.trim();
@@ -73,6 +73,58 @@ describe("powershell", () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain("a'b");
     expect(lastLine(r.out)).toBe("x");
+  }, SHELL_TIMEOUT_MS);
+
+  test("a native command's stderr under 2>&1 does not stop the run", () => {
+    const r = run("powershell", 'cmd /c "echo err 1>&2" 2>&1; echo дальше');
+    expect(r.code).toBe(0);
+    // 5.1 shows a redirected native stderr line as an error, on its stderr.
+    expect(r.out + r.err).toContain("err");
+    expect(lastLine(r.out)).toBe("дальше");
+  }, SHELL_TIMEOUT_MS);
+
+  test("a native command's stderr under 2>$null does not stop the run", () => {
+    const r = run("powershell", '$x = cmd /c "echo err 1>&2" 2>$null; echo дальше');
+    expect(r.code).toBe(0);
+    expect(r.out + r.err).not.toContain("err");
+    expect(lastLine(r.out)).toBe("дальше");
+  }, SHELL_TIMEOUT_MS);
+
+  test("powershell stops at a failure inside a loop", () => {
+    const r = run("powershell", "foreach ($i in 3,0) { cmd /c exit $i }; echo конец");
+    expect(r.code).toBe(3);
+    expect(r.out).not.toContain("конец");
+  }, SHELL_TIMEOUT_MS);
+
+  test("powershell stops at a failure inside an if block", () => {
+    const r = run("powershell", "if ($true) {\n  cmd /c exit 4\n  echo внутри\n}\necho после");
+    expect(r.code).toBe(4);
+    expect(r.out).not.toContain("внутри");
+    expect(r.out).not.toContain("после");
+  }, SHELL_TIMEOUT_MS);
+
+  test("powershell stops at a failing native command in an assignment", () => {
+    const r = run("powershell", "$x = cmd /c exit 6\necho дальше");
+    expect(r.code).toBe(6);
+    expect(r.out).not.toContain("дальше");
+  }, SHELL_TIMEOUT_MS);
+
+  test("powershell keeps using namespace", () => {
+    const r = run("powershell", "using namespace System.IO\n[Path]::GetFileName('a\\b.txt')");
+    expect(r.code).toBe(0);
+    expect(lastLine(r.out)).toBe("b.txt");
+  }, SHELL_TIMEOUT_MS);
+
+  test("powershell exits with the user's own exit code", () => {
+    const r = run("powershell", "echo до; exit 5; echo после");
+    expect(r.code).toBe(5);
+    expect(r.out).not.toContain("после");
+  }, SHELL_TIMEOUT_MS);
+
+  test("powershell goes on past an error the user silenced", () => {
+    const r = run("powershell", "Get-Item C:\\нет-такого -ErrorAction SilentlyContinue; echo дальше");
+    expect(r.code).toBe(0);
+    expect(lastLine(r.out)).toBe("дальше");
   }, SHELL_TIMEOUT_MS);
 });
 
