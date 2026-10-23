@@ -141,7 +141,7 @@ async function enabled(sessionId: string, title = "Title") {
 beforeEach(() => {
   fake = new FakeTelegram();
   dir = tempDir();
-  config = { groupId: GROUP, allowFrom: [ME] };
+  config = { groupId: GROUP, allowFrom: [ME], turnEndChime: "" };
   log = memLogger();
   exited = false;
 });
@@ -200,7 +200,7 @@ describe("enable", () => {
   });
 
   test("without groupId the error explains what to configure", async () => {
-    config = { allowFrom: [ME] };
+    config = { allowFrom: [ME], turnEndChime: "" };
     await startHub();
     const c = await plugin("s1");
     const res = await req(c, { op: "enable", title: "T" });

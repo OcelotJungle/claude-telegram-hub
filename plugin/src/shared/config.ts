@@ -2,6 +2,7 @@ import { readFileSync } from "fs";
 import { homedir } from "os";
 import { isAbsolute, join, relative, resolve } from "path";
 import { z } from "zod";
+import { defaultTurnEndChime } from "./chime.ts";
 import { arr, field } from "./guards.ts";
 import { DEFAULT_PORT } from "./protocol.ts";
 
@@ -84,7 +85,17 @@ export type Launch = { command: string[]; timeoutSec: number };
 export type ExecConfig = { bash?: string };
 
 // launchError: config.json has a launch section that is not valid.
-export type Config = { groupId?: string; allowFrom: string[]; launch?: Launch; launchError?: string; exec?: ExecConfig };
+// turnEndChime: the terminal sound command ("" for none), always set;
+// turnEndChimeError: config.json has a turnEndChime that is not a string.
+export type Config = {
+  groupId?: string;
+  allowFrom: string[];
+  launch?: Launch;
+  launchError?: string;
+  exec?: ExecConfig;
+  turnEndChime: string;
+  turnEndChimeError?: string;
+};
 
 const execSchema: z.ZodType<ExecConfig> = z.object({ bash: z.string().min(1).optional() });
 
@@ -98,10 +109,13 @@ export function loadConfig(): Config {
   try {
     raw = JSON.parse(readText(paths().configFile));
   } catch {
-    return { allowFrom: [] };
+    return { allowFrom: [], turnEndChime: defaultTurnEndChime() };
   }
   const groupId = field(raw, "groupId");
-  const cfg: Config = { allowFrom: arr(field(raw, "allowFrom")).map(String) };
+  const cfg: Config = { allowFrom: arr(field(raw, "allowFrom")).map(String), turnEndChime: defaultTurnEndChime() };
+  const chime = field(raw, "turnEndChime");
+  if (typeof chime === "string") cfg.turnEndChime = chime;
+  else if (chime !== undefined) cfg.turnEndChimeError = "turnEndChime в config.json должен быть строкой";
   if (groupId != null && groupId !== "") cfg.groupId = String(groupId);
   const launch = field(raw, "launch");
   if (launch !== undefined) {

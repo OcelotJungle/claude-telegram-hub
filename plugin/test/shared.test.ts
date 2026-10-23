@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "fs";
 import { join } from "path";
 import { chunk } from "../src/shared/chunk.ts";
+import { chimeCommand, defaultTurnEndChime, playChime } from "../src/shared/chime.ts";
 import { idleMs, loadConfig, loadToken, paths } from "../src/shared/config.ts";
 import { tempDir } from "./helpers.ts";
 
@@ -110,7 +111,7 @@ describe("config", () => {
   test("config.json saved as UTF-16 or with a BOM is read", () => {
     for (const enc of [utf16le, utf8bom]) {
       writeFileSync(join(dir, "config.json"), enc('{ "groupId": "-1001", "allowFrom": ["1"] }'));
-      expect(loadConfig()).toEqual({ groupId: "-1001", allowFrom: ["1"] });
+      expect(loadConfig()).toEqual({ groupId: "-1001", allowFrom: ["1"], turnEndChime: defaultTurnEndChime() });
     }
   });
 
@@ -126,7 +127,7 @@ describe("config", () => {
 
   test("config coerces numeric ids to strings", () => {
     writeFileSync(join(dir, "config.json"), JSON.stringify({ groupId: -1001234, allowFrom: [123456789] }));
-    expect(loadConfig()).toEqual({ groupId: "-1001234", allowFrom: ["123456789"] });
+    expect(loadConfig()).toEqual({ groupId: "-1001234", allowFrom: ["123456789"], turnEndChime: defaultTurnEndChime() });
   });
 
   test("TG_HUB_IDLE_MS=0 means never, nonsense means the default", () => {
@@ -165,8 +166,46 @@ describe("config", () => {
   });
 
   test("missing or corrupt config gives empty allowFrom", () => {
-    expect(loadConfig()).toEqual({ allowFrom: [] });
+    expect(loadConfig()).toEqual({ allowFrom: [], turnEndChime: defaultTurnEndChime() });
     writeFileSync(join(dir, "config.json"), "{not json");
-    expect(loadConfig()).toEqual({ allowFrom: [] });
+    expect(loadConfig()).toEqual({ allowFrom: [], turnEndChime: defaultTurnEndChime() });
+  });
+
+  test("turnEndChime: default when missing, a string as given (also empty), default plus an error otherwise", () => {
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [] }));
+    expect(loadConfig().turnEndChime).toBe(defaultTurnEndChime());
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], turnEndChime: "beep {kind}" }));
+    expect(loadConfig().turnEndChime).toBe("beep {kind}");
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], turnEndChime: "" }));
+    expect(loadConfig().turnEndChime).toBe("");
+    expect(loadConfig().turnEndChimeError).toBeUndefined();
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], turnEndChime: 5 }));
+    const cfg = loadConfig();
+    expect(cfg.turnEndChime).toBe(defaultTurnEndChime());
+    expect(cfg.turnEndChimeError).toContain("turnEndChime");
+  });
+});
+
+describe("chime", () => {
+  test("the default runs chime.ps1 of the chime skill with {kind}", () => {
+    const cmd = defaultTurnEndChime();
+    expect(cmd).toContain("/.claude/skills/chime/chime.ps1");
+    expect(cmd).toContain("-Kind {kind}");
+    expect(cmd).not.toContain("\\");
+  });
+
+  test("{kind} is replaced everywhere; an empty template gives no command", () => {
+    expect(chimeCommand("a {kind} b {kind}", "ask")).toBe("a ask b ask");
+    expect(chimeCommand("", "ask")).toBeUndefined();
+    expect(chimeCommand("  ", "done")).toBeUndefined();
+  });
+
+  test("playChime hands the command to the runner, not at all for an empty template, and swallows its errors", () => {
+    const ran: string[] = [];
+    playChime("beep {kind}", "done", cmd => ran.push(cmd));
+    expect(ran).toEqual(["beep done"]);
+    playChime("", "done", cmd => ran.push(cmd));
+    expect(ran).toEqual(["beep done"]);
+    expect(() => playChime("beep", "ask", () => { throw new Error("no shell"); })).not.toThrow();
   });
 });

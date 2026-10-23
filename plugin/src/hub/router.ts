@@ -18,7 +18,7 @@ export type Route =
 
 // Only topic messages from allowed senders in the configured group reach a
 // session; General, DMs, other chats and strangers are ignored.
-export function routeUpdate(u: Update, cfg: Config, sessions: SessionStore, isConnected: (sessionId: string) => boolean): Route {
+export function routeUpdate(u: Update, cfg: Pick<Config, "groupId" | "allowFrom">, sessions: SessionStore, isConnected: (sessionId: string) => boolean): Route {
   const m = u.message;
   if (!m) return ignore("no message");
   if (!cfg.groupId || String(m.chat.id) !== cfg.groupId) return ignore(`chat ${m.chat.id} is not the group`);

@@ -102,7 +102,7 @@ beforeEach(async () => {
   fake = new FakeTelegram();
   port = await freePort();
   state = tempDir();
-  config = { groupId: GROUP, allowFrom: [ME] };
+  config = { groupId: GROUP, allowFrom: [ME], turnEndChime: "" };
   hub = new Hub({
     port,
     sessionsFile: join(state, "sessions.json"),
@@ -487,7 +487,7 @@ describe("PluginCore", () => {
   });
 
   test("enable without groupId returns the explanation", async () => {
-    config = { allowFrom: [ME] };
+    config = { allowFrom: [ME], turnEndChime: "" };
     const c = makeCore();
     await expect(c.enable()).rejects.toThrow(/config\.json/);
   });
