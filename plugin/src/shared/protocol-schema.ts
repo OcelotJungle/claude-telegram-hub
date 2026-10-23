@@ -1,7 +1,7 @@
 // Runtime checks of the protocol messages, typed against protocol.ts: a
 // message type changed on one side and not here fails the type check.
 // protocol.ts itself has no imports, so the function hooks module can use it.
-import type { CleanupReport, CommandReply, EnableResult, HookBody, HubToPlugin, LimitsPost, PluginToHub, QueuedFile, RateLimit, TerminateRequest } from "./protocol.ts";
+import type { CleanupReport, CommandReply, EnableResult, HookBody, HubToPlugin, LimitsPost, PluginToHub, QueuedFile, RateLimit, TerminateRequest, TurnEndBody } from "./protocol.ts";
 
 import { z } from "zod";
 
@@ -45,6 +45,7 @@ export const hubToPlugin: z.ZodType<HubToPlugin> = z.union([
   z.object({ type: z.literal("switchSession"), sessionId: z.string(), transcriptPath: z.string(), cwd: z.string() }),
   z.object({ type: z.literal("permissionReply"), requestId: z.string(), behavior: z.enum(["allow", "deny"]) }),
   z.object({ type: z.literal("terminate") }),
+  z.object({ type: z.literal("turnEnd"), final: z.boolean(), kind: z.enum(["ask", "done"]).optional() }),
 ]);
 
 export const enableResult: z.ZodType<EnableResult> = z.object({ topicTitle: z.string(), created: z.boolean() });
@@ -55,6 +56,13 @@ export const hookBody: z.ZodType<HookBody> = z.object({
   transcript_path: z.string(),
   cwd: z.string(),
   source: z.string().optional(),
+});
+
+export const turnEndBody: z.ZodType<TurnEndBody> = z.object({
+  messagingSocket: z.string(),
+  session_id: z.string(),
+  final: z.boolean(),
+  kind: z.enum(["ask", "done"]).optional(),
 });
 
 // A reply without notify is sent silently.

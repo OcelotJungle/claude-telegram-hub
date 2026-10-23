@@ -74,9 +74,20 @@ export type HubToPlugin =
   // The answer to a permission prompt, given in the topic.
   | { type: "permissionReply"; requestId: string; behavior: PermissionBehavior }
   // /stop in the topic: end the Claude Code process of this window.
-  | { type: "terminate" };
+  | { type: "terminate" }
+  // The Stop hook's decision on how the turn ended; kind only when final.
+  | { type: "turnEnd"; final: boolean; kind?: TurnEndKind };
 
 export type PermissionBehavior = "allow" | "deny";
+export type TurnEndKind = "ask" | "done";
+
+// Body the Stop hook POSTs to /turn-end.
+export type TurnEndBody = {
+  messagingSocket: string;
+  session_id: string;
+  final: boolean;
+  kind?: TurnEndKind;
+};
 
 
 // Body the SessionStart hook POSTs to /hook.

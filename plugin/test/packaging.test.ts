@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { z } from "zod";
 import { Hub } from "../src/hub/hub.ts";
@@ -11,6 +11,7 @@ import { freePort, memLogger, must, tempDir, wsClient } from "./helpers.ts";
 const PLUGIN = resolve(import.meta.dir, "..");
 const REPO = resolve(PLUGIN, "..");
 const HOOK = join(PLUGIN, "src", "hook", "session-start.ts");
+const STOP_HOOK = join(PLUGIN, "src", "hook", "stop.ts");
 
 // Async on purpose: an in-process hub must keep serving while the hook runs.
 async function runHook(port: number, input: object, socket = "pipe-H") {
@@ -63,6 +64,72 @@ describe("SessionStart hook", () => {
   });
 });
 
+describe("Stop hook", () => {
+  let hub: Hub | undefined;
+  const clients: { close(): void }[] = [];
+  afterEach(async () => {
+    for (const c of clients.splice(0)) c.close();
+    await hub?.stop();
+  });
+
+  // The state dir holds a config whose chime command writes its kind into a file.
+  function chimeSetup() {
+    const dir = tempDir();
+    const marker = join(dir, "chimed.txt");
+    const script = join(dir, "chime.ts");
+    writeFileSync(script, `import { writeFileSync } from "fs";\nwriteFileSync(${JSON.stringify(marker)}, process.argv[2] ?? "");\n`);
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], turnEndChime: `"${process.execPath}" "${script}" {kind}` }));
+    return { dir, marker };
+  }
+
+  async function runStop(port: number, input: object, stateDir: string, socket = "pipe-S") {
+    const proc = Bun.spawn([process.execPath, STOP_HOOK], {
+      stdin: new Blob([JSON.stringify(input)]),
+      stdout: "pipe",
+      env: { ...process.env, TG_HUB_PORT: String(port), TG_HUB_STATE_DIR: stateDir, CLAUDE_CODE_MESSAGING_SOCKET: socket },
+    });
+    const stdout = await new Response(proc.stdout).text();
+    return { status: await proc.exited, stdout };
+  }
+
+  test("tells the window how the turn ended, without a sound of its own", async () => {
+    const port = await freePort();
+    const { dir, marker } = chimeSetup();
+    hub = new Hub({ port, sessionsFile: join(dir, "s.json"), outboxFile: join(dir, "o.json"), filesDir: join(dir, "files"), inboxDir: dir, api: undefined, config: () => ({ allowFrom: [], turnEndChime: "" }), idleMs: 60_000, log: memLogger(), onExit() {} });
+    hub.start();
+    const c = await wsClient(port, { type: "hello", v: PROTOCOL_VERSION, windowKey: "pipe-S", sessionId: "s", cwd: "C:\\p" });
+    clients.push(c);
+    const r = await runStop(port, { session_id: "s", hook_event_name: "Stop", last_assistant_message: "Готово. Дальше?", background_tasks: [{ id: "t" }] }, dir);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("");
+    expect(await c.next("turnEnd")).toEqual({ type: "turnEnd", final: true, kind: "ask" });
+    await Bun.sleep(300);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("with no hub a final turn plays the chime itself, an intermediate one does not", async () => {
+    const port = await freePort();
+    const { dir, marker } = chimeSetup();
+    const quiet = await runStop(port, { session_id: "s", last_assistant_message: "Жду.", background_tasks: [{ id: "t" }] }, dir);
+    expect(quiet.status).toBe(0);
+    await Bun.sleep(500);
+    expect(existsSync(marker)).toBe(false);
+    const loud = await runStop(port, { session_id: "s", last_assistant_message: "Готово." }, dir);
+    expect(loud.status).toBe(0);
+    expect(loud.stdout).toBe("");
+    const deadline = Date.now() + 5000;
+    while (!existsSync(marker) && Date.now() < deadline) await Bun.sleep(50);
+    expect(readFileSync(marker, "utf8")).toBe("done");
+  });
+
+  test("survives garbage input", async () => {
+    const port = await freePort();
+    const r = spawnSync(process.execPath, [STOP_HOOK], { input: "not json", env: { ...process.env, TG_HUB_PORT: String(port) }, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("");
+  });
+});
+
 describe("plugin packaging", () => {
   // The parts of the manifests the tests read.
   const marketplace = z.object({ name: z.string(), plugins: z.array(z.object({ name: z.string(), source: z.string() })) });
@@ -93,6 +160,8 @@ describe("plugin packaging", () => {
     const cmd = hooks.hooks.SessionStart[0].hooks[0].command;
     expect(cmd).toContain("src/hook/session-start.ts");
     expect(existsSync(HOOK)).toBe(true);
+    expect(hooks.hooks.Stop[0].hooks[0].command).toContain("src/hook/stop.ts");
+    expect(existsSync(STOP_HOOK)).toBe(true);
     // The function hooks module that runs commands from the topic.
     expect(hooks.modules).toEqual(["../src/mod/register.ts"]);
     expect(existsSync(join(PLUGIN, "hooks", hooks.modules[0]))).toBe(true);

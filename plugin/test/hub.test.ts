@@ -1086,6 +1086,27 @@ describe("hooks and transport", () => {
     expect(a.messages.some(m => m.type === "switchSession")).toBe(false);
   });
 
+  test("a turn-end decision goes to the window with the same messaging socket", async () => {
+    await startHub();
+    const a = await plugin("a", "pipe-A");
+    const b = await plugin("b", "pipe-B");
+    const post = (body: unknown) => fetch(`http://127.0.0.1:${port}/turn-end`, { method: "POST", body: JSON.stringify(body) });
+    expect((await post({ messagingSocket: "pipe-B", session_id: "b", final: true, kind: "ask" })).status).toBe(200);
+    expect(await b.next("turnEnd")).toEqual({ type: "turnEnd", final: true, kind: "ask" });
+    expect((await post({ messagingSocket: "pipe-B", session_id: "b", final: false })).status).toBe(200);
+    expect(await b.next("turnEnd", m => !m.final)).toEqual({ type: "turnEnd", final: false });
+    expect(a.messages.some(m => m.type === "turnEnd")).toBe(false);
+  });
+
+  test("a turn-end decision for an unknown window is 404, a bad body is 400", async () => {
+    await startHub();
+    await plugin("a", "pipe-A");
+    const post = (body: unknown) => fetch(`http://127.0.0.1:${port}/turn-end`, { method: "POST", body: JSON.stringify(body) });
+    expect((await post({ messagingSocket: "pipe-X", session_id: "x", final: true, kind: "done" })).status).toBe(404);
+    expect((await post({ messagingSocket: "pipe-A", session_id: "a", final: "yes" })).status).toBe(400);
+    expect((await post({ messagingSocket: "pipe-A", session_id: "a", final: true, kind: "loud" })).status).toBe(400);
+  });
+
   test("a hook that arrives before the window says hello is applied on hello", async () => {
     await startHub();
     await fetch(`http://127.0.0.1:${port}/hook`, {

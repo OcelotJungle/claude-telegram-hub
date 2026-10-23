@@ -11,6 +11,17 @@
         ]
       }
     ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/src/hook/stop.ts\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolBatch": [
       {
         "hooks": [

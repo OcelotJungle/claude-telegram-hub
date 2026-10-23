@@ -24,7 +24,7 @@ import { field } from "../shared/guards.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
-import { cleanupReport, commandReply, hookBody, limitsPost, pluginToHub, sendFilesMessage, sendMessage, terminateRequest } from "../shared/protocol-schema.ts";
+import { cleanupReport, commandReply, hookBody, limitsPost, pluginToHub, sendFilesMessage, sendMessage, terminateRequest, turnEndBody } from "../shared/protocol-schema.ts";
 import { tokens } from "../shared/tokens.ts";
 import { loadCards, saveCards } from "./cards.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
@@ -444,6 +444,17 @@ export class Hub {
       const body = hookBody.safeParse(await req.json().catch(() => undefined));
       if (!body.success) return new Response("bad hook body", { status: 400 });
       this.onHook(body.data);
+      return new Response("ok");
+    }
+    if (url.pathname === "/turn-end" && req.method === "POST") {
+      const body = turnEndBody.safeParse(await req.json().catch(() => undefined));
+      if (!body.success) return new Response("bad turn-end body", { status: 400 });
+      const { messagingSocket, session_id: sessionId, final, kind } = body.data;
+      let target: WS | undefined;
+      for (const ws of this.conns) if (ws.data.windowKey === messagingSocket) target = ws;
+      if (!target) return new Response("no window", { status: 404 });
+      this.log.info(`turn end of ${sessionId}: ${final ? `final ${kind ?? "done"}` : "intermediate"}`);
+      this.send(target, { type: "turnEnd", final, ...(kind ? { kind } : {}) });
       return new Response("ok");
     }
     if (url.pathname === "/commands" && req.method === "GET") {
