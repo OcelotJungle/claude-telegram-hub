@@ -6,7 +6,7 @@ import { z } from "zod";
 import { Hub } from "../src/hub/hub.ts";
 import { HOOK_NOTE_TOOL } from "../src/plugin/plugin.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
-import { freePort, memLogger, must, tempDir, wsClient } from "./helpers.ts";
+import { freePort, memLogger, must, tempDir, waitFor, wsClient } from "./helpers.ts";
 
 const PLUGIN = resolve(import.meta.dir, "..");
 const REPO = resolve(PLUGIN, "..");
@@ -72,14 +72,15 @@ describe("Stop hook", () => {
     await hub?.stop();
   });
 
-  // The state dir holds a config whose chime command writes its kind into a file.
+  // The state dir holds a config whose chime command adds its kind as a line to a file.
   function chimeSetup() {
     const dir = tempDir();
     const marker = join(dir, "chimed.txt");
     const script = join(dir, "chime.ts");
-    writeFileSync(script, `import { writeFileSync } from "fs";\nwriteFileSync(${JSON.stringify(marker)}, process.argv[2] ?? "");\n`);
+    writeFileSync(script, `import { appendFileSync } from "fs";\nappendFileSync(${JSON.stringify(marker)}, (process.argv[2] ?? "") + "\\n");\n`);
     writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], turnEndChime: `"${process.execPath}" "${script}" {kind}` }));
-    return { dir, marker };
+    const chimes = () => (existsSync(marker) ? readFileSync(marker, "utf8").split("\n").filter(l => l !== "") : []);
+    return { dir, chimes };
   }
 
   async function runStop(port: number, input: object, stateDir: string, socket = "pipe-S") {
@@ -94,7 +95,7 @@ describe("Stop hook", () => {
 
   test("tells the window how the turn ended, without a sound of its own", async () => {
     const port = await freePort();
-    const { dir, marker } = chimeSetup();
+    const { dir, chimes } = chimeSetup();
     hub = new Hub({ port, sessionsFile: join(dir, "s.json"), outboxFile: join(dir, "o.json"), filesDir: join(dir, "files"), inboxDir: dir, api: undefined, config: () => ({ allowFrom: [], turnEndChime: "" }), idleMs: 60_000, log: memLogger(), onExit() {} });
     hub.start();
     const c = await wsClient(port, { type: "hello", v: PROTOCOL_VERSION, windowKey: "pipe-S", sessionId: "s", cwd: "C:\\p" });
@@ -103,23 +104,22 @@ describe("Stop hook", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("");
     expect(await c.next("turnEnd")).toEqual({ type: "turnEnd", final: true, kind: "ask" });
-    await Bun.sleep(300);
-    expect(existsSync(marker)).toBe(false);
+    // A hook with no hub to tell chimes; by then a chime of the first would be heard too.
+    expect((await runStop(await freePort(), { session_id: "s", last_assistant_message: "Готово." }, dir)).status).toBe(0);
+    await waitFor(() => chimes().length > 0, 5000, "chime");
+    expect(chimes()).toEqual(["done"]);
   });
 
   test("with no hub a final turn plays the chime itself, an intermediate one does not", async () => {
     const port = await freePort();
-    const { dir, marker } = chimeSetup();
+    const { dir, chimes } = chimeSetup();
     const quiet = await runStop(port, { session_id: "s", last_assistant_message: "Жду.", background_tasks: [{ id: "t" }] }, dir);
     expect(quiet.status).toBe(0);
-    await Bun.sleep(500);
-    expect(existsSync(marker)).toBe(false);
     const loud = await runStop(port, { session_id: "s", last_assistant_message: "Готово." }, dir);
     expect(loud.status).toBe(0);
     expect(loud.stdout).toBe("");
-    const deadline = Date.now() + 5000;
-    while (!existsSync(marker) && Date.now() < deadline) await Bun.sleep(50);
-    expect(readFileSync(marker, "utf8")).toBe("done");
+    await waitFor(() => chimes().length > 0, 5000, "chime");
+    expect(chimes()).toEqual(["done"]);
   });
 
   test("survives garbage input", async () => {
