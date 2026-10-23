@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import { rename } from "fs/promises";
 import { join } from "path";
 import { cleanTranscript, KEEP_BACKUPS, restoreCleanup } from "../src/hub/skill-cleanup.ts";
 import { field } from "../src/shared/guards.ts";
@@ -74,46 +75,56 @@ function backups(d: string, id = SID): string[] {
     .sort();
 }
 
+// Read sizes that split lines, "\r\n" and multibyte characters at every
+// place; undefined is the default.
+const CHUNKS = [undefined, 1, 7, 64];
+
+function errno(code: string): Error {
+  return Object.assign(new Error(`${code}: rename refused`), { code });
+}
+
 describe("cleanTranscript", () => {
-  test("empties skills in every invoked_skills record and keeps every other byte", async () => {
-    const d = dir();
-    const path = join(d, `${SID}.jsonl`);
-    const bad = Buffer.concat([Buffer.from('{"type":"user","uuid":"u3","text":"'), Buffer.from([0xff, 0xfe, 0x80]), Buffer.from('"}')]);
-    const input = write(path, [
-      user("u1", "hi"),
-      "\r\n",
-      invoked("s1", skills("brainstorming", "writing-plans")),
-      "\r\n",
-      bad,
-      "\n",
-      attachment("a1", "skill_listing"),
-      "\n",
-      attachment("a2", "file"),
-      "\n",
-      user("u2", 'grep for "invoked_skills" please'),
-      "\n",
-      invoked("s2", skills("writing-plans")),
-    ]);
-    const res = await cleanTranscript(path, NOW);
-    expect(res.kind).toBe("cleaned");
-    const output = readFileSync(path);
-    const before = lines(input);
-    const after = lines(output);
-    expect(after.length).toBe(before.length);
-    for (let i = 0; i < before.length; i++) {
-      const b = before[i];
-      const a = after[i];
-      if (b === undefined || a === undefined) throw new Error("line missing");
-      if (i === 1 || i === 6) {
-        expect(uuidOf(a)).toEqual(uuidOf(b));
-        expect(skillsOf(a)).toEqual([]);
-        expect(a.at(-1) === 0x0d).toBe(b.at(-1) === 0x0d);
-      } else expect(a.equals(b)).toBe(true);
-    }
-    // The last line had no newline and still has none.
-    expect(output.at(-1)).not.toBe(0x0a);
-    expect(existsSync(`${path}.cleanup-tmp`)).toBe(false);
-  });
+  for (const chunkBytes of CHUNKS) {
+    test(`empties skills in every invoked_skills record and keeps every other byte (chunk ${chunkBytes ?? "default"})`, async () => {
+      const d = dir();
+      const path = join(d, `${SID}.jsonl`);
+      const bad = Buffer.concat([Buffer.from('{"type":"user","uuid":"u3","text":"'), Buffer.from([0xff, 0xfe, 0x80]), Buffer.from('"}')]);
+      const input = write(path, [
+        user("u1", "hi"),
+        "\r\n",
+        invoked("s1", skills("brainstorming", "writing-plans")),
+        "\r\n",
+        bad,
+        "\n",
+        attachment("a1", "skill_listing"),
+        "\n",
+        attachment("a2", "file"),
+        "\n",
+        user("u2", 'grep for "invoked_skills" please'),
+        "\n",
+        invoked("s2", skills("writing-plans")),
+      ]);
+      const res = await cleanTranscript(path, NOW, chunkBytes === undefined ? {} : { chunkBytes });
+      expect(res.kind).toBe("cleaned");
+      const output = readFileSync(path);
+      const before = lines(input);
+      const after = lines(output);
+      expect(after.length).toBe(before.length);
+      for (let i = 0; i < before.length; i++) {
+        const b = before[i];
+        const a = after[i];
+        if (b === undefined || a === undefined) throw new Error("line missing");
+        if (i === 1 || i === 6) {
+          expect(uuidOf(a)).toEqual(uuidOf(b));
+          expect(skillsOf(a)).toEqual([]);
+          expect(a.at(-1) === 0x0d).toBe(b.at(-1) === 0x0d);
+        } else expect(a.equals(b)).toBe(true);
+      }
+      // The last line had no newline and still has none.
+      expect(output.at(-1)).not.toBe(0x0a);
+      expect(existsSync(`${path}.cleanup-tmp`)).toBe(false);
+    });
+  }
 
   test("reports the last record's skills with their sizes", async () => {
     const d = dir();
@@ -197,5 +208,59 @@ describe("cleanTranscript", () => {
     expect(backups(d)).toEqual([1, 2, 3].map(i => `${SID}.cleanup-${NOW + i}.jsonl`));
     expect(existsSync(foreign)).toBe(true);
     expect(existsSync(path)).toBe(true);
+  });
+
+  test("a failed rename leaves the file as it was, with no temp file and no backup", async () => {
+    const d = dir();
+    const path = join(d, `${SID}.jsonl`);
+    const input = write(path, [user("u1", "x"), "\n", invoked("s1", skills("tdd")), "\n"]);
+    const io = { rename: () => Promise.reject(errno("EIO")) };
+    await expect(cleanTranscript(path, NOW, io)).rejects.toThrow("EIO");
+    expect(readFileSync(path).equals(input)).toBe(true);
+    expect(readdirSync(d)).toEqual([`${SID}.jsonl`]);
+  });
+
+  test("a rename Windows refuses twice is tried again", async () => {
+    const d = dir();
+    const path = join(d, `${SID}.jsonl`);
+    write(path, [user("u1", "x"), "\n", invoked("s1", skills("tdd")), "\n"]);
+    let tries = 0;
+    const io = {
+      rename: (from: string, to: string): Promise<void> => (++tries <= 2 ? Promise.reject(errno("EPERM")) : rename(from, to)),
+    };
+    expect((await cleanTranscript(path, NOW, io)).kind).toBe("cleaned");
+    expect(tries).toBe(3);
+    const record = lines(readFileSync(path))[1];
+    if (record === undefined) throw new Error("line missing");
+    expect(skillsOf(record)).toEqual([]);
+    expect(readdirSync(d).sort()).toEqual([`${SID}.cleanup-${NOW}.jsonl`, `${SID}.jsonl`].sort());
+  });
+
+  test("undecodable bytes in an invoked_skills record are an unknown format", async () => {
+    const d = dir();
+    const path = join(d, `${SID}.jsonl`);
+    const [head, tail] = invoked("s1", [{ name: "tdd", path: "p", content: "@@" }]).split("@@");
+    const input = write(path, [user("u1", "x"), "\n", head ?? "", Buffer.from([0xff, 0xfe]), tail ?? "", "\n"]);
+    expect(await cleanTranscript(path, NOW)).toEqual({ kind: "format", version: "1.0.0" });
+    expect(readFileSync(path).equals(input)).toBe(true);
+    expect(readdirSync(d)).toEqual([`${SID}.jsonl`]);
+  });
+
+  test("a transcript that grows before the rename is left alone", async () => {
+    const d = dir();
+    const path = join(d, `${SID}.jsonl`);
+    const input = write(path, [user("u1", "x"), "\n", invoked("s1", skills("tdd")), "\n"]);
+    const more = user("u2", "a session writes on") + "\n";
+    let calls = 0;
+    // The first look is pass 1's; before the second, a session appends.
+    const io = {
+      size: async (p: string): Promise<number> => {
+        if (++calls === 2) appendFileSync(p, more);
+        return statSync(p).size;
+      },
+    };
+    await expect(cleanTranscript(path, NOW, io)).rejects.toThrow("транскрипт дописывается — сессия уже открыта?");
+    expect(readFileSync(path).equals(Buffer.concat([input, Buffer.from(more)]))).toBe(true);
+    expect(readdirSync(d)).toEqual([`${SID}.jsonl`]);
   });
 });
