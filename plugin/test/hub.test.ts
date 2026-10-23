@@ -1835,6 +1835,9 @@ describe("commands", () => {
     const COMPACT_MS = 1200;
     // How long a window that does not end is waited for: 0.4 s.
     const STOP_MS = 400;
+    // A slow send, still under the test API's 300 ms attempt timeout so it
+    // is not sent twice.
+    const SLOW_SEND_MS = 200;
 
     const skill = (name: string, chars: number) => ({ name, content: "x".repeat(chars) });
     const record = (uuid: string, skills: { name: string; content: string }[]) =>
@@ -1879,14 +1882,23 @@ describe("commands", () => {
       const started = await reply(runner, t => t.startsWith("🧹 Сожму"));
       expect(started.text).toBe("🧹 Сожму контекст, когда агент закончит ход, и перезапущу сессию без накопившихся скиллов.");
       expect(started.disable_notification).toBe(true);
+      const startedId = fake.lastMessageId;
       await pollUntil(runner, () => terminated(a));
       expect(compacted).toStrictEqual(["keep the plan"]);
       await windowEnds(a);
       const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
       expect(summary.text).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k)");
       expect(summary.disable_notification).toBe(false);
+      // The summary takes the place of the "will compact" message.
+      await waitFor(() => fake.callsOf("deleteMessage").length);
+      expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
       await waitFor(() => spawned.length);
       expect(spawned).toEqual([STARTED]);
+      // The summary stands for the start notice.
+      await plugin(SID);
+      await Bun.sleep(SETTLE_MS);
+      expect(sentText(t => t.startsWith("🚀"))).toBeUndefined();
+      expect(fake.callsOf("editMessageText")).toEqual([]);
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
       expect(backups(folder).length).toBe(1);
       expect(sentText(t => t === "⏹ Сессия завершена")).toBeUndefined();
@@ -1913,10 +1925,15 @@ describe("commands", () => {
       const { runner } = mod(SID, undefined, undefined, async () => {
         throw new Error("boom");
       });
+      // The "will compact" message is still being sent when the failure comes.
+      fake.delayNext("sendMessage", SLOW_SEND_MS);
+      const startedId = fake.lastMessageId + 1;
       command("/cleanup");
       const failed = await reply(runner, t => t.startsWith("⚠️"));
       expect(failed.text).toBe("⚠️ /cleanup не выполнена: компакт не удался: boom. Сессию не трогаю");
       expect(failed.disable_notification).toBe(false);
+      await waitFor(() => fake.callsOf("deleteMessage").length);
+      expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
       await Bun.sleep(SETTLE_MS);
       expect(terminated(a)).toBe(false);
       expect(readFileSync(transcript, "utf8")).toBe(original);

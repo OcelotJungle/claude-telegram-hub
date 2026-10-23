@@ -146,7 +146,9 @@ type Held = { message: Message } | { inbound: Inbound };
 // reported before compacting, and whether the window is compacting or
 // exiting. noRelaunch: a /stop came meanwhile. held: topic messages for the
 // session from the start of the compact on, the window still open or not.
-// compactTimer: gives up on a compact the module never reports.
+// compactTimer: gives up on a compact the module never reports. startMsg:
+// the module's "will compact" reply once in the topic; ended: the outcome
+// replaces it, so it goes as soon as it is there.
 type Cleanup = {
   id: string;
   before?: number;
@@ -154,7 +156,13 @@ type Cleanup = {
   noRelaunch?: boolean;
   held: Held[];
   compactTimer?: ReturnType<typeof setTimeout>;
+  startMsg?: number;
+  ended?: boolean;
 };
+
+// The queue item of a /cleanup's first module reply, the "will compact" one:
+// reply 0 to the command, its first piece.
+const cleanupStartKey = (c: Cleanup) => `cmd-${c.id}.0#0`;
 
 export type HubOptions = {
   port: number;
@@ -289,6 +297,9 @@ export class Hub {
   // Messages of a /cleanup dropped by a second /stop, kept until the window
   // it ends is gone.
   private dyingHeld = new Map<string, Held[]>();
+  // The /cleanup a module reply belongs to, by its queue id: the first reply
+  // to the command is the "will compact" one.
+  private cleanupStarts = new Map<string, Cleanup>();
   // The start notices sent to a session's topic: Telegram message id and the
   // text it shows. They go once its agent starts working.
   private launchNotices = new Map<string, { id: number; text: string }[]>();
@@ -551,7 +562,7 @@ export class Hub {
         void this.finishCleanup(sid, cleanup, ws.data.exitingPid);
       } else {
         this.log.info(`window for session ${sid} closed while compacting for /cleanup; /cleanup dropped`);
-        this.notice(sid, "⚠️ Окно закрылось до конца компакта, /cleanup отменена", true);
+        this.cleanupOutcome(sid, cleanup, "⚠️ Окно закрылось до конца компакта, /cleanup отменена");
         this.dropCleanup(sid);
       }
     }
@@ -1153,6 +1164,11 @@ ${msg.text}`);
       const { text } = item;
       const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, text, item.silent, item.entities, item.buttons));
       if (item.id.startsWith(LAUNCH_NOTICE)) this.launchNoticeSent(sessionId, sent.message_id, text);
+      const cleanup = this.cleanupStarts.get(item.id);
+      if (cleanup) {
+        cleanup.startMsg = sent.message_id;
+        if (cleanup.ended) this.dropCleanupStart(item.id, cleanup);
+      }
       return;
     }
     const lost = queued.filter(f => !existsSync(f.path));
@@ -1532,10 +1548,29 @@ ${msg.text}`);
     c.compactTimer = setTimeout(() => {
       if (this.cleanups.get(sessionId) !== c || c.phase !== "compacting") return;
       this.log.warn(`/cleanup of session ${sessionId}: no compact report in ${ms} ms; /cleanup dropped`);
-      this.notice(sessionId, `⚠️ /cleanup не дождалась компакта за ${ms / MS_PER_MINUTE} мин, отменена. Сессию не трогаю`, true);
+      this.cleanupOutcome(sessionId, c, `⚠️ /cleanup не дождалась компакта за ${ms / MS_PER_MINUTE} мин, отменена. Сессию не трогаю`);
       this.dropCleanup(sessionId);
     }, ms);
     this.cleanups.set(sessionId, c);
+    this.cleanupStarts.set(cleanupStartKey(c), c);
+  }
+
+  // The outcome of a /cleanup takes the place of its "will compact" message:
+  // that one goes and the outcome comes loud, as a new message. One still
+  // queued or being sent goes once it is in the topic.
+  private cleanupOutcome(sessionId: string, c: Cleanup, text: string): void {
+    c.ended = true;
+    if (c.startMsg !== undefined) this.dropCleanupStart(cleanupStartKey(c), c);
+    this.notice(sessionId, text, true);
+  }
+
+  private dropCleanupStart(key: string, c: Cleanup): void {
+    this.cleanupStarts.delete(key);
+    const api = this.opts.api;
+    const groupId = this.opts.config().groupId;
+    if (c.startMsg === undefined || !api || !groupId) return;
+    const id = c.startMsg;
+    api.deleteMessage(groupId, id).catch(e => this.log.warn(`deleting the /cleanup notice ${id} failed: ${e}`));
   }
 
   // The first /stop only keeps the session from starting again; a second one
@@ -1560,6 +1595,8 @@ ${msg.text}`);
   private dropCleanup(sessionId: string, windowDies = false): void {
     const c = this.cleanups.get(sessionId);
     if (c) clearTimeout(c.compactTimer);
+    // An ended one keeps its entry until its "will compact" message is there.
+    if (c && !c.ended) this.cleanupStarts.delete(cleanupStartKey(c));
     this.cleanups.delete(sessionId);
     const queued = this.commands.get(sessionId) ?? [];
     for (const e of queued.filter(e => e.cmd.name === "cleanup")) clearTimeout(e.timer);
@@ -1588,7 +1625,7 @@ ${msg.text}`);
     clearTimeout(c.compactTimer);
     if (error !== undefined) {
       this.log.warn(`/cleanup of session ${sessionId}: the compact failed: ${error}`);
-      this.notice(sessionId, `⚠️ /cleanup не выполнена: компакт не удался: ${error}. Сессию не трогаю`, true);
+      this.cleanupOutcome(sessionId, c, `⚠️ /cleanup не выполнена: компакт не удался: ${error}. Сессию не трогаю`);
       return this.dropCleanup(sessionId);
     }
     this.log.info(`/cleanup of session ${sessionId}: compacted${before === undefined ? "" : ` from ${before} tokens`}; ending the window`);
@@ -1615,14 +1652,14 @@ ${msg.text}`);
     if (this.connOf(sessionId)) {
       this.cleanups.delete(sessionId);
       this.log.warn(`/cleanup of session ${sessionId}: a window of the session connected again; the transcript untouched, ${c.held.length} held message(s) go to it`);
-      this.notice(sessionId, "⚠️ Сессия снова открыта, скиллы не убраны", true);
+      this.cleanupOutcome(sessionId, c, "⚠️ Сессия снова открыта, скиллы не убраны");
       return this.whenReady(() => this.sendHeld(sessionId, c.held));
     }
     if (pid !== undefined && alive(pid)) {
       this.cleanups.delete(sessionId);
       this.log.warn(`/cleanup of session ${sessionId}: Claude Code ${pid} did not exit; the transcript untouched, ${c.held.length} held message(s) dropped`);
       const lost = c.held.length ? ` Не доставлено сообщений из темы: ${c.held.length}.` : "";
-      return this.notice(sessionId, `⚠️ Claude Code не завершился, скиллы не убраны, сессию не запускаю${lost}`, true);
+      return this.cleanupOutcome(sessionId, c, `⚠️ Claude Code не завершился, скиллы не убраны, сессию не запускаю${lost}`);
     }
     const path = this.transcriptOf(sessionId);
     let text: string;
@@ -1645,14 +1682,14 @@ ${msg.text}`);
     // A window came back during the edit: it is not started a second time.
     if (this.connOf(sessionId)) {
       this.log.warn(`/cleanup of session ${sessionId}: a window of the session connected during the edit; not starting it, ${c.held.length} held message(s) go to it`);
-      this.notice(sessionId, text, true);
+      this.cleanupOutcome(sessionId, c, text);
       return this.whenReady(() => this.sendHeld(sessionId, c.held));
     }
     // Messages that came meanwhile still reach the agent, as a message to a
-    // stopped session starts it.
+    // stopped session starts it. The summary stands for the start notice.
     const relaunch = !c.noRelaunch || c.held.length > 0;
-    this.notice(sessionId, relaunch ? text : text + CLEANUP_STOPPED, true);
-    if (relaunch) this.launch(sessionId, undefined, c.held);
+    this.cleanupOutcome(sessionId, c, relaunch ? text : text + CLEANUP_STOPPED);
+    if (relaunch) this.launch(sessionId, undefined, c.held, false);
     else this.log.info(`/cleanup of session ${sessionId}: done; not starting it again after /stop`);
   }
 
@@ -1665,8 +1702,9 @@ ${msg.text}`);
 
   // Runs the configured command for a session without a window: the account
   // given, else the one it ran on last; with neither it does not start. The
-  // messages wait until the session connects; one start at a time.
-  private launch(sessionId: string, account: string | undefined, held: Held[]): void {
+  // messages wait until the session connects; one start at a time. announce:
+  // false leaves out the start notice; a failure is told all the same.
+  private launch(sessionId: string, account: string | undefined, held: Held[], announce = true): void {
     const cfg = this.opts.config();
     const rec = this.store.get(sessionId);
     if (!rec) return;
@@ -1705,7 +1743,7 @@ ${msg.text}`);
     }, sec * MS_PER_SECOND);
     this.launches.set(sessionId, { account: acc, held, timer });
     this.launchEnds.delete(sessionId);
-    this.launchNotice(sessionId, `🚀 Запускаю сессию (аккаунт ${acc})…`);
+    if (announce) this.launchNotice(sessionId, `🚀 Запускаю сессию (аккаунт ${acc})…`);
   }
 
   // A window of the session connected: a start it waited for is done, and
