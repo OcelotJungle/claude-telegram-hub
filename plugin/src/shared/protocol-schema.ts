@@ -1,7 +1,7 @@
 // Runtime checks of the protocol messages, typed against protocol.ts: a
 // message type changed on one side and not here fails the type check.
 // protocol.ts itself has no imports, so the function hooks module can use it.
-import type { CommandReply, EnableResult, HookBody, HubToPlugin, LimitsPost, PluginToHub, QueuedFile, RateLimit, TerminateRequest } from "./protocol.ts";
+import type { CleanupReport, CommandReply, EnableResult, HookBody, HubToPlugin, LimitsPost, PluginToHub, QueuedFile, RateLimit, TerminateRequest } from "./protocol.ts";
 
 import { z } from "zod";
 
@@ -60,6 +60,14 @@ export const hookBody: z.ZodType<HookBody> = z.object({
 export const commandReply: z.ZodType<CommandReply> = z.object({ sessionId: z.string(), id: z.string(), text: z.string(), notify: z.boolean().catch(false) });
 
 export const terminateRequest: z.ZodType<TerminateRequest> = z.object({ sessionId: z.string(), id: z.string() });
+
+export const cleanupReport: z.ZodType<CleanupReport> = z.object({
+  sessionId: z.string(),
+  id: z.string(),
+  before: z.number().optional(),
+  after: z.number().optional(),
+  error: z.string().optional(),
+});
 
 const rateLimit: z.ZodType<RateLimit> = z.object({ kind: z.string(), percentUsed: z.number(), resetsAt: z.string().optional() });
 

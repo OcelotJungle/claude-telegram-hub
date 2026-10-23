@@ -173,6 +173,104 @@ describe("limits shared through the hub", () => {
   });
 });
 
+describe("/cleanup", () => {
+  const STARTED = "🧹 Сожму контекст, когда агент закончит ход, и перезапущу сессию без накопившихся скиллов.";
+
+  function runner(commands: { id: string; name: string; args: string }[], compact: (args: string | undefined) => Promise<{ tokensBefore?: number; tokensAfter?: number; skip?: string }>) {
+    const posted: { path: string; body: unknown }[] = [];
+    const urls: string[] = [];
+    const compacted: (string | undefined)[] = [];
+    let queue = commands;
+    const r = new Runner("http://hub", {
+      sessionId: async () => "s",
+      usage: async () => usage({ tokens: 1 }),
+      run: async () => ({}),
+      compact: async args => {
+        compacted.push(args);
+        return compact(args);
+      },
+      http: async (url, init) => {
+        if (init?.method === "POST") {
+          posted.push({ path: new URL(url).pathname, body: JSON.parse(init.body ?? "null") });
+          return { status: 200, text: "ok" };
+        }
+        urls.push(url);
+        const list = queue;
+        queue = [];
+        return { status: 200, text: JSON.stringify(list) };
+      },
+      now: () => NOW,
+    });
+    const polls = async (n: number) => {
+      for (let i = 0; i < n; i++) {
+        await r.poll();
+        await Bun.sleep(10);
+      }
+    };
+    return { r, posted, urls, compacted, polls };
+  }
+
+  test("cleanup compacts with its instructions and reports the sizes to the hub, without a ✅ reply", async () => {
+    const s = runner([{ id: "c1", name: "cleanup", args: "keep the plan" }], async () => ({ tokensBefore: 210_000, tokensAfter: 24_000 }));
+    await s.polls(5);
+    expect(s.compacted).toEqual(["keep the plan"]);
+    expect(s.posted).toEqual([
+      { path: "/reply", body: { sessionId: "s", id: "c1.0", text: STARTED, notify: false } },
+      { path: "/cleanup", body: { sessionId: "s", id: "c1", before: 210_000, after: 24_000 } },
+    ]);
+  });
+
+  test("cleanup reports the compact error and posts no terminate", async () => {
+    const failing = runner([{ id: "c1", name: "cleanup", args: "" }], async () => {
+      throw new Error("boom");
+    });
+    await failing.polls(8);
+    expect(failing.compacted).toEqual([undefined, undefined, undefined]);
+    expect(failing.posted.map(p => p.path)).toEqual(["/reply", "/cleanup"]);
+    expect(failing.posted[1]?.body).toEqual({ sessionId: "s", id: "c1", error: "boom" });
+
+    const skipped = runner([{ id: "c2", name: "cleanup", args: "" }], async () => ({ skip: "nothing to compact" }));
+    await skipped.polls(5);
+    expect(skipped.posted.map(p => p.path)).toEqual(["/reply", "/cleanup"]);
+    expect(skipped.posted[1]?.body).toEqual({ sessionId: "s", id: "c2", error: "nothing to compact" });
+  });
+
+  test("cleanup waits for a running compaction first", async () => {
+    let release = () => {};
+    const held = new Promise<void>(done => (release = done));
+    const s = runner(
+      [
+        { id: "c1", name: "compact", args: "first" },
+        { id: "c2", name: "cleanup", args: "second" },
+      ],
+      async args => {
+        if (args === "first") await held;
+        return { tokensBefore: 100_000, tokensAfter: 10_000 };
+      },
+    );
+    await s.polls(5);
+    expect(s.compacted).toEqual(["first"]);
+    expect(s.posted.map(p => p.path)).toEqual(["/reply", "/reply"]);
+    release();
+    await s.polls(5);
+    expect(s.compacted).toEqual(["first", "second"]);
+    expect(s.posted.map(p => [p.path, field(p.body, "id")])).toEqual([
+      ["/reply", "c1.0"],
+      ["/reply", "c2.0"],
+      ["/reply", "c1.1"],
+      ["/cleanup", "c2"],
+    ]);
+  });
+
+  test("the poll asks for cleanup", async () => {
+    const s = runner([], async () => ({}));
+    await s.polls(1);
+    const url = new URL(s.urls[0] ?? "http://x");
+    expect(url.searchParams.get("stop")).toBe("1");
+    expect(url.searchParams.get("cleanup")).toBe("1");
+  });
+});
+
 describe("/compact argument", () => {
   test("a token count or auto sets the autocompact window", () => {
     expect(["333000", "333k", "333K", "1m", "1.5m", "auto", "AUTO"].map(autocompactArg)).toEqual(["333000", "333000", "333000", "1000000", "1500000", "auto", "auto"]);

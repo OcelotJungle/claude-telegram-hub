@@ -1,7 +1,7 @@
 // What the plugin's function hooks module does with commands from the topic.
 // The module runs inside Claude Code with no Node: everything outside comes
 // in as Deps (the engine's `$` calls), so this file imports nothing but types.
-import type { LimitsReading, RateLimit, TopicCommand } from "../shared/protocol.ts";
+import type { CleanupReport, LimitsReading, RateLimit, TopicCommand } from "../shared/protocol.ts";
 
 // /stop of a session with more context than this compacts it first, so a
 // resume does not cache all of it again.
@@ -34,6 +34,10 @@ export type Usage = {
 // The part of the engine's session.compact result the report needs.
 export type Compaction = { tokensBefore?: number; tokensAfter?: number; skip?: string };
 
+// How a compaction ended: the engine's result, or the error of its last try.
+type Outcome = { ok: Compaction } | { error: string };
+type Target = { sessionId: string; id: string };
+
 export type Deps = {
   sessionId(): Promise<string>;
   usage(): Promise<Usage>;
@@ -48,13 +52,15 @@ export type Deps = {
 
 export class Runner {
   private polling = false;
-  // Replies and terminate requests the hub has not taken yet, oldest first;
+  // Replies, terminate requests and cleanup reports the hub has not taken yet, oldest first;
   // retried on every poll.
   private unsent: { path: string; body: string }[] = [];
   private flushing: Promise<void> | undefined;
   // Compactions asked for from the topic, oldest first, each run once no
   // turn runs; `failed` counts the tries that failed with none running.
-  private compactions: { to: { sessionId: string; id: string }; args: string; failed: number; done: () => void }[] = [];
+  // `report` hands the outcome on: a reply to /compact, a report to the hub
+  // for /cleanup.
+  private compactions: { args: string; failed: number; report: (o: Outcome) => Promise<void>; done: () => void }[] = [];
   private compacting = false;
   // Whether a main-loop turn runs, from the module's turn hooks.
   private turnRuns = false;
@@ -76,7 +82,7 @@ export class Runner {
     try {
       await this.flush();
       const sessionId = await this.deps.sessionId();
-      const res = await this.deps.http(`${this.base}/commands?session=${encodeURIComponent(sessionId)}&stop=1`);
+      const res = await this.deps.http(`${this.base}/commands?session=${encodeURIComponent(sessionId)}&stop=1&cleanup=1`);
       if (res.status !== 200) return;
       for (const cmd of topicCommands(res.text)) void this.execute(sessionId, cmd);
     } catch {
@@ -116,6 +122,7 @@ export class Runner {
       return;
     }
     if (cmd.name === "stop") return this.stop(to);
+    if (cmd.name === "cleanup") return this.cleanup(to, cmd.args);
     const window = autocompactArg(cmd.args);
     if (window !== undefined) {
       try {
@@ -130,14 +137,35 @@ export class Runner {
   }
 
   // Resolves once the compaction is over and its result is handed to the hub.
-  private async compact(to: { sessionId: string; id: string }, args: string, started: string): Promise<void> {
+  private async compact(to: Target, args: string, started: string): Promise<void> {
     const run = (async () => {
       await this.reply(to, started, false);
-      await new Promise<void>(done => this.compactions.push({ to, args, failed: 0, done }));
+      const report = (o: Outcome) => this.reply(to, "ok" in o ? compactionText(o.ok) : `⚠️ Компакт не выполнен: ${o.error}`, true);
+      await new Promise<void>(done => this.compactions.push({ args, failed: 0, report, done }));
     })();
     this.running.add(run);
     await run;
     this.running.delete(run);
+  }
+
+  // /cleanup: compacts after the compactions already asked for, then tells
+  // the hub the sizes or the error. The hub ends the window, empties the
+  // remembered skills and starts the session again.
+  private async cleanup(to: Target, args: string): Promise<void> {
+    await this.reply(to, "🧹 Сожму контекст, когда агент закончит ход, и перезапущу сессию без накопившихся скиллов.", false);
+    await Promise.all(this.running);
+    const report = async (o: Outcome) => {
+      const body: CleanupReport = { sessionId: to.sessionId, id: to.id };
+      if ("error" in o) body.error = o.error;
+      else if (o.ok.skip !== undefined) body.error = o.ok.skip;
+      else {
+        if (o.ok.tokensBefore !== undefined) body.before = o.ok.tokensBefore;
+        if (o.ok.tokensAfter !== undefined) body.after = o.ok.tokensAfter;
+      }
+      this.unsent.push({ path: "/cleanup", body: JSON.stringify(body) });
+      await this.flush();
+    };
+    await new Promise<void>(done => this.compactions.push({ args, failed: 0, report, done }));
   }
 
   // The engine's own result, not the session.compact hook: the compact
@@ -147,16 +175,16 @@ export class Runner {
     const head = this.compactions[0];
     if (!head || this.compacting || this.turnRuns) return;
     this.compacting = true;
-    let text: string | undefined;
+    let outcome: Outcome | undefined;
     try {
-      text = compactionText(await this.deps.compact(head.args || undefined));
+      outcome = { ok: await this.deps.compact(head.args || undefined) };
     } catch (e) {
       // Failed with a turn running, or one just starting: tried again.
-      if (!this.turnRuns && ++head.failed >= COMPACT_TRIES) text = `⚠️ Компакт не выполнен: ${message(e)}`;
+      if (!this.turnRuns && ++head.failed >= COMPACT_TRIES) outcome = { error: message(e) };
     }
-    if (text !== undefined) {
+    if (outcome !== undefined) {
       this.compactions.shift();
-      await this.reply(head.to, text, true);
+      await head.report(outcome);
       head.done();
     }
     this.compacting = false;
@@ -315,5 +343,5 @@ function isRateLimit(v: unknown): v is RateLimit {
 function isTopicCommand(v: unknown): v is TopicCommand {
   if (typeof v !== "object" || v === null) return false;
   const name = "name" in v ? v.name : undefined;
-  return "id" in v && typeof v.id === "string" && (name === "info" || name === "compact" || name === "stop") && "args" in v && typeof v.args === "string";
+  return "id" in v && typeof v.id === "string" && (name === "info" || name === "compact" || name === "stop" || name === "cleanup") && "args" in v && typeof v.args === "string";
 }
