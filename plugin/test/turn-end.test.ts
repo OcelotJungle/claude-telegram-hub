@@ -22,6 +22,16 @@ describe("hasQuestion", () => {
     expect(hasQuestion("Смотри https://x.y/?q=1")).toBe(false);
   });
 
+  test("a ? right at the end of a URL asks", () => {
+    expect(hasQuestion("see https://x.y?")).toBe(true);
+    expect(hasQuestion("Глянешь https://x.y/a? Потом.")).toBe(true);
+  });
+
+  test("an unclosed fenced block is dropped to the end of the text", () => {
+    expect(hasQuestion("Готово.\n\n```js\nconst a = b ? 1 : 2;")).toBe(false);
+    expect(hasQuestion("Так подойдёт?\n\n```\ncut ? off")).toBe(true);
+  });
+
   test("a code block after the question paragraph: the question paragraph is the last non-empty one", () => {
     expect(hasQuestion("Так подойдёт?\n\n```\ncode\n```\n")).toBe(true);
   });
