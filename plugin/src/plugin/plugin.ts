@@ -54,9 +54,13 @@ const HUB_TELEGRAM_TIMEOUT_MS = 150_000;
 const WAITS_FOR_USER = new Set(["AskUserQuestion"]);
 // A topic message starting with this stops the agent's turn and takes its place.
 const INTERRUPT_PREFIX = "!";
-// With the mode off, a finished turn chimes in the terminal only if it ran
-// at least this long (a question always chimes).
+// With the mode off, a finished turn chimes in the terminal only if this
+// long has passed since the user last typed in the terminal (a question
+// always chimes).
 export const CHIME_MIN_TURN_MS = 30_000;
+
+// A bad turnEndChime in config.json is logged once per process.
+let chimeConfigWarned = false;
 
 // A topic message that interrupts the agent, in the <channel> tag Claude Code
 // would have put it in.
@@ -101,6 +105,17 @@ export type PluginOptions = {
   chime?: (kind: ChimeKind) => void;
   now?: () => number;
 };
+
+// Plays the turnEndChime of config.json; a bad one is logged once per
+// process and the default sound plays instead.
+export function playConfiguredChime(kind: ChimeKind, log: Logger, play: (template: string, kind: ChimeKind) => void = playChime): void {
+  const config = loadConfig();
+  if (config.turnEndChimeError && !chimeConfigWarned) {
+    chimeConfigWarned = true;
+    log.warn(`${config.turnEndChimeError}; playing the default sound`);
+  }
+  play(config.turnEndChime, kind);
+}
 
 // Our own tools never make the text before them "intermediate".
 export function isOwnTool(name: string): boolean {
@@ -147,8 +162,8 @@ export class PluginCore {
   // The agent is in a turn and not waiting for the user.
   private busy = false;
   private now: () => number;
-  // When the current turn began (busy went on).
-  private turnStartedAt = 0;
+  // When the user last typed in the terminal of this window.
+  private lastInputAt: number | undefined;
   // Topic messages reach the session one after another, in the order they came.
   private inbound = Promise.resolve();
   enabled = false;
@@ -158,7 +173,7 @@ export class PluginCore {
     this.cwd = opts.cwd;
     this.log = opts.log;
     this.now = opts.now ?? Date.now;
-    this.relay = new Relay({ isOwnTool, now: this.now });
+    this.relay = new Relay({ isOwnTool, onFinalClose: kind => this.turnClosed(kind), now: this.now });
     this.transcriptPath = transcriptPathFor(opts.sessionId, opts.cwd, opts.configDir);
     this.client = new HubClient({
       port: opts.port,
@@ -343,6 +358,7 @@ export class PluginCore {
   private onRecord(rec: unknown): void {
     for (const ev of parseRecord(rec).flatMap(e => this.settleApiError(e))) {
       this.flush(this.relay.feed(ev));
+      if (ev.kind === "terminal_input") this.lastInputAt = this.now();
       if (ev.kind === "terminal_input" && this.enabled) {
         this.client.send({ type: "terminalInput" });
         this.setEnabled(false);
@@ -378,7 +394,7 @@ export class PluginCore {
     const pending = this.apiError;
     if (ev.kind === "turn_closed") {
       this.apiError = undefined;
-      return pending === undefined ? [] : [{ kind: "turn_end", messageId: pending, cut: true }];
+      return pending === undefined ? [ev] : [{ kind: "turn_end", messageId: pending, cut: true }, ev];
     }
     if ("messageId" in ev) this.apiError = undefined;
     return [ev];
@@ -388,7 +404,6 @@ export class PluginCore {
   private setBusy(busy: boolean): void {
     if (busy === this.busy) return;
     this.busy = busy;
-    if (busy) this.turnStartedAt = this.now();
     this.client.send({ type: "busy", busy });
   }
 
@@ -434,22 +449,24 @@ export class PluginCore {
     this.flush(this.relay.setEnabled(on));
   }
 
-  // The Stop hook's verdict. With the mode on the relay sends the text loud
-  // and the phone is the signal; with it off the terminal chimes.
+  // The Stop hook's verdict. The transcript is read first: the hook may come
+  // before the tailer has seen the end of the turn.
   private onTurnEnd(final: boolean, kind: ChimeKind | undefined): void {
-    if (!final) {
-      this.relay.decide({ final: false });
-      return;
-    }
-    const k = kind ?? "done";
-    this.relay.decide({ final: true, kind: k });
+    this.tailer?.pollNow();
+    this.flush(this.relay.decide(final ? { final: true, kind: kind ?? "done" } : { final: false }));
+  }
+
+  // A turn closed as final. With the mode on the relay sent the text loud and
+  // the phone is the signal; with it off the terminal chimes: always on a
+  // question, on "done" only when the user has not typed here for a while.
+  private turnClosed(kind: ChimeKind): void {
     if (this.enabled) return;
-    if (k === "ask" || this.now() - this.turnStartedAt >= CHIME_MIN_TURN_MS) {
-      try {
-        (this.opts.chime ?? (kk => playChime(loadConfig().turnEndChime, kk)))(k);
-      } catch (e) {
-        this.log.warn(`turn-end chime failed: ${e}`);
-      }
+    if (kind === "done" && this.lastInputAt !== undefined && this.now() - this.lastInputAt < CHIME_MIN_TURN_MS) return;
+    try {
+      if (this.opts.chime) this.opts.chime(kind);
+      else playConfiguredChime(kind, this.log);
+    } catch (e) {
+      this.log.warn(`turn-end chime failed: ${e}`);
     }
   }
 

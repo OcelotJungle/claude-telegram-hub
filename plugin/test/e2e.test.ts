@@ -99,16 +99,17 @@ test("a window talks to Telegram through a hub it started itself", async () => {
   expect(res.content[0]).toMatchObject({ text: expect.stringContaining("e2e-proj · E2E") });
   expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: "e2e-proj · E2E" }]);
 
-  // What the Stop hook reports when the turn ends.
+  appendFileSync(
+    transcript,
+    JSON.stringify({ type: "assistant", message: { id: "m1", role: "assistant", content: [{ type: "text", text: "Готово!" }], stop_reason: "end_turn" } }) + "\n",
+  );
+  // What the Stop hook reports when the turn ends; then Claude Code closes the turn.
   const turnEnd = await fetch(`http://127.0.0.1:${port}/turn-end`, {
     method: "POST",
     body: JSON.stringify({ messagingSocket: "\\\\.\\pipe\\LOCAL\\cc-msg-e2e", session_id: SID, final: true, kind: "done" }),
   });
   expect(turnEnd.status).toBe(200);
-  appendFileSync(
-    transcript,
-    JSON.stringify({ type: "assistant", message: { id: "m1", role: "assistant", content: [{ type: "text", text: "Готово!" }], stop_reason: "end_turn" } }) + "\n",
-  );
+  appendFileSync(transcript, JSON.stringify({ type: "system", subtype: "turn_duration", durationMs: 1000 }) + "\n");
   await waitFor(() => fake.texts().length === 1, 5000, "final message");
   expect(fake.texts()[0]).toMatchObject({ message_thread_id: 100, text: "Готово!", disable_notification: false });
 

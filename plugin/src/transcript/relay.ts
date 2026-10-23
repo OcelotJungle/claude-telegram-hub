@@ -1,36 +1,49 @@
 import type { TurnEnd } from "../hook/turn-end.ts";
 import type { TranscriptEvent } from "./parse.ts";
 
-// How long the transcript must stay quiet after the Stop hook's decision, so
-// the last records of the turn have been read.
-export const TURN_SETTLE_MS = 1500;
-// How long a turn that ended in the transcript waits for the decision before
-// it is closed as a final one.
+// How long an ended turn waits for what is missing before it is closed: the
+// decision after turn_closed, or, with no turn_closed, quiet from the main
+// agent and no new decision.
 export const TURN_DECISION_MS = 5000;
 const REMEMBERED_ENDS = 50;
 
 export type Outgoing = { text: string; notify: boolean };
+type FinalKind = Extract<TurnEnd, { final: true }>["kind"];
 
 // Decides which assistant text goes to the topic and whether it notifies.
 // A text followed by a tool call is intermediate (silent, sent at once); the
-// last text of a turn is held until the Stop hook's decision arrives: a final
-// turn sends it with a notification, any other turn end sends it silently.
+// last text of a turn is held until the turn is really over: a final turn
+// sends it with a notification, any other turn end sends it silently.
 //
 // Every record of an end_turn message carries the stop reason, including the
-// thinking record written before the final text, so a turn end is only closed
-// on idle() (a poll that brought no new records, after the decision and the
-// quiet period) or when an event of another message arrives.
+// thinking record written before the final text, so turn_end only marks the
+// turn as ending. It closes on turn_closed (written once, after all Stop
+// hooks) together with the Stop hook's decision, on idle() when one of them
+// is overdue, or silently when a record of another message shows the turn
+// went on.
 export class Relay {
   private enabled = false;
   private pending: string | undefined;
   private ending: string | undefined;
-  private endingAt = 0;
+  // When turn_closed came for the ending turn.
+  private closedAt: number | undefined;
   private ended: string[] = [];
   private decision: { d: TurnEnd; at: number } | undefined;
-  private lastRecordAt = 0;
+  // When the last record of a main-agent message came.
+  private lastMessageAt = 0;
+  // The last turn is closed and no new message has started since: a decision
+  // arriving now is late.
+  private closed = false;
   private now: () => number;
 
-  constructor(private opts: { isOwnTool(name: string): boolean; now?: () => number }) {
+  constructor(
+    private opts: {
+      isOwnTool(name: string): boolean;
+      // A turn closed as final by the Stop hook's decision, whatever the mode.
+      onFinalClose?(kind: FinalKind): void;
+      now?: () => number;
+    },
+  ) {
     this.now = opts.now ?? Date.now;
   }
 
@@ -43,24 +56,27 @@ export class Relay {
       else if (this.pending !== undefined) out = [{ text: this.pending, notify: false }];
     }
     this.enabled = on;
-    if (!on) {
-      this.pending = undefined;
-      this.decision = undefined;
-    }
+    if (!on) this.pending = undefined;
     return out;
   }
 
   // The Stop hook's verdict on how the turn ended. A later one replaces an
-  // earlier one (another Stop hook can continue the turn).
-  decide(d: TurnEnd): void {
+  // earlier one (another Stop hook can continue the turn); one for a turn
+  // already closed is dropped.
+  decide(d: TurnEnd): Outgoing[] {
+    if (this.closed) return [];
     this.decision = { d, at: this.now() };
+    return this.ending !== undefined && this.closedAt !== undefined ? this.closeBy(d) : [];
   }
 
   feed(ev: TranscriptEvent): Outgoing[] {
-    this.lastRecordAt = this.now();
     const out: Outgoing[] = [];
     if (this.ending !== undefined && ("messageId" in ev ? ev.messageId !== this.ending : ev.kind === "terminal_input")) {
       out.push(...this.close(false));
+    }
+    if ("messageId" in ev) {
+      this.lastMessageAt = this.now();
+      if (!this.ended.includes(ev.messageId)) this.closed = false;
     }
     switch (ev.kind) {
       case "terminal_input":
@@ -83,7 +99,17 @@ export class Relay {
       case "turn_end":
         if (!this.ended.includes(ev.messageId)) {
           this.ending = ev.messageId;
-          this.endingAt = this.now();
+          this.closedAt = undefined;
+        }
+        break;
+      case "turn_closed":
+        if (this.ending === undefined) {
+          this.closed = true;
+          this.decision = undefined;
+        } else if (this.decision) {
+          out.push(...this.closeBy(this.decision.d));
+        } else {
+          this.closedAt = this.now();
         }
         break;
     }
@@ -99,22 +125,34 @@ export class Relay {
     return out;
   }
 
-  // Closes an ended turn once its decision has settled, or once the decision
-  // is overdue (then the turn counts as a final one).
+  // Closes an ended turn whose decision is overdue: 5 s after turn_closed, or,
+  // with no turn_closed, 5 s with no main-agent records and no new decision.
   idle(): Outgoing[] {
     if (this.ending === undefined) return [];
     const now = this.now();
-    if (this.decision) {
-      return now - Math.max(this.decision.at, this.lastRecordAt) >= TURN_SETTLE_MS ? this.close(this.decision.d.final) : [];
-    }
-    return now - this.endingAt >= TURN_DECISION_MS ? this.close(true) : [];
+    if (this.closedAt !== undefined) return now - this.closedAt >= TURN_DECISION_MS ? this.closeBy(undefined) : [];
+    const quietSince = Math.max(this.lastMessageAt, this.decision?.at ?? 0);
+    return now - quietSince >= TURN_DECISION_MS ? this.closeBy(this.decision?.d) : [];
   }
 
-  // The window is going away or the session changes: nothing more will come,
-  // so the turn is closed by its decision if there is one, else silently.
+  // The window is going away or the session changes: nothing more will come.
+  // An ended turn is closed by its decision, if any; text mid-turn goes
+  // silently and its decision is dropped. Nothing chimes.
   endTurn(): Outgoing[] {
-    if (this.ending === undefined && this.decision === undefined) return [];
-    return this.close(this.decision?.d.final === true);
+    if (this.ending !== undefined) return this.close(this.decision?.d.final === true);
+    const out: Outgoing[] = this.enabled && this.pending !== undefined ? [{ text: this.pending, notify: false }] : [];
+    this.pending = undefined;
+    this.decision = undefined;
+    return out;
+  }
+
+  // The turn is really over: by the decision, or, with none, as a final one
+  // that does not report (a broken hook must not chime on every turn).
+  private closeBy(d: TurnEnd | undefined): Outgoing[] {
+    if (d === undefined) return this.close(true);
+    const out = this.close(d.final);
+    if (d.final) this.opts.onFinalClose?.(d.kind);
+    return out;
   }
 
   // Sends the pending text (loud for a final turn) and forgets the turn.
@@ -124,6 +162,8 @@ export class Relay {
       if (this.ended.length > REMEMBERED_ENDS) this.ended.shift();
     }
     this.ending = undefined;
+    this.closedAt = undefined;
+    this.closed = true;
     const out: Outgoing[] = this.enabled && this.pending !== undefined ? [{ text: this.pending, notify: final }] : [];
     this.pending = undefined;
     this.decision = undefined;

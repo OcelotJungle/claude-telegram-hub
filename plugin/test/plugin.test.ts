@@ -7,8 +7,10 @@ import { join } from "path";
 import { z } from "zod";
 import { Hub } from "../src/hub/hub.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
-import { CHIME_MIN_TURN_MS, CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, filesRejectedPrompt, interruptPrompt, MAX_AUTO_CONTINUES, PluginCore } from "../src/plugin/plugin.ts";
+import { CHIME_MIN_TURN_MS, CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, filesRejectedPrompt, interruptPrompt, MAX_AUTO_CONTINUES, playConfiguredChime, PluginCore } from "../src/plugin/plugin.ts";
+import { defaultTurnEndChime } from "../src/shared/chime.ts";
 import { arr, field } from "../src/shared/guards.ts";
+import { TURN_DECISION_MS } from "../src/transcript/relay.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { freePort, memLogger, NO_PACE, tempDir, waitFor } from "./helpers.ts";
 
@@ -65,13 +67,24 @@ const assistantTool = (name: string, id: string) => ({
   message: { id, role: "assistant", content: [{ type: "tool_use", id: "t", name, input: {} }], stop_reason: "tool_use" },
 });
 const humanTyped = (text: string) => ({ type: "user", isSidechain: false, origin: { kind: "human" }, promptSource: "typed", message: { role: "user", content: text } });
-const typedMidTurn = (text: string) => ({ type: "attachment", isSidechain: false, attachment: { type: "queued_command", prompt: text, commandMode: "prompt", origin: { kind: "human" } } });
+// Claude Code closing the turn after all Stop hooks.
+const closed = { type: "system", subtype: "turn_duration", durationMs: 1000 };
+const typedMidTurn =(text: string) => ({ type: "attachment", isSidechain: false, attachment: { type: "queued_command", prompt: text, commandMode: "prompt", origin: { kind: "human" } } });
 const NARRATION_SIG = "CAQSrgcKEQgSGAI4AUIJbmFycmF0aW9uEgxhMFJuZKXpKQCYxWIaDLo3cuvEnZjRl04uqSIwcikVdFlQ26x5rHo0oYhd4CFFTF+Qg/KbIJ4gkTpHfgPAWqq3";
 const assistantNarration = (text: string, id: string) => ({
   type: "assistant",
   isSidechain: false,
   message: { id, role: "assistant", content: [{ type: "thinking", thinking: text, signature: NARRATION_SIG }], stop_reason: "tool_use" },
 });
+
+// The hub sends a topic message to the plugin over the same socket as the
+// Stop hook's verdict, after it: once the message arrives, the verdict has
+// been handled.
+async function verdictHandled() {
+  const before = channel.length;
+  fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "дальше" }));
+  await waitFor(() => channel.length > before, 3000, "a topic message after the verdict");
+}
 
 function sent() {
   return fake.texts().map(p => ({ text: p.text, silent: p.disable_notification, topic: p.message_thread_id }));
@@ -182,7 +195,7 @@ describe("PluginCore", () => {
 
   test("a final turn: the text before a tool is silent, the last text is loud", async () => {
     await enabledCore();
-    append(assistantText("Смотрю код", "tool_use", "a1"), assistantTool("Read", "a1"), assistantText("Готово", "end_turn", "a2"));
+    append(assistantText("Смотрю код", "tool_use", "a1"), assistantTool("Read", "a1"), assistantText("Готово", "end_turn", "a2"), closed);
     await stopHook(true, "done");
     await waitFor(() => sent().length === 2, 5000, "two messages");
     expect(sent()).toEqual([
@@ -193,7 +206,7 @@ describe("PluginCore", () => {
 
   test("an ask turn is loud too", async () => {
     await enabledCore();
-    append(assistantText("Какой вариант?", "end_turn", "q1"));
+    append(assistantText("Какой вариант?", "end_turn", "q1"), closed);
     await stopHook(true, "ask");
     await waitFor(() => sent().length === 1, 5000, "question");
     expect(sent()).toEqual([{ text: "Какой вариант?", silent: false, topic: 100 }]);
@@ -201,33 +214,44 @@ describe("PluginCore", () => {
 
   test("an intermediate turn end sends its text silently", async () => {
     await enabledCore();
-    append(assistantText("Жду монитор", "end_turn", "p1"));
+    append(assistantText("Жду монитор", "end_turn", "p1"), closed);
     await stopHook(false);
     await waitFor(() => sent().length === 1, 5000, "text");
     expect(sent()).toEqual([{ text: "Жду монитор", silent: true, topic: 100 }]);
   });
 
-  test("without a decision the turn is closed as final after the limit", async () => {
+  test("without a decision a closed turn is closed as final after the limit", async () => {
     await enabledCore();
-    append(assistantText("Итог", "end_turn", "n1"));
-    await waitFor(() => sent().length === 1, 8000, "text");
+    append(assistantText("Итог", "end_turn", "n1"), closed);
+    // Each check moves the clock past the limit: the tailer reads both records
+    // in one poll, and its next idle check closes the turn.
+    await waitFor(
+      () => {
+        clockSkew += TURN_DECISION_MS;
+        return sent().length === 1;
+      },
+      3000,
+      "text",
+    );
     expect(sent()).toEqual([{ text: "Итог", silent: false, topic: 100 }]);
-  }, 15_000);
+  });
 
   test("a final turn without text sends nothing", async () => {
     await enabledCore();
-    append({ type: "assistant", isSidechain: false, message: { id: "c1", role: "assistant", content: [{ type: "thinking", thinking: "" }], stop_reason: "end_turn" } });
+    append({ type: "assistant", isSidechain: false, message: { id: "c1", role: "assistant", content: [{ type: "thinking", thinking: "" }], stop_reason: "end_turn" } }, closed);
     await stopHook(true, "done");
-    await Bun.sleep(2500);
+    await verdictHandled();
     expect(sent()).toEqual([]);
   });
 
   describe("the terminal chime", () => {
-    // The user types in the terminal: the mode goes off and a turn begins.
+    // The user types in the terminal: the mode goes off, and the turn that
+    // follows ends and is closed.
     async function terminalTurn() {
       const c = await enabledCore();
       append(humanTyped("сам продолжу"));
       await waitFor(() => !c.enabled, 3000, "disabled");
+      append(assistantText("Сделал", "end_turn", "e1"), closed);
       return c;
     }
 
@@ -238,16 +262,25 @@ describe("PluginCore", () => {
       expect(chimes).toEqual(["ask"]);
     });
 
-    test("done after a short turn is silent", async () => {
+    test("done soon after the user typed is silent", async () => {
       await terminalTurn();
       await stopHook(true, "done");
-      await Bun.sleep(300);
+      await verdictHandled();
       expect(chimes).toEqual([]);
     });
 
-    test("done after a long turn chimes", async () => {
+    test(`done ${CHIME_MIN_TURN_MS / 1000} s after the user typed chimes`, async () => {
       await terminalTurn();
       clockSkew = CHIME_MIN_TURN_MS;
+      await stopHook(true, "done");
+      await waitFor(() => chimes.length === 1, 3000, "chime");
+      expect(chimes).toEqual(["done"]);
+    });
+
+    test("done chimes when the user has not typed in this window", async () => {
+      makeCore();
+      await waitFor(() => hub.isConnected(SID), 3000, "plugin connected");
+      append(assistantText("Сделал", "end_turn", "e1"), closed);
       await stopHook(true, "done");
       await waitFor(() => chimes.length === 1, 3000, "chime");
       expect(chimes).toEqual(["done"]);
@@ -257,16 +290,17 @@ describe("PluginCore", () => {
       await terminalTurn();
       clockSkew = CHIME_MIN_TURN_MS;
       await stopHook(false);
-      await Bun.sleep(300);
+      await verdictHandled();
       expect(chimes).toEqual([]);
     });
 
     test("with the mode on the terminal stays silent", async () => {
       await enabledCore();
       clockSkew = CHIME_MIN_TURN_MS;
+      append(assistantText("Какой вариант?", "end_turn", "q1"), closed);
       await stopHook(true, "ask");
-      await stopHook(true, "done");
-      await Bun.sleep(300);
+      await waitFor(() => sent().length === 1, 3000, "loud question");
+      expect(sent()[0].silent).toBe(false);
       expect(chimes).toEqual([]);
     });
   });
@@ -312,6 +346,7 @@ describe("PluginCore", () => {
       { type: "attachment", isSidechain: false, attachment: { type: "queued_command", prompt: "<task-notification/>", commandMode: "task-notification", origin: { kind: "task-notification" } } },
       { type: "user", isSidechain: false, origin: { kind: "peer", handback: true }, isMeta: true, message: { role: "user", content: "Another Claude…" } },
       assistantText("продолжаю", "end_turn", "tn1"),
+      closed,
     );
     await stopHook(false);
     await waitFor(() => sent().length === 1, 3000, "turn text");
@@ -518,7 +553,7 @@ describe("PluginCore", () => {
     writeFileSync(next, line({ type: "ai-title", aiTitle: "После clear" }));
     await c.enable();
     expect(fake.callsOf("createForumTopic").at(-1)?.name).toBe("demo-app · После clear");
-    appendFileSync(next, line(assistantText("в новой сессии", "end_turn")));
+    appendFileSync(next, line(assistantText("в новой сессии", "end_turn")) + line(closed));
     append(assistantText("в старой сессии", "end_turn"));
     await stopHook(false);
     await waitFor(() => sent().length === 1, 3000, "message");
@@ -555,7 +590,7 @@ describe("PluginCore", () => {
     // same file, path spelled differently (drive letter case)
     c.switchSession(SID, transcript.replace(/^([A-Za-z]):/, (_, d) => d.toLowerCase() + ":"), CWD);
     expect(c.enabled).toBe(true);
-    append(assistantText("после компакта", "end_turn"));
+    append(assistantText("после компакта", "end_turn"), closed);
     await stopHook(false);
     await waitFor(() => sent().length === 1, 3000, "message");
   });
@@ -619,7 +654,6 @@ describe("note to the agent that the mode went off", () => {
 describe("a turn ended by a failed connection to the API", () => {
   const ERROR = "API Error: Connection lost mid-response. The response above may be incomplete.";
   const apiError = (text = ERROR) => ({ ...assistantText(text, "stop_sequence"), error: "server_error", isApiErrorMessage: true });
-  const closed = { type: "system", subtype: "turn_duration", durationMs: 1000 };
   // The error record, then Claude Code closing the turn on it.
   const cut = (): object[] => [apiError(), closed];
   const UNREACHABLE = "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)";
@@ -679,7 +713,7 @@ describe("a turn ended by a failed connection to the API", () => {
   test("a cut written before the window started is history", async () => {
     appendFileSync(transcript, cut().map(line).join(""));
     await enabledCore();
-    append(assistantText("новый ход", "end_turn"));
+    append(assistantText("новый ход", "end_turn"), closed);
     await stopHook(false);
     await waitFor(() => sent().length === 1, 3000, "new turn");
     expect(channel).toEqual([]);
@@ -793,5 +827,29 @@ describe("tg_send_file", () => {
     await waitFor(() => channel.length === 1, 3000, "rejection prompt");
     expect(channel[0]).toEqual({ content: filesRejectedPrompt("a.txt: Request Entity Too Large"), meta: { user: "tg-hub", reason: "files_rejected" } });
     expect(sent()).toEqual([]);
+  });
+});
+
+describe("the configured chime", () => {
+  const savedStateDir = process.env.TG_HUB_STATE_DIR;
+  afterEach(() => {
+    if (savedStateDir === undefined) delete process.env.TG_HUB_STATE_DIR;
+    else process.env.TG_HUB_STATE_DIR = savedStateDir;
+  });
+
+  test("a bad turnEndChime plays the default sound and is logged once", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], turnEndChime: 5 }));
+    process.env.TG_HUB_STATE_DIR = dir;
+    const log = memLogger();
+    const played: [string, ChimeKind][] = [];
+    const play = (template: string, kind: ChimeKind) => void played.push([template, kind]);
+    playConfiguredChime("done", log, play);
+    playConfiguredChime("ask", log, play);
+    expect(played).toEqual([
+      [defaultTurnEndChime(), "done"],
+      [defaultTurnEndChime(), "ask"],
+    ]);
+    expect(log.lines).toEqual(["WARN turnEndChime в config.json должен быть строкой; playing the default sound"]);
   });
 });
