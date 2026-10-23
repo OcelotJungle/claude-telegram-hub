@@ -131,6 +131,12 @@ describe("hubCommandOf", () => {
     expect(hubCommandOf("/stop", "test_bot")).toEqual({ name: "stop", args: "" });
   });
 
+  test("/cleanup and /cleanup@bot keep the plan", () => {
+    expect(hubCommandOf("/cleanup", "test_bot")).toEqual({ name: "cleanup", args: "" });
+    expect(hubCommandOf("/cleanup@test_bot keep the plan", "test_bot")).toEqual({ name: "cleanup", args: "keep the plan" });
+    expect(hubCommandOf("/cleanup@other_bot", "test_bot")).toBeUndefined();
+  });
+
   test("/exec, /cmd and /bash with their text", () => {
     expect(hubCommandOf("/exec npm run x", "test_bot")).toEqual({ name: "exec", args: "npm run x" });
     expect(hubCommandOf("/cmd dir /b", "test_bot")).toEqual({ name: "cmd", args: "dir /b" });

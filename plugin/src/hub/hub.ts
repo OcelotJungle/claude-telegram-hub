@@ -11,11 +11,12 @@ import type { RichMessage } from "./rich.ts";
 import type { HubCommand } from "./router.ts";
 import type { VideoTools } from "./video.ts";
 import type { ExecShell } from "./exec-shell.ts";
+import type { CleanupResult } from "./skill-cleanup.ts";
 
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync } from "fs";
-import { dirname, join } from "path";
+import { basename, dirname, join } from "path";
 import { z } from "zod";
 import { chunk } from "../shared/chunk.ts";
 import { isInside } from "../shared/config.ts";
@@ -23,12 +24,13 @@ import { field } from "../shared/guards.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
-import { commandReply, hookBody, limitsPost, pluginToHub, sendFilesMessage, sendMessage, terminateRequest } from "../shared/protocol-schema.ts";
+import { cleanupReport, commandReply, hookBody, limitsPost, pluginToHub, sendFilesMessage, sendMessage, terminateRequest } from "../shared/protocol-schema.ts";
+import { tokens } from "../mod/commands.ts";
 import { loadCards, saveCards } from "./cards.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
-import { launchCommand, LaunchError, sessionCwd } from "./launch.ts";
+import { launchCommand, LaunchError, sessionCwd, sessionTranscript } from "./launch.ts";
 import { commandOf, hubCommandOf, routeCallback, routeUpdate } from "./router.ts";
 import { accountOf, SessionStore, topicName } from "./sessions.ts";
 import { isThreadNotFound, TelegramError } from "./telegram.ts";
@@ -39,6 +41,7 @@ import { EXEC_CARD_MS, EXEC_CHECK_MS, EXEC_MAX_AGE_MS, Execs } from "./exec.ts";
 import { freshEnv } from "./exec-env.ts";
 import { isAlive, killTree, spawnRunner } from "./exec-runner.ts";
 import { DEFAULT_BASH, findPowershell } from "./exec-shell.ts";
+import { cleanTranscript } from "./skill-cleanup.ts";
 
 const INACTIVE_TEXT = "сессия сейчас не активна";
 // The queue id prefix of the start notice, "starting the session".
@@ -52,6 +55,16 @@ const READY_DELAY_MS = 1500;
 // (5 s and jitter), then the ready delay, with room.
 const EXEC_GRACE_MS = 10_000;
 const STOP_TIMEOUT_MS = 15_000;
+// /cleanup edits the transcript only once Claude Code has exited: it waits
+// this long for the process, checking this often; with the process unknown,
+// it gives the window this long to go.
+const CLEANUP_EXIT_MS = 30_000;
+const EXIT_POLL_MS = 200;
+const CLEANUP_SETTLE_MS = 3000;
+// The size of a removed skill in tokens, roughly.
+const CHARS_PER_TOKEN = 4;
+const CLEANUP_BUSY = "⏳ /cleanup уже идёт";
+const CLEANUP_STOPPED = " Сессия остановлена.";
 // Messages a starting session holds; more are dropped.
 const MAX_HELD = 50;
 const MS_PER_SECOND = 1000;
@@ -96,6 +109,7 @@ const BOT_COMMANDS = [
   { command: "compact", description: "Сжать контекст; /compact N — окно автокомпакта" },
   { command: "run", description: "Запустить сессию; /run N — на аккаунте N" },
   { command: "stop", description: "Завершить сессию" },
+  { command: "cleanup", description: "Сжать контекст и убрать накопившиеся скиллы" },
   { command: "exec", description: "Команда в PowerShell в папке сессии" },
   { command: "cmd", description: "Команда в cmd в папке сессии" },
   { command: "bash", description: "Команда в Git Bash в папке сессии" },
@@ -122,6 +136,11 @@ type Inbound = { content: string; meta: ChannelMeta; onSent(): void };
 // What a starting session gets once it connects: topic messages and the
 // results of topic commands.
 type Held = { message: Message } | { inbound: Inbound };
+// A /cleanup under way: the id of its command, the context the module
+// reported before compacting, and whether the window is compacting or
+// exiting. noRelaunch: a /stop came meanwhile. held: what came for the
+// session after its window closed.
+type Cleanup = { id: string; before?: number; phase: "compacting" | "exiting"; noRelaunch?: boolean; held: Held[] };
 
 export type HubOptions = {
   port: number;
@@ -158,6 +177,11 @@ export type HubOptions = {
   spawn?(command: string[]): void;
   readyDelayMs?: number;
   stopTimeoutMs?: number;
+  // /cleanup: how long it waits for Claude Code to exit, how long it waits
+  // with the process unknown, and how it tells the process is still there.
+  cleanupExitMs?: number;
+  cleanupSettleMs?: number;
+  isAlive?(pid: number): boolean;
   // A window in this config dir runs on the default login, whose account is
   // asked of defaultAccount (cswap by default).
   defaultConfigDir?: string;
@@ -244,6 +268,7 @@ export class Hub {
   // Sessions whose /stop waits for the module's terminate request: the id of
   // the stop command.
   private stopping = new Map<string, string>();
+  private cleanups = new Map<string, Cleanup>();
   // The start notices sent to a session's topic: Telegram message id and the
   // text it shows. They go once its agent starts working.
   private launchNotices = new Map<string, { id: number; text: string }[]>();
@@ -390,12 +415,19 @@ export class Hub {
       return new Response("ok");
     }
     if (url.pathname === "/commands" && req.method === "GET") {
-      return Response.json(this.takeCommands(url.searchParams.get("session") ?? "", url.searchParams.get("stop") === "1"));
+      const session = url.searchParams.get("session") ?? "";
+      return Response.json(this.takeCommands(session, url.searchParams.get("stop") === "1", url.searchParams.get("cleanup") === "1"));
     }
     if (url.pathname === "/terminate" && req.method === "POST") {
       const r = terminateRequest.safeParse(await req.json().catch(() => undefined));
       if (!r.success) return new Response("bad terminate request", { status: 400 });
       if (this.stopping.get(r.data.sessionId) === r.data.id) this.terminate(r.data.sessionId);
+      return new Response("ok");
+    }
+    if (url.pathname === "/cleanup" && req.method === "POST") {
+      const r = cleanupReport.safeParse(await req.json().catch(() => undefined));
+      if (!r.success) return new Response("bad cleanup report", { status: 400 });
+      this.onCleanupReport(r.data.sessionId, r.data.id, r.data.before, r.data.error);
       return new Response("ok");
     }
     if (url.pathname === "/limits" && req.method === "POST") {
@@ -432,6 +464,7 @@ export class Hub {
         if (this.stopping.get(sessionId) === cmd.id) this.terminate(sessionId);
         return;
       }
+      if (cmd.name === "cleanup" && this.cleanups.get(sessionId)?.id === cmd.id) this.cleanups.delete(sessionId);
       this.enqueue(sessionId, `cmd-${cmd.id}-lost`, `⚠️ /${cmd.name} не выполнена: окно не забрало её за ${ms / MS_PER_SECOND} с. Команды выполняет модуль плагина — перезапусти окно.`, true, false);
     }, ms);
     this.commands.set(sessionId, [...(this.commands.get(sessionId) ?? []), { cmd, timer }]);
@@ -455,10 +488,11 @@ export class Hub {
     return this.connOf(sessionId)?.data.account ?? this.store.get(sessionId)?.account;
   }
 
-  // An older module does not know stop: it stays queued for its timeout.
-  private takeCommands(sessionId: string, takesStop: boolean): TopicCommand[] {
+  // An older module does not know stop or cleanup: it stays queued for its
+  // timeout.
+  private takeCommands(sessionId: string, takesStop: boolean, takesCleanup: boolean): TopicCommand[] {
     const queued = this.commands.get(sessionId) ?? [];
-    const taken = queued.filter(e => takesStop || e.cmd.name !== "stop");
+    const taken = queued.filter(e => (takesStop || e.cmd.name !== "stop") && (takesCleanup || e.cmd.name !== "cleanup"));
     const left = queued.filter(e => !taken.includes(e));
     if (left.length) this.commands.set(sessionId, left);
     else this.commands.delete(sessionId);
@@ -486,6 +520,19 @@ export class Hub {
     const sid = ws.data.sessionId;
     if (sid) this.log.info(`window for session ${sid} disconnected`);
     if (sid && !this.connOf(sid)) this.stopping.delete(sid);
+    const cleanup = sid ? this.cleanups.get(sid) : undefined;
+    if (sid && cleanup && !this.connOf(sid)) {
+      if (cleanup.phase === "exiting") {
+        // The cleanup's summary tells the topic instead of "session ended".
+        const t = this.stops.get(sid);
+        if (t) clearTimeout(t);
+        this.stops.delete(sid);
+        void this.finishCleanup(sid, cleanup, ws.data.exitingPid);
+      } else {
+        this.log.info(`window for session ${sid} closed while compacting for /cleanup; /cleanup dropped`);
+        this.dropCleanup(sid);
+      }
+    }
     const stop = sid ? this.stops.get(sid) : undefined;
     if (sid && stop && !this.connOf(sid)) {
       clearTimeout(stop);
@@ -542,6 +589,8 @@ export class Hub {
 
   private onHook(body: HookBody): void {
     if (!body.messagingSocket || !body.session_id || !body.transcript_path) return;
+    // /cleanup edits this file; only one named after the session is trusted.
+    if (basename(body.transcript_path) === `${body.session_id}.jsonl`) this.store.setTranscript(body.session_id, body.transcript_path);
     for (const ws of this.conns) {
       if (ws.data.windowKey === body.messagingSocket) {
         this.forwardHook(ws, body);
@@ -1355,7 +1404,8 @@ ${msg.text}`);
   // A starting session keeps what comes for it until it connects; false when
   // the session is not starting.
   private hold(sessionId: string, h: Held): boolean {
-    const pending = this.launches.get(sessionId);
+    const cleanup = this.cleanups.get(sessionId);
+    const pending = this.launches.get(sessionId) ?? (cleanup && !this.connOf(sessionId) ? cleanup : undefined);
     if (!pending) return false;
     if (pending.held.length < MAX_HELD) pending.held.push(h);
     else this.log.warn(`session ${sessionId} is starting and holds ${MAX_HELD} messages; ${"message" in h ? `message ${h.message.message_id}` : "a command result"} dropped`);
@@ -1365,10 +1415,14 @@ ${msg.text}`);
   private onHubCommand(sessionId: string, cmd: HubCommand, m: Message): void {
     if (cmd.name === "exec" || cmd.name === "cmd" || cmd.name === "bash") return this.onExecCommand(sessionId, cmd.name, cmd.args, m);
     if (cmd.name === "run") {
+      if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, false);
       if (this.connOf(sessionId)) return this.notice(sessionId, "Сессия уже работает", false);
       if (this.launches.has(sessionId)) return this.notice(sessionId, "Сессия уже запускается", false);
       return this.launch(sessionId, cmd.args || undefined, []);
     }
+    if (cmd.name === "cleanup") return this.startCleanup(sessionId, cmd.args);
+    const cleanup = this.cleanups.get(sessionId);
+    if (cleanup) return this.stopDuringCleanup(sessionId, cleanup);
     if (!this.connOf(sessionId)) return this.notice(sessionId, "Сессия не запущена", false);
     if (this.stops.has(sessionId)) return;
     if (this.stopping.has(sessionId)) {
@@ -1393,9 +1447,110 @@ ${msg.text}`);
       sessionId,
       setTimeout(() => {
         this.stops.delete(sessionId);
+        if (this.cleanups.delete(sessionId)) this.log.warn(`session ${sessionId} did not end for /cleanup; /cleanup dropped`);
         this.notice(sessionId, `⚠️ Не удалось завершить сессию за ${ms / MS_PER_SECOND} с`, true);
       }, ms),
     );
+  }
+
+  // --- /cleanup ---------------------------------------------------------------
+
+  // The module compacts the session, the window ends, the hub empties the
+  // skills Claude Code remembers in the transcript and starts it again.
+  private startCleanup(sessionId: string, args: string): void {
+    if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, false);
+    if (!this.connOf(sessionId)) return this.notice(sessionId, "Сессия не запущена", false);
+    if (this.stops.has(sessionId) || this.stopping.has(sessionId)) return this.notice(sessionId, "⏳ Сессия уже завершается", false);
+    this.cleanups.set(sessionId, { id: this.queueCommand(sessionId, { name: "cleanup", args }), phase: "compacting", held: [] });
+  }
+
+  // The first /stop only keeps the session from starting again; a second one
+  // ends a compacting window at once, the transcript untouched.
+  private stopDuringCleanup(sessionId: string, c: Cleanup): void {
+    if (!c.noRelaunch) {
+      c.noRelaunch = true;
+      this.log.info(`/stop during /cleanup of session ${sessionId}: it will not start again`);
+      return this.notice(sessionId, "⏹ После /cleanup сессию не запущу", false);
+    }
+    if (c.phase === "compacting") {
+      this.log.info(`second /stop during the /cleanup compact of session ${sessionId}: ending the window, the transcript untouched`);
+      this.dropCleanup(sessionId);
+    }
+    this.terminate(sessionId);
+  }
+
+  private dropCleanup(sessionId: string): void {
+    this.cleanups.delete(sessionId);
+    const queued = this.commands.get(sessionId) ?? [];
+    for (const e of queued.filter(e => e.cmd.name === "cleanup")) clearTimeout(e.timer);
+    this.commands.set(sessionId, queued.filter(e => e.cmd.name !== "cleanup"));
+  }
+
+  private onCleanupReport(sessionId: string, id: string, before: number | undefined, error: string | undefined): void {
+    const c = this.cleanups.get(sessionId);
+    if (!c || c.id !== id || c.phase !== "compacting") return;
+    if (error !== undefined) {
+      this.log.warn(`/cleanup of session ${sessionId}: the compact failed: ${error}`);
+      this.cleanups.delete(sessionId);
+      return this.notice(sessionId, `⚠️ /cleanup не выполнена: компакт не удался: ${error}. Сессию не трогаю`, true);
+    }
+    this.log.info(`/cleanup of session ${sessionId}: compacted${before === undefined ? "" : ` from ${before} tokens`}; ending the window`);
+    if (before !== undefined) c.before = before;
+    c.phase = "exiting";
+    this.terminate(sessionId);
+  }
+
+  // The window is gone: once Claude Code has exited, the skills go from the
+  // transcript and the session starts again.
+  private async finishCleanup(sessionId: string, c: Cleanup, pid: number | undefined): Promise<void> {
+    const current = () => this.running && this.cleanups.get(sessionId) === c;
+    const alive = this.opts.isAlive ?? isAlive;
+    if (pid === undefined) {
+      this.log.info(`/cleanup of session ${sessionId}: the Claude Code process is unknown; waiting for it to go`);
+      await this.sleep(this.opts.cleanupSettleMs ?? CLEANUP_SETTLE_MS);
+    } else {
+      const deadline = Date.now() + (this.opts.cleanupExitMs ?? CLEANUP_EXIT_MS);
+      while (current() && alive(pid) && Date.now() < deadline) await this.sleep(EXIT_POLL_MS);
+    }
+    if (!current()) return;
+    if ((pid !== undefined && alive(pid)) || this.connOf(sessionId)) {
+      this.cleanups.delete(sessionId);
+      const why = this.connOf(sessionId) ? "a window of the session connected again" : `Claude Code ${pid} did not exit`;
+      this.log.warn(`/cleanup of session ${sessionId}: ${why}; the transcript untouched, ${c.held.length} held message(s) dropped`);
+      const text = this.connOf(sessionId) ? "⚠️ Сессия снова открыта, скиллы не убраны" : "⚠️ Claude Code не завершился, скиллы не убраны, сессию не запускаю";
+      return this.notice(sessionId, text, true);
+    }
+    const path = this.transcriptOf(sessionId);
+    let text: string;
+    if (!path) {
+      this.log.warn(`/cleanup of session ${sessionId}: no transcript found`);
+      text = "⚠️ Транскрипт сессии не найден, скиллы не убраны";
+    } else {
+      try {
+        const result = await cleanTranscript(path, Date.now());
+        this.log.info(`/cleanup of session ${sessionId}: ${path}: ${result.kind}${result.kind === "cleaned" ? `, ${result.records} record(s), backup ${result.backup}` : ""}`);
+        text = cleanupSummary(c.before, result);
+      } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        this.log.warn(`/cleanup of session ${sessionId}: emptying the skills in ${path} failed: ${why}`);
+        text = `⚠️ Скиллы не убраны: ${why}`;
+      }
+    }
+    if (!current()) return;
+    this.cleanups.delete(sessionId);
+    // Messages that came meanwhile still reach the agent, as a message to a
+    // stopped session starts it.
+    const relaunch = !c.noRelaunch || c.held.length > 0;
+    this.notice(sessionId, relaunch ? text : text + CLEANUP_STOPPED, true);
+    if (relaunch) this.launch(sessionId, undefined, c.held);
+    else this.log.info(`/cleanup of session ${sessionId}: done; not starting it again after /stop`);
+  }
+
+  // The transcript the hook named, else the one found by the session id.
+  private transcriptOf(sessionId: string): string | undefined {
+    const known = this.store.get(sessionId)?.transcript;
+    if (known && existsSync(known)) return known;
+    return this.opts.projectsDir ? sessionTranscript(sessionId, this.opts.projectsDir) : undefined;
   }
 
   // Runs the configured command for a session without a window: the account
@@ -1677,6 +1832,20 @@ function spawnDetached(command: string[]): void {
   const child = spawn(exe, args, { detached: true, stdio: "ignore" });
   child.on("error", () => {});
   child.unref();
+}
+
+// The /cleanup summary in the topic: the context before the compact, then
+// what came of the skills.
+export function cleanupSummary(before: number | undefined, r: CleanupResult): string {
+  const was = before === undefined ? undefined : `Контекст был ${tokens(before)}`;
+  if (r.kind === "format") {
+    const version = r.version ? ` (Claude Code ${r.version})` : "";
+    return `🧹 ${was ? `${was}. ` : ""}⚠️ Формат транскрипта изменился, скиллы не убраны${version}`;
+  }
+  if (r.kind === "nothing" || !r.skills.length) return was ? `🧹 ${was}, скиллов в контексте не было` : "🧹 Скиллов в контексте не было";
+  const size = tokens(Math.round(r.skills.reduce((n, s) => n + s.chars, 0) / CHARS_PER_TOKEN));
+  const list = `${r.skills.map(s => s.name).join(", ")} (~${size})`;
+  return was ? `🧹 ${was}, убраны скиллы: ${list}` : `🧹 Убраны скиллы: ${list}`;
 }
 
 // Queue item ids are `<plugin message id>#<n>`, replacements add `.<m>`.

@@ -7,12 +7,21 @@ const SEP = " · ";
 // A cswap profile folder: <number>-<email>.
 const CSWAP_PROFILE = /^(\d+)-/;
 
-// cwd and account: where and on which cswap account the session last ran.
-export type SessionRecord = { topicId: number; title: string; project: string; enabled: boolean; cwd?: string; account?: string };
+// cwd and account: where and on which cswap account the session last ran;
+// transcript: its transcript file, as Claude Code's hook named it.
+export type SessionRecord = { topicId: number; title: string; project: string; enabled: boolean; cwd?: string; account?: string; transcript?: string };
 
 const dataSchema: z.ZodType<Record<string, SessionRecord>> = z.record(
   z.string(),
-  z.object({ topicId: z.number(), title: z.string(), project: z.string(), enabled: z.boolean(), cwd: z.string().optional(), account: z.string().optional() }),
+  z.object({
+    topicId: z.number(),
+    title: z.string(),
+    project: z.string(),
+    enabled: z.boolean(),
+    cwd: z.string().optional(),
+    account: z.string().optional(),
+    transcript: z.string().optional(),
+  }),
 );
 
 // The cswap account of a Claude Code config dir (…\sessions\1-me_gmail.com → "1").
@@ -61,6 +70,13 @@ export class SessionStore {
     const next = { ...rec, ...(cwd ? { cwd } : {}), ...(account ? { account } : {}) };
     if (next.cwd === rec.cwd && next.account === rec.account) return;
     this.data[sessionId] = next;
+    this.save();
+  }
+
+  setTranscript(sessionId: string, path: string): void {
+    const rec = this.data[sessionId];
+    if (!rec || rec.transcript === path) return;
+    this.data[sessionId] = { ...rec, transcript: path };
     this.save();
   }
 

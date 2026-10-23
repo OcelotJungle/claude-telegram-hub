@@ -3,9 +3,9 @@ import type { Compaction, Usage } from "../src/mod/commands.ts";
 import type { Config } from "../src/shared/config.ts";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
-import { Hub } from "../src/hub/hub.ts";
+import { cleanupSummary, Hub } from "../src/hub/hub.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
 import { saveExecs } from "../src/hub/exec-store.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
@@ -56,6 +56,9 @@ type HubExtras = {
   spawnRunner?(specFile: string): number;
   execFileLimit?: number;
   execGraceMs?: number;
+  isAlive?(pid: number): boolean;
+  cleanupExitMs?: number;
+  cleanupSettleMs?: number;
 };
 
 async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number } & HubExtras = {}) {
@@ -86,6 +89,9 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     ...(o.spawn ? { spawn: o.spawn } : {}),
     ...(o.projectsDir ? { projectsDir: o.projectsDir } : {}),
     ...(o.stopTimeoutMs ? { stopTimeoutMs: o.stopTimeoutMs } : {}),
+    ...(o.isAlive ? { isAlive: o.isAlive } : {}),
+    ...(o.cleanupExitMs ? { cleanupExitMs: o.cleanupExitMs } : {}),
+    ...(o.cleanupSettleMs ? { cleanupSettleMs: o.cleanupSettleMs } : {}),
     defaultConfigDir: DEFAULT_DIR,
     defaultAccount: o.defaultAccount ?? (async () => undefined),
     execDir: join(dir, "exec"),
@@ -1806,7 +1812,254 @@ describe("commands", () => {
   test("the hub puts the commands into the bot menu", async () => {
     await startHub();
     const call = await waitFor(() => fake.callsOf("setMyCommands")[0]);
-    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "run", "stop", "exec", "cmd", "bash"]);
+    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "run", "stop", "cleanup", "exec", "cmd", "bash"]);
+  });
+
+  describe("/cleanup", () => {
+    const SID = "11111111-2222-3333-4444-555555555555";
+    const COMMAND = ["wt.exe", "-d", "{cwd}", "cswap.exe", "run", "{account}", "--", "--resume", "{session}"];
+    const STARTED = ["wt.exe", "-d", CWD, "cswap.exe", "run", "2", "--", "--resume", SID];
+    const PID = 4242;
+    const VERSION = "1.0.0";
+    // Skill sizes in characters: 1k and 18k tokens.
+    const SMALL_SKILL = 4000;
+    const BIG_SKILL = 72_000;
+    // How long a Claude Code that does not exit is waited for.
+    const EXIT_MS = 300;
+
+    const skill = (name: string, chars: number) => ({ name, content: "x".repeat(chars) });
+    const record = (uuid: string, skills: { name: string; content: string }[]) =>
+      JSON.stringify({ parentUuid: "p", type: "attachment", attachment: { type: "invoked_skills", skills }, uuid, version: VERSION });
+    const SKILLS = [record("u1", [skill("a", SMALL_SKILL)]), record("u2", [skill("a", SMALL_SKILL), skill("b", BIG_SKILL)])];
+
+    // A session with a window, a topic and a transcript in its own projects
+    // folder; Claude Code exits at once unless told otherwise, started
+    // commands are recorded.
+    async function liveSession(lines: string[], o: Parameters<typeof startHub>[0] = {}) {
+      const projects = tempDir();
+      const folder = join(projects, "C--x");
+      mkdirSync(folder, { recursive: true });
+      const transcript = join(folder, `${SID}.jsonl`);
+      writeFileSync(transcript, [JSON.stringify({ type: "user", cwd: CWD }), ...lines].map(l => `${l}\n`).join(""));
+      const spawned: string[][] = [];
+      config = { ...config, launch: { command: COMMAND, timeoutSec: LAUNCH_TIMEOUT_S } };
+      await startHub({ spawn: c => void spawned.push(c), projectsDir: projects, isAlive: () => false, ...o });
+      const a = await enabled(SID);
+      return { a, spawned, transcript, folder, original: readFileSync(transcript, "utf8") };
+    }
+
+    // The window ends the way the plugin ends it on terminate.
+    async function windowEnds(a: Awaited<ReturnType<typeof plugin>>) {
+      await a.next("terminate");
+      a.send({ type: "exiting", pid: PID });
+      a.close();
+    }
+
+    const pollUntil = (runner: Runner, done: () => boolean) =>
+      waitFor(async () => {
+        await runner.poll();
+        return done();
+      });
+
+    const backups = (folder: string) => readdirSync(folder).filter(f => f.startsWith(`${SID}.cleanup-`));
+
+    test("/cleanup compacts, ends the window, empties the skills and starts the session again", async () => {
+      const { a, spawned, transcript, folder } = await liveSession(SKILLS);
+      const { runner, compacted } = mod(SID);
+      command("/cleanup keep the plan");
+      const started = await reply(runner, t => t.startsWith("🧹 Сожму"));
+      expect(started.text).toBe("🧹 Сожму контекст, когда агент закончит ход, и перезапущу сессию без накопившихся скиллов.");
+      expect(started.disable_notification).toBe(true);
+      await pollUntil(runner, () => terminated(a));
+      expect(compacted).toStrictEqual(["keep the plan"]);
+      await windowEnds(a);
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
+      expect(summary.text).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k)");
+      expect(summary.disable_notification).toBe(false);
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+      expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
+      expect(backups(folder).length).toBe(1);
+      expect(sentText(t => t === "⏹ Сессия завершена")).toBeUndefined();
+    });
+
+    test("a message during /cleanup waits and reaches the session started again", async () => {
+      let alive = true;
+      const { a } = await liveSession(SKILLS, { isAlive: () => alive });
+      const { runner } = mod(SID);
+      command("/cleanup");
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      await waitFor(() => !hub.isConnected(SID));
+      command("meanwhile");
+      await Bun.sleep(SETTLE_MS);
+      alive = false;
+      await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
+      const w = await plugin(SID);
+      expect((await w.next("inbound")).content).toBe("meanwhile");
+    });
+
+    test("a failed compact leaves the window and the transcript alone", async () => {
+      const { a, spawned, transcript, original } = await liveSession(SKILLS);
+      const { runner } = mod(SID, undefined, undefined, async () => {
+        throw new Error("boom");
+      });
+      command("/cleanup");
+      const failed = await reply(runner, t => t.startsWith("⚠️"));
+      expect(failed.text).toBe("⚠️ /cleanup не выполнена: компакт не удался: boom. Сессию не трогаю");
+      expect(failed.disable_notification).toBe(false);
+      await Bun.sleep(SETTLE_MS);
+      expect(terminated(a)).toBe(false);
+      expect(readFileSync(transcript, "utf8")).toBe(original);
+      expect(spawned).toEqual([]);
+    });
+
+    test("an older module that does not take /cleanup gets the lost notice and keeps running", async () => {
+      const { a } = await liveSession(SKILLS, { commandPickupMs: 150 });
+      command("/cleanup");
+      const answers = new Set<string>();
+      const lost = await waitFor(async () => {
+        answers.add(await (await fetch(`http://127.0.0.1:${port}/commands?session=${SID}&stop=1`)).text());
+        return sentText(t => t.startsWith("⚠️"));
+      }, 3000);
+      expect(lost.text).toBe("⚠️ /cleanup не выполнена: окно не забрало её за 0.15 с. Команды выполняет модуль плагина — перезапусти окно.");
+      expect([...answers]).toEqual(["[]"]);
+      expect(terminated(a)).toBe(false);
+      // The cleanup is over: /run answers for a working session.
+      command("/run");
+      await waitFor(() => sentText(t => t === "Сессия уже работает"));
+    });
+
+    test("a Claude Code that does not exit keeps the transcript and does not relaunch", async () => {
+      const { a, spawned, transcript, original } = await liveSession(SKILLS, { isAlive: () => true, cleanupExitMs: EXIT_MS });
+      const { runner } = mod(SID);
+      command("/cleanup");
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
+      expect(warning.text).toBe("⚠️ Claude Code не завершился, скиллы не убраны, сессию не запускаю");
+      expect(warning.disable_notification).toBe(false);
+      expect(readFileSync(transcript, "utf8")).toBe(original);
+      expect(spawned).toEqual([]);
+    });
+
+    test("/stop during /cleanup still empties the skills but does not relaunch", async () => {
+      const { a, spawned, transcript } = await liveSession(SKILLS);
+      const h = held();
+      const { runner } = mod(SID, undefined, undefined, h.answer);
+      command("/cleanup");
+      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      command("/stop");
+      const noted = await waitFor(() => sentText(t => t.startsWith("⏹")));
+      expect(noted.text).toBe("⏹ После /cleanup сессию не запущу");
+      expect(noted.disable_notification).toBe(true);
+      h.release();
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
+      expect(summary.text).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k) Сессия остановлена.");
+      expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
+      await Bun.sleep(SETTLE_MS);
+      expect(spawned).toEqual([]);
+    });
+
+    test("a message after /stop during /cleanup starts the session again for it", async () => {
+      let alive = true;
+      const { a, spawned } = await liveSession(SKILLS, { isAlive: () => alive });
+      const { runner } = mod(SID);
+      command("/cleanup");
+      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      command("/stop");
+      await waitFor(() => sentText(t => t.startsWith("⏹ После")));
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      await waitFor(() => !hub.isConnected(SID));
+      command("meanwhile");
+      await Bun.sleep(SETTLE_MS);
+      alive = false;
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
+      expect(summary.text).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k)");
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+    });
+
+    test("a second /stop during the compact ends the window without editing", async () => {
+      const { a, spawned, transcript, original, folder } = await liveSession(SKILLS);
+      const h = held();
+      const { runner } = mod(SID, undefined, undefined, h.answer);
+      command("/cleanup");
+      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      command("/stop");
+      await waitFor(() => sentText(t => t.startsWith("⏹ После")));
+      command("/stop");
+      await windowEnds(a);
+      await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
+      await Bun.sleep(SETTLE_MS);
+      expect(readFileSync(transcript, "utf8")).toBe(original);
+      expect(backups(folder)).toEqual([]);
+      expect(spawned).toEqual([]);
+      h.release();
+    });
+
+    test("an unknown transcript format still relaunches with the warning", async () => {
+      const odd = JSON.stringify({ parentUuid: "p", type: "attachment", attachment: { type: "invoked_skills", names: ["x"] }, uuid: "u1", version: VERSION });
+      const { a, spawned, transcript, original } = await liveSession([odd]);
+      const { runner } = mod(SID);
+      command("/cleanup");
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
+      expect(summary.text).toBe(`🧹 Контекст был 180k. ⚠️ Формат транскрипта изменился, скиллы не убраны (Claude Code ${VERSION})`);
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+      expect(readFileSync(transcript, "utf8")).toBe(original);
+    });
+
+    test("nothing to remove says so and starts the session again", async () => {
+      const { a, spawned } = await liveSession([]);
+      const { runner } = mod(SID);
+      command("/cleanup");
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
+      expect(summary.text).toBe("🧹 Контекст был 180k, скиллов в контексте не было");
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+    });
+
+    test("a second /cleanup and /run wait for the first", async () => {
+      const { a } = await liveSession(SKILLS);
+      const h = held();
+      const { runner } = mod(SID, undefined, undefined, h.answer);
+      command("/cleanup");
+      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      command("/cleanup");
+      command("/run");
+      await waitFor(() => fake.texts().filter(p => p.text === "⏳ /cleanup уже идёт").length === 2);
+      expect(terminated(a)).toBe(false);
+      h.release();
+    });
+  });
+});
+
+describe("cleanupSummary", () => {
+  const BEFORE = 180_000;
+  const BACKUP = "x.cleanup-1.jsonl";
+
+  test("removed skills with their size, with and without the size before", () => {
+    const r = { kind: "cleaned" as const, skills: [{ name: "a", chars: 4000 }, { name: "b", chars: 72_000 }], records: 2, backup: BACKUP };
+    expect(cleanupSummary(BEFORE, r)).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k)");
+    expect(cleanupSummary(undefined, r)).toBe("🧹 Убраны скиллы: a, b (~19k)");
+  });
+
+  test("no skills, found or remembered, says there were none", () => {
+    expect(cleanupSummary(BEFORE, { kind: "nothing" })).toBe("🧹 Контекст был 180k, скиллов в контексте не было");
+    expect(cleanupSummary(undefined, { kind: "cleaned", skills: [], records: 1, backup: BACKUP })).toBe("🧹 Скиллов в контексте не было");
+  });
+
+  test("an unknown format names the Claude Code version when it is known", () => {
+    expect(cleanupSummary(BEFORE, { kind: "format", version: "1.0.0" })).toBe("🧹 Контекст был 180k. ⚠️ Формат транскрипта изменился, скиллы не убраны (Claude Code)");
+    expect(cleanupSummary(undefined, { kind: "format" })).toBe("🧹 ⚠️ Формат транскрипта изменился, скиллы не убраны");
   });
 });
 
