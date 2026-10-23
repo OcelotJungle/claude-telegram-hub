@@ -1,10 +1,13 @@
 import type { TurnEnd } from "../hook/turn-end.ts";
 import type { TranscriptEvent } from "./parse.ts";
 
-// How long an ended turn waits for what is missing before it is closed: the
-// decision after turn_closed, or, with no turn_closed, quiet from the main
-// agent and no new decision.
+// How long a turn waits for the decision after turn_closed.
 export const TURN_DECISION_MS = 5000;
+// How long an ended turn with no turn_closed waits with no main-agent records
+// and no new decision. Claude Code writes turn_closed after all Stop hooks, so
+// this is a fallback; it outlasts a prompt-type Stop hook that may still
+// continue the turn.
+export const TURN_CLOSE_WAIT_MS = 30_000;
 const REMEMBERED_ENDS = 50;
 
 export type Outgoing = { text: string; notify: boolean };
@@ -126,13 +129,13 @@ export class Relay {
   }
 
   // Closes an ended turn whose decision is overdue: 5 s after turn_closed, or,
-  // with no turn_closed, 5 s with no main-agent records and no new decision.
+  // with no turn_closed, 30 s with no main-agent records and no new decision.
   idle(): Outgoing[] {
     if (this.ending === undefined) return [];
     const now = this.now();
     if (this.closedAt !== undefined) return now - this.closedAt >= TURN_DECISION_MS ? this.closeBy(undefined) : [];
     const quietSince = Math.max(this.lastMessageAt, this.decision?.at ?? 0);
-    return now - quietSince >= TURN_DECISION_MS ? this.closeBy(this.decision?.d) : [];
+    return now - quietSince >= TURN_CLOSE_WAIT_MS ? this.closeBy(this.decision?.d) : [];
   }
 
   // The window is going away or the session changes: nothing more will come.

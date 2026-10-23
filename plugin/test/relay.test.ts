@@ -1,7 +1,7 @@
 import type { TranscriptEvent } from "../src/transcript/parse.ts";
 
 import { describe, expect, test } from "bun:test";
-import { Relay, TURN_DECISION_MS } from "../src/transcript/relay.ts";
+import { Relay, TURN_CLOSE_WAIT_MS, TURN_DECISION_MS } from "../src/transcript/relay.ts";
 
 const own = (name: string) => /(^|__)tg_(enable|disable)$/.test(name);
 const text = (t: string, m = "m1"): TranscriptEvent => ({ kind: "text", text: t, messageId: m });
@@ -72,13 +72,16 @@ describe("relay: closing a turn", () => {
     expect(r.idle()).toEqual([]);
   });
 
-  test("no turn_closed: closed by the decision after 5 s of quiet", () => {
+  test("no turn_closed: closed by the decision after 30 s of quiet", () => {
     const { r, clock, finals } = makeRelay();
     r.feed(text("B", "m2"));
     r.feed(end("m2"));
     clock.t += 1000;
     r.decide(DONE);
-    clock.t += TURN_DECISION_MS - 1;
+    // A prompt-type Stop hook may still continue the turn after 5 s.
+    clock.t += TURN_DECISION_MS;
+    expect(r.idle()).toEqual([]);
+    clock.t += TURN_CLOSE_WAIT_MS - TURN_DECISION_MS - 1;
     expect(r.idle()).toEqual([]);
     clock.t += 1;
     expect(r.idle()).toEqual([{ text: "B", notify: true }]);
@@ -90,19 +93,19 @@ describe("relay: closing a turn", () => {
     r.feed(text("B", "m2"));
     r.feed(end("m2"));
     r.decide(DONE);
-    clock.t += TURN_DECISION_MS - 1;
+    clock.t += TURN_CLOSE_WAIT_MS - 1;
     r.feed(end("m2"));
-    clock.t += TURN_DECISION_MS - 1;
+    clock.t += TURN_CLOSE_WAIT_MS - 1;
     expect(r.idle()).toEqual([]);
     clock.t += 1;
     expect(r.idle()).toEqual([{ text: "B", notify: true }]);
   });
 
-  test("no turn_closed and no decision: closed loud after 5 s of quiet, nothing reported", () => {
+  test("no turn_closed and no decision: closed loud after 30 s of quiet, nothing reported", () => {
     const { r, clock, finals } = makeRelay();
     r.feed(text("B", "m2"));
     r.feed(end("m2"));
-    clock.t += TURN_DECISION_MS - 1;
+    clock.t += TURN_CLOSE_WAIT_MS - 1;
     expect(r.idle()).toEqual([]);
     clock.t += 1;
     expect(r.idle()).toEqual([{ text: "B", notify: true }]);
