@@ -1833,6 +1833,8 @@ describe("commands", () => {
     const EXIT_MS = 300;
     // How long a compact that does not end is waited for: 0.02 min.
     const COMPACT_MS = 1200;
+    // How long a window that does not end is waited for: 0.4 s.
+    const STOP_MS = 400;
 
     const skill = (name: string, chars: number) => ({ name, content: "x".repeat(chars) });
     const record = (uuid: string, skills: { name: string; content: string }[]) =>
@@ -2184,6 +2186,76 @@ describe("commands", () => {
       expect((await w.next("inbound")).content).toBe("meanwhile");
       expect(readFileSync(transcript, "utf8")).toBe(original);
       h.release();
+    });
+
+    test("a second /stop while the window ends after the compact changes nothing", async () => {
+      const { a, spawned, transcript } = await liveSession(SKILLS);
+      const { runner } = mod(SID);
+      command("/cleanup");
+      await pollUntil(runner, () => terminated(a));
+      command("/stop");
+      await waitFor(() => sentText(t => t.startsWith("⏹ После")));
+      command("/stop");
+      await Bun.sleep(SETTLE_MS);
+      expect(a.messages.filter(m => m.type === "terminate").length).toBe(1);
+      await windowEnds(a);
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
+      expect(summary.text).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k) Сессия остановлена.");
+      expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
+      await Bun.sleep(SETTLE_MS);
+      expect(spawned).toEqual([]);
+    });
+
+    test("a window that does not end after the compact drops /cleanup loudly and gets the held messages", async () => {
+      const { a, spawned, transcript, original } = await liveSession(SKILLS, { stopTimeoutMs: STOP_MS });
+      const { runner } = mod(SID);
+      command("/cleanup");
+      await pollUntil(runner, () => terminated(a));
+      command("meanwhile");
+      await heldForCleanup();
+      const failed = await waitFor(() => sentText(t => t.startsWith("⚠️")), STOP_MS * 3);
+      expect(failed.text).toBe("⚠️ Не удалось завершить сессию за 0.4 с");
+      expect(failed.disable_notification).toBe(false);
+      expect((await a.next("inbound")).content).toBe("meanwhile");
+      // The cleanup is over: /run answers for a working session.
+      command("/run");
+      await waitFor(() => sentText(t => t === "Сессия уже работает"));
+      expect(readFileSync(transcript, "utf8")).toBe(original);
+      expect(spawned).toEqual([]);
+    });
+
+    test("a window that ends without naming its process is waited out, then cleaned and started again", async () => {
+      // A pid would be waited for and found alive; without one the hub only waits a moment.
+      const { a, spawned, transcript } = await liveSession(SKILLS, { isAlive: () => true, cleanupSettleMs: SETTLE_MS });
+      const { runner } = mod(SID);
+      command("/cleanup");
+      await pollUntil(runner, () => terminated(a));
+      await a.next("terminate");
+      a.close();
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
+      expect(summary.text).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k)");
+      expect(log.lines.some(l => l.includes("the Claude Code process is unknown"))).toBe(true);
+      expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+    });
+
+    test("a failed transcript edit says so loudly and still starts the session again", async () => {
+      const { a, spawned, transcript, original } = await liveSession(SKILLS, {
+        cleanTranscript: async () => {
+          throw new Error("disk");
+        },
+      });
+      const { runner } = mod(SID);
+      command("/cleanup");
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️ Скиллы")));
+      expect(warning.text).toBe("⚠️ Скиллы не убраны: disk");
+      expect(warning.disable_notification).toBe(false);
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+      expect(readFileSync(transcript, "utf8")).toBe(original);
     });
   });
 });

@@ -1,7 +1,10 @@
 // What the plugin's function hooks module does with commands from the topic.
 // The module runs inside Claude Code with no Node: everything outside comes
-// in as Deps (the engine's `$` calls), so this file imports nothing but types.
+// in as Deps (the engine's `$` calls), so this file imports only types and
+// plain helpers from shared/ that need nothing at run time.
 import type { CleanupReport, LimitsReading, RateLimit, TopicCommand } from "../shared/protocol.ts";
+
+import { MILLION, THOUSAND, tokens } from "../shared/tokens.ts";
 
 // /stop of a session with more context than this compacts it first, so a
 // resume does not cache all of it again.
@@ -9,8 +12,6 @@ const STOP_COMPACT_TOKENS = 120_000;
 const LIMIT_NAMES: Record<string, string> = { five_hour: "5 часов", seven_day: "Неделя" };
 // The order of the limits in /info; others go after these.
 const LIMIT_ORDER = ["five_hour", "seven_day"];
-const THOUSAND = 1_000;
-const MILLION = 1_000_000;
 const MS_PER_MINUTE = 60_000;
 const MINUTES_PER_HOUR = 60;
 const HOURS_PER_DAY = 24;
@@ -291,11 +292,6 @@ export function compactionText(c: Compaction): string {
   if (c.skip !== undefined) return `⚠️ Компакт пропущен: ${c.skip}`;
   const sizes = c.tokensBefore !== undefined && c.tokensAfter !== undefined ? `: ${tokens(c.tokensBefore)} → ${tokens(c.tokensAfter)} токенов` : "";
   return `✅ Контекст сжат${sizes}.`;
-}
-
-export function tokens(n: number): string {
-  if (n >= MILLION) return `${Number((n / MILLION).toFixed(1))}M`;
-  return `${Math.round(n / THOUSAND)}k`;
 }
 
 // `/compact <N>` with a token count (333000, 333k, 1.5m) or `auto` sets the

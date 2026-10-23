@@ -1,8 +1,9 @@
 import type { Usage } from "../src/mod/commands.ts";
 
 import { describe, expect, test } from "bun:test";
-import { autocompactArg, infoText, Runner, tokens } from "../src/mod/commands.ts";
+import { autocompactArg, infoText, Runner } from "../src/mod/commands.ts";
 import { field } from "../src/shared/guards.ts";
+import { tokens } from "../src/shared/tokens.ts";
 
 const NOW = Date.parse("2026-01-01T11:40:00Z");
 
