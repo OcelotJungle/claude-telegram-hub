@@ -31,6 +31,9 @@ let interrupts: { prompt: string; channelBefore: number; channelAfter: number }[
 let interruptMs: number;
 let interruptFails: boolean;
 let terminated: number;
+// The pid the fake terminate reports as the Claude Code process it ends.
+let claudePid: number | undefined;
+let hubLog: ReturnType<typeof memLogger>;
 let spoolDir: string;
 let state: string;
 let spawned: number;
@@ -83,7 +86,10 @@ function makeCore(sessionId = SID) {
       if (interruptFails) throw new Error("inbox is gone");
     },
     answerPermission: (requestId, behavior) => answers.push({ requestId, behavior }),
-    terminate: () => void terminated++,
+    terminate: exiting => {
+      terminated++;
+      if (claudePid !== undefined) exiting(claudePid);
+    },
     log: pluginLog,
     tailIntervalMs: 30,
     cardEveryMs: 30,
@@ -113,7 +119,7 @@ beforeEach(async () => {
     reactionDelayMs: 50,
     // No module polls here: /stop ends the window once nobody takes it.
     commandPickupMs: 100,
-    log: memLogger(),
+    log: (hubLog = memLogger()),
     onExit() {},
   });
   hub.start();
@@ -128,6 +134,7 @@ beforeEach(async () => {
   interruptMs = 0;
   interruptFails = false;
   terminated = 0;
+  claudePid = undefined;
   spoolDir = join(state, "spool");
   spawned = 0;
   pluginLog = memLogger();
@@ -381,6 +388,13 @@ describe("PluginCore", () => {
     await enabledCore();
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "/stop" }));
     await waitFor(() => terminated === 1, 3000, "terminate");
+  });
+
+  test("terminate tells the hub the pid it is about to end", async () => {
+    claudePid = 4242;
+    await enabledCore();
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "/stop" }));
+    await waitFor(() => hubLog.lines.includes(`INFO session ${SID}: the plugin ends Claude Code 4242`), 3000, "exiting");
   });
 
   test("a permission request is sent loudly while enabled", async () => {

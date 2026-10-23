@@ -83,10 +83,11 @@ const core = sessionId
       answerPermission: (requestId, behavior) => {
         mcp.notification({ method: "notifications/claude/channel/permission", params: { request_id: requestId, behavior } }).catch(e => log.error(`permission answer failed: ${e}`));
       },
-      terminate: () => {
+      terminate: exiting => {
         const pid = findClaudePid(process.ppid, windowsProcessInfo, process.env.CLAUDE_PID);
         if (!pid) return log.error("terminate: no claude.exe among the parents of this plugin");
         log.info(`terminate: ending claude.exe ${pid}`);
+        exiting(pid);
         try {
           process.kill(pid);
         } catch (e) {

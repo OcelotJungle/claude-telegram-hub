@@ -85,8 +85,9 @@ export type PluginOptions = {
   interrupt(prompt: string): Promise<void>;
   // Answers a permission prompt of Claude Code.
   answerPermission(requestId: string, behavior: PermissionBehavior): void;
-  // Ends the Claude Code process of this window (/stop in the topic).
-  terminate(): void;
+  // Ends the Claude Code process of this window (/stop in the topic), first
+  // passing its pid to `exiting`; neither happens if the process is not found.
+  terminate(exiting: (pid: number) => void): void;
   log: Logger;
   tailIntervalMs?: number;
   // How often a subagent card may change; the watcher's own default if unset.
@@ -452,7 +453,8 @@ export class PluginCore {
         this.log.info(`session ${this.sessionId}: /stop from the topic, ending Claude Code`);
         this.tailer?.pollNow();
         this.flush(this.relay.idle());
-        this.opts.terminate();
+        // The hub waits for this pid to be gone before it touches the transcript.
+        this.opts.terminate(pid => this.client.send({ type: "exiting", pid }));
         return;
     }
   }

@@ -58,7 +58,10 @@ export type PluginToHub =
   // Topic messages that reached the agent's context, by Telegram message id.
   | { type: "seen"; messageIds: number[] }
   // The agent started working, or stopped: its turn ended or it waits for the user.
-  | { type: "busy"; busy: boolean };
+  | { type: "busy"; busy: boolean }
+  // The plugin is about to end this Claude Code process (after terminate), so
+  // the hub can wait until it is gone.
+  | { type: "exiting"; pid: number };
 
 export type HubToPlugin =
   | { type: "state"; enabled: boolean; topicTitle?: string }

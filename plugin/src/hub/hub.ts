@@ -102,7 +102,8 @@ const BOT_COMMANDS = [
 ];
 const EXEC_NOT_SET = "⚠️ Команды оболочки в этом хабе не настроены";
 
-type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; busy?: boolean; reportsSeen?: boolean };
+// exitingPid: the Claude Code process the plugin said it is ending.
+type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; busy?: boolean; reportsSeen?: boolean; exitingPid?: number };
 type WS = ServerWebSocket<Conn>;
 type Card = {
   text: string;
@@ -643,6 +644,10 @@ ${msg.text}`);
         if (!msg.busy) return;
         this.showTyping(ws);
         if (sid) this.dropLaunchNotices(sid);
+        return;
+      case "exiting":
+        this.log.info(`session ${sid}: the plugin ends Claude Code ${msg.pid}`);
+        ws.data.exitingPid = msg.pid;
         return;
     }
   }
