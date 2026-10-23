@@ -61,6 +61,11 @@ const STOP_TIMEOUT_MS = 15_000;
 const CLEANUP_EXIT_MS = 30_000;
 const EXIT_POLL_MS = 200;
 const CLEANUP_SETTLE_MS = 3000;
+// How long /cleanup waits for the module to report its compact.
+const CLEANUP_COMPACT_MS = 600_000;
+// A topic message starting with it reaches a compacting window at once, as
+// it interrupts the agent (the plugin's own prefix).
+const INTERRUPT_PREFIX = "!";
 // The size of a removed skill in tokens, roughly.
 const CHARS_PER_TOKEN = 4;
 const CLEANUP_BUSY = "⏳ /cleanup уже идёт";
@@ -68,6 +73,7 @@ const CLEANUP_STOPPED = " Сессия остановлена.";
 // Messages a starting session holds; more are dropped.
 const MAX_HELD = 50;
 const MS_PER_SECOND = 1000;
+const MS_PER_MINUTE = 60_000;
 const HOOK_TTL_MS = 60_000;
 const SPOOL_SCAN_MS = 5000;
 const POLL_TIMEOUT_SEC = 25;
@@ -138,9 +144,17 @@ type Inbound = { content: string; meta: ChannelMeta; onSent(): void };
 type Held = { message: Message } | { inbound: Inbound };
 // A /cleanup under way: the id of its command, the context the module
 // reported before compacting, and whether the window is compacting or
-// exiting. noRelaunch: a /stop came meanwhile. held: what came for the
-// session after its window closed.
-type Cleanup = { id: string; before?: number; phase: "compacting" | "exiting"; noRelaunch?: boolean; held: Held[] };
+// exiting. noRelaunch: a /stop came meanwhile. held: topic messages for the
+// session from the start of the compact on, the window still open or not.
+// compactTimer: gives up on a compact the module never reports.
+type Cleanup = {
+  id: string;
+  before?: number;
+  phase: "compacting" | "exiting";
+  noRelaunch?: boolean;
+  held: Held[];
+  compactTimer?: ReturnType<typeof setTimeout>;
+};
 
 export type HubOptions = {
   port: number;
@@ -177,9 +191,10 @@ export type HubOptions = {
   spawn?(command: string[]): void;
   readyDelayMs?: number;
   stopTimeoutMs?: number;
-  // /cleanup: how long it waits for Claude Code to exit, how long it waits
-  // with the process unknown, how it tells the process is still there, and
-  // what empties the skills in the transcript.
+  // /cleanup: how long it waits for the compact, for Claude Code to exit,
+  // and with the process unknown; how it tells the process is still there,
+  // and what empties the skills in the transcript.
+  cleanupCompactMs?: number;
   cleanupExitMs?: number;
   cleanupSettleMs?: number;
   isAlive?(pid: number): boolean;
@@ -387,6 +402,7 @@ export class Hub {
     for (const card of this.cards.values()) clearTimeout(card.timer);
     for (const l of this.launches.values()) clearTimeout(l.timer);
     for (const t of this.stops.values()) clearTimeout(t);
+    for (const c of this.cleanups.values()) clearTimeout(c.compactTimer);
     for (const t of this.readyTimers) clearTimeout(t);
     for (const t of this.reactionTimers.values()) clearTimeout(t);
     // The commands go on; the next hub picks them up.
@@ -466,7 +482,7 @@ export class Hub {
         if (this.stopping.get(sessionId) === cmd.id) this.terminate(sessionId);
         return;
       }
-      if (cmd.name === "cleanup" && this.cleanups.get(sessionId)?.id === cmd.id) this.cleanups.delete(sessionId);
+      if (cmd.name === "cleanup" && this.cleanups.get(sessionId)?.id === cmd.id) this.dropCleanup(sessionId);
       this.enqueue(sessionId, `cmd-${cmd.id}-lost`, `⚠️ /${cmd.name} не выполнена: окно не забрало её за ${ms / MS_PER_SECOND} с. Команды выполняет модуль плагина — перезапусти окно.`, true, false);
     }, ms);
     this.commands.set(sessionId, [...(this.commands.get(sessionId) ?? []), { cmd, timer }]);
@@ -532,6 +548,7 @@ export class Hub {
         void this.finishCleanup(sid, cleanup, ws.data.exitingPid);
       } else {
         this.log.info(`window for session ${sid} closed while compacting for /cleanup; /cleanup dropped`);
+        this.notice(sid, "⚠️ Окно закрылось до конца компакта, /cleanup отменена", true);
         this.dropCleanup(sid);
       }
     }
@@ -1344,7 +1361,25 @@ ${msg.text}`);
       if (cfg.groupId) await api.sendMessage(cfg.groupId, route.topicId, text, false).catch(e => this.log.warn(`inactive notice failed: ${e}`));
       return;
     }
+    if (this.holdForCleanup(route.sessionId, m)) return;
     await this.deliver(api, route.sessionId, m);
+  }
+
+  // A /cleanup under way keeps topic messages for the session it starts
+  // again; a module command still goes to the window, and so does a message
+  // that interrupts the agent.
+  private holdForCleanup(sessionId: string, m: Message): boolean {
+    const c = this.cleanups.get(sessionId);
+    if (!c) return false;
+    if (m.text !== undefined && commandOf(m.text, this.botUsername)) return false;
+    if ((m.text ?? m.caption ?? "").trimStart().startsWith(INTERRUPT_PREFIX)) return false;
+    if (c.held.length >= MAX_HELD) {
+      this.log.warn(`/cleanup of session ${sessionId} holds ${MAX_HELD} messages; message ${m.message_id} dropped`);
+      return true;
+    }
+    c.held.push({ message: m });
+    this.log.info(`message ${m.message_id} for session ${sessionId} held until /cleanup ends`);
+    return true;
   }
 
   private async deliver(api: TelegramApi, sessionId: string, m: Message): Promise<void> {
@@ -1449,7 +1484,10 @@ ${msg.text}`);
       sessionId,
       setTimeout(() => {
         this.stops.delete(sessionId);
-        if (this.cleanups.delete(sessionId)) this.log.warn(`session ${sessionId} did not end for /cleanup; /cleanup dropped`);
+        if (this.cleanups.has(sessionId)) {
+          this.log.warn(`session ${sessionId} did not end for /cleanup; /cleanup dropped`);
+          this.dropCleanup(sessionId);
+        }
         this.notice(sessionId, `⚠️ Не удалось завершить сессию за ${ms / MS_PER_SECOND} с`, true);
       }, ms),
     );
@@ -1463,7 +1501,15 @@ ${msg.text}`);
     if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, false);
     if (!this.connOf(sessionId)) return this.notice(sessionId, "Сессия не запущена", false);
     if (this.stops.has(sessionId) || this.stopping.has(sessionId)) return this.notice(sessionId, "⏳ Сессия уже завершается", false);
-    this.cleanups.set(sessionId, { id: this.queueCommand(sessionId, { name: "cleanup", args }), phase: "compacting", held: [] });
+    const c: Cleanup = { id: this.queueCommand(sessionId, { name: "cleanup", args }), phase: "compacting", held: [] };
+    const ms = this.opts.cleanupCompactMs ?? CLEANUP_COMPACT_MS;
+    c.compactTimer = setTimeout(() => {
+      if (this.cleanups.get(sessionId) !== c || c.phase !== "compacting") return;
+      this.log.warn(`/cleanup of session ${sessionId}: no compact report in ${ms} ms; /cleanup dropped`);
+      this.notice(sessionId, `⚠️ /cleanup не дождалась компакта за ${ms / MS_PER_MINUTE} мин, отменена. Сессию не трогаю`, true);
+      this.dropCleanup(sessionId);
+    }, ms);
+    this.cleanups.set(sessionId, c);
   }
 
   // The first /stop only keeps the session from starting again; a second one
@@ -1481,20 +1527,38 @@ ${msg.text}`);
     this.terminate(sessionId);
   }
 
+  // A /cleanup given up before the window ended: the messages it held go to
+  // the window still open, else as to a stopped session.
   private dropCleanup(sessionId: string): void {
+    const c = this.cleanups.get(sessionId);
+    if (c) clearTimeout(c.compactTimer);
     this.cleanups.delete(sessionId);
     const queued = this.commands.get(sessionId) ?? [];
     for (const e of queued.filter(e => e.cmd.name === "cleanup")) clearTimeout(e.timer);
-    this.commands.set(sessionId, queued.filter(e => e.cmd.name !== "cleanup"));
+    const left = queued.filter(e => e.cmd.name !== "cleanup");
+    if (left.length) this.commands.set(sessionId, left);
+    else this.commands.delete(sessionId);
+    if (!c?.held.length) return;
+    if (this.connOf(sessionId)) {
+      this.log.info(`/cleanup of session ${sessionId} dropped: ${c.held.length} held message(s) go to its window`);
+      void this.sendHeld(sessionId, c.held);
+    } else if (this.opts.config().launch) {
+      this.log.info(`/cleanup of session ${sessionId} dropped: ${c.held.length} held message(s) start the session`);
+      this.launch(sessionId, undefined, c.held);
+    } else this.log.warn(`/cleanup of session ${sessionId} dropped with no window and no launch command: ${c.held.length} held message(s) dropped`);
   }
 
   private onCleanupReport(sessionId: string, id: string, before: number | undefined, error: string | undefined): void {
     const c = this.cleanups.get(sessionId);
-    if (!c || c.id !== id || c.phase !== "compacting") return;
+    if (!c || c.id !== id || c.phase !== "compacting") {
+      this.log.info(`/cleanup report ${id} for session ${sessionId} ignored: that /cleanup was dropped or is unknown`);
+      return;
+    }
+    clearTimeout(c.compactTimer);
     if (error !== undefined) {
       this.log.warn(`/cleanup of session ${sessionId}: the compact failed: ${error}`);
-      this.cleanups.delete(sessionId);
-      return this.notice(sessionId, `⚠️ /cleanup не выполнена: компакт не удался: ${error}. Сессию не трогаю`, true);
+      this.notice(sessionId, `⚠️ /cleanup не выполнена: компакт не удался: ${error}. Сессию не трогаю`, true);
+      return this.dropCleanup(sessionId);
     }
     this.log.info(`/cleanup of session ${sessionId}: compacted${before === undefined ? "" : ` from ${before} tokens`}; ending the window`);
     if (before !== undefined) c.before = before;

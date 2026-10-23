@@ -58,6 +58,7 @@ type HubExtras = {
   execFileLimit?: number;
   execGraceMs?: number;
   isAlive?(pid: number): boolean;
+  cleanupCompactMs?: number;
   cleanupExitMs?: number;
   cleanupSettleMs?: number;
   cleanTranscript?: typeof cleanTranscript;
@@ -92,6 +93,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     ...(o.projectsDir ? { projectsDir: o.projectsDir } : {}),
     ...(o.stopTimeoutMs ? { stopTimeoutMs: o.stopTimeoutMs } : {}),
     ...(o.isAlive ? { isAlive: o.isAlive } : {}),
+    ...(o.cleanupCompactMs ? { cleanupCompactMs: o.cleanupCompactMs } : {}),
     ...(o.cleanupExitMs ? { cleanupExitMs: o.cleanupExitMs } : {}),
     ...(o.cleanupSettleMs ? { cleanupSettleMs: o.cleanupSettleMs } : {}),
     ...(o.cleanTranscript ? { cleanTranscript: o.cleanTranscript } : {}),
@@ -1829,6 +1831,8 @@ describe("commands", () => {
     const BIG_SKILL = 72_000;
     // How long a Claude Code that does not exit is waited for.
     const EXIT_MS = 300;
+    // How long a compact that does not end is waited for: 0.02 min.
+    const COMPACT_MS = 1200;
 
     const skill = (name: string, chars: number) => ({ name, content: "x".repeat(chars) });
     const record = (uuid: string, skills: { name: string; content: string }[]) =>
@@ -2086,6 +2090,100 @@ describe("commands", () => {
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
       await Bun.sleep(SETTLE_MS);
       expect(spawned).toEqual([]);
+    });
+
+    const heldForCleanup = () => waitFor(() => log.lines.some(l => l.includes("held until /cleanup ends")));
+    const inbound = (c: { messages: { type: string }[] }) => c.messages.some(m => m.type === "inbound");
+
+    test("a message during the compact does not reach the window and goes to the session started again", async () => {
+      const { a, spawned } = await liveSession(SKILLS);
+      const h = held();
+      const { runner } = mod(SID, undefined, undefined, h.answer);
+      command("/cleanup");
+      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      command("meanwhile");
+      await heldForCleanup();
+      await Bun.sleep(SETTLE_MS);
+      expect(inbound(a)).toBe(false);
+      h.release();
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+      const w = await plugin(SID);
+      expect((await w.next("inbound")).content).toBe("meanwhile");
+      expect(inbound(a)).toBe(false);
+    });
+
+    test("a message starting with ! during the compact reaches the window at once", async () => {
+      const { a } = await liveSession(SKILLS);
+      const h = held();
+      const { runner } = mod(SID, undefined, undefined, h.answer);
+      command("/cleanup");
+      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      command(" !stop now");
+      expect((await a.next("inbound")).content).toBe(" !stop now");
+      h.release();
+    });
+
+    test("a failed compact hands the held messages to the window", async () => {
+      const { a, spawned } = await liveSession(SKILLS);
+      let release = () => {};
+      const gate = new Promise<void>(r => (release = r));
+      const { runner } = mod(SID, undefined, undefined, async () => {
+        await gate;
+        throw new Error("boom");
+      });
+      command("/cleanup");
+      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      command("meanwhile");
+      await heldForCleanup();
+      expect(inbound(a)).toBe(false);
+      release();
+      await reply(runner, t => t.startsWith("⚠️ /cleanup не выполнена"));
+      expect((await a.next("inbound")).content).toBe("meanwhile");
+      expect(terminated(a)).toBe(false);
+      expect(spawned).toEqual([]);
+    });
+
+    test("a compact that does not end in time drops /cleanup loudly, hands the held messages to the window and ignores the late report", async () => {
+      const { a, spawned, transcript, original } = await liveSession(SKILLS, { cleanupCompactMs: COMPACT_MS });
+      const h = held();
+      const { runner } = mod(SID, undefined, undefined, h.answer);
+      command("/cleanup");
+      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      command("meanwhile");
+      await heldForCleanup();
+      const late = await waitFor(() => sentText(t => t.startsWith("⚠️")), COMPACT_MS * 3);
+      expect(late.text).toBe("⚠️ /cleanup не дождалась компакта за 0.02 мин, отменена. Сессию не трогаю");
+      expect(late.disable_notification).toBe(false);
+      expect((await a.next("inbound")).content).toBe("meanwhile");
+      h.release();
+      await pollUntil(runner, () => log.lines.some(l => l.includes("ignored: that /cleanup was dropped or is unknown")));
+      await Bun.sleep(SETTLE_MS);
+      expect(terminated(a)).toBe(false);
+      expect(readFileSync(transcript, "utf8")).toBe(original);
+      expect(spawned).toEqual([]);
+    });
+
+    test("a window closed during the compact drops /cleanup loudly and its held messages start the session", async () => {
+      const { a, spawned, transcript, original } = await liveSession(SKILLS);
+      const h = held();
+      const { runner } = mod(SID, undefined, undefined, h.answer);
+      command("/cleanup");
+      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      command("meanwhile");
+      await heldForCleanup();
+      a.close();
+      const closed = await waitFor(() => sentText(t => t.startsWith("⚠️ Окно")));
+      expect(closed.text).toBe("⚠️ Окно закрылось до конца компакта, /cleanup отменена");
+      expect(closed.disable_notification).toBe(false);
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+      const w = await plugin(SID);
+      expect((await w.next("inbound")).content).toBe("meanwhile");
+      expect(readFileSync(transcript, "utf8")).toBe(original);
+      h.release();
     });
   });
 });
