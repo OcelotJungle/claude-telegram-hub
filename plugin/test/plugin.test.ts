@@ -1,3 +1,4 @@
+import type { ChimeKind } from "../src/shared/chime.ts";
 import type { Config } from "../src/shared/config.ts";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -6,9 +7,8 @@ import { join } from "path";
 import { z } from "zod";
 import { Hub } from "../src/hub/hub.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
-import { CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, filesRejectedPrompt, interruptPrompt, MAX_AUTO_CONTINUES, PluginCore } from "../src/plugin/plugin.ts";
+import { CHIME_MIN_TURN_MS, CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, filesRejectedPrompt, interruptPrompt, MAX_AUTO_CONTINUES, PluginCore } from "../src/plugin/plugin.ts";
 import { arr, field } from "../src/shared/guards.ts";
-import { NOTIFY_MARKER } from "../src/transcript/relay.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { freePort, memLogger, NO_PACE, tempDir, waitFor } from "./helpers.ts";
 
@@ -38,6 +38,18 @@ let spoolDir: string;
 let state: string;
 let spawned: number;
 let pluginLog: ReturnType<typeof memLogger>;
+// The chimes the plugin asked for, and how far the plugin's clock is moved ahead.
+let chimes: ChimeKind[];
+let clockSkew: number;
+
+// What the Stop hook does: tells the hub how the turn ended.
+async function stopHook(final: boolean, kind?: ChimeKind) {
+  const res = await fetch(`http://127.0.0.1:${port}/turn-end`, {
+    method: "POST",
+    body: JSON.stringify({ messagingSocket: "pipe-1", session_id: SID, final, ...(kind ? { kind } : {}) }),
+  });
+  expect(res.status).toBe(200);
+}
 
 const line = (o: object) => JSON.stringify(o) + "\n";
 const append = (...recs: object[]) => appendFileSync(transcript, recs.map(line).join(""));
@@ -91,6 +103,8 @@ function makeCore(sessionId = SID) {
       if (claudePid !== undefined) exiting(claudePid);
     },
     log: pluginLog,
+    chime: kind => chimes.push(kind),
+    now: () => Date.now() + clockSkew,
     tailIntervalMs: 30,
     cardEveryMs: 30,
   });
@@ -138,6 +152,8 @@ beforeEach(async () => {
   spoolDir = join(state, "spool");
   spawned = 0;
   pluginLog = memLogger();
+  chimes = [];
+  clockSkew = 0;
 });
 
 afterEach(async () => {
@@ -164,35 +180,95 @@ describe("PluginCore", () => {
     expect(sent()).toEqual([]);
   });
 
-  test("intermediate text is silent and the final text is silent without tg_notify", async () => {
+  test("a final turn: the text before a tool is silent, the last text is loud", async () => {
     await enabledCore();
     append(assistantText("Смотрю код", "tool_use", "a1"), assistantTool("Read", "a1"), assistantText("Готово", "end_turn", "a2"));
-    await waitFor(() => sent().length === 2, 3000, "two messages");
+    await stopHook(true, "done");
+    await waitFor(() => sent().length === 2, 5000, "two messages");
     expect(sent()).toEqual([
       { text: "Смотрю код", silent: true, topic: 100 },
-      { text: "Готово", silent: true, topic: 100 },
+      { text: "Готово", silent: false, topic: 100 },
     ]);
   });
 
-  test("tg_notify makes the final text loud", async () => {
-    const c = await enabledCore();
-    append(assistantText("Сводка", "tool_use", "b1"), assistantTool("mcp__plugin_tg-hub_tg-hub__tg_notify", "b1"));
-    await Bun.sleep(100);
-    expect(c.notify("done")).toContain("notification");
-    append(assistantText("Всё сделано", "end_turn", "b2"));
-    await waitFor(() => sent().length === 2, 3000, "two messages");
-    expect(sent()).toEqual([
-      { text: "Сводка", silent: true, topic: 100 },
-      { text: "Всё сделано", silent: false, topic: 100 },
-    ]);
+  test("an ask turn is loud too", async () => {
+    await enabledCore();
+    append(assistantText("Какой вариант?", "end_turn", "q1"));
+    await stopHook(true, "ask");
+    await waitFor(() => sent().length === 1, 5000, "question");
+    expect(sent()).toEqual([{ text: "Какой вариант?", silent: false, topic: 100 }]);
   });
 
-  test("tg_notify with no text after it sends the marker loudly", async () => {
-    const c = await enabledCore();
-    c.notify("ask");
+  test("an intermediate turn end sends its text silently", async () => {
+    await enabledCore();
+    append(assistantText("Жду монитор", "end_turn", "p1"));
+    await stopHook(false);
+    await waitFor(() => sent().length === 1, 5000, "text");
+    expect(sent()).toEqual([{ text: "Жду монитор", silent: true, topic: 100 }]);
+  });
+
+  test("without a decision the turn is closed as final after the limit", async () => {
+    await enabledCore();
+    append(assistantText("Итог", "end_turn", "n1"));
+    await waitFor(() => sent().length === 1, 8000, "text");
+    expect(sent()).toEqual([{ text: "Итог", silent: false, topic: 100 }]);
+  }, 15_000);
+
+  test("a final turn without text sends nothing", async () => {
+    await enabledCore();
     append({ type: "assistant", isSidechain: false, message: { id: "c1", role: "assistant", content: [{ type: "thinking", thinking: "" }], stop_reason: "end_turn" } });
-    await waitFor(() => sent().length === 1, 3000, "marker");
-    expect(sent()[0]).toEqual({ text: NOTIFY_MARKER, silent: false, topic: 100 });
+    await stopHook(true, "done");
+    await Bun.sleep(2500);
+    expect(sent()).toEqual([]);
+  });
+
+  describe("the terminal chime", () => {
+    // The user types in the terminal: the mode goes off and a turn begins.
+    async function terminalTurn() {
+      const c = await enabledCore();
+      append(humanTyped("сам продолжу"));
+      await waitFor(() => !c.enabled, 3000, "disabled");
+      return c;
+    }
+
+    test("ask always chimes", async () => {
+      await terminalTurn();
+      await stopHook(true, "ask");
+      await waitFor(() => chimes.length === 1, 3000, "chime");
+      expect(chimes).toEqual(["ask"]);
+    });
+
+    test("done after a short turn is silent", async () => {
+      await terminalTurn();
+      await stopHook(true, "done");
+      await Bun.sleep(300);
+      expect(chimes).toEqual([]);
+    });
+
+    test("done after a long turn chimes", async () => {
+      await terminalTurn();
+      clockSkew = CHIME_MIN_TURN_MS;
+      await stopHook(true, "done");
+      await waitFor(() => chimes.length === 1, 3000, "chime");
+      expect(chimes).toEqual(["done"]);
+    });
+
+    test("an intermediate turn end never chimes", async () => {
+      await terminalTurn();
+      clockSkew = CHIME_MIN_TURN_MS;
+      await stopHook(false);
+      await Bun.sleep(300);
+      expect(chimes).toEqual([]);
+    });
+
+    test("with the mode on the terminal stays silent", async () => {
+      await enabledCore();
+      clockSkew = CHIME_MIN_TURN_MS;
+      await stopHook(true, "ask");
+      await stopHook(true, "done");
+      await Bun.sleep(300);
+      expect(chimes).toEqual([]);
+    });
   });
 
   test("typing in the terminal turns the mode off", async () => {
@@ -237,6 +313,7 @@ describe("PluginCore", () => {
       { type: "user", isSidechain: false, origin: { kind: "peer", handback: true }, isMeta: true, message: { role: "user", content: "Another Claude…" } },
       assistantText("продолжаю", "end_turn", "tn1"),
     );
+    await stopHook(false);
     await waitFor(() => sent().length === 1, 3000, "turn text");
     expect(c.enabled).toBe(true);
     expect(c.hookNote("")).toBe("");
@@ -443,6 +520,7 @@ describe("PluginCore", () => {
     expect(fake.callsOf("createForumTopic").at(-1)?.name).toBe("demo-app · После clear");
     appendFileSync(next, line(assistantText("в новой сессии", "end_turn")));
     append(assistantText("в старой сессии", "end_turn"));
+    await stopHook(false);
     await waitFor(() => sent().length === 1, 3000, "message");
     await Bun.sleep(150);
     expect(sent()).toEqual([{ text: "в новой сессии", silent: true, topic: 101 }]);
@@ -478,12 +556,8 @@ describe("PluginCore", () => {
     c.switchSession(SID, transcript.replace(/^([A-Za-z]):/, (_, d) => d.toLowerCase() + ":"), CWD);
     expect(c.enabled).toBe(true);
     append(assistantText("после компакта", "end_turn"));
+    await stopHook(false);
     await waitFor(() => sent().length === 1, 3000, "message");
-  });
-
-  test("tg_notify while the mode is off says so", () => {
-    const c = makeCore();
-    expect(c.notify("done")).toContain("off");
   });
 
   test("enable without groupId returns the explanation", async () => {
@@ -506,7 +580,7 @@ describe("note to the agent that the mode went off", () => {
     const note = noteOf(c.hookNote(""));
     expect(note.hookEventName).toBe("PostToolBatch");
     expect(note.additionalContext).toContain("OFF");
-    expect(note.additionalContext).toContain("tg_notify");
+    expect(note.additionalContext).toContain("tg_enable");
     expect(c.enabled).toBe(false);
     expect(c.hookNote("")).toBe("");
   });
@@ -575,6 +649,7 @@ describe("a turn ended by a failed connection to the API", () => {
     await enabledCore();
     append(assistantText("Пишу файл", "tool_use", "r1"), assistantTool("Write", "r1"), apiError("API Error: The response stopped arriving."));
     append(assistantText("Записал", "tool_use", "r2"), assistantTool("Bash", "r2"), assistantText("Готово", "end_turn", "r3"), closed);
+    await stopHook(true, "done");
     await waitFor(() => sent().length === 3, 3000, "three messages");
     expect(sent().map(s => s.text)).toEqual(["Пишу файл", "Записал", "Готово"]);
     expect(channel).toEqual([]);
@@ -605,6 +680,7 @@ describe("a turn ended by a failed connection to the API", () => {
     appendFileSync(transcript, cut().map(line).join(""));
     await enabledCore();
     append(assistantText("новый ход", "end_turn"));
+    await stopHook(false);
     await waitFor(() => sent().length === 1, 3000, "new turn");
     expect(channel).toEqual([]);
   });

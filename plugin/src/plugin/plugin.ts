@@ -1,3 +1,4 @@
+import type { ChimeKind } from "../shared/chime.ts";
 import type { Logger } from "../shared/log.ts";
 import type { ChannelMeta, HubToPlugin, PermissionBehavior } from "../shared/protocol.ts";
 import type { TranscriptEvent } from "../transcript/parse.ts";
@@ -7,7 +8,8 @@ import type { Titles } from "../transcript/tail.ts";
 import { randomUUID } from "crypto";
 import { copyFileSync, mkdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
-import { isInside } from "../shared/config.ts";
+import { playChime } from "../shared/chime.ts";
+import { isInside, loadConfig } from "../shared/config.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { BYTES_PER_MB, MAX_CAPTION, MAX_UPLOAD } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
@@ -24,7 +26,7 @@ export const HOOK_NOTE_TOOL = "tg_hook_note";
 
 const MODE_OFF_NOTE =
   "tg-hub: Telegram mode is now OFF for this session, because the user typed a message in the terminal. " +
-  "Your text is no longer relayed to Telegram, and tg_notify is not needed. " +
+  "Your text is no longer relayed to Telegram. " +
   "If that message asks to continue in Telegram, call tg_enable.";
 
 // A turn ended by a failed connection to the API: the agent is told to go
@@ -52,6 +54,9 @@ const HUB_TELEGRAM_TIMEOUT_MS = 150_000;
 const WAITS_FOR_USER = new Set(["AskUserQuestion"]);
 // A topic message starting with this stops the agent's turn and takes its place.
 const INTERRUPT_PREFIX = "!";
+// With the mode off, a finished turn chimes in the terminal only if it ran
+// at least this long (a question always chimes).
+export const CHIME_MIN_TURN_MS = 30_000;
 
 // A topic message that interrupts the agent, in the <channel> tag Claude Code
 // would have put it in.
@@ -92,11 +97,14 @@ export type PluginOptions = {
   tailIntervalMs?: number;
   // How often a subagent card may change; the watcher's own default if unset.
   cardEveryMs?: number;
+  // Plays the end-of-turn sound; the configured command by default.
+  chime?: (kind: ChimeKind) => void;
+  now?: () => number;
 };
 
 // Our own tools never make the text before them "intermediate".
 export function isOwnTool(name: string): boolean {
-  return /(^|__)tg_(enable|disable|notify)$/.test(name);
+  return /(^|__)tg_(enable|disable)$/.test(name);
 }
 
 // Whether the agent works after this event; undefined when it tells nothing.
@@ -125,7 +133,7 @@ export class PluginCore {
   private transcriptPath: string;
   private tailer: TranscriptTailer | undefined;
   private subagents: SubagentWatcher | undefined;
-  private relay = new Relay({ isOwnTool });
+  private relay: Relay;
   private client: HubClient;
   private titles: Titles = {};
   private log: Logger;
@@ -138,6 +146,9 @@ export class PluginCore {
   private apiError: string | undefined;
   // The agent is in a turn and not waiting for the user.
   private busy = false;
+  private now: () => number;
+  // When the current turn began (busy went on).
+  private turnStartedAt = 0;
   // Topic messages reach the session one after another, in the order they came.
   private inbound = Promise.resolve();
   enabled = false;
@@ -146,6 +157,8 @@ export class PluginCore {
     this.sessionId = opts.sessionId;
     this.cwd = opts.cwd;
     this.log = opts.log;
+    this.now = opts.now ?? Date.now;
+    this.relay = new Relay({ isOwnTool, now: this.now });
     this.transcriptPath = transcriptPathFor(opts.sessionId, opts.cwd, opts.configDir);
     this.client = new HubClient({
       port: opts.port,
@@ -171,7 +184,7 @@ export class PluginCore {
   // hub took goes to the spool directory, and a hub is started to send it.
   async shutdown(timeoutMs: number): Promise<void> {
     this.tailer?.pollNow();
-    this.flush(this.relay.idle());
+    this.flush(this.relay.endTurn());
     await this.client.drain(timeoutMs);
     const left = this.client.unacked;
     if (left.length) {
@@ -199,12 +212,6 @@ export class PluginCore {
   async disable(): Promise<string> {
     await this.client.request({ op: "disable" });
     return "Telegram mode is off.";
-  }
-
-  notify(_kind: "done" | "ask"): string {
-    if (!this.enabled) return "Telegram mode is off — nothing will be sent.";
-    this.relay.markNotify();
-    return "The final message of this turn will be sent with a notification. Write it now as your last text.";
   }
 
   async download(fileId: string): Promise<string> {
@@ -297,7 +304,7 @@ export class PluginCore {
       return;
     }
     this.log.info(`session ${this.sessionId} → ${sessionId}`);
-    this.flush(this.relay.idle());
+    this.flush(this.relay.endTurn());
     this.setEnabled(false);
     this.setBusy(false);
     this.sessionId = sessionId;
@@ -381,6 +388,7 @@ export class PluginCore {
   private setBusy(busy: boolean): void {
     if (busy === this.busy) return;
     this.busy = busy;
+    if (busy) this.turnStartedAt = this.now();
     this.client.send({ type: "busy", busy });
   }
 
@@ -406,7 +414,7 @@ export class PluginCore {
     const before = this.cuts++;
     if (!this.enabled) return;
     // The error text ended the turn: it goes before the note.
-    this.flush(this.relay.idle());
+    this.flush(this.relay.endTurn());
     if (before >= MAX_AUTO_CONTINUES) {
       if (before === MAX_AUTO_CONTINUES) this.client.enqueue(this.sessionId, CUT_LIMIT_NOTE, true);
       return;
@@ -424,6 +432,25 @@ export class PluginCore {
     this.enabled = on;
     if (on) this.noteOwed = false;
     this.flush(this.relay.setEnabled(on));
+  }
+
+  // The Stop hook's verdict. With the mode on the relay sends the text loud
+  // and the phone is the signal; with it off the terminal chimes.
+  private onTurnEnd(final: boolean, kind: ChimeKind | undefined): void {
+    if (!final) {
+      this.relay.decide({ final: false });
+      return;
+    }
+    const k = kind ?? "done";
+    this.relay.decide({ final: true, kind: k });
+    if (this.enabled) return;
+    if (k === "ask" || this.now() - this.turnStartedAt >= CHIME_MIN_TURN_MS) {
+      try {
+        (this.opts.chime ?? (kk => playChime(loadConfig().turnEndChime, kk)))(k);
+      } catch (e) {
+        this.log.warn(`turn-end chime failed: ${e}`);
+      }
+    }
   }
 
   private onHubMessage(m: HubToPlugin): void {
@@ -449,10 +476,13 @@ export class PluginCore {
         // what the agent was told to expect.
         if (m.error) this.opts.emitChannel(filesRejectedPrompt(m.error), { user: "tg-hub", reason: "files_rejected" });
         return;
+      case "turnEnd":
+        this.onTurnEnd(m.final, m.kind);
+        return;
       case "terminate":
         this.log.info(`session ${this.sessionId}: /stop from the topic, ending Claude Code`);
         this.tailer?.pollNow();
-        this.flush(this.relay.idle());
+        this.flush(this.relay.endTurn());
         // The hub waits for this pid to be gone before it touches the transcript.
         this.opts.terminate(pid => this.client.send({ type: "exiting", pid }));
         return;

@@ -85,10 +85,10 @@ test("a window talks to Telegram through a hub it started itself", async () => {
   const caps = client.getServerCapabilities();
   expect(caps?.experimental).toMatchObject({ "claude/channel": {}, "claude/channel/permission": {} });
   const instructions = client.getInstructions() ?? "";
-  expect(instructions).toContain("tg_notify");
+  expect(instructions).toContain("tg_enable");
 
   const { tools } = await client.listTools();
-  expect(tools.map(t => t.name).sort()).toEqual(["download_attachment", "tg_disable", "tg_enable", "tg_hook_note", "tg_notify", "tg_send_file"]);
+  expect(tools.map(t => t.name).sort()).toEqual(["download_attachment", "tg_disable", "tg_enable", "tg_hook_note", "tg_send_file"]);
   // What the PostToolBatch hook gets when there is nothing to tell: no output.
   const note = CallToolResultSchema.parse(await client.callTool({ name: "tg_hook_note", arguments: { agent_id: "" } }));
   expect(note.isError).toBeFalsy();
@@ -99,8 +99,12 @@ test("a window talks to Telegram through a hub it started itself", async () => {
   expect(res.content[0]).toMatchObject({ text: expect.stringContaining("e2e-proj · E2E") });
   expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: "e2e-proj · E2E" }]);
 
-  const notify = CallToolResultSchema.parse(await client.callTool({ name: "tg_notify", arguments: { kind: "done" } }));
-  expect(notify.content[0]).toMatchObject({ text: expect.stringContaining("notification") });
+  // What the Stop hook reports when the turn ends.
+  const turnEnd = await fetch(`http://127.0.0.1:${port}/turn-end`, {
+    method: "POST",
+    body: JSON.stringify({ messagingSocket: "\\\\.\\pipe\\LOCAL\\cc-msg-e2e", session_id: SID, final: true, kind: "done" }),
+  });
+  expect(turnEnd.status).toBe(200);
   appendFileSync(
     transcript,
     JSON.stringify({ type: "assistant", message: { id: "m1", role: "assistant", content: [{ type: "text", text: "Готово!" }], stop_reason: "end_turn" } }) + "\n",
@@ -128,8 +132,3 @@ test("a window talks to Telegram through a hub it started itself", async () => {
   await client.close();
   await waitFor(async () => !(await health()), 8000, "hub idle exit");
 }, 30_000);
-
-test("tg_notify with a wrong kind is an error", async () => {
-  const res = CallToolResultSchema.parse(await client.callTool({ name: "tg_notify", arguments: { kind: "loud" } }));
-  expect(res.isError).toBe(true);
-}, 15_000);
