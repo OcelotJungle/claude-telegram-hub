@@ -2010,6 +2010,58 @@ describe("commands", () => {
       h.release();
     });
 
+    test("a second /stop during the compact does not hand held messages to the dying window", async () => {
+      const { a, spawned } = await liveSession(SKILLS);
+      const h = held();
+      const { runner } = mod(SID, undefined, undefined, h.answer);
+      command("/cleanup");
+      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      command("meanwhile");
+      await heldForCleanup();
+      command("/stop");
+      await waitFor(() => sentText(t => t.startsWith("⏹ После")));
+      command("/stop");
+      await windowEnds(a);
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+      expect(inbound(a)).toBe(false);
+      const w = await plugin(SID);
+      expect((await w.next("inbound")).content).toBe("meanwhile");
+      h.release();
+    });
+
+    test("a Claude Code that does not exit says how many held messages were not delivered", async () => {
+      const { a, spawned } = await liveSession(SKILLS, { isAlive: () => true, cleanupExitMs: EXIT_MS });
+      const { runner } = mod(SID);
+      command("/cleanup");
+      await pollUntil(runner, () => terminated(a));
+      command("meanwhile");
+      await heldForCleanup();
+      await windowEnds(a);
+      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
+      expect(warning.text).toBe("⚠️ Claude Code не завершился, скиллы не убраны, сессию не запускаю Не доставлено сообщений из темы: 1.");
+      expect(spawned).toEqual([]);
+    });
+
+    test("an exec result during /cleanup waits for the relaunched session", async () => {
+      const { a, spawned } = await liveSession(SKILLS);
+      const h = held();
+      const { runner } = mod(SID, undefined, undefined, h.answer);
+      command("/cleanup");
+      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      command("/cmd echo hi");
+      await waitFor(() => log.lines.some(l => l.includes("a command result for session") && l.includes("held until /cleanup ends")), RUN_MS);
+      expect(a.messages.some(m => m.type === "inbound")).toBe(false);
+      h.release();
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+      const w = await plugin(SID);
+      expect((await w.next("inbound", m => m.meta.source === "exec", WAIT_MS)).content).toContain("hi");
+      expect(a.messages.some(m => m.type === "inbound")).toBe(false);
+    }, RUN_MS + WAIT_MS);
+
     test("an unknown transcript format still relaunches with the warning", async () => {
       const odd = JSON.stringify({ parentUuid: "p", type: "attachment", attachment: { type: "invoked_skills", names: ["x"] }, uuid: "u1", version: VERSION });
       const { a, spawned, transcript, original } = await liveSession([odd]);

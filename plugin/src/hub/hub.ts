@@ -286,6 +286,9 @@ export class Hub {
   // the stop command.
   private stopping = new Map<string, string>();
   private cleanups = new Map<string, Cleanup>();
+  // Messages of a /cleanup dropped by a second /stop, kept until the window
+  // it ends is gone.
+  private dyingHeld = new Map<string, Held[]>();
   // The start notices sent to a session's topic: Telegram message id and the
   // text it shows. They go once its agent starts working.
   private launchNotices = new Map<string, { id: number; text: string }[]>();
@@ -557,6 +560,14 @@ export class Hub {
       clearTimeout(stop);
       this.stops.delete(sid);
       this.notice(sid, "⏹ Сессия завершена", false);
+    }
+    const dying = sid && !this.connOf(sid) ? this.dyingHeld.get(sid) : undefined;
+    if (sid && dying) {
+      this.dyingHeld.delete(sid);
+      if (this.opts.config().launch) {
+        this.log.info(`window for session ${sid} ended: ${dying.length} held message(s) start the session`);
+        this.launch(sid, undefined, dying);
+      } else this.log.warn(`window for session ${sid} ended with no launch command: ${dying.length} held message(s) dropped`);
     }
     this.armIdle();
   }
@@ -1369,16 +1380,24 @@ ${msg.text}`);
   // again; a module command still goes to the window, and so does a message
   // that interrupts the agent.
   private holdForCleanup(sessionId: string, m: Message): boolean {
-    const c = this.cleanups.get(sessionId);
-    if (!c) return false;
+    if (!this.cleanups.has(sessionId)) return false;
     if (m.text !== undefined && commandOf(m.text, this.botUsername)) return false;
     if ((m.text ?? m.caption ?? "").trimStart().startsWith(INTERRUPT_PREFIX)) return false;
+    return this.keepForCleanup(sessionId, { message: m });
+  }
+
+  // Puts a message or a command result on the held list of the /cleanup under
+  // way; false when there is none.
+  private keepForCleanup(sessionId: string, h: Held): boolean {
+    const c = this.cleanups.get(sessionId);
+    if (!c) return false;
+    const what = "message" in h ? `message ${h.message.message_id}` : "a command result";
     if (c.held.length >= MAX_HELD) {
-      this.log.warn(`/cleanup of session ${sessionId} holds ${MAX_HELD} messages; message ${m.message_id} dropped`);
+      this.log.warn(`/cleanup of session ${sessionId} holds ${MAX_HELD} messages; ${what} dropped`);
       return true;
     }
-    c.held.push({ message: m });
-    this.log.info(`message ${m.message_id} for session ${sessionId} held until /cleanup ends`);
+    c.held.push(h);
+    this.log.info(`${what} for session ${sessionId} held until /cleanup ends`);
     return true;
   }
 
@@ -1484,6 +1503,13 @@ ${msg.text}`);
       sessionId,
       setTimeout(() => {
         this.stops.delete(sessionId);
+        const dying = this.dyingHeld.get(sessionId);
+        if (dying) {
+          // The window stays: what a dropped /cleanup held goes to it.
+          this.dyingHeld.delete(sessionId);
+          this.log.warn(`session ${sessionId} did not end; ${dying.length} held message(s) go to its window`);
+          void this.sendHeld(sessionId, dying);
+        }
         if (this.cleanups.has(sessionId)) {
           this.log.warn(`session ${sessionId} did not end for /cleanup; /cleanup dropped`);
           this.dropCleanup(sessionId);
@@ -1522,14 +1548,16 @@ ${msg.text}`);
     }
     if (c.phase === "compacting") {
       this.log.info(`second /stop during the /cleanup compact of session ${sessionId}: ending the window, the transcript untouched`);
-      this.dropCleanup(sessionId);
+      this.dropCleanup(sessionId, true);
     }
     this.terminate(sessionId);
   }
 
   // A /cleanup given up before the window ended: the messages it held go to
-  // the window still open, else as to a stopped session.
-  private dropCleanup(sessionId: string): void {
+  // the window still open, else as to a stopped session. A window about to be
+  // terminated does not get them: they wait for it to go and then start the
+  // session, as a message to a stopped session does.
+  private dropCleanup(sessionId: string, windowDies = false): void {
     const c = this.cleanups.get(sessionId);
     if (c) clearTimeout(c.compactTimer);
     this.cleanups.delete(sessionId);
@@ -1539,7 +1567,10 @@ ${msg.text}`);
     if (left.length) this.commands.set(sessionId, left);
     else this.commands.delete(sessionId);
     if (!c?.held.length) return;
-    if (this.connOf(sessionId)) {
+    if (windowDies && this.connOf(sessionId)) {
+      this.log.info(`/cleanup of session ${sessionId} dropped: ${c.held.length} held message(s) wait for the ending window to go`);
+      this.dyingHeld.set(sessionId, c.held);
+    } else if (this.connOf(sessionId)) {
       this.log.info(`/cleanup of session ${sessionId} dropped: ${c.held.length} held message(s) go to its window`);
       void this.sendHeld(sessionId, c.held);
     } else if (this.opts.config().launch) {
@@ -1590,7 +1621,8 @@ ${msg.text}`);
     if (pid !== undefined && alive(pid)) {
       this.cleanups.delete(sessionId);
       this.log.warn(`/cleanup of session ${sessionId}: Claude Code ${pid} did not exit; the transcript untouched, ${c.held.length} held message(s) dropped`);
-      return this.notice(sessionId, "⚠️ Claude Code не завершился, скиллы не убраны, сессию не запускаю", true);
+      const lost = c.held.length ? ` Не доставлено сообщений из темы: ${c.held.length}.` : "";
+      return this.notice(sessionId, `⚠️ Claude Code не завершился, скиллы не убраны, сессию не запускаю${lost}`, true);
     }
     const path = this.transcriptOf(sessionId);
     let text: string;
@@ -1758,8 +1790,11 @@ ${msg.text}`);
   // A command's result reaches the agent as a topic message would: at once
   // with a window, after the start with a session starting or startable.
   private reportExec(sessionId: string, inbound: Inbound): void {
-    if (this.connOf(sessionId)) this.deliverInbound(sessionId, inbound);
-    else if (this.hold(sessionId, { inbound })) {
+    if (this.connOf(sessionId)) {
+      // A /cleanup under way holds it like a topic message: a turn it starts
+      // would be cut by the kill.
+      if (!this.keepForCleanup(sessionId, { inbound })) this.deliverInbound(sessionId, inbound);
+    } else if (this.hold(sessionId, { inbound })) {
       // Goes once the session connects.
     } else if (this.opts.config().launch) this.launch(sessionId, undefined, [{ inbound }]);
     else {
