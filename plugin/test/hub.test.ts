@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "path";
 import { cleanupSummary, Hub } from "../src/hub/hub.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
+import { cleanTranscript } from "../src/hub/skill-cleanup.ts";
 import { saveExecs } from "../src/hub/exec-store.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
 import { Runner } from "../src/mod/commands.ts";
@@ -59,6 +60,7 @@ type HubExtras = {
   isAlive?(pid: number): boolean;
   cleanupExitMs?: number;
   cleanupSettleMs?: number;
+  cleanTranscript?: typeof cleanTranscript;
 };
 
 async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number } & HubExtras = {}) {
@@ -92,6 +94,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     ...(o.isAlive ? { isAlive: o.isAlive } : {}),
     ...(o.cleanupExitMs ? { cleanupExitMs: o.cleanupExitMs } : {}),
     ...(o.cleanupSettleMs ? { cleanupSettleMs: o.cleanupSettleMs } : {}),
+    ...(o.cleanTranscript ? { cleanTranscript: o.cleanTranscript } : {}),
     defaultConfigDir: DEFAULT_DIR,
     defaultAccount: o.defaultAccount ?? (async () => undefined),
     execDir: join(dir, "exec"),
@@ -2038,6 +2041,51 @@ describe("commands", () => {
       await waitFor(() => fake.texts().filter(p => p.text === "⏳ /cleanup уже идёт").length === 2);
       expect(terminated(a)).toBe(false);
       h.release();
+    });
+
+    test("a window back while Claude Code is waited for gets the held messages and the transcript stays", async () => {
+      const { a, spawned, transcript, original, folder } = await liveSession(SKILLS, { isAlive: () => true });
+      const { runner } = mod(SID);
+      command("/cleanup");
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      await waitFor(() => !hub.isConnected(SID));
+      command("meanwhile");
+      await Bun.sleep(SETTLE_MS);
+      const w = await plugin(SID);
+      expect((await w.next("inbound")).content).toBe("meanwhile");
+      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
+      expect(warning.text).toBe("⚠️ Сессия снова открыта, скиллы не убраны");
+      expect(readFileSync(transcript, "utf8")).toBe(original);
+      expect(backups(folder)).toEqual([]);
+      expect(spawned).toEqual([]);
+    });
+
+    test("a window back during the edit is not started a second time and gets the held messages", async () => {
+      let alive = true;
+      let w: Awaited<ReturnType<typeof plugin>> | undefined;
+      const { a, spawned, transcript } = await liveSession(SKILLS, {
+        isAlive: () => alive,
+        cleanTranscript: async (path, now) => {
+          w = await plugin(SID);
+          return cleanTranscript(path, now);
+        },
+      });
+      const { runner } = mod(SID);
+      command("/cleanup");
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      await waitFor(() => !hub.isConnected(SID));
+      command("meanwhile");
+      await Bun.sleep(SETTLE_MS);
+      alive = false;
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
+      expect(summary.text).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k)");
+      const window = must(w, "window");
+      expect((await window.next("inbound")).content).toBe("meanwhile");
+      expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
+      await Bun.sleep(SETTLE_MS);
+      expect(spawned).toEqual([]);
     });
   });
 });
