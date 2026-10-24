@@ -81,7 +81,7 @@ async function dimensions(path: string, ffprobe: string): Promise<VideoMeta> {
 
 // Runs a tool to completion; its stdout, or an error with its stderr.
 async function run(cmd: string, args: string[]): Promise<string> {
-  const proc = Bun.spawn([cmd, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: TOOL_TIMEOUT_MS });
+  const proc = Bun.spawn([cmd, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: TOOL_TIMEOUT_MS, windowsHide: true });
   const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   if (code !== 0) throw new Error(`${cmd} exited with ${proc.signalCode ?? code}${err.trim() ? `: ${err.trim().split("\n")[0]}` : ""}`);
   return out;

@@ -6,7 +6,7 @@ import { hasFfmpeg, makeVideo, memLogger, must, tempDir } from "./helpers.ts";
 
 // The pixel size of a JPEG, by ffprobe.
 function imageSize(path: string): { width: number; height: number } {
-  const r = Bun.spawnSync(["ffprobe", "-v", "error", "-show_entries", "stream=width,height", "-of", "json", path]);
+  const r = Bun.spawnSync(["ffprobe", "-v", "error", "-show_entries", "stream=width,height", "-of", "json", path], { windowsHide: true });
   return JSON.parse(r.stdout.toString()).streams[0];
 }
 

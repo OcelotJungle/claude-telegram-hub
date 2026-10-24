@@ -33,6 +33,7 @@ async function runHook(port: number, input: object, socket = "pipe-H") {
     stdin: new Blob([JSON.stringify(input)]),
     stdout: "pipe",
     env: { ...process.env, TG_HUB_PORT: String(port), CLAUDE_CODE_MESSAGING_SOCKET: socket },
+    windowsHide: true,
   });
   const stdout = await new Response(proc.stdout).text();
   const status = await proc.exited;
@@ -71,7 +72,7 @@ describe("SessionStart hook", () => {
 
   test("survives garbage input", async () => {
     const port = await freePort();
-    const r = spawnSync(process.execPath, [HOOK], { input: "not json", env: { ...process.env, TG_HUB_PORT: String(port) }, encoding: "utf8" });
+    const r = spawnSync(process.execPath, [HOOK], { input: "not json", env: { ...process.env, TG_HUB_PORT: String(port) }, encoding: "utf8", windowsHide: true });
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("");
   });
@@ -101,6 +102,7 @@ describe("Stop hook", () => {
       stdin: new Blob([JSON.stringify(input)]),
       stdout: "pipe",
       env: { ...process.env, TG_HUB_PORT: String(port), TG_HUB_STATE_DIR: stateDir, CLAUDE_CODE_MESSAGING_SOCKET: socket },
+      windowsHide: true,
     });
     const stdout = await new Response(proc.stdout).text();
     return { status: await proc.exited, stdout };
@@ -137,7 +139,7 @@ describe("Stop hook", () => {
 
   test("survives garbage input", async () => {
     const port = await freePort();
-    const r = spawnSync(process.execPath, [STOP_HOOK], { input: "not json", env: { ...process.env, TG_HUB_PORT: String(port) }, encoding: "utf8" });
+    const r = spawnSync(process.execPath, [STOP_HOOK], { input: "not json", env: { ...process.env, TG_HUB_PORT: String(port) }, encoding: "utf8", windowsHide: true });
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("");
   });
@@ -162,6 +164,7 @@ describe("AskUserQuestion hook", () => {
       stdin: new Blob([JSON.stringify(input)]),
       stdout: "pipe",
       env: { ...process.env, TG_HUB_PORT: String(port), CLAUDE_CODE_MESSAGING_SOCKET: "pipe-Q" },
+      windowsHide: true,
     });
     const stdout = await new Response(proc.stdout).text();
     return { status: await proc.exited, stdout };
@@ -279,6 +282,7 @@ describe("AskUserQuestion hook", () => {
       stdin: new Blob([JSON.stringify(INPUT)]),
       stdout: "pipe",
       env: { ...process.env, TG_HUB_PORT: String(port), CLAUDE_CODE_MESSAGING_SOCKET: "pipe-Q" },
+      windowsHide: true,
     });
     // A slow reader: the pipe fills up before anything is read.
     await Bun.sleep(SLOW_READER_MS);
@@ -315,7 +319,7 @@ describe("AskUserQuestion hook", () => {
 
   test("survives garbage input", async () => {
     const port = await freePort();
-    const r = spawnSync(process.execPath, [QUESTION_HOOK], { input: "not json", env: { ...process.env, TG_HUB_PORT: String(port) }, encoding: "utf8" });
+    const r = spawnSync(process.execPath, [QUESTION_HOOK], { input: "not json", env: { ...process.env, TG_HUB_PORT: String(port) }, encoding: "utf8", windowsHide: true });
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("");
   });
@@ -379,7 +383,7 @@ describe("plugin packaging", () => {
   });
 });
 
-const ps = spawnSync("powershell", ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.Major"], { encoding: "utf8" });
+const ps = spawnSync("powershell", ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.Major"], { encoding: "utf8", windowsHide: true });
 const hasPowerShell = ps.status === 0;
 
 describe.skipIf(!hasPowerShell)("PowerShell wrappers", () => {
@@ -389,7 +393,7 @@ describe.skipIf(!hasPowerShell)("PowerShell wrappers", () => {
     const r = spawnSync(
       "powershell",
       ["-NoProfile", "-Command", `$global:TgHubClaudeExe='x'; $global:TgHubCswapExe='y'; . '${script}'; (${fn} @(${quoted})) -join '|'`],
-      { encoding: "utf8" },
+      { encoding: "utf8", windowsHide: true },
     );
     if (r.status !== 0) throw new Error(r.stderr);
     return r.stdout.trim();

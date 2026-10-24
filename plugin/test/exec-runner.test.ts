@@ -99,7 +99,7 @@ describe("exec runner", () => {
     dirs.push(join(parent, ".."));
     const runner = join(import.meta.dir, "..", "src", "hub", "exec-runner.ts").replaceAll("\\", "/");
     writeFileSync(parent, `import { spawnRunner } from "${runner}";\nspawnRunner(${JSON.stringify(file)});\nprocess.exit(0);\n`);
-    const p = Bun.spawn([process.execPath, parent], { stdio: ["ignore", "ignore", "ignore"] });
+    const p = Bun.spawn([process.execPath, parent], { stdio: ["ignore", "ignore", "ignore"], windowsHide: true });
     expect(await p.exited).toBe(0);
     expect(existsSync(spec.exit)).toBe(false);
     await waitFor(() => existsSync(spec.exit), PING_WAIT_MS, "exit file");

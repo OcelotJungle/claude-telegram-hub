@@ -99,7 +99,7 @@ export function makeVideo(path: string, o: { width?: number; height?: number; se
   const args = ["-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", `testsrc=size=${size}:rate=25:duration=${o.seconds ?? 3}`, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"];
   const plain = o.rotation ? `${path}.plain.mp4` : path;
   const run = (a: string[]) => {
-    const r = Bun.spawnSync(["ffmpeg", ...a], { stderr: "pipe" });
+    const r = Bun.spawnSync(["ffmpeg", ...a], { stderr: "pipe", windowsHide: true });
     if (r.exitCode !== 0) throw new Error(`ffmpeg failed: ${r.stderr.toString()}`);
   };
   run([...args, plain]);
