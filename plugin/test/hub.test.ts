@@ -486,11 +486,24 @@ describe("batching", () => {
     const inbound = await a.next("inbound");
     const parts = inbound.content.split("\n\n");
     expect(parts.length).toBe(3);
-    for (const p of parts) expect(p.startsWith(`(photo: ${join(dir, "inbox")}`)).toBe(true);
-    expect(parts[0].endsWith(") look")).toBe(true);
+    expect(parts[0].startsWith(`look (photo: ${join(dir, "inbox")}`)).toBe(true);
+    for (const p of parts.slice(1)) expect(p.startsWith(`(photo: ${join(dir, "inbox")}`)).toBe(true);
     expect(inbound.meta.image_path).toBeUndefined();
     await Bun.sleep(100);
     expect(inbounds(a).length).toBe(1);
+  });
+
+  test('an album captioned "!x" while the agent works starts with "!x"', async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send({ type: "busy", busy: true });
+    await Bun.sleep(50);
+    for (const id of ["B1", "B2"]) fake.files.set(id, { path: `photos/${id}.jpg`, body: new Uint8Array([1]) });
+    const photo = (id: string) => [{ file_id: id, file_unique_id: id }];
+    fake.pushUpdate(msg(undefined, { caption: "!x", photo: photo("B1") }));
+    fake.pushUpdate(msg(undefined, { photo: photo("B2") }));
+    const inbound = await a.next("inbound");
+    expect(inbound.content.startsWith("!x (photo: ")).toBe(true);
   });
 
   test("forwards and the text sent after them come as one notification", async () => {
@@ -514,14 +527,18 @@ describe("batching", () => {
   });
 
   test("a steady stream is sent once the batch is old enough", async () => {
-    await startHub({ batchQuietMs: 200, batchMaxMs: 300 });
+    // The quiet window outlasts the whole stream, so only the cap can send a
+    // part of it before the stream ends.
+    await startHub({ batchQuietMs: 1000, batchMaxMs: 300 });
     const a = await enabled("a");
     const texts = Array.from({ length: 8 }, (_, i) => `m${i}`);
-    for (const t of texts) {
+    let sentAfter: number | undefined;
+    for (const [i, t] of texts.entries()) {
       fake.pushUpdate(msg(t));
       await Bun.sleep(100);
+      if (sentAfter === undefined && inbounds(a).length > 0) sentAfter = i;
     }
-    expect(inbounds(a).length).toBeGreaterThan(0);
+    expect(sentAfter).toBeDefined();
     expect(String(inbounds(a)[0])).not.toContain("m7");
     await waitFor(() => inbounds(a).join("\n\n") === texts.join("\n\n"), 3000, "the whole stream");
   });
@@ -1549,6 +1566,30 @@ describe("starting and stopping sessions", () => {
     expect(new SessionStore(join(dir, "sessions.json")).get(SID)?.account).toBe("2");
   });
 
+  // The window closes while its messages wait in a batch: none is lost.
+  test("a batch whose window closed starts the session", async () => {
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: COMMAND, timeoutSec: LAUNCH_TIMEOUT_S } };
+    await startHub({ spawn: c => void spawned.push(c), batchQuietMs: 400 });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("one"));
+    fake.pushUpdate(msg("two"));
+    await Bun.sleep(100);
+    a.close();
+    await waitFor(() => spawned.length === 1, WAIT_MS, "session start");
+    const w = await plugin(SID);
+    expect((await w.next("inbound")).content).toBe("one\n\ntwo");
+  });
+
+  test("a batch whose window closed, without launch, says the session is inactive", async () => {
+    await startHub({ batchQuietMs: 400 });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("one"));
+    await Bun.sleep(100);
+    a.close();
+    await waitFor(() => texts().includes("сессия сейчас не активна"), WAIT_MS);
+  });
+
   test("without launch in the config a closed session is just inactive", async () => {
     await startHub();
     const a = await enabled(SID);
@@ -2359,6 +2400,33 @@ describe("commands", () => {
       expect((await a.next("inbound")).content).toBe("meanwhile");
       expect(terminated(a)).toBe(false);
       expect(spawned).toEqual([]);
+    });
+
+    test('held messages and a waiting "!" batch reach the window in the order they came', async () => {
+      const { a } = await liveSession(SKILLS, { batchQuietMs: 2000, batchMaxMs: 5000 });
+      let release = () => {};
+      const gate = new Promise<void>(r => (release = r));
+      const { runner } = mod(SID, undefined, undefined, async () => {
+        await gate;
+        throw new Error("boom");
+      });
+      const inbounds = (c: { messages: { type: string; content?: unknown }[] }) => c.messages.filter(m => m.type === "inbound").map(m => m.content);
+      const contents = () => inbounds(a);
+      const heldCount = () => log.lines.filter(l => l.includes("held until /cleanup ends")).length;
+      command("/cleanup");
+      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      command("before");
+      await waitFor(() => heldCount() === 1);
+      // Goes live, and waits in its batch for the quiet window.
+      command("!stop");
+      await Bun.sleep(SETTLE_MS);
+      command("after");
+      await waitFor(() => heldCount() === 2);
+      expect(inbound(a)).toBe(false);
+      release();
+      await reply(runner, t => t.startsWith("⚠️ /cleanup не выполнена"));
+      await waitFor(() => contents().length === 2, 1000, "both batches before the quiet window ends");
+      expect(contents()).toEqual(["before", "!stop\n\nafter"]);
     });
 
     test("a compact that does not end in time drops /cleanup loudly, hands the held messages to the window and ignores the late report", async () => {

@@ -428,14 +428,14 @@ export class Hub {
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
-    // Waiting batches go at once, while the windows are still connected.
-    await Promise.all([...this.batches.keys(), ...this.batchSends.keys()].map(sid => this.flushBatch(sid)));
-    for (const b of this.batches.values()) {
-      clearTimeout(b.quietTimer);
-      clearTimeout(b.maxTimer);
+    // Polling stops first, so no batch starts after the flush.
+    this.abort.abort();
+    // Waiting batches go at once, while the windows are still connected; an
+    // update handled meanwhile may start one more.
+    while (this.batches.size || this.batchSends.size) {
+      await Promise.all([...this.batches.keys(), ...this.batchSends.keys()].map(sid => this.flushBatch(sid)));
     }
     this.batchIds.clear();
-    this.abort.abort();
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.spoolTimer) clearInterval(this.spoolTimer);
     if (this.typingTimer) clearInterval(this.typingTimer);
@@ -1391,6 +1391,8 @@ ${msg.text}`);
         continue;
       }
       for (const u of updates) {
+        // A stopping hub takes no more; the next one gets them again.
+        if (!this.running) return;
         offset = Math.max(offset, u.update_id + 1);
         try {
           await this.handleUpdate(api, u);
@@ -1424,15 +1426,22 @@ ${msg.text}`);
       await this.flushBatch(route.sessionId);
       return this.onHubCommand(route.sessionId, hubCmd, m);
     }
-    if (route.action === "inactive") {
-      if (this.hold(route.sessionId, { message: m })) return;
-      if (cfg.launch) return this.launch(route.sessionId, undefined, [{ message: m }]);
-      const text = cfg.launchError ? `${INACTIVE_TEXT}; автозапуск не работает: секция launch в config.json с ошибкой` : INACTIVE_TEXT;
-      if (cfg.groupId) await api.sendMessage(cfg.groupId, route.topicId, text, false).catch(e => this.log.warn(`inactive notice failed: ${e}`));
-      return;
-    }
+    if (route.action === "inactive") return this.toInactive(api, route.sessionId, [m]);
     if (this.holdForCleanup(route.sessionId, m)) return;
     await this.deliver(api, route.sessionId, m);
+  }
+
+  // Messages for a session without a window: kept for its start under way,
+  // else they start it, else the user is told it is not active.
+  private async toInactive(api: TelegramApi, sessionId: string, messages: Message[]): Promise<void> {
+    const rest = messages.filter(m => !this.hold(sessionId, { message: m }));
+    if (!rest.length) return;
+    const cfg = this.opts.config();
+    if (cfg.launch) return this.launch(sessionId, undefined, rest.map(m => ({ message: m })));
+    const text = cfg.launchError ? `${INACTIVE_TEXT}; автозапуск не работает: секция launch в config.json с ошибкой` : INACTIVE_TEXT;
+    const topicId = this.store.get(sessionId)?.topicId;
+    if (!cfg.groupId || topicId === undefined) return;
+    await api.sendMessage(cfg.groupId, topicId, text, false).catch(e => this.log.warn(`inactive notice failed: ${e}`));
   }
 
   // A /cleanup under way keeps topic messages for the session it starts
@@ -1455,7 +1464,7 @@ ${msg.text}`);
       this.log.warn(`/cleanup of session ${sessionId} holds ${MAX_HELD} messages; ${what} dropped`);
       return true;
     }
-    c.held.push(h);
+    keepInOrder(c.held, h);
     this.log.info(`${what} for session ${sessionId} held until /cleanup ends`);
     return true;
   }
@@ -1463,10 +1472,7 @@ ${msg.text}`);
   // A topic message joins the session's waiting batch. A module command goes
   // after the batch; a "!" message sends it and starts its own.
   private async deliver(api: TelegramApi, sessionId: string, m: Message): Promise<void> {
-    if (!this.connOf(sessionId)) {
-      this.log.warn(`session ${sessionId} has no window, message ${m.message_id} not delivered`);
-      return;
-    }
+    if (!this.connOf(sessionId)) return this.toInactive(api, sessionId, [m]);
     const cmd = m.text !== undefined ? commandOf(m.text, this.botUsername) : undefined;
     if (cmd) {
       await this.flushBatch(sessionId);
@@ -1523,9 +1529,11 @@ ${msg.text}`);
     if (!first) return;
     const ws = this.connOf(sessionId);
     const ids = messages.map(m => m.message_id);
+    // The window closed while the batch waited: the messages go the way of
+    // ones for an inactive session, so none is lost.
     if (!ws) {
-      this.log.warn(`session ${sessionId} has no window, ${rest.length ? `messages ${ids.join(", ")}` : `message ${first.message_id}`} not delivered`);
-      return;
+      this.log.info(`session ${sessionId} has no window for ${rest.length ? `messages ${ids.join(", ")}` : `message ${first.message_id}`}`);
+      return this.toInactive(api, sessionId, messages);
     }
     this.setEnabled(sessionId, true);
     if (!rest.length) {
@@ -1548,11 +1556,12 @@ ${msg.text}`);
     this.log.info(`messages ${ids.join(", ")} in topic ${first.message_thread_id} → session ${sessionId}: ${messages.map(kindOfMessage).join(", ")}, ${content.length} chars`);
   }
 
-  // A message of a batch: its files named in the text, before its own text.
+  // A message of a batch: its own text first, so a "!" stays at the start,
+  // then its files named.
   private async itemContent(api: TelegramApi, m: Message): Promise<string> {
     const text = m.text ?? m.caption ?? (m.rich_message ? await this.richContent(api, m.rich_message) : undefined);
     const mark = await this.fileMark(api, m);
-    return withContext(m, [mark, text].filter(s => s !== undefined && s !== "").join(" "), this.botId);
+    return withContext(m, [text, mark].filter(s => s !== undefined && s !== "").join(" "), this.botId);
   }
 
   private async fileMark(api: TelegramApi, m: Message): Promise<string | undefined> {
@@ -1626,7 +1635,7 @@ ${msg.text}`);
     const cleanup = this.cleanups.get(sessionId);
     const pending = this.launches.get(sessionId) ?? (cleanup && !this.connOf(sessionId) ? cleanup : undefined);
     if (!pending) return false;
-    if (pending.held.length < MAX_HELD) pending.held.push(h);
+    if (pending.held.length < MAX_HELD) keepInOrder(pending.held, h);
     else this.log.warn(`session ${sessionId} is starting and holds ${MAX_HELD} messages; ${"message" in h ? `message ${h.message.message_id}` : "a command result"} dropped`);
     return true;
   }
@@ -1921,8 +1930,18 @@ ${msg.text}`);
 
   // Hands held messages and command results to the session's window, in the
   // order they came. Consecutive messages go as one batch at once, cut where
-  // a command, a command result or a "!" message comes.
-  private async sendHeld(sessionId: string, held: Held[]): Promise<void> {
+  // a command, a command result or a "!" message comes. A batch waiting in the
+  // window meanwhile joins them in the order of arrival, so neither the held
+  // messages nor the newer ones jump the queue.
+  private async sendHeld(sessionId: string, kept: Held[]): Promise<void> {
+    const held = [...kept];
+    const waiting = this.batches.get(sessionId);
+    if (waiting) {
+      this.batches.delete(sessionId);
+      clearTimeout(waiting.quietTimer);
+      clearTimeout(waiting.maxTimer);
+      for (const m of waiting.messages) keepInOrder(held, { message: m });
+    }
     let run: Message[] = [];
     const flush = async () => {
       if (!run.length) return;
@@ -2226,6 +2245,15 @@ function kindOfMessage(m: Message): string {
 
 // The plugin interrupts the agent for such a message. A forward starts with
 // its mark there, so it never does.
+// Puts a held message before the held ones that came after it: a batch
+// rerouted when its window closed is older than what was held meanwhile.
+// message_id grows within a chat; a command result goes last.
+function keepInOrder(held: Held[], h: Held): void {
+  const at = "message" in h ? held.findIndex(x => "message" in x && x.message.message_id > h.message.message_id) : -1;
+  if (at < 0) held.push(h);
+  else held.splice(at, 0, h);
+}
+
 function isInterrupt(m: Message): boolean {
   return !m.forward_origin && (m.text ?? m.caption ?? "").trimStart().startsWith(INTERRUPT_PREFIX);
 }
