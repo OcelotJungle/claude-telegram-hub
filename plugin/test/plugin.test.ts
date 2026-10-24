@@ -527,6 +527,21 @@ describe("PluginCore", () => {
     await waitFor(() => hubLog.lines.includes(`INFO session ${SID}: the plugin ends Claude Code 4242`), 3000, "exiting");
   });
 
+  test("text written before a question reaches the topic before the poll", async () => {
+    await enabledCore();
+    // The tool_use record is not in the file yet: only the text before it.
+    append(assistantText("Спрошу про цвет", "tool_use", "q1"));
+    const question = { question: "Какой цвет?", header: "Цвет", options: [{ label: "Красный", description: "" }, { label: "Синий", description: "" }], multiSelect: false };
+    const answer = fetch(`http://127.0.0.1:${port}/question`, {
+      method: "POST",
+      body: JSON.stringify({ messagingSocket: "pipe-1", session_id: SID, tool_input: { questions: [question] } }),
+    }).then(r => r.json());
+    await waitFor(() => sent().length === 2, 3000, "the text and the poll");
+    expect(sent().map(m => m.text)).toEqual(["Спрошу про цвет", "Цвет\nКакой цвет?\n\n1. Красный\n2. Синий"]);
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "зелёный" }));
+    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "зелёный" } });
+  });
+
   test("a permission request is sent loudly while enabled", async () => {
     const c = await enabledCore();
     c.permissionRequest({ request_id: "abcde", tool_name: "Bash", description: "git push" });

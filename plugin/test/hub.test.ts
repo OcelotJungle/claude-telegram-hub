@@ -49,6 +49,11 @@ const SHOWN_MS = 50;
 const SLOW_SEND_MS = 300;
 // Telegram takes at most this many characters in one message.
 const TELEGRAM_LIMIT = 4096;
+// The test windows do not answer the hub's catch-up before a question, so
+// it waits briefly by default; the catch-up tests pick their own wait.
+const CATCH_UP_MS = 20;
+const SHORT_CATCH_UP_MS = 150;
+const LONG_CATCH_UP_MS = 2000;
 
 let fake: FakeTelegram;
 let hub: Hub;
@@ -72,6 +77,7 @@ type HubExtras = {
   cleanupExitMs?: number;
   cleanupSettleMs?: number;
   cleanTranscript?: typeof cleanTranscript;
+  catchUpMs?: number;
 };
 
 async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number; batchQuietMs?: number; batchMaxMs?: number } & HubExtras = {}) {
@@ -100,6 +106,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     reactionDelayMs: o.reactionDelayMs ?? 50,
     readyDelayMs: 50,
     batchQuietMs: o.batchQuietMs ?? BATCH_QUIET_MS,
+    catchUpMs: o.catchUpMs ?? CATCH_UP_MS,
     ...(o.batchMaxMs ? { batchMaxMs: o.batchMaxMs } : {}),
     ...(o.spawn ? { spawn: o.spawn } : {}),
     ...(o.projectsDir ? { projectsDir: o.projectsDir } : {}),
@@ -2881,6 +2888,48 @@ describe("questions", () => {
     expect(edit).toMatchObject({ message_id: id, text: `${Q1_TEXT}\n\n✅ Синий` });
     expect(edit.reply_markup).toBeUndefined();
     await waitFor(() => fake.callsOf("answerCallbackQuery").length === 1);
+  });
+
+  test("the window relays the text written before the call first, and the poll goes after it", async () => {
+    await startHub({ catchUpMs: LONG_CATCH_UP_MS });
+    const a = await enabled("a");
+    const started = Date.now();
+    const answer = ask([Q1]);
+    const m = await a.next("catchUp");
+    await Bun.sleep(SHOWN_MS);
+    expect(fake.callsOf("sendMessage")).toEqual([]);
+    a.send({ type: "send", id: "s1", sessionId: "a", text: "Спрошу про цвет", notify: false });
+    a.send({ type: "caughtUp", id: m.id });
+    const msg = await polled(2);
+    expect(Date.now() - started).toBeLessThan(LONG_CATCH_UP_MS);
+    expect(fake.texts().map(t => t.text)).toEqual(["Спрошу про цвет", Q1_TEXT]);
+    press(dataOf(msg, 0), fake.lastMessageId);
+    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Красный" } });
+  });
+
+  test("a window that does not answer the catch-up still gets the poll after a short wait", async () => {
+    await startHub({ catchUpMs: SHORT_CATCH_UP_MS });
+    const a = await enabled("a");
+    const started = Date.now();
+    const answer = ask([Q1]);
+    await a.next("catchUp");
+    expect((await polled()).text).toBe(Q1_TEXT);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(SHORT_CATCH_UP_MS);
+    press(dataOf(await polled(), 1), fake.lastMessageId);
+    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Синий" } });
+  });
+
+  test("a poll ended while the window catches up is never shown", async () => {
+    await startHub({ catchUpMs: LONG_CATCH_UP_MS });
+    const a = await enabled("a");
+    const abort = new AbortController();
+    const answer = ask([Q1], abort.signal);
+    const m = await a.next("catchUp");
+    abort.abort();
+    await answer;
+    a.send({ type: "caughtUp", id: m.id });
+    await Bun.sleep(SHOWN_MS);
+    expect(fake.callsOf("sendMessage")).toEqual([]);
   });
 
   test("a question too long for one message is cut, and so is the message with its answer", async () => {

@@ -119,6 +119,9 @@ const REACTION_DELAY_MS = 3000;
 // window, or this long after its first message at the latest.
 const BATCH_QUIET_MS = 1000;
 const BATCH_MAX_MS = 10_000;
+// How long a question waits for its window to relay the text written
+// before the call; a window too old to answer costs this much.
+const CATCH_UP_MS = 1000;
 // Sent batches whose ✍ is cleared with their first message; the oldest are
 // forgotten past this.
 const MAX_BATCH_IDS = 200;
@@ -212,6 +215,8 @@ export type HubOptions = {
   reactionDelayMs?: number;
   batchQuietMs?: number;
   batchMaxMs?: number;
+  // How long a question waits for its window to catch up.
+  catchUpMs?: number;
   // Where Claude Code keeps transcripts, to find the cwd of a session the hub
   // has not recorded one for.
   projectsDir?: string;
@@ -298,6 +303,8 @@ export class Hub {
   private permissions = new Map<string, { sessionId: string; requestId: string } & Formatted>();
   // Open AskUserQuestion polls, by the key in their buttons' data; one per session.
   private polls = new Map<string, Poll>();
+  // Questions waiting for their window to catch up, by poll key.
+  private catchUps = new Map<string, () => void>();
   // Messages that answer a poll's question, by poll key: those sent together
   // (an album, a few lines) wait out a quiet window and answer once.
   private answerGroups = new Map<string, AnswerGroup>();
@@ -811,6 +818,9 @@ ${msg.text}`);
         this.log.info(`session ${sid}: the plugin ends Claude Code ${msg.pid}`);
         ws.data.exitingPid = msg.pid;
         return;
+      case "caughtUp":
+        this.catchUps.get(msg.id)?.();
+        return;
     }
   }
 
@@ -988,7 +998,28 @@ ${msg.text}`);
       }
       signal.addEventListener("abort", () => void this.finishPoll(p, { decision: "none" }, TO_TERMINAL), { once: true });
       this.log.info(`question poll ${key} for session ${sessionId}: ${questions.length} question(s)`);
-      this.queueQuestion(p);
+      void this.catchUp(sessionId, key).then(() => {
+        if (!p.done) this.queueQuestion(p);
+      });
+    });
+  }
+
+  // The agent's text before the tool call reaches the hub only when the
+  // window's tailer next reads the transcript, so the window is asked to
+  // send it now; the question then queues behind it. Settles when the
+  // window answers, or after catchUpMs: an older window never does.
+  private catchUp(sessionId: string, key: string): Promise<void> {
+    const ws = this.connOf(sessionId);
+    if (!ws) return Promise.resolve();
+    return new Promise(resolve => {
+      const timer = setTimeout(() => done(), this.opts.catchUpMs ?? CATCH_UP_MS);
+      const done = () => {
+        clearTimeout(timer);
+        this.catchUps.delete(key);
+        resolve();
+      };
+      this.catchUps.set(key, done);
+      this.send(ws, { type: "catchUp", id: key });
     });
   }
 

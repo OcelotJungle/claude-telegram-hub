@@ -34,6 +34,7 @@ export const pluginToHub: z.ZodType<PluginToHub> = z.union([
   z.object({ type: z.literal("seen"), messageIds: z.array(z.number()) }),
   z.object({ type: z.literal("busy"), busy: z.boolean() }),
   z.object({ type: z.literal("exiting"), pid: z.number() }),
+  z.object({ type: z.literal("caughtUp"), id: z.string() }),
 ]);
 
 export const hubToPlugin: z.ZodType<HubToPlugin> = z.union([
@@ -46,6 +47,7 @@ export const hubToPlugin: z.ZodType<HubToPlugin> = z.union([
   z.object({ type: z.literal("permissionReply"), requestId: z.string(), behavior: z.enum(["allow", "deny"]) }),
   z.object({ type: z.literal("terminate") }),
   z.object({ type: z.literal("turnEnd"), final: z.boolean(), kind: z.enum(["ask", "done"]).optional() }),
+  z.object({ type: z.literal("catchUp"), id: z.string() }),
 ]);
 
 export const enableResult: z.ZodType<EnableResult> = z.object({ topicTitle: z.string(), created: z.boolean() });

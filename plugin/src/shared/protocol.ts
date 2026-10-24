@@ -61,7 +61,9 @@ export type PluginToHub =
   | { type: "busy"; busy: boolean }
   // The plugin is about to end this Claude Code process (after terminate), so
   // the hub can wait until it is gone.
-  | { type: "exiting"; pid: number };
+  | { type: "exiting"; pid: number }
+  // The answer to catchUp: the text written before the tool call is sent.
+  | { type: "caughtUp"; id: string };
 
 export type HubToPlugin =
   | { type: "state"; enabled: boolean; topicTitle?: string }
@@ -78,7 +80,10 @@ export type HubToPlugin =
   // /stop in the topic: end the Claude Code process of this window.
   | { type: "terminate" }
   // The Stop hook's decision on how the turn ended; kind only when final.
-  | { type: "turnEnd"; final: boolean; kind?: TurnEndKind };
+  | { type: "turnEnd"; final: boolean; kind?: TurnEndKind }
+  // The hub is about to show a question: relay the text the agent wrote
+  // before the tool call, then answer caughtUp with the same id.
+  | { type: "catchUp"; id: string };
 
 export type PermissionBehavior = "allow" | "deny";
 export type TurnEndKind = "ask" | "done";

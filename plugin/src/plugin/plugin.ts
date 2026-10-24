@@ -494,6 +494,12 @@ export class PluginCore {
       case "turnEnd":
         this.onTurnEnd(m.final, m.kind);
         return;
+      // A question is coming: the text before it goes first, as with files.
+      case "catchUp":
+        this.tailer?.pollNow();
+        this.flush(this.relay.textBeforeToolCall());
+        this.client.send({ type: "caughtUp", id: m.id });
+        return;
       case "terminate":
         this.log.info(`session ${this.sessionId}: /stop from the topic, ending Claude Code`);
         this.tailer?.pollNow();
