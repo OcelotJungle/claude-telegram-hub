@@ -12,7 +12,7 @@ import { playChime } from "../shared/chime.ts";
 import { isInside, loadConfig } from "../shared/config.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { BYTES_PER_MB, MAX_CAPTION, MAX_UPLOAD } from "../shared/media.ts";
-import { PROTOCOL_VERSION } from "../shared/protocol.ts";
+import { PROTOCOL_VERSION, QUESTION_CALL_WAIT_MS } from "../shared/protocol.ts";
 import { enableResult } from "../shared/protocol-schema.ts";
 import { transcriptPathFor } from "../transcript/locate.ts";
 import { parseRecord } from "../transcript/parse.ts";
@@ -56,6 +56,11 @@ const WAITS_FOR_USER = new Set(["AskUserQuestion"]);
 // long has passed since the user last typed in the terminal (a question
 // always chimes).
 export const CHIME_MIN_TURN_MS = 30_000;
+// Claude Code may write a question's call to the transcript only after its
+// PreToolUse hook has run: the window rereads the transcript this often
+// until the call shows. Call ids seen are kept up to this many.
+const CATCH_UP_POLL_MS = 50;
+const MAX_SEEN_TOOL_USES = 50;
 
 // A bad turnEndChime in config.json is logged once per process.
 let chimeConfigWarned = false;
@@ -102,6 +107,9 @@ export type PluginOptions = {
   // Plays the end-of-turn sound; the configured command by default.
   chime?: (kind: ChimeKind) => void;
   now?: () => number;
+  // How long catchUp waits for the question's call to show in the
+  // transcript; QUESTION_CALL_WAIT_MS by default.
+  catchUpWaitMs?: number;
 };
 
 // Plays the turnEndChime of config.json; a bad one is logged once per
@@ -151,6 +159,9 @@ export class PluginCore {
   private titles: Titles = {};
   private log: Logger;
   private reportedKinds = new Set<string>();
+  // Ids of the latest tool calls in the session's own transcript (subagent
+  // calls never get here), oldest first.
+  private seenToolUses = new Set<string>();
   // Terminal input turned the mode off and the agent has not been told yet.
   private noteOwed = false;
   // Responses cut since a turn last ended normally.
@@ -356,6 +367,7 @@ export class PluginCore {
   private onRecord(rec: unknown): void {
     for (const ev of parseRecord(rec).flatMap(e => this.settleApiError(e))) {
       this.flush(this.relay.feed(ev));
+      if (ev.kind === "tool_use" && ev.id) this.rememberToolUse(ev.id);
       if (ev.kind === "terminal_input") this.lastInputAt = this.now();
       if (ev.kind === "terminal_input" && this.enabled) {
         this.client.send({ type: "terminalInput" });
@@ -380,6 +392,33 @@ export class PluginCore {
       const busy = busyAfter(ev);
       if (busy !== undefined) this.setBusy(busy);
     }
+  }
+
+  private rememberToolUse(id: string): void {
+    this.seenToolUses.add(id);
+    for (const old of this.seenToolUses) {
+      if (this.seenToolUses.size <= MAX_SEEN_TOOL_USES) break;
+      this.seenToolUses.delete(old);
+    }
+  }
+
+  // A question is coming: the text before it goes first, as with files. The
+  // hook may run before Claude Code writes that text and the call itself, so
+  // with the call's id the transcript is reread until the call shows (the
+  // relay sends the text before a call as soon as it reads the call), or
+  // until the wait runs out.
+  private async catchUp(id: string, toolUseId: string | undefined): Promise<void> {
+    this.tailer?.pollNow();
+    if (toolUseId !== undefined) {
+      const deadline = Date.now() + (this.opts.catchUpWaitMs ?? QUESTION_CALL_WAIT_MS);
+      while (!this.seenToolUses.has(toolUseId) && Date.now() < deadline) {
+        await Bun.sleep(CATCH_UP_POLL_MS);
+        this.tailer?.pollNow();
+      }
+      if (!this.seenToolUses.has(toolUseId)) this.log.warn(`question call ${toolUseId} did not show in the transcript in time; the question goes anyway`);
+    }
+    this.flush(this.relay.textBeforeToolCall());
+    this.client.send({ type: "caughtUp", id });
   }
 
   // An API error record ends the turn, cut, only if Claude Code closes the
@@ -494,11 +533,8 @@ export class PluginCore {
       case "turnEnd":
         this.onTurnEnd(m.final, m.kind);
         return;
-      // A question is coming: the text before it goes first, as with files.
       case "catchUp":
-        this.tailer?.pollNow();
-        this.flush(this.relay.textBeforeToolCall());
-        this.client.send({ type: "caughtUp", id: m.id });
+        void this.catchUp(m.id, m.toolUseId);
         return;
       case "terminate":
         this.log.info(`session ${this.sessionId}: /stop from the topic, ending Claude Code`);

@@ -2852,10 +2852,10 @@ describe("questions", () => {
     ],
     multiSelect: true,
   };
-  const ask = (questions: object[], signal?: AbortSignal): Promise<unknown> =>
+  const ask = (questions: object[], signal?: AbortSignal, extra: Record<string, unknown> = {}): Promise<unknown> =>
     fetch(`http://127.0.0.1:${port}/question`, {
       method: "POST",
-      body: JSON.stringify({ messagingSocket: "win-a", session_id: "a", tool_input: { questions } }),
+      body: JSON.stringify({ messagingSocket: "win-a", session_id: "a", tool_input: { questions }, ...extra }),
       ...(signal ? { signal } : {}),
     })
       .then(r => r.json())
@@ -2905,6 +2905,26 @@ describe("questions", () => {
     expect(fake.texts().map(t => t.text)).toEqual(["Спрошу про цвет", Q1_TEXT]);
     press(dataOf(msg, 0), fake.lastMessageId);
     expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Красный" } });
+  });
+
+  test("the catch-up names the question's tool call when the hook gives it", async () => {
+    await startHub({ catchUpMs: LONG_CATCH_UP_MS });
+    const a = await enabled("a");
+    void ask([Q1], undefined, { tool_use_id: "toolu_q" });
+    const m = await a.next("catchUp");
+    expect(m).toEqual({ type: "catchUp", id: m.id, toolUseId: "toolu_q" });
+    a.send({ type: "caughtUp", id: m.id });
+    await polled();
+  });
+
+  test("the catch-up of an older hook without the tool call's id carries none", async () => {
+    await startHub({ catchUpMs: LONG_CATCH_UP_MS });
+    const a = await enabled("a");
+    void ask([Q1]);
+    const m = await a.next("catchUp");
+    expect(m).toEqual({ type: "catchUp", id: m.id });
+    a.send({ type: "caughtUp", id: m.id });
+    await polled();
   });
 
   test("a window that does not answer the catch-up still gets the poll after a short wait", async () => {

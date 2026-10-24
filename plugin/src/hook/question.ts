@@ -12,9 +12,11 @@ import { PARENT_CHECK_MS, QUESTION_DEADLINE_MS } from "./question-limits.ts";
 
 // The part of the hook input the hub needs; the hub checks the questions.
 // The tool input stays whole: updatedInput replaces it, so other fields must
-// survive.
+// survive. tool_use_id lets the window wait until its transcript shows the
+// call; without it the question still goes, only without that wait.
 const hookInput = z.object({
   session_id: z.string().min(1),
+  tool_use_id: z.string().optional().catch(undefined),
   tool_input: z.looseObject({ questions: z.array(z.unknown()) }),
 });
 
@@ -41,6 +43,7 @@ try {
       body: JSON.stringify({
         messagingSocket: process.env.CLAUDE_CODE_MESSAGING_SOCKET,
         session_id: input.session_id,
+        ...(input.tool_use_id ? { tool_use_id: input.tool_use_id } : {}),
         tool_input: input.tool_input,
       }),
       timeout: false,

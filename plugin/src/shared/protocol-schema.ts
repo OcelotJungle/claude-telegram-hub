@@ -47,7 +47,7 @@ export const hubToPlugin: z.ZodType<HubToPlugin> = z.union([
   z.object({ type: z.literal("permissionReply"), requestId: z.string(), behavior: z.enum(["allow", "deny"]) }),
   z.object({ type: z.literal("terminate") }),
   z.object({ type: z.literal("turnEnd"), final: z.boolean(), kind: z.enum(["ask", "done"]).optional() }),
-  z.object({ type: z.literal("catchUp"), id: z.string() }),
+  z.object({ type: z.literal("catchUp"), id: z.string(), toolUseId: z.string().optional() }),
 ]);
 
 export const enableResult: z.ZodType<EnableResult> = z.object({ topicTitle: z.string(), created: z.boolean() });
@@ -77,6 +77,7 @@ const askQuestion: z.ZodType<AskQuestion> = z.object({
 export const questionBody: z.ZodType<QuestionBody> = z.object({
   messagingSocket: z.string().optional(),
   session_id: z.string(),
+  tool_use_id: z.string().optional(),
   tool_input: z.object({ questions: z.array(askQuestion).min(1) }),
 });
 
