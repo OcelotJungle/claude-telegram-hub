@@ -6,10 +6,6 @@ export const PROTOCOL_VERSION = 1;
 // imports, so the plugin's function hooks module can use it too.
 export const DEFAULT_PORT = 47613;
 
-// How long a window waits for a question's tool call to show in its
-// transcript before it answers caughtUp anyway; the hub waits longer.
-export const QUESTION_CALL_WAIT_MS = 3000;
-
 // A command from the topic, which the plugin's function hooks module takes
 // from the hub (GET /commands?session=<id>) and answers (POST /reply). stop
 // goes only to a module that asks with &stop=1; once it is ready for the
@@ -86,10 +82,8 @@ export type HubToPlugin =
   // The Stop hook's decision on how the turn ended; kind only when final.
   | { type: "turnEnd"; final: boolean; kind?: TurnEndKind }
   // The hub is about to show a question: relay the text the agent wrote
-  // before the tool call, then answer caughtUp with the same id. toolUseId:
-  // the question's tool call; the window first waits until its transcript
-  // shows it (up to QUESTION_CALL_WAIT_MS). Older hooks do not give it.
-  | { type: "catchUp"; id: string; toolUseId?: string };
+  // before the tool call, then answer caughtUp with the same id.
+  | { type: "catchUp"; id: string };
 
 export type PermissionBehavior = "allow" | "deny";
 export type TurnEndKind = "ask" | "done";
@@ -111,12 +105,10 @@ export type AskQuestion = {
 };
 
 // Body the AskUserQuestion PreToolUse hook POSTs to /question; the hub holds
-// the request open until the topic answers. tool_use_id: the call's id, which
-// older hooks do not send.
+// the request open until the topic answers.
 export type QuestionBody = {
   messagingSocket?: string;
   session_id: string;
-  tool_use_id?: string;
   tool_input: { questions: AskQuestion[] };
 };
 

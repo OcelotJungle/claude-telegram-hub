@@ -27,9 +27,9 @@ describe("assistant records", () => {
     ]);
   });
 
-  test("tool_use block is tool_use with the call's id", () => {
+  test("tool_use block is tool_use", () => {
     expect(parseRecord(assistant("m1", "tool_use", toolUse("Bash")))).toEqual([
-      { kind: "tool_use", name: "Bash", messageId: "m1", id: "toolu_1" },
+      { kind: "tool_use", name: "Bash", messageId: "m1" },
     ]);
   });
 
@@ -257,7 +257,7 @@ describe("tool call details", () => {
   const call = (input: object) => parseRecord(assistant("m1", "tool_use", { type: "tool_use", id: "t", name: "X", input }));
 
   test("a path shows as its file name", () => {
-    expect(call({ file_path: "C:\\src\\hub\\hub.ts", old_string: "a" })).toEqual([{ kind: "tool_use", name: "X", messageId: "m1", id: "t", detail: "hub.ts" }]);
+    expect(call({ file_path: "C:\\src\\hub\\hub.ts", old_string: "a" })).toEqual([{ kind: "tool_use", name: "X", messageId: "m1", detail: "hub.ts" }]);
   });
 
   test("a description beats a command, and only the first line is kept", () => {

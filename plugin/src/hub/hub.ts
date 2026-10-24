@@ -24,7 +24,7 @@ import { isInside } from "../shared/config.ts";
 import { field } from "../shared/guards.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
-import { PROTOCOL_VERSION, QUESTION_CALL_WAIT_MS } from "../shared/protocol.ts";
+import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { cleanupReport, commandReply, hookBody, limitsPost, pluginToHub, questionBody, sendFilesMessage, sendMessage, terminateRequest, turnEndBody } from "../shared/protocol-schema.ts";
 import { tokens } from "../shared/tokens.ts";
 import { loadCards, saveCards } from "./cards.ts";
@@ -120,10 +120,8 @@ const REACTION_DELAY_MS = 3000;
 const BATCH_QUIET_MS = 1000;
 const BATCH_MAX_MS = 10_000;
 // How long a question waits for its window to relay the text written
-// before the call; a window too old to answer costs this much. Longer than
-// the window's own wait for the call to show in its transcript, so a window
-// that waited the whole time still answers first.
-const CATCH_UP_MS = QUESTION_CALL_WAIT_MS + 1000;
+// before the call; a window too old to answer costs this much.
+const CATCH_UP_MS = 1000;
 // Sent batches whose ✍ is cleared with their first message; the oldest are
 // forgotten past this.
 const MAX_BATCH_IDS = 200;
@@ -543,7 +541,7 @@ export class Hub {
     if (url.pathname === "/question" && req.method === "POST") {
       const r = questionBody.safeParse(await req.json().catch(() => undefined));
       if (!r.success) return new Response("bad question body", { status: 400 });
-      const { messagingSocket, session_id: hookSession, tool_use_id: toolUseId, tool_input } = r.data;
+      const { messagingSocket, session_id: hookSession, tool_input } = r.data;
       // The window's current session may differ from the hook's after a
       // session switch; the window knows the one with the topic.
       let target: WS | undefined;
@@ -552,7 +550,7 @@ export class Hub {
       if (!this.store.get(sessionId)?.enabled) return Response.json({ decision: "none" });
       // The answer may take hours; the hook's own timeout bounds the wait.
       server.timeout(req, 0);
-      return Response.json(await this.askQuestion(sessionId, tool_input.questions, req.signal, toolUseId));
+      return Response.json(await this.askQuestion(sessionId, tool_input.questions, req.signal));
     }
     return new Response("not found", { status: 404 });
   }
@@ -988,7 +986,7 @@ ${msg.text}`);
   // topic one at a time, and the promise settles with the topic's answer, or
   // with "none" when the call goes back to the terminal (the hook gave up,
   // the window left, the hub stops). A newer poll of the session ends the old one.
-  private askQuestion(sessionId: string, questions: AskQuestion[], signal: AbortSignal, toolUseId?: string): Promise<QuestionDecision> {
+  private askQuestion(sessionId: string, questions: AskQuestion[], signal: AbortSignal): Promise<QuestionDecision> {
     for (const old of this.polls.values()) if (old.sessionId === sessionId) void this.finishPoll(old, { decision: "none" }, TO_TERMINAL);
     const key = randomUUID().replaceAll("-", "").slice(0, PERMISSION_KEY_CHARS);
     return new Promise(resolve => {
@@ -1000,7 +998,7 @@ ${msg.text}`);
       }
       signal.addEventListener("abort", () => void this.finishPoll(p, { decision: "none" }, TO_TERMINAL), { once: true });
       this.log.info(`question poll ${key} for session ${sessionId}: ${questions.length} question(s)`);
-      void this.catchUp(sessionId, key, toolUseId).then(() => {
+      void this.catchUp(sessionId, key).then(() => {
         if (!p.done) this.queueQuestion(p);
       });
     });
@@ -1010,8 +1008,7 @@ ${msg.text}`);
   // window's tailer next reads the transcript, so the window is asked to
   // send it now; the question then queues behind it. Settles when the
   // window answers, or after catchUpMs: an older window never does.
-  // toolUseId, when the hook gave it, names the call the window waits to see.
-  private catchUp(sessionId: string, key: string, toolUseId?: string): Promise<void> {
+  private catchUp(sessionId: string, key: string): Promise<void> {
     const ws = this.connOf(sessionId);
     if (!ws) return Promise.resolve();
     return new Promise(resolve => {
@@ -1022,7 +1019,7 @@ ${msg.text}`);
         resolve();
       };
       this.catchUps.set(key, done);
-      this.send(ws, { type: "catchUp", id: key, ...(toolUseId ? { toolUseId } : {}) });
+      this.send(ws, { type: "catchUp", id: key });
     });
   }
 

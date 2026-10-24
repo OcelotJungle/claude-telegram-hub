@@ -20,10 +20,6 @@ const CWD = "C:\\code\\demo-app";
 const SID = "sess-1";
 // The hub's quiet window for topic messages that come together, kept short.
 const BATCH_QUIET_MS = 5;
-// How long the plugin waits for a question's tool call to show in the
-// transcript, and how late Claude Code writes it in the tests that need it.
-const CATCH_UP_WAIT_MS = 1000;
-const LATE_RECORDS_MS = 200;
 
 let fake: FakeTelegram;
 let hub: Hub;
@@ -67,10 +63,10 @@ const assistantText = (text: string, stop: "tool_use" | "end_turn" | "stop_seque
   isSidechain: false,
   message: { id, role: "assistant", content: [{ type: "text", text }], stop_reason: stop },
 });
-const assistantTool = (name: string, id: string, toolUseId = "t") => ({
+const assistantTool = (name: string, id: string) => ({
   type: "assistant",
   isSidechain: false,
-  message: { id, role: "assistant", content: [{ type: "tool_use", id: toolUseId, name, input: {} }], stop_reason: "tool_use" },
+  message: { id, role: "assistant", content: [{ type: "tool_use", id: "t", name, input: {} }], stop_reason: "tool_use" },
 });
 const humanTyped = (text: string) => ({ type: "user", isSidechain: false, origin: { kind: "human" }, promptSource: "typed", message: { role: "user", content: text } });
 // Claude Code closing the turn after all Stop hooks.
@@ -126,7 +122,6 @@ function makeCore(sessionId = SID) {
     now: () => Date.now() + clockSkew,
     tailIntervalMs: 30,
     cardEveryMs: 30,
-    catchUpWaitMs: CATCH_UP_WAIT_MS,
   });
   core.start();
   return core;
@@ -545,35 +540,6 @@ describe("PluginCore", () => {
     expect(sent().map(m => m.text)).toEqual(["Спрошу про цвет", "Цвет\nКакой цвет?\n\n1. Красный\n2. Синий"]);
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "зелёный" }));
     expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "зелёный" } });
-  });
-
-  test("text Claude Code writes after the question arrives still reaches the topic before the poll", async () => {
-    await enabledCore();
-    const question = { question: "Какой цвет?", header: "Цвет", options: [{ label: "Красный", description: "" }, { label: "Синий", description: "" }], multiSelect: false };
-    const answer = fetch(`http://127.0.0.1:${port}/question`, {
-      method: "POST",
-      body: JSON.stringify({ messagingSocket: "pipe-1", session_id: SID, tool_use_id: "toolu_q", tool_input: { questions: [question] } }),
-    }).then(r => r.json());
-    // The transcript gets the text and the call only after the hub asked the window to catch up.
-    await Bun.sleep(LATE_RECORDS_MS);
-    append(assistantText("Спрошу про цвет", "tool_use", "q2"), assistantTool("AskUserQuestion", "q2", "toolu_q"));
-    await waitFor(() => sent().length === 2, 3000, "the text and the poll");
-    expect(sent().map(m => m.text)).toEqual(["Спрошу про цвет", "Цвет\nКакой цвет?\n\n1. Красный\n2. Синий"]);
-    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "зелёный" }));
-    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "зелёный" } });
-  });
-
-  test("a question whose call never shows in the transcript is still shown after the wait", async () => {
-    await enabledCore();
-    append(assistantText("Спрошу про цвет", "tool_use", "q3"));
-    const question = { question: "Какой цвет?", header: "Цвет", options: [{ label: "Красный", description: "" }], multiSelect: false };
-    void fetch(`http://127.0.0.1:${port}/question`, {
-      method: "POST",
-      body: JSON.stringify({ messagingSocket: "pipe-1", session_id: SID, tool_use_id: "toolu_missing", tool_input: { questions: [question] } }),
-    }).catch(() => undefined);
-    await waitFor(() => sent().length === 2, 3000, "the text and the poll");
-    expect(sent().map(m => m.text)).toEqual(["Спрошу про цвет", "Цвет\nКакой цвет?\n\n1. Красный"]);
-    expect(pluginLog.lines.some(l => l.startsWith("WARN") && l.includes("toolu_missing"))).toBe(true);
   });
 
   test("a permission request is sent loudly while enabled", async () => {

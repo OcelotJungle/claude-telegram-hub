@@ -18,8 +18,8 @@ const SYNTHETIC_MODEL = "<synthetic>";
 
 export type TranscriptEvent =
   | { kind: "text"; text: string; messageId: string }
-  // id: the call's own id (toolu_…). detail: what the call works on, for a status line.
-  | { kind: "tool_use"; name: string; messageId: string; id?: string; detail?: string }
+  // detail: what the call works on, for a status line.
+  | { kind: "tool_use"; name: string; messageId: string; detail?: string }
   // cut: the connection to the API failed, before or during the response,
   // and the turn ended on it: the answer is missing or incomplete.
   | { kind: "turn_end"; messageId: string; cut?: true }
@@ -111,13 +111,7 @@ function parseAssistant(r: Rec): TranscriptEvent[] {
       else if (kind !== "thinking") out.push({ kind: "unknown_thinking", blockKind: kind ?? "?" });
     } else if (block.type === "tool_use" && typeof block.name === "string") {
       const detail = toolDetail(block.input);
-      out.push({
-        kind: "tool_use",
-        name: block.name,
-        messageId,
-        ...(typeof block.id === "string" ? { id: block.id } : {}),
-        ...(detail ? { detail } : {}),
-      });
+      out.push(detail ? { kind: "tool_use", name: block.name, messageId, detail } : { kind: "tool_use", name: block.name, messageId });
     }
   }
   // Every record of a split message carries the final stop_reason; the relay
