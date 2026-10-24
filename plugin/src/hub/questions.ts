@@ -4,10 +4,12 @@ import type { Entity, Formatted } from "../shared/markdown.ts";
 import type { AskQuestion, QuestionDecision } from "../shared/protocol.ts";
 import type { Button } from "./telegram.ts";
 
+import { chunk, MAX_MESSAGE } from "../shared/chunk.ts";
 import { MAX_REPLY_CHARS } from "./reply-context.ts";
 
 // A preview longer than this is cut; a text longer than TEXT_LIMIT goes
-// without previews, leaving room for the outcome line under it.
+// without previews, and is cut if still longer, leaving room for the
+// outcome line under it.
 const PREVIEW_CHARS = 700;
 const TEXT_LIMIT = 3700;
 const BUTTON_CHARS = 64;
@@ -46,7 +48,7 @@ export type PollPress = { key: string; index: number; action: PollAction };
 // several), the question, then the numbered options with their previews.
 export function questionText(questions: AskQuestion[], i: number): Formatted {
   const full = build(questions, i, true);
-  return full.text.length > TEXT_LIMIT ? build(questions, i, false) : full;
+  return full.text.length > TEXT_LIMIT ? cutText(build(questions, i, false), TEXT_LIMIT) : full;
 }
 
 function build(questions: AskQuestion[], i: number, previews: boolean): Formatted {
@@ -70,9 +72,18 @@ function build(questions: AskQuestion[], i: number, previews: boolean): Formatte
   return { text, entities };
 }
 
-// The message with its outcome line under it.
+// The message with its outcome line under it, within one Telegram message.
 export function withOutcome(f: Formatted, outcome: string): Formatted {
-  return { text: `${f.text}\n\n${outcome}`, entities: f.entities };
+  const body = cutText(f, MAX_MESSAGE - outcome.length - 2);
+  return { text: `${body.text}\n\n${outcome}`, entities: body.entities };
+}
+
+// A formatted text cut to max characters, the ellipsis included, at a
+// paragraph, line or word boundary where it can.
+function cutText(f: Formatted, max: number): Formatted {
+  if (f.text.length <= max) return f;
+  const head = chunk(f, max - ELLIPSIS.length)[0] ?? { text: "", entities: [] };
+  return { text: `${head.text}${ELLIPSIS}`, entities: head.entities };
 }
 
 export function questionButtons(p: Poll): Button[][] {

@@ -47,6 +47,8 @@ const BATCH_QUIET_MS = 5;
 // after it answer the question. A slow send keeps a question unsent.
 const SHOWN_MS = 50;
 const SLOW_SEND_MS = 300;
+// Telegram takes at most this many characters in one message.
+const TELEGRAM_LIMIT = 4096;
 
 let fake: FakeTelegram;
 let hub: Hub;
@@ -2879,6 +2881,28 @@ describe("questions", () => {
     expect(edit).toMatchObject({ message_id: id, text: `${Q1_TEXT}\n\n✅ Синий` });
     expect(edit.reply_markup).toBeUndefined();
     await waitFor(() => fake.callsOf("answerCallbackQuery").length === 1);
+  });
+
+  test("a question too long for one message is cut, and so is the message with its answer", async () => {
+    await startHub();
+    await enabled("a");
+    const question = "Очень длинный вопрос ".repeat(300);
+    const options = [
+      { label: "Да", description: "д".repeat(1500), preview: "п".repeat(5000) },
+      { label: "Нет", description: "н".repeat(1500) },
+    ];
+    const answer = ask([{ question, header: "Длинный", options, multiSelect: false }]);
+    const msg = await shown();
+    const id = fake.lastMessageId;
+    expect(fake.callsOf("sendMessage")).toHaveLength(1);
+    expect(String(msg.text).length).toBeLessThanOrEqual(TELEGRAM_LIMIT);
+    expect(String(msg.text).startsWith("Длинный\nОчень длинный вопрос")).toBe(true);
+    expect(keys(msg)[0]).toEqual(["1. Да"]);
+    press(dataOf(msg, 0), id);
+    expect(await answer).toEqual({ decision: "allow", answers: { [question]: "Да" } });
+    const edit = await waitFor(() => edits()[0]);
+    expect(String(edit.text).length).toBeLessThanOrEqual(TELEGRAM_LIMIT);
+    expect(String(edit.text).endsWith("\n\n✅ Да")).toBe(true);
   });
 
   test("a multiple choice toggles options and is answered by «Готово» with the labels joined", async () => {
