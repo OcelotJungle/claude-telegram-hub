@@ -542,6 +542,13 @@ describe("PluginCore", () => {
     expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "зелёный" } });
   });
 
+  test("the separator call before a question sends the text before it at once", async () => {
+    await enabledCore();
+    append(assistantText("Объясняю, о чём спрошу", "tool_use", "q1"), assistantTool("mcp__plugin_tg-hub_tg-hub__tg_before_question", "q1"));
+    await waitFor(() => sent().length === 1, 3000, "the text before the separator");
+    expect(sent()).toEqual([{ text: "Объясняю, о чём спрошу", silent: true, topic: 100 }]);
+  });
+
   test("a permission request is sent loudly while enabled", async () => {
     const c = await enabledCore();
     c.permissionRequest({ request_id: "abcde", tool_name: "Bash", description: "git push" });

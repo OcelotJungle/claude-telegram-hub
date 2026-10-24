@@ -19,6 +19,11 @@ const SHUTDOWN_DRAIN_MS = 2000;
 const SHUTDOWN_DEADLINE_MS = 3000;
 // How often a stdin closed without an event is noticed.
 const STDIN_CHECK_MS = 5000;
+// A step of its own between the text explaining a question and the
+// question: Claude Code writes that step to the transcript at once, while a
+// step with AskUserQuestion is written only after its PreToolUse hook ends.
+const BEFORE_QUESTION_TOOL = "tg_before_question";
+const BEFORE_QUESTION_REPLY = "Now call AskUserQuestion.";
 const INSTRUCTIONS = [
   "tg-hub connects this session to a Telegram topic, so the user can follow and answer from the phone.",
   "",
@@ -27,6 +32,8 @@ const INSTRUCTIONS = [
   "While the mode is on, your text output is relayed to the topic automatically — there is no reply tool, just write as usual. Text before a tool call reaches the topic too, only without a notification; the last text of a turn goes when the turn ends. Tool calls, tool output and hidden thinking are never relayed.",
   "",
   "Whether the last text of a turn comes with a notification, and whether the terminal plays a sound, is decided automatically when the turn ends. Do not call anything for it and do not mention it: just write your answer.",
+  "",
+  "While the mode is on, AskUserQuestion is asked in the topic, and text you write in the same step as the AskUserQuestion call reaches the topic only after the user answers. To explain something before asking, write the explanation, call tg_before_question, and call AskUserQuestion in the next step, not in the same one.",
   "",
   "To show the user a file in Telegram — a screenshot, a chart, a log — call tg_send_file with its path; several paths make an album. Text you wrote before the call arrives first. It works whenever the session has a topic, even with the mode off, so you can send a file the user asked for from the terminal.",
   "",
@@ -134,6 +141,12 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: BEFORE_QUESTION_TOOL,
+      description:
+        "Call it after writing the text that explains a question and before calling AskUserQuestion, while Telegram mode is on. It does nothing; it only ends the step, so that text reaches the topic above the question. Text written in the same step as AskUserQuestion reaches the topic only after the user answers. Call AskUserQuestion in the next step, not in parallel with this call.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
       name: "download_attachment",
       description: "Download a file sent in the Telegram topic (attachment_file_id from the <channel> tag, or a file_id named in the message text). Returns a local path to Read. Telegram caps bot downloads at 20MB.",
       inputSchema: { type: "object", properties: { file_id: { type: "string" } }, required: ["file_id"] },
@@ -149,6 +162,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const args = req.params.arguments ?? {};
   const text = (t: string, isError = false) => ({ content: [{ type: "text" as const, text: t }], ...(isError ? { isError: true } : {}) });
+  // The separator needs no session: its step is what matters.
+  if (req.params.name === BEFORE_QUESTION_TOOL) return text(BEFORE_QUESTION_REPLY);
   try {
     if (!core) throw new Error("CLAUDE_CODE_SESSION_ID is not set in this window, tg-hub cannot identify the session");
     switch (req.params.name) {
