@@ -1534,7 +1534,10 @@ ${msg.text}`);
     // The window closed while the batch waited: the messages go the way of
     // ones for an inactive session, so none is lost.
     if (!ws) {
-      this.log.info(`session ${sessionId} has no window for ${rest.length ? `messages ${ids.join(", ")}` : `message ${first.message_id}`}`);
+      const what = rest.length ? `messages ${ids.join(", ")}` : `message ${first.message_id}`;
+      // A hub that stops starts no window: nobody would hand it the messages.
+      if (!this.running) return this.log.warn(`session ${sessionId} has no window and the hub is stopping: ${what} not delivered`);
+      this.log.info(`session ${sessionId} has no window for ${what}`);
       return this.toInactive(api, sessionId, messages);
     }
     this.setEnabled(sessionId, true);
@@ -1552,7 +1555,8 @@ ${msg.text}`);
     }
     const parts: string[] = [];
     for (const m of [head, ...rest]) parts.push(await this.itemContent(api, m));
-    const content = parts.join("\n\n");
+    // A lone "!" leaves an empty first part.
+    const content = parts.filter(p => p !== "").join("\n\n");
     if (ws.data.reportsSeen) {
       for (const id of ids) this.reactLater(id);
       this.batchIds.set(first.message_id, rest.map(m => m.message_id));

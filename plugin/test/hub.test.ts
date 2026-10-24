@@ -567,6 +567,16 @@ describe("batching", () => {
     expect(inbound.interrupt).toBe(true);
   });
 
+  test('a lone "!" leaves no blank line before the messages after it', async () => {
+    await startHub();
+    const a = await enabled("a");
+    fake.pushUpdate(msg("!"));
+    fake.pushUpdate(msg("c"));
+    const inbound = await a.next("inbound");
+    expect(inbound.content).toBe("c");
+    expect(inbound.interrupt).toBe(true);
+  });
+
   test('a forward whose text starts with "!" is no interrupt and joins the batch', async () => {
     await startHub();
     const a = await enabled("a");
@@ -1594,6 +1604,19 @@ describe("starting and stopping sessions", () => {
     await waitFor(() => spawned.length === 1, WAIT_MS, "session start");
     const w = await plugin(SID);
     expect((await w.next("inbound")).content).toBe("one\n\ntwo");
+  });
+
+  test("a batch whose window closed starts no session while the hub stops", async () => {
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: COMMAND, timeoutSec: LAUNCH_TIMEOUT_S } };
+    await startHub({ spawn: c => void spawned.push(c), batchQuietMs: 5000 });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("one"));
+    await Bun.sleep(100);
+    a.close();
+    await waitFor(() => !hub.isConnected(SID));
+    await hub.stop();
+    expect(spawned).toEqual([]);
   });
 
   test("a batch whose window closed, without launch, says the session is inactive", async () => {
