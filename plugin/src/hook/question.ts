@@ -9,9 +9,11 @@ import { hubPort } from "../shared/config.ts";
 import { questionDecision } from "../shared/protocol-schema.ts";
 
 // The part of the hook input the hub needs; the hub checks the questions.
+// The tool input stays whole: updatedInput replaces it, so other fields must
+// survive.
 const hookInput = z.object({
   session_id: z.string().min(1),
-  tool_input: z.object({ questions: z.array(z.unknown()) }),
+  tool_input: z.looseObject({ questions: z.array(z.unknown()) }),
 });
 
 try {
@@ -35,7 +37,7 @@ try {
       const d = decision.data;
       const output =
         d.decision === "allow"
-          ? { permissionDecision: "allow", permissionDecisionReason: "Answered in Telegram", updatedInput: { questions: input.tool_input.questions, answers: d.answers } }
+          ? { permissionDecision: "allow", permissionDecisionReason: "Answered in Telegram", updatedInput: { ...input.tool_input, answers: d.answers } }
           : { permissionDecision: "deny", permissionDecisionReason: d.reason };
       process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", ...output } }));
     }

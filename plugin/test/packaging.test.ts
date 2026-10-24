@@ -186,6 +186,14 @@ describe("AskUserQuestion hook", () => {
     });
   });
 
+  test("the allowed input keeps every field of the original tool input", async () => {
+    const { port, bodies } = await fakeHub({ decision: "allow", answers: { "Какой цвет?": "Синий" } });
+    const toolInput = { questions: QUESTIONS, metadata: { source: "x" } };
+    const r = await runQuestion(port, { ...INPUT, tool_input: toolInput });
+    expect(bodies).toEqual([{ messagingSocket: "pipe-Q", session_id: "s", tool_input: toolInput }]);
+    expect(JSON.parse(r.stdout).hookSpecificOutput.updatedInput).toEqual({ ...toolInput, answers: { "Какой цвет?": "Синий" } });
+  });
+
   test("a cancel in the topic denies the tool with the hub's reason", async () => {
     const { port } = await fakeHub({ decision: "deny", reason: "cancelled" });
     const r = await runQuestion(port, INPUT);
