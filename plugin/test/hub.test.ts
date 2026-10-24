@@ -242,6 +242,17 @@ describe("inbound", () => {
     expect(a.messages.some(m => m.type === "inbound")).toBe(false);
   });
 
+  test("a reply carries what it answers after the text, a forward its origin before it", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const original = { message_id: 50, date: 0, chat: { id: Number(GROUP), type: "supergroup" }, from: { id: 1, is_bot: true, first_name: "Hub" }, text: "готово" };
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!стоп", extra: { reply_to_message: original } }));
+    expect((await a.next("inbound")).content).toBe("!стоп\n\n[reply to your message]\n> готово");
+    const origin = { type: "hidden_user", date: 0, sender_user_name: "Аноним" };
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "смотри", extra: { forward_origin: origin } }));
+    expect((await a.next("inbound", m => m.content.endsWith("смотри"))).content).toBe("[forwarded from Аноним]\nсмотри");
+  });
+
   test("a message the agent has at once never wears ✍", async () => {
     await startHub({ reactionDelayMs: 300 });
     const a = await enabled("a");

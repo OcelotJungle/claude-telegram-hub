@@ -35,6 +35,7 @@ import { commandOf, hubCommandOf, routeCallback, routeUpdate } from "./router.ts
 import { accountOf, SessionStore, topicName } from "./sessions.ts";
 import { isThreadNotFound, TelegramError } from "./telegram.ts";
 import { richPhotos, richToMarkdown } from "./rich.ts";
+import { withContext } from "./reply-context.ts";
 import { richPieces } from "./rich-out.ts";
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath } from "./video.ts";
 import { EXEC_CARD_MS, EXEC_CHECK_MS, EXEC_MAX_AGE_MS, Execs } from "./exec.ts";
@@ -1997,7 +1998,7 @@ ${msg.text}`);
       content ??= `(sticker${m.sticker.emoji ? ` ${m.sticker.emoji}` : ""})`;
       attach("sticker", m.sticker);
     }
-    return { content: content ?? "", meta };
+    return { content: withContext(m, content ?? ""), meta };
   }
 }
 
