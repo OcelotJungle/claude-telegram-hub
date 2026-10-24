@@ -2987,6 +2987,23 @@ describe("questions", () => {
     expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": given } });
   });
 
+  test("a message that answers gets ✍ while the poll waits, and loses it once the agent has the answers", async () => {
+    await startHub();
+    await enabled("a");
+    const answer = ask([Q1, Q2]);
+    await shown();
+    const id = fake.nextMessageId;
+    say("мой");
+    const second = await polled(2);
+    await waitFor(() => fake.callsOf("setMessageReaction").length === 1);
+    expect(fake.callsOf("setMessageReaction")[0]).toEqual({ chat_id: GROUP, message_id: id, reaction: [{ type: "emoji", emoji: "✍" }] });
+    press(dataOf(second, 1), fake.lastMessageId);
+    press(dataOf(second, 3), fake.lastMessageId);
+    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "мой", "Что добавить?": "Лук" } });
+    await waitFor(() => fake.callsOf("setMessageReaction").length === 2);
+    expect(fake.callsOf("setMessageReaction")[1]).toEqual({ chat_id: GROUP, message_id: id, reaction: [] });
+  });
+
   test("a topic command works as usual and leaves the poll open", async () => {
     await startHub();
     await enabled("a");

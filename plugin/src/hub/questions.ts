@@ -33,6 +33,8 @@ export type Poll = {
   checked: Set<number>;
   messageIds: (number | undefined)[];
   outcomes: (string | undefined)[];
+  // Topic messages taken as answers: their ✍ comes off once the agent has them.
+  taken: number[];
   done: boolean;
   resolve(d: QuestionDecision): void;
 };

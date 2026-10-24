@@ -978,7 +978,7 @@ ${msg.text}`);
     for (const old of this.polls.values()) if (old.sessionId === sessionId) void this.finishPoll(old, { decision: "none" }, TO_TERMINAL);
     const key = randomUUID().replaceAll("-", "").slice(0, PERMISSION_KEY_CHARS);
     return new Promise(resolve => {
-      const p: Poll = { key, sessionId, questions, answers: {}, index: 0, checked: new Set(), messageIds: [], outcomes: [], done: false, resolve };
+      const p: Poll = { key, sessionId, questions, answers: {}, index: 0, checked: new Set(), messageIds: [], outcomes: [], taken: [], done: false, resolve };
       this.polls.set(key, p);
       if (signal.aborted) {
         void this.finishPoll(p, { decision: "none" }, TO_TERMINAL);
@@ -1002,6 +1002,8 @@ ${msg.text}`);
     this.polls.delete(p.key);
     p.outcomes[p.index] = outcome;
     p.resolve(decision);
+    // The agent has the answers now; with none, it never gets them.
+    if (decision.decision === "allow") for (const id of p.taken) this.clearTaken(id);
     this.log.info(`question poll ${p.key} of session ${p.sessionId}: ${decision.decision}`);
     await this.showOutcome(p, p.index);
   }
@@ -1666,6 +1668,13 @@ ${msg.text}`);
       return;
     }
     this.log.info(`question poll ${key}: answered by message(s) ${g.messages.map(m => m.message_id).join(", ")}`);
+    // Like an inbound message, an answer shows ✍ while the agent does not have it.
+    if (this.connOf(p.sessionId)?.data.reportsSeen) {
+      for (const m of g.messages) {
+        this.reactLater(m.message_id);
+        p.taken.push(m.message_id);
+      }
+    }
     await this.answerPoll(p, g.parts.join("\n\n"));
   }
 
