@@ -34,7 +34,7 @@ import { launchCommand, LaunchError, sessionCwd, sessionTranscript } from "./lau
 import { commandOf, hubCommandOf, routeCallback, routeUpdate } from "./router.ts";
 import { accountOf, SessionStore, topicName } from "./sessions.ts";
 import { isThreadNotFound, TelegramError } from "./telegram.ts";
-import { richPhotos, richToMarkdown } from "./rich.ts";
+import { media, richPhotos, richToMarkdown } from "./rich.ts";
 import { withContext } from "./reply-context.ts";
 import { richPieces } from "./rich-out.ts";
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath } from "./video.ts";
@@ -108,6 +108,14 @@ const TAKEN_REACTION = "✍";
 // It goes on only if the agent has not had the message for this long, so an
 // idle agent's message does not blink with it.
 const REACTION_DELAY_MS = 3000;
+// Topic messages that come together (an album, forwards, a text after them)
+// reach the agent as one: the batch goes once no message came for the quiet
+// window, or this long after its first message at the latest.
+const BATCH_QUIET_MS = 1000;
+const BATCH_MAX_MS = 10_000;
+// Sent batches whose ✍ is cleared with their first message; the oldest are
+// forgotten past this.
+const MAX_BATCH_IDS = 200;
 // Telegram shows "typing…" for up to 5 s; it is renewed this often while the
 // agent works.
 const TYPING_EVERY_MS = 4000;
@@ -143,6 +151,8 @@ type Inbound = { content: string; meta: ChannelMeta; onSent(): void };
 // What a starting session gets once it connects: topic messages and the
 // results of topic commands.
 type Held = { message: Message } | { inbound: Inbound };
+// Topic messages of a session waiting to go to its window together.
+type Batch = { api: TelegramApi; messages: Message[]; quietTimer: ReturnType<typeof setTimeout>; maxTimer: ReturnType<typeof setTimeout> };
 // A /cleanup under way: the id of its command, the context the module
 // reported before compacting, and whether the window is compacting or
 // exiting. noRelaunch: a /stop came meanwhile. held: topic messages for the
@@ -193,6 +203,8 @@ export type HubOptions = {
   cardGapMs?: number;
   typingEveryMs?: number;
   reactionDelayMs?: number;
+  batchQuietMs?: number;
+  batchMaxMs?: number;
   // Where Claude Code keeps transcripts, to find the cwd of a session the hub
   // has not recorded one for.
   projectsDir?: string;
@@ -286,6 +298,12 @@ export class Hub {
   private reactions = new Map<number, Promise<void>>();
   // Topic messages handed to a session whose ✍ is not on yet, by message id.
   private reactionTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  // The batch waiting for each session, the other message ids of a sent
+  // batch by its first one, and the latest batch send of each session: one
+  // goes after another, as photos are downloaded on the way.
+  private batches = new Map<string, Batch>();
+  private batchIds = new Map<number, number[]>();
+  private batchSends = new Map<string, Promise<void>>();
   // Sessions being started from the topic, with the messages they will get.
   private launches = new Map<string, { account: string; held: Held[]; timer: ReturnType<typeof setTimeout> }>();
   private execs: Execs | undefined;
@@ -409,6 +427,13 @@ export class Hub {
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
+    // Waiting batches go at once, while the windows are still connected.
+    await Promise.all([...this.batches.keys(), ...this.batchSends.keys()].map(sid => this.flushBatch(sid)));
+    for (const b of this.batches.values()) {
+      clearTimeout(b.quietTimer);
+      clearTimeout(b.maxTimer);
+    }
+    this.batchIds.clear();
     this.abort.abort();
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.spoolTimer) clearInterval(this.spoolTimer);
@@ -1392,7 +1417,11 @@ ${msg.text}`);
     }
     if (!m) return;
     const hubCmd = m.text !== undefined ? hubCommandOf(m.text, this.botUsername) : undefined;
-    if (hubCmd) return this.onHubCommand(route.sessionId, hubCmd, m);
+    if (hubCmd) {
+      // The messages before the command reach the agent first.
+      await this.flushBatch(route.sessionId);
+      return this.onHubCommand(route.sessionId, hubCmd, m);
+    }
     if (route.action === "inactive") {
       if (this.hold(route.sessionId, { message: m })) return;
       if (cfg.launch) return this.launch(route.sessionId, undefined, [{ message: m }]);
@@ -1410,7 +1439,7 @@ ${msg.text}`);
   private holdForCleanup(sessionId: string, m: Message): boolean {
     if (!this.cleanups.has(sessionId)) return false;
     if (m.text !== undefined && commandOf(m.text, this.botUsername)) return false;
-    if ((m.text ?? m.caption ?? "").trimStart().startsWith(INTERRUPT_PREFIX)) return false;
+    if (isInterrupt(m)) return false;
     return this.keepForCleanup(sessionId, { message: m });
   }
 
@@ -1429,22 +1458,118 @@ ${msg.text}`);
     return true;
   }
 
+  // A topic message joins the session's waiting batch. A module command goes
+  // after the batch; a "!" message sends it and starts its own.
   private async deliver(api: TelegramApi, sessionId: string, m: Message): Promise<void> {
-    const ws = this.connOf(sessionId);
-    if (!ws) {
+    if (!this.connOf(sessionId)) {
       this.log.warn(`session ${sessionId} has no window, message ${m.message_id} not delivered`);
       return;
     }
     const cmd = m.text !== undefined ? commandOf(m.text, this.botUsername) : undefined;
     if (cmd) {
+      await this.flushBatch(sessionId);
       this.queueCommand(sessionId, cmd);
       return;
     }
+    if (isInterrupt(m)) void this.flushBatch(sessionId);
+    const quietMs = this.opts.batchQuietMs ?? BATCH_QUIET_MS;
+    const b = this.batches.get(sessionId);
+    if (b) {
+      b.messages.push(m);
+      clearTimeout(b.quietTimer);
+      b.quietTimer = setTimeout(() => void this.flushBatch(sessionId), quietMs);
+      return;
+    }
+    this.batches.set(sessionId, {
+      api,
+      messages: [m],
+      quietTimer: setTimeout(() => void this.flushBatch(sessionId), quietMs),
+      maxTimer: setTimeout(() => void this.flushBatch(sessionId), this.opts.batchMaxMs ?? BATCH_MAX_MS),
+    });
+  }
+
+  // Sends the session's waiting batch after the batches sent before it;
+  // resolves once all of them are in the window.
+  private flushBatch(sessionId: string): Promise<void> {
+    const b = this.batches.get(sessionId);
+    if (b) {
+      this.batches.delete(sessionId);
+      clearTimeout(b.quietTimer);
+      clearTimeout(b.maxTimer);
+      this.queueBatch(sessionId, b.api, b.messages);
+    }
+    return this.batchSends.get(sessionId) ?? Promise.resolve();
+  }
+
+  private queueBatch(sessionId: string, api: TelegramApi, messages: Message[]): Promise<void> {
+    const prev = this.batchSends.get(sessionId) ?? Promise.resolve();
+    const next = prev
+      .then(() => this.sendBatch(api, sessionId, messages))
+      .catch(e => this.log.error(`delivering messages ${messages.map(m => m.message_id).join(", ")} to session ${sessionId} failed: ${e}`));
+    this.batchSends.set(sessionId, next);
+    void next.then(() => {
+      if (this.batchSends.get(sessionId) === next) this.batchSends.delete(sessionId);
+    });
+    return next;
+  }
+
+  // One message goes as before, with its attachment in the meta; several go
+  // as one notification, their texts after blank lines and their files named
+  // in the text.
+  private async sendBatch(api: TelegramApi, sessionId: string, messages: Message[]): Promise<void> {
+    const [first, ...rest] = messages;
+    if (!first) return;
+    const ws = this.connOf(sessionId);
+    const ids = messages.map(m => m.message_id);
+    if (!ws) {
+      this.log.warn(`session ${sessionId} has no window, ${rest.length ? `messages ${ids.join(", ")}` : `message ${first.message_id}`} not delivered`);
+      return;
+    }
     this.setEnabled(sessionId, true);
-    const { content, meta } = await this.inboundOf(api, m);
-    if (ws.data.reportsSeen) this.reactLater(m.message_id);
-    this.send(ws, { type: "inbound", content, meta });
-    this.log.info(`message ${m.message_id} in topic ${m.message_thread_id} → session ${sessionId}: ${shapeOf(m, content)}`);
+    if (!rest.length) {
+      const { content, meta } = await this.inboundOf(api, first);
+      if (ws.data.reportsSeen) this.reactLater(first.message_id);
+      this.send(ws, { type: "inbound", content, meta });
+      this.log.info(`message ${first.message_id} in topic ${first.message_thread_id} → session ${sessionId}: ${shapeOf(first, content)}`);
+      return;
+    }
+    const parts: string[] = [];
+    for (const m of messages) parts.push(await this.itemContent(api, m));
+    const content = parts.join("\n\n");
+    if (ws.data.reportsSeen) {
+      for (const id of ids) this.reactLater(id);
+      this.batchIds.set(first.message_id, rest.map(m => m.message_id));
+      const oldest = this.batchIds.keys().next();
+      if (this.batchIds.size > MAX_BATCH_IDS && !oldest.done) this.batchIds.delete(oldest.value);
+    }
+    this.send(ws, { type: "inbound", content, meta: baseMeta(first) });
+    this.log.info(`messages ${ids.join(", ")} in topic ${first.message_thread_id} → session ${sessionId}: ${messages.map(kindOfMessage).join(", ")}, ${content.length} chars`);
+  }
+
+  // A message of a batch: its files named in the text, before its own text.
+  private async itemContent(api: TelegramApi, m: Message): Promise<string> {
+    const text = m.text ?? m.caption ?? (m.rich_message ? await this.richContent(api, m.rich_message) : undefined);
+    const mark = await this.fileMark(api, m);
+    return withContext(m, [mark, text].filter(s => s !== undefined && s !== "").join(" "));
+  }
+
+  private async fileMark(api: TelegramApi, m: Message): Promise<string | undefined> {
+    const best = m.photo?.at(-1);
+    if (best) {
+      try {
+        return `(photo: ${await api.downloadFile(best.file_id, this.opts.inboxDir)})`;
+      } catch (e) {
+        this.log.warn(`photo download failed: ${e}`);
+        return media("photo", undefined, best.file_id);
+      }
+    }
+    if (m.document) return media("document", safeName(m.document.file_name), m.document.file_id);
+    if (m.voice) return media("voice", undefined, m.voice.file_id);
+    if (m.audio) return media("audio", safeName(m.audio.title) ?? safeName(m.audio.file_name), m.audio.file_id);
+    if (m.video) return media("video", safeName(m.video.file_name), m.video.file_id);
+    if (m.video_note) return media("video note", undefined, m.video_note.file_id);
+    if (m.sticker) return media("sticker", m.sticker.emoji, m.sticker.file_id);
+    return undefined;
   }
 
   private reactLater(messageId: number): void {
@@ -1455,8 +1580,16 @@ ${msg.text}`);
     this.reactionTimers.set(messageId, timer);
   }
 
-  // The agent has the message: ✍ comes off, or never goes on.
+  // The agent has the message: ✍ comes off, or never goes on. A batch is
+  // seen by its first message, so its other messages are cleared with it.
   private seen(messageId: number): void {
+    const others = this.batchIds.get(messageId);
+    this.batchIds.delete(messageId);
+    for (const id of others ?? []) this.clearTaken(id);
+    this.clearTaken(messageId);
+  }
+
+  private clearTaken(messageId: number): void {
     const timer = this.reactionTimers.get(messageId);
     if (timer === undefined) return this.react(messageId, undefined);
     clearTimeout(timer);
@@ -1785,15 +1918,41 @@ ${msg.text}`);
   }
 
   // Hands held messages and command results to the session's window, in the
-  // order they came.
+  // order they came. Consecutive messages go as one batch at once, cut where
+  // a command, a command result or a "!" message comes.
   private async sendHeld(sessionId: string, held: Held[]): Promise<void> {
+    let run: Message[] = [];
+    const flush = async () => {
+      if (!run.length) return;
+      const messages = run;
+      run = [];
+      await this.queueBatch(sessionId, this.requireApi(), messages);
+    };
     for (const h of held) {
       try {
-        if ("message" in h) await this.deliver(this.requireApi(), sessionId, h.message);
-        else this.deliverInbound(sessionId, h.inbound);
+        if (!("message" in h)) {
+          await flush();
+          this.deliverInbound(sessionId, h.inbound);
+          continue;
+        }
+        const m = h.message;
+        const cmd = m.text !== undefined ? commandOf(m.text, this.botUsername) : undefined;
+        if (cmd) {
+          await flush();
+          if (this.connOf(sessionId)) this.queueCommand(sessionId, cmd);
+          else this.log.warn(`session ${sessionId} has no window, message ${m.message_id} not delivered`);
+          continue;
+        }
+        if (isInterrupt(m)) await flush();
+        run.push(m);
       } catch (e) {
         this.log.error(`delivering held ${"message" in h ? `message ${h.message.message_id}` : "command result"} to session ${sessionId} failed: ${e}`);
       }
+    }
+    try {
+      await flush();
+    } catch (e) {
+      this.log.error(`delivering held messages to session ${sessionId} failed: ${e}`);
     }
   }
 
@@ -1953,13 +2112,7 @@ ${msg.text}`);
 
   // Same meta shape as the official telegram plugin.
   private async inboundOf(api: TelegramApi, m: Message): Promise<{ content: string; meta: ChannelMeta }> {
-    const meta: ChannelMeta = {
-      chat_id: String(m.chat.id),
-      message_id: String(m.message_id),
-      user: m.from?.username ?? String(m.from?.id),
-      user_id: String(m.from?.id),
-      ts: new Date(m.date * MS_PER_SECOND).toISOString(),
-    };
+    const meta = baseMeta(m);
     const attach = (kind: string, f: { file_id: string; file_size?: number; mime_type?: string }, name?: string) => {
       meta.attachment_kind = kind;
       meta.attachment_file_id = f.file_id;
@@ -2061,9 +2214,28 @@ function filesPiece(files: OutFile[], caption: Formatted | undefined, loud: bool
 // What a delivered message was, for the log: its kind, length and formatting,
 // never its text.
 function shapeOf(m: Message, content: string): string {
-  const kind = (["rich_message", "photo", "document", "voice", "audio", "video", "video_note", "sticker"] as const).find(k => m[k]) ?? "text";
   const types = [...new Set((m.entities ?? m.caption_entities ?? []).map(e => e.type))];
-  return `${kind}, ${content.length} chars${types.length ? `, entities ${types.join(", ")}` : ""}`;
+  return `${kindOfMessage(m)}, ${content.length} chars${types.length ? `, entities ${types.join(", ")}` : ""}`;
+}
+
+function kindOfMessage(m: Message): string {
+  return (["rich_message", "photo", "document", "voice", "audio", "video", "video_note", "sticker"] as const).find(k => m[k]) ?? "text";
+}
+
+// The plugin interrupts the agent for such a message.
+function isInterrupt(m: Message): boolean {
+  return (m.text ?? m.caption ?? "").trimStart().startsWith(INTERRUPT_PREFIX);
+}
+
+// Who sent a topic message and when; a batch carries its first message's.
+function baseMeta(m: Message): ChannelMeta {
+  return {
+    chat_id: String(m.chat.id),
+    message_id: String(m.message_id),
+    user: m.from?.username ?? String(m.from?.id),
+    user_id: String(m.from?.id),
+    ts: new Date(m.date * MS_PER_SECOND).toISOString(),
+  };
 }
 
 // Uploader-controlled names land inside the <channel> tag; strip delimiters.

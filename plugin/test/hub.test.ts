@@ -39,6 +39,9 @@ const LAUNCH_TIMEOUT_S = 30;
 const EXEC_GRACE_MS = 300;
 // A grace long enough to end a run and connect a window inside it.
 const LONG_GRACE_MS = 2000;
+// Topic messages that come together go as one; a short quiet window keeps
+// the other tests quick.
+const BATCH_QUIET_MS = 5;
 
 let fake: FakeTelegram;
 let hub: Hub;
@@ -64,7 +67,7 @@ type HubExtras = {
   cleanTranscript?: typeof cleanTranscript;
 };
 
-async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number } & HubExtras = {}) {
+async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number; batchQuietMs?: number; batchMaxMs?: number } & HubExtras = {}) {
   port = await freePort();
   hub = new Hub({
     port,
@@ -89,6 +92,8 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     typingEveryMs: o.typingEveryMs ?? 50,
     reactionDelayMs: o.reactionDelayMs ?? 50,
     readyDelayMs: 50,
+    batchQuietMs: o.batchQuietMs ?? BATCH_QUIET_MS,
+    ...(o.batchMaxMs ? { batchMaxMs: o.batchMaxMs } : {}),
     ...(o.spawn ? { spawn: o.spawn } : {}),
     ...(o.projectsDir ? { projectsDir: o.projectsDir } : {}),
     ...(o.stopTimeoutMs ? { stopTimeoutMs: o.stopTimeoutMs } : {}),
@@ -463,6 +468,87 @@ describe("inbound", () => {
     const msg = await a.next("inbound");
     expect(msg.content).toBe("(document: a_b_.txt)");
     expect(msg.meta).toMatchObject({ attachment_kind: "document", attachment_file_id: "D1", attachment_name: "a_b_.txt", attachment_size: "5" });
+  });
+});
+
+describe("batching", () => {
+  const msg = (text?: string, extra?: Record<string, unknown>) => topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text, extra });
+  const inbounds = (c: { messages: { type: string; content?: unknown }[] }) => c.messages.filter(m => m.type === "inbound").map(m => m.content);
+
+  test("an album of photos reaches the agent as one notification naming every photo", async () => {
+    await startHub();
+    const a = await enabled("a");
+    for (const id of ["A1", "A2", "A3"]) fake.files.set(id, { path: `photos/${id}.jpg`, body: new Uint8Array([1]) });
+    const photo = (id: string) => [{ file_id: id, file_unique_id: id }];
+    fake.pushUpdate(msg(undefined, { caption: "look", photo: photo("A1") }));
+    fake.pushUpdate(msg(undefined, { photo: photo("A2") }));
+    fake.pushUpdate(msg(undefined, { photo: photo("A3") }));
+    const inbound = await a.next("inbound");
+    const parts = inbound.content.split("\n\n");
+    expect(parts.length).toBe(3);
+    for (const p of parts) expect(p.startsWith(`(photo: ${join(dir, "inbox")}`)).toBe(true);
+    expect(parts[0].endsWith(") look")).toBe(true);
+    expect(inbound.meta.image_path).toBeUndefined();
+    await Bun.sleep(100);
+    expect(inbounds(a).length).toBe(1);
+  });
+
+  test("forwards and the text sent after them come as one notification", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const forward_origin = { type: "hidden_user", date: 0, sender_user_name: "Аноним" };
+    fake.pushUpdate(msg("раз", { forward_origin }));
+    fake.pushUpdate(msg("два", { forward_origin }));
+    fake.pushUpdate(msg("что скажешь?"));
+    expect((await a.next("inbound")).content).toBe("[forwarded from Аноним]\nраз\n\n[forwarded from Аноним]\nдва\n\nчто скажешь?");
+  });
+
+  test("a message after the quiet window is a notification of its own", async () => {
+    await startHub({ batchQuietMs: 30 });
+    const a = await enabled("a");
+    fake.pushUpdate(msg("one"));
+    await Bun.sleep(150);
+    fake.pushUpdate(msg("two"));
+    await waitFor(() => inbounds(a).length === 2);
+    expect(inbounds(a)).toEqual(["one", "two"]);
+  });
+
+  test("a steady stream is sent once the batch is old enough", async () => {
+    await startHub({ batchQuietMs: 200, batchMaxMs: 300 });
+    const a = await enabled("a");
+    const texts = Array.from({ length: 8 }, (_, i) => `m${i}`);
+    for (const t of texts) {
+      fake.pushUpdate(msg(t));
+      await Bun.sleep(100);
+    }
+    expect(inbounds(a).length).toBeGreaterThan(0);
+    expect(String(inbounds(a)[0])).not.toContain("m7");
+    await waitFor(() => inbounds(a).join("\n\n") === texts.join("\n\n"), 3000, "the whole stream");
+  });
+
+  test('a "!" message sends the waiting batch and starts its own', async () => {
+    await startHub();
+    const a = await enabled("a");
+    fake.pushUpdate(msg("a"));
+    fake.pushUpdate(msg("!b"));
+    fake.pushUpdate(msg("c"));
+    await waitFor(() => inbounds(a).length === 2);
+    expect(inbounds(a)).toEqual(["a", "!b\n\nc"]);
+  });
+
+  test("seeing the first message of a batch takes ✍ off all of its messages", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const us = [msg("one"), msg("two"), msg("three")];
+    const ids = us.map(u => u.message?.message_id);
+    for (const u of us) fake.pushUpdate(u);
+    await a.next("inbound");
+    await waitFor(() => fake.callsOf("setMessageReaction").length === 3);
+    a.send({ type: "seen", messageIds: [ids[0]] });
+    await waitFor(() => fake.callsOf("setMessageReaction").length === 6);
+    const cleared = fake.callsOf("setMessageReaction").slice(3);
+    expect(cleared.every(c => arr(c.reaction).length === 0)).toBe(true);
+    expect(new Set(cleared.map(c => c.message_id))).toEqual(new Set(ids));
   });
 });
 
@@ -1335,8 +1421,8 @@ describe("starting and stopping sessions", () => {
     await Bun.sleep(150);
     expect(spawned).toEqual([["wt.exe", "-d", CWD, "cswap.exe", "run", "2", "--", "--resume", SID]]);
     const w = await plugin(SID);
-    expect((await w.next("inbound")).content).toBe("first");
-    expect((await w.next("inbound", m => m.content === "second")).content).toBe("second");
+    // Held messages go together as one notification.
+    expect((await w.next("inbound")).content).toBe("first\n\nsecond");
     await waitFor(() => fake.callsOf("editMessageText").some(c => c.text === "✅ Сессия запущена"));
     expect(spawned.length).toBe(1);
   });
@@ -1601,13 +1687,29 @@ describe("commands", () => {
     expect(a.ran).toEqual([]);
   });
 
+  test("a command sends the messages waiting before it without waiting for the quiet window", async () => {
+    await startHub({ batchQuietMs: 5000 });
+    const a = await enabled("a");
+    const { runner, ran } = mod("a");
+    const start = Date.now();
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "hello" }));
+    command("/compact 200k");
+    expect((await a.next("inbound")).content).toBe("hello");
+    expect(Date.now() - start).toBeLessThan(3000);
+    await waitFor(async () => {
+      await runner.poll();
+      return ran.length;
+    });
+    expect(ran).toEqual([["autocompact", "200000"]]);
+  });
+
   test("a command for another bot and unknown commands reach the agent as text", async () => {
     await startHub();
     const a = await enabled("a");
     command("/info@other_bot");
     command("/start");
-    await waitFor(() => a.messages.filter(m => m.type === "inbound").length === 2);
-    expect(a.messages.filter(m => m.type === "inbound").map(m => m.content)).toEqual(["/info@other_bot", "/start"]);
+    // Sent together, they come as one notification.
+    expect((await a.next("inbound")).content).toBe("/info@other_bot\n\n/start");
   });
 
   test("a command nobody picks up is reported in the topic", async () => {

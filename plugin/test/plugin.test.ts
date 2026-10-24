@@ -18,6 +18,8 @@ const GROUP = "-1001";
 const ME = "123456789";
 const CWD = "C:\\code\\demo-app";
 const SID = "sess-1";
+// The hub's quiet window for topic messages that come together, kept short.
+const BATCH_QUIET_MS = 5;
 
 let fake: FakeTelegram;
 let hub: Hub;
@@ -144,6 +146,7 @@ beforeEach(async () => {
     cardGapMs: 0,
     typingEveryMs: 50,
     reactionDelayMs: 50,
+    batchQuietMs: BATCH_QUIET_MS,
     // No module polls here: /stop ends the window once nobody takes it.
     commandPickupMs: 100,
     log: (hubLog = memLogger()),
@@ -401,6 +404,8 @@ describe("PluginCore", () => {
     interruptMs = 100;
     const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!стоп, не туда" });
     fake.pushUpdate(u);
+    // Sent together, the next message would join the "!" one.
+    await waitFor(() => interrupts.length === 1, 3000, "interrupt");
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "смотри в src" }));
     await waitFor(() => channel.length === 1, 3000, "the next message");
     expect(interrupts.map(i => [i.channelBefore, i.channelAfter])).toEqual([[0, 0]]);

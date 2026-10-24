@@ -118,7 +118,7 @@ function listItem(item: unknown, paths: Paths): string {
   return `${label} ${box}${body.split("\n").join(`\n${pad}`)}`;
 }
 
-function media(kind: string, name: string | undefined, fileId: string | undefined): string {
+export function media(kind: string, name: string | undefined, fileId: string | undefined): string {
   return `(${kind}${name ? `: ${name}` : ""}${fileId ? `, file_id: ${fileId}` : ""})`;
 }
 
