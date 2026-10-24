@@ -3,6 +3,8 @@ import { spawnSync } from "child_process";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { z } from "zod";
+import { QUESTION_DEADLINE_MS } from "../src/hook/question-limits.ts";
+import { isAlive } from "../src/hub/exec-runner.ts";
 import { Hub } from "../src/hub/hub.ts";
 import { HOOK_NOTE_TOOL } from "../src/plugin/plugin.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
@@ -14,6 +16,15 @@ const HOOK = join(PLUGIN, "src", "hook", "session-start.ts");
 const STOP_HOOK = join(PLUGIN, "src", "hook", "stop.ts");
 const QUESTION_HOOK = join(PLUGIN, "src", "hook", "question.ts");
 const SLOW_READER_MS = 500;
+const TEST_DEADLINE_MS = 300;
+const MS_PER_SECOND = 1000;
+// How far under the hooks.json timeout the hook's own deadline may sit.
+const DEADLINE_MARGIN_MAX_MS = 5 * 60_000;
+const PARENT_GONE_WAIT_MS = 10_000;
+const PARENT_GONE_TEST_MS = 30_000;
+// Starts the hook with its own stdin, prints its pid and lives on until killed.
+// Detached, so the hook outlives it, as it would outlive a dead Claude Code.
+const PARENT_SCRIPT = "const c = require(\"child_process\").spawn(process.execPath, [process.env.HOOK_PATH], { stdio: [\"inherit\", \"ignore\", \"ignore\"], detached: true, windowsHide: true }); console.log(c.pid); await Bun.sleep(1e9);";
 
 // Async on purpose: an in-process hub must keep serving while the hook runs.
 async function runHook(port: number, input: object, socket = "pipe-H") {
@@ -171,6 +182,72 @@ describe("AskUserQuestion hook", () => {
     });
     return { port, bodies };
   }
+
+  // A stand-in hub that holds /question until the hook drops it.
+  async function holdingHub() {
+    const port = await freePort();
+    const seen = { got: 0, aborted: 0 };
+    server = Bun.serve({
+      port,
+      hostname: "127.0.0.1",
+      fetch(req, srv) {
+        srv.timeout(req, 0);
+        seen.got++;
+        return new Promise<Response>(resolve => {
+          req.signal.addEventListener("abort", () => {
+            seen.aborted++;
+            resolve(new Response("gone"));
+          });
+        });
+      },
+    });
+    return { port, seen };
+  }
+
+  test("the hook stops waiting at its own deadline", async () => {
+    const { port, seen } = await holdingHub();
+    const proc = Bun.spawn([process.execPath, QUESTION_HOOK], {
+      stdin: new Blob([JSON.stringify(INPUT)]),
+      stdout: "pipe",
+      env: { ...process.env, TG_HUB_PORT: String(port), TG_HUB_QUESTION_DEADLINE_MS: String(TEST_DEADLINE_MS) },
+      windowsHide: true,
+    });
+    const stdout = await new Response(proc.stdout).text();
+    expect({ status: await proc.exited, stdout }).toEqual({ status: 0, stdout: "" });
+    await waitFor(() => seen.aborted === 1);
+  });
+
+  test("the hook stops waiting when its parent is gone", async () => {
+    const { port, seen } = await holdingHub();
+    // A parent that starts the hook and then lives on until killed.
+    const parent = Bun.spawn([process.execPath, "-e", PARENT_SCRIPT], {
+      stdin: new Blob([JSON.stringify(INPUT)]),
+      stdout: "pipe",
+      env: { ...process.env, TG_HUB_PORT: String(port), HOOK_PATH: QUESTION_HOOK },
+      windowsHide: true,
+    });
+    const reader = parent.stdout.getReader();
+    const first = await reader.read();
+    const hookPid = Number(new TextDecoder().decode(first.value).trim());
+    try {
+      await waitFor(() => seen.got === 1);
+      parent.kill();
+      await parent.exited;
+      await waitFor(() => seen.aborted === 1, PARENT_GONE_WAIT_MS);
+      await waitFor(() => !isAlive(hookPid), PARENT_GONE_WAIT_MS);
+    } finally {
+      if (isAlive(hookPid)) process.kill(hookPid);
+    }
+  }, PARENT_GONE_TEST_MS);
+
+  test("the hook's deadline is a little under its timeout in hooks.json", () => {
+    const hooks = z
+      .object({ hooks: z.object({ PreToolUse: z.array(z.object({ matcher: z.string(), hooks: z.array(z.object({ timeout: z.number() })) })) }) })
+      .parse(JSON.parse(readFileSync(join(PLUGIN, "hooks", "hooks.json"), "utf8")));
+    const timeoutMs = must(hooks.hooks.PreToolUse.find(h => h.matcher === "AskUserQuestion")?.hooks[0]).timeout * MS_PER_SECOND;
+    expect(QUESTION_DEADLINE_MS).toBeLessThan(timeoutMs);
+    expect(QUESTION_DEADLINE_MS).toBeGreaterThan(timeoutMs - DEADLINE_MARGIN_MAX_MS);
+  });
 
   test("an answer from the topic allows the tool with the questions and the answers", async () => {
     const { port, bodies } = await fakeHub({ decision: "allow", answers: { "Какой цвет?": "Синий" } });

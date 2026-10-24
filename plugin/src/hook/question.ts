@@ -5,8 +5,10 @@
 // (deny); otherwise, or on any error, prints nothing and the terminal shows
 // its own dialog.
 import { z } from "zod";
+import { isAlive } from "../hub/exec-runner.ts";
 import { hubPort } from "../shared/config.ts";
 import { questionDecision } from "../shared/protocol-schema.ts";
+import { PARENT_CHECK_MS, QUESTION_DEADLINE_MS } from "./question-limits.ts";
 
 // The part of the hook input the hub needs; the hub checks the questions.
 // The tool input stays whole: updatedInput replaces it, so other fields must
@@ -16,12 +18,23 @@ const hookInput = z.object({
   tool_input: z.looseObject({ questions: z.array(z.unknown()) }),
 });
 
+// The wait ends at the hook's own deadline (TG_HUB_QUESTION_DEADLINE_MS
+// shortens it for tests) or once the parent is gone: a hook that Claude Code
+// no longer waits for must not hold the poll open. Only signals the parent,
+// so it starts no process; on Windows ppid keeps the dead parent's number.
+const stop = new AbortController();
+const parent = process.ppid;
+const deadline = Number(process.env.TG_HUB_QUESTION_DEADLINE_MS) || QUESTION_DEADLINE_MS;
+setTimeout(() => stop.abort(), deadline);
+setInterval(() => {
+  if (process.ppid !== parent || !isAlive(parent)) stop.abort();
+}, PARENT_CHECK_MS);
+
 try {
   const parsed = hookInput.safeParse(JSON.parse(await Bun.stdin.text()));
   if (parsed.success) {
     const input = parsed.data;
-    // No deadline: the hook's own timeout bounds the wait. timeout: false
-    // turns off Bun's 5-minute idle timer on the held request.
+    // timeout: false turns off Bun's 5-minute idle timer on the held request.
     const res = await fetch(`http://127.0.0.1:${hubPort()}/question`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -31,6 +44,7 @@ try {
         tool_input: input.tool_input,
       }),
       timeout: false,
+      signal: stop.signal,
     });
     const decision = questionDecision.safeParse(await res.json());
     if (decision.success && decision.data.decision !== "none") {
