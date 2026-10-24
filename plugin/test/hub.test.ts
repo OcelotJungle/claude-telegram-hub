@@ -2943,15 +2943,28 @@ describe("questions", () => {
     expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Красный" } });
   });
 
-  test('a "!" message cancels the poll and reaches the agent as an interrupt', async () => {
+  test('a "!" message cancels the poll and reaches the agent as an ordinary message', async () => {
     await startHub();
     const a = await enabled("a");
     const answer = ask([Q1]);
     await polled();
     say("!стоп");
     expect(await answer).toEqual({ decision: "deny", reason: CANCEL_REASON });
-    expect(await a.next("inbound")).toMatchObject({ content: "стоп", interrupt: true });
+    const inbound = await a.next("inbound");
+    expect(inbound).toMatchObject({ content: "стоп" });
+    expect(field(inbound, "interrupt")).toBeUndefined();
     await waitFor(() => edits().some(e => String(e.text).endsWith(`\n\n${CANCELLED}`)));
+  });
+
+  test('a lone "!" cancels the poll and delivers nothing', async () => {
+    await startHub();
+    const a = await enabled("a");
+    const answer = ask([Q1]);
+    await polled();
+    say("!");
+    expect(await answer).toEqual({ decision: "deny", reason: CANCEL_REASON });
+    await Bun.sleep(SETTLE_MS);
+    expect(a.messages.filter(m => m.type === "inbound")).toEqual([]);
   });
 
   test("«Отменить» denies the question", async () => {

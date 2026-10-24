@@ -1596,30 +1596,34 @@ ${msg.text}`);
       await this.flushBatch(route.sessionId);
       return this.onHubCommand(route.sessionId, hubCmd, m);
     }
-    if (await this.toPoll(api, route.sessionId, m)) return;
-    if (route.action === "inactive") return this.toInactive(api, route.sessionId, [m]);
-    if (this.holdForCleanup(route.sessionId, m)) return;
-    await this.deliver(api, route.sessionId, m);
+    const rest = await this.toPoll(api, route.sessionId, m);
+    if (!rest) return;
+    if (route.action === "inactive") return this.toInactive(api, route.sessionId, [rest]);
+    if (this.holdForCleanup(route.sessionId, rest)) return;
+    await this.deliver(api, route.sessionId, rest);
   }
 
   // A message while the session's poll is open answers its question; a "!"
-  // message cancels the poll and goes on to the agent. True when taken.
-  private async toPoll(api: TelegramApi, sessionId: string, m: Message): Promise<boolean> {
+  // message cancels the poll and goes on to the agent as an ordinary message,
+  // since the agent waits for the answer and has no turn to stop. Returns the
+  // message to deliver, or undefined when nothing is left of it.
+  private async toPoll(api: TelegramApi, sessionId: string, m: Message): Promise<Message | undefined> {
     let p: Poll | undefined;
     for (const open of this.polls.values()) if (open.sessionId === sessionId) p = open;
-    if (!p) return false;
+    if (!p) return m;
     const role = pollRole(m, this.botUsername);
-    if (role === "pass") return false;
+    if (role === "pass") return m;
     if (role === "cancel") {
       void this.finishPoll(p, { decision: "deny", reason: CANCEL_REASON }, CANCELLED);
-      return false;
+      const plain = withoutInterrupt(m);
+      return plain.text === "" ? undefined : plain;
     }
     const text = m.text ?? m.caption ?? (m.rich_message ? await this.richContent(api, m.rich_message) : undefined);
     const answer = [text, await this.fileMark(api, m)].filter(s => s !== undefined && s !== "").join(" ");
-    if (!answer || p.done) return false;
+    if (!answer || p.done) return m;
     this.log.info(`question poll ${p.key}: answered by message ${m.message_id}`);
     await this.answerPoll(p, answer);
-    return true;
+    return undefined;
   }
 
   // Messages for a session without a window: kept for its start under way,
