@@ -26,8 +26,9 @@ export type TranscriptEvent =
   // response broke off, or before Claude Code retries the request itself. It
   // ended the turn only if turn_closed comes before the turn goes on.
   | { kind: "api_error"; messageId: string }
-  // Claude Code closed the turn (system record turn_duration).
-  | { kind: "turn_closed" }
+  // Claude Code closed the turn (system record turn_duration). pendingAgents:
+  // background subagents still running; the Stop hook does not see them.
+  | { kind: "turn_closed"; pendingAgents: number }
   | { kind: "terminal_input" }
   | { kind: "title"; source: "custom" | "agent" | "ai"; title: string }
   // A thinking block with text whose kind is neither thinking nor narration:
@@ -69,7 +70,8 @@ export function parseRecord(r: unknown): TranscriptEvent[] {
     case "ai-title":
       return title("ai", r.aiTitle);
     case "system":
-      return r.subtype === "turn_duration" ? [{ kind: "turn_closed" }] : [];
+      if (r.subtype !== "turn_duration") return [];
+      return [{ kind: "turn_closed", pendingAgents: typeof r.pendingBackgroundAgentCount === "number" ? r.pendingBackgroundAgentCount : 0 }];
     default:
       return [];
   }

@@ -113,7 +113,9 @@ describe("API errors", () => {
   });
 
   test("Claude Code closing the turn is turn_closed", () => {
-    expect(parseRecord({ type: "system", subtype: "turn_duration", durationMs: 1000 })).toEqual([{ kind: "turn_closed" }]);
+    expect(parseRecord({ type: "system", subtype: "turn_duration", durationMs: 1000 })).toEqual([{ kind: "turn_closed", pendingAgents: 0 }]);
+    const waiting = { type: "system", subtype: "turn_duration", durationMs: 1000, pendingBackgroundAgentCount: 7 };
+    expect(parseRecord(waiting)).toEqual([{ kind: "turn_closed", pendingAgents: 7 }]);
     expect(parseRecord({ type: "system", subtype: "stop_hook_summary" })).toEqual([]);
   });
 

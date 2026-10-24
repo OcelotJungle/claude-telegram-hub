@@ -30,6 +30,9 @@ export class Relay {
   private ending: string | undefined;
   // When turn_closed came for the ending turn.
   private closedAt: number | undefined;
+  // Background subagents still running when the turn closed: the agent waits
+  // for them and goes on, so a turn without a question is only a pause.
+  private pendingAgents = 0;
   private ended: string[] = [];
   private decision: { d: TurnEnd; at: number } | undefined;
   // When the last record of a main-agent message came.
@@ -109,10 +112,10 @@ export class Relay {
         if (this.ending === undefined) {
           this.closed = true;
           this.decision = undefined;
-        } else if (this.decision) {
-          out.push(...this.closeBy(this.decision.d));
         } else {
-          this.closedAt = this.now();
+          this.pendingAgents = ev.pendingAgents;
+          if (this.decision) out.push(...this.closeBy(this.decision.d));
+          else this.closedAt = this.now();
         }
         break;
     }
@@ -150,8 +153,11 @@ export class Relay {
   }
 
   // The turn is really over: by the decision, or, with none, as a final one
-  // that does not report (a broken hook must not chime on every turn).
-  private closeBy(d: TurnEnd | undefined): Outgoing[] {
+  // that does not report (a broken hook must not chime on every turn). With
+  // background subagents still running, only a question makes it final.
+  private closeBy(given: TurnEnd | undefined): Outgoing[] {
+    const asks = given?.final === true && given.kind === "ask";
+    const d: TurnEnd | undefined = this.pendingAgents > 0 && !asks ? { final: false } : given;
     if (d === undefined) return this.close(true);
     const out = this.close(d.final);
     if (d.final) this.opts.onFinalClose?.(d.kind);
@@ -166,6 +172,7 @@ export class Relay {
     }
     this.ending = undefined;
     this.closedAt = undefined;
+    this.pendingAgents = 0;
     this.closed = true;
     const out: Outgoing[] = this.enabled && this.pending !== undefined ? [{ text: this.pending, notify: final }] : [];
     this.pending = undefined;

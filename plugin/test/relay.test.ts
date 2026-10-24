@@ -7,7 +7,8 @@ const own = (name: string) => /(^|__)tg_(enable|disable)$/.test(name);
 const text = (t: string, m = "m1"): TranscriptEvent => ({ kind: "text", text: t, messageId: m });
 const tool = (name: string, m = "m1"): TranscriptEvent => ({ kind: "tool_use", name, messageId: m });
 const end = (m: string): TranscriptEvent => ({ kind: "turn_end", messageId: m });
-const CLOSED: TranscriptEvent = { kind: "turn_closed" };
+const CLOSED: TranscriptEvent = { kind: "turn_closed", pendingAgents: 0 };
+const CLOSED_WAITING: TranscriptEvent = { kind: "turn_closed", pendingAgents: 3 };
 const DONE = { final: true, kind: "done" } as const;
 const ASK = { final: true, kind: "ask" } as const;
 const PAUSE = { final: false } as const;
@@ -215,6 +216,57 @@ describe("relay: closing a turn", () => {
     r.feed(end("m1"));
     clock.t += TURN_DECISION_MS;
     expect(r.idle()).toEqual([]);
+  });
+});
+
+describe("relay: background subagents still running", () => {
+  test("a done turn is only a pause: silent, nothing reported", () => {
+    const { r, finals } = makeRelay();
+    r.feed(text("1 of 8 done", "m1"));
+    r.feed(end("m1"));
+    r.decide(DONE);
+    expect(r.feed(CLOSED_WAITING)).toEqual([{ text: "1 of 8 done", notify: false }]);
+    expect(finals).toEqual([]);
+  });
+
+  test("the decision after turn_closed is a pause too", () => {
+    const { r, finals } = makeRelay();
+    r.feed(text("B", "m1"));
+    r.feed(end("m1"));
+    r.feed(CLOSED_WAITING);
+    expect(r.decide(DONE)).toEqual([{ text: "B", notify: false }]);
+    expect(finals).toEqual([]);
+  });
+
+  test("no decision: closed silently 5 s later", () => {
+    const { r, clock } = makeRelay();
+    r.feed(text("B", "m1"));
+    r.feed(end("m1"));
+    r.feed(CLOSED_WAITING);
+    clock.t += TURN_DECISION_MS;
+    expect(r.idle()).toEqual([{ text: "B", notify: false }]);
+  });
+
+  test("a question is still final", () => {
+    const { r, finals } = makeRelay();
+    r.feed(text("Which one?", "m1"));
+    r.feed(end("m1"));
+    r.decide(ASK);
+    expect(r.feed(CLOSED_WAITING)).toEqual([{ text: "Which one?", notify: true }]);
+    expect(finals).toEqual(["ask"]);
+  });
+
+  test("the next turn with none left is final again", () => {
+    const { r, finals } = makeRelay();
+    r.feed(text("A", "m1"));
+    r.feed(end("m1"));
+    r.decide(DONE);
+    r.feed(CLOSED_WAITING);
+    r.feed(text("B", "m2"));
+    r.feed(end("m2"));
+    r.decide(DONE);
+    expect(r.feed(CLOSED)).toEqual([{ text: "B", notify: true }]);
+    expect(finals).toEqual(["done"]);
   });
 });
 
