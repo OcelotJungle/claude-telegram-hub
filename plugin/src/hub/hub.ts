@@ -286,6 +286,7 @@ export class Hub {
   // The latest rate-limit reading of each session, with its account then.
   private limits = new Map<string, LimitsReading & { account?: string }>();
   private botUsername: string | undefined;
+  private botId: number | undefined;
   // Permission prompts sent to topics, by the key in their buttons' data.
   private permissions = new Map<string, { sessionId: string; requestId: string } & Formatted>();
   // Subagent cards by `${sessionId}:${cardId}`: text is the latest Markdown
@@ -1354,6 +1355,7 @@ ${msg.text}`);
           this.log.info(wasOnline ? "Telegram polling works again" : `polling Telegram as @${me.username ?? me.id}`);
           if (!wasOnline) {
             this.botUsername = me.username;
+            this.botId = me.id;
             void this.registerCommands(api);
           }
           online = wasOnline = true;
@@ -1550,7 +1552,7 @@ ${msg.text}`);
   private async itemContent(api: TelegramApi, m: Message): Promise<string> {
     const text = m.text ?? m.caption ?? (m.rich_message ? await this.richContent(api, m.rich_message) : undefined);
     const mark = await this.fileMark(api, m);
-    return withContext(m, [mark, text].filter(s => s !== undefined && s !== "").join(" "));
+    return withContext(m, [mark, text].filter(s => s !== undefined && s !== "").join(" "), this.botId);
   }
 
   private async fileMark(api: TelegramApi, m: Message): Promise<string | undefined> {
@@ -2151,7 +2153,7 @@ ${msg.text}`);
       content ??= `(sticker${m.sticker.emoji ? ` ${m.sticker.emoji}` : ""})`;
       attach("sticker", m.sticker);
     }
-    return { content: withContext(m, content ?? ""), meta };
+    return { content: withContext(m, content ?? "", this.botId), meta };
   }
 }
 
@@ -2222,9 +2224,10 @@ function kindOfMessage(m: Message): string {
   return (["rich_message", "photo", "document", "voice", "audio", "video", "video_note", "sticker"] as const).find(k => m[k]) ?? "text";
 }
 
-// The plugin interrupts the agent for such a message.
+// The plugin interrupts the agent for such a message. A forward starts with
+// its mark there, so it never does.
 function isInterrupt(m: Message): boolean {
-  return (m.text ?? m.caption ?? "").trimStart().startsWith(INTERRUPT_PREFIX);
+  return !m.forward_origin && (m.text ?? m.caption ?? "").trimStart().startsWith(INTERRUPT_PREFIX);
 }
 
 // Who sent a topic message and when; a batch carries its first message's.

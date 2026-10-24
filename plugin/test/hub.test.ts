@@ -536,6 +536,16 @@ describe("batching", () => {
     expect(inbounds(a)).toEqual(["a", "!b\n\nc"]);
   });
 
+  test('a forward whose text starts with "!" is no interrupt and joins the batch', async () => {
+    await startHub();
+    const a = await enabled("a");
+    fake.pushUpdate(msg("a"));
+    fake.pushUpdate(msg("!b", { forward_origin: { type: "hidden_user", date: 0, sender_user_name: "X" } }));
+    await waitFor(() => inbounds(a).length === 1);
+    await Bun.sleep(50);
+    expect(inbounds(a)).toEqual(["a\n\n[forwarded from X]\n!b"]);
+  });
+
   test("seeing the first message of a batch takes ✍ off all of its messages", async () => {
     await startHub();
     const a = await enabled("a");

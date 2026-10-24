@@ -12,9 +12,10 @@ export const MAX_REPLY_CHARS = 300;
 // The media fields a message and an external reply share.
 type Media = Pick<Message, "photo" | "document" | "voice" | "audio" | "video" | "video_note" | "sticker">;
 
-export function withContext(m: Message, content: string): string {
+// botId is this bot's own user id: only its messages are "your message".
+export function withContext(m: Message, content: string, botId: number | undefined): string {
   const forward = m.forward_origin ? `${forwardMark(m.forward_origin)}\n` : "";
-  const reply = replyBlock(m);
+  const reply = replyBlock(m, botId);
   return `${forward}${content}${reply ? `\n\n${reply}` : ""}`;
 }
 
@@ -39,7 +40,7 @@ function originName(o: TelegramMessageOrigin): string | undefined {
   }
 }
 
-function replyBlock(m: Message): string | undefined {
+function replyBlock(m: Message, botId: number | undefined): string | undefined {
   if (m.external_reply) {
     const name = originName(m.external_reply.origin);
     const head = name ? `[reply to a message from another chat: ${name}]` : "[reply to a message from another chat]";
@@ -49,26 +50,27 @@ function replyBlock(m: Message): string | undefined {
   const r = m.reply_to_message;
   // Every message in a topic replies to the topic's service message.
   if (!r || r.forum_topic_created || r.message_id === m.message_thread_id) return undefined;
-  const label = authorLabel(r, m);
+  const label = authorLabel(r, m, botId);
   if (m.quote) return `[quote from ${label}]\n${quoted(m.quote.text)}`;
-  const full = originalText(r);
-  const short = full.length > MAX_REPLY_CHARS;
-  const body = short ? full.slice(0, MAX_REPLY_CHARS) : full;
+  // Cut by code points so an emoji is never split; the mark is not counted.
+  const chars = Array.from(originalText(r) ?? "");
+  const short = chars.length > MAX_REPLY_CHARS;
+  const text = chars.slice(0, MAX_REPLY_CHARS).join("");
+  const body = [mediaMark(r), text].filter(Boolean).join(" ");
   return [`[reply to ${label}]`, ...(body ? [quoted(body)] : []), ...(short ? ["(message shortened)"] : [])].join("\n");
 }
 
-function authorLabel(r: Message, m: Message): string {
-  if (r.from?.is_bot) return "your message";
+function authorLabel(r: Message, m: Message, botId: number | undefined): string {
+  if (r.from && r.from.id === botId) return "your message";
   if (r.from && r.from.id === m.from?.id) return "the user's own message";
   const name = r.from ? userName(r.from) : r.sender_chat ? chatName(r.sender_chat) : undefined;
   return name ? `a message from ${name}` : "a message";
 }
 
-// The text, caption or rich text of the original, after a mark of its media.
+// The text, caption or rich text of the original.
 // Nothing is downloaded: a rich photo is named by its file_id.
-function originalText(r: Message): string {
-  const text = r.text ?? r.caption ?? (r.rich_message ? richToMarkdown(r.rich_message) : undefined);
-  return [mediaMark(r), text].filter(Boolean).join(" ");
+function originalText(r: Message): string | undefined {
+  return r.text ?? r.caption ?? (r.rich_message ? richToMarkdown(r.rich_message) : undefined);
 }
 
 function mediaMark(m: Media): string | undefined {
