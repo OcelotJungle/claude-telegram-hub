@@ -13,6 +13,8 @@ const DETAIL_FIELDS = ["file_path", "notebook_path", "description", "pattern", "
 const CHANNEL_MESSAGE_ID = /<channel\b[^>]*\bmessage_id="(\d+)"/g;
 // Claude Code's record for Esc: "[Request interrupted by user]", or "… for tool use]".
 const INTERRUPTED = /^\[Request interrupted by user\b/;
+// The model name of messages Claude Code writes itself.
+const SYNTHETIC_MODEL = "<synthetic>";
 
 export type TranscriptEvent =
   | { kind: "text"; text: string; messageId: string }
@@ -93,8 +95,11 @@ function parseAssistant(r: Rec): TranscriptEvent[] {
   // agent's; other errors (rate_limit, invalid_request…) are not the
   // network's, their text is news for the person and they end the turn.
   if (r.isApiErrorMessage === true && r.error === "server_error") return [{ kind: "api_error", messageId }];
+  // Claude Code's own stub reply ("No response requested.") is not the
+  // agent's either, and tells the person nothing; it still ends the turn.
+  const stub = msg.model === SYNTHETIC_MODEL && r.isApiErrorMessage !== true;
   const out: TranscriptEvent[] = [];
-  for (const block of arr(msg.content)) {
+  for (const block of stub ? [] : arr(msg.content)) {
     if (!isObject(block)) continue;
     if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
       out.push({ kind: "text", text: block.text, messageId });

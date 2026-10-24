@@ -127,6 +127,14 @@ describe("API errors", () => {
   test("a subagent's cut response is ignored", () => {
     expect(parseRecord(apiError({ isSidechain: true }))).toEqual([]);
   });
+
+  // Observed in Claude Code: a turn started by a channel
+  // message or a reminder sometimes ends on this stub, never on the agent's text.
+  test("Claude Code's own stub reply just ends the turn, without its text", () => {
+    const base = assistant("s1", "stop_sequence", text("No response requested."));
+    const stub = { ...base, isApiErrorMessage: false, message: { ...base.message, model: "<synthetic>" } };
+    expect(parseRecord(stub)).toEqual([{ kind: "turn_end", messageId: "s1" }]);
+  });
 });
 
 describe("user records", () => {
