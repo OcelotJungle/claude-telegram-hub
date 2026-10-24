@@ -12,6 +12,7 @@ const PLUGIN = resolve(import.meta.dir, "..");
 const REPO = resolve(PLUGIN, "..");
 const HOOK = join(PLUGIN, "src", "hook", "session-start.ts");
 const STOP_HOOK = join(PLUGIN, "src", "hook", "stop.ts");
+const QUESTION_HOOK = join(PLUGIN, "src", "hook", "question.ts");
 
 // Async on purpose: an in-process hub must keep serving while the hook runs.
 async function runHook(port: number, input: object, socket = "pipe-H") {
@@ -130,6 +131,95 @@ describe("Stop hook", () => {
   });
 });
 
+describe("AskUserQuestion hook", () => {
+  const QUESTIONS = [{ question: "Какой цвет?", header: "Цвет", options: [{ label: "Синий", description: "" }, { label: "Красный", description: "" }], multiSelect: false }];
+  const INPUT = { session_id: "s", hook_event_name: "PreToolUse", tool_name: "AskUserQuestion", tool_input: { questions: QUESTIONS } };
+  let server: { stop(force?: boolean): void } | undefined;
+  let hub: Hub | undefined;
+  const clients: { close(): void }[] = [];
+  afterEach(async () => {
+    server?.stop(true);
+    server = undefined;
+    for (const c of clients.splice(0)) c.close();
+    await hub?.stop();
+    hub = undefined;
+  });
+
+  async function runQuestion(port: number, input: object) {
+    const proc = Bun.spawn([process.execPath, QUESTION_HOOK], {
+      stdin: new Blob([JSON.stringify(input)]),
+      stdout: "pipe",
+      env: { ...process.env, TG_HUB_PORT: String(port), CLAUDE_CODE_MESSAGING_SOCKET: "pipe-Q" },
+    });
+    const stdout = await new Response(proc.stdout).text();
+    return { status: await proc.exited, stdout };
+  }
+
+  // A stand-in hub that answers /question with the given decision and keeps the bodies it got.
+  async function fakeHub(decision: object) {
+    const port = await freePort();
+    const bodies: unknown[] = [];
+    server = Bun.serve({
+      port,
+      hostname: "127.0.0.1",
+      async fetch(req) {
+        if (new URL(req.url).pathname !== "/question") return new Response("no", { status: 404 });
+        bodies.push(await req.json());
+        return Response.json(decision);
+      },
+    });
+    return { port, bodies };
+  }
+
+  test("an answer from the topic allows the tool with the questions and the answers", async () => {
+    const { port, bodies } = await fakeHub({ decision: "allow", answers: { "Какой цвет?": "Синий" } });
+    const r = await runQuestion(port, INPUT);
+    expect(r.status).toBe(0);
+    expect(bodies).toEqual([{ messagingSocket: "pipe-Q", session_id: "s", tool_input: { questions: QUESTIONS } }]);
+    expect(JSON.parse(r.stdout)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+        permissionDecisionReason: "Answered in Telegram",
+        updatedInput: { questions: QUESTIONS, answers: { "Какой цвет?": "Синий" } },
+      },
+    });
+  });
+
+  test("a cancel in the topic denies the tool with the hub's reason", async () => {
+    const { port } = await fakeHub({ decision: "deny", reason: "cancelled" });
+    const r = await runQuestion(port, INPUT);
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout)).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "cancelled" } });
+  });
+
+  test("none, a broken answer or no hub leave the dialog to the terminal", async () => {
+    for (const decision of [{ decision: "none" }, { decision: "allow" }]) {
+      const { port } = await fakeHub(decision);
+      const r = await runQuestion(port, INPUT);
+      expect(r).toEqual({ status: 0, stdout: "" });
+      server?.stop(true);
+    }
+    expect(await runQuestion(await freePort(), INPUT)).toEqual({ status: 0, stdout: "" });
+  });
+
+  test("the real hub decides nothing for a session with the mode off", async () => {
+    const port = await freePort();
+    const dir = tempDir();
+    hub = new Hub({ port, sessionsFile: join(dir, "s.json"), outboxFile: join(dir, "o.json"), filesDir: join(dir, "files"), inboxDir: dir, api: undefined, config: () => ({ allowFrom: [], turnEndChime: "" }), idleMs: 60_000, log: memLogger(), onExit() {} });
+    hub.start();
+    clients.push(await wsClient(port, { type: "hello", v: PROTOCOL_VERSION, windowKey: "pipe-Q", sessionId: "s", cwd: "C:\\p" }));
+    expect(await runQuestion(port, INPUT)).toEqual({ status: 0, stdout: "" });
+  });
+
+  test("survives garbage input", async () => {
+    const port = await freePort();
+    const r = spawnSync(process.execPath, [QUESTION_HOOK], { input: "not json", env: { ...process.env, TG_HUB_PORT: String(port) }, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("");
+  });
+});
+
 describe("plugin packaging", () => {
   // The parts of the manifests the tests read.
   const marketplace = z.object({ name: z.string(), plugins: z.array(z.object({ name: z.string(), source: z.string() })) });
@@ -137,7 +227,7 @@ describe("plugin packaging", () => {
   const mcpConfig = z.object({ mcpServers: z.record(z.string(), z.object({ command: z.string() })) });
   const pkgJson = z.object({ scripts: z.record(z.string(), z.string()) });
   const hooksJson = z.object({
-    hooks: z.record(z.string(), z.array(z.object({ hooks: z.array(z.looseObject({ command: z.string().optional() })) }))),
+    hooks: z.record(z.string(), z.array(z.object({ matcher: z.string().optional(), hooks: z.array(z.looseObject({ command: z.string().optional() })) }))),
     modules: z.array(z.string()),
   });
   const json = <T>(p: string, schema: z.ZodType<T>) => schema.parse(JSON.parse(readFileSync(p, "utf8")));
@@ -162,6 +252,12 @@ describe("plugin packaging", () => {
     expect(existsSync(HOOK)).toBe(true);
     expect(hooks.hooks.Stop[0].hooks[0].command).toContain("src/hook/stop.ts");
     expect(existsSync(STOP_HOOK)).toBe(true);
+    // The questions hook waits as long as a poll may stay open: 24 hours.
+    const question = hooks.hooks.PreToolUse[0];
+    expect(question.matcher).toBe("AskUserQuestion");
+    expect(question.hooks[0]).toMatchObject({ type: "command", timeout: 86400, statusMessage: "Жду ответа в Телеграме" });
+    expect(question.hooks[0].command).toContain("src/hook/question.ts");
+    expect(existsSync(QUESTION_HOOK)).toBe(true);
     // The function hooks module that runs commands from the topic.
     expect(hooks.modules).toEqual(["../src/mod/register.ts"]);
     expect(existsSync(join(PLUGIN, "hooks", hooks.modules[0]))).toBe(true);
