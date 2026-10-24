@@ -39,7 +39,8 @@ try {
         d.decision === "allow"
           ? { permissionDecision: "allow", permissionDecisionReason: "Answered in Telegram", updatedInput: { ...input.tool_input, answers: d.answers } }
           : { permissionDecision: "deny", permissionDecisionReason: d.reason };
-      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", ...output } }));
+      // Awaited: process.exit below must not cut a large answer short.
+      await Bun.write(Bun.stdout, JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", ...output } }));
     }
   }
 } catch {}

@@ -13,6 +13,7 @@ const REPO = resolve(PLUGIN, "..");
 const HOOK = join(PLUGIN, "src", "hook", "session-start.ts");
 const STOP_HOOK = join(PLUGIN, "src", "hook", "stop.ts");
 const QUESTION_HOOK = join(PLUGIN, "src", "hook", "question.ts");
+const SLOW_READER_MS = 500;
 
 // Async on purpose: an in-process hub must keep serving while the hook runs.
 async function runHook(port: number, input: object, socket = "pipe-H") {
@@ -192,6 +193,21 @@ describe("AskUserQuestion hook", () => {
     const r = await runQuestion(port, { ...INPUT, tool_input: toolInput });
     expect(bodies).toEqual([{ messagingSocket: "pipe-Q", session_id: "s", tool_input: toolInput }]);
     expect(JSON.parse(r.stdout).hookSpecificOutput.updatedInput).toEqual({ ...toolInput, answers: { "Какой цвет?": "Синий" } });
+  });
+
+  test("a large answer reaches stdout whole before the hook exits", async () => {
+    const big = "ж".repeat(2_000_000);
+    const { port } = await fakeHub({ decision: "allow", answers: { "Какой цвет?": big } });
+    const proc = Bun.spawn([process.execPath, QUESTION_HOOK], {
+      stdin: new Blob([JSON.stringify(INPUT)]),
+      stdout: "pipe",
+      env: { ...process.env, TG_HUB_PORT: String(port), CLAUDE_CODE_MESSAGING_SOCKET: "pipe-Q" },
+    });
+    // A slow reader: the pipe fills up before anything is read.
+    await Bun.sleep(SLOW_READER_MS);
+    const stdout = await new Response(proc.stdout).text();
+    await proc.exited;
+    expect(JSON.parse(stdout).hookSpecificOutput.updatedInput.answers["Какой цвет?"]).toBe(big);
   });
 
   test("a cancel in the topic denies the tool with the hub's reason", async () => {
