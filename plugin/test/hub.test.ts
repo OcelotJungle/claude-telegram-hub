@@ -3130,6 +3130,26 @@ describe("questions", () => {
     await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`));
   });
 
+  test("turning the mode off moves the poll to the terminal", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const answer = ask([Q1]);
+    await polled();
+    await req(a, { op: "disable" });
+    expect(await answer).toEqual({ decision: "none" });
+    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`));
+  });
+
+  test("typing in the terminal moves the poll to the terminal", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const answer = ask([Q1]);
+    await polled();
+    a.send({ type: "terminalInput" });
+    expect(await answer).toEqual({ decision: "none" });
+    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`));
+  });
+
   test("a poll message Telegram rejects leaves the question to the terminal", async () => {
     await startHub();
     await enabled("a");

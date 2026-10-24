@@ -912,6 +912,8 @@ ${msg.text}`);
   private setEnabled(sessionId: string, on: boolean): boolean {
     this.store.setEnabled(sessionId, on);
     this.pushState(sessionId);
+    // With the mode off the user answers in the terminal, as on a timeout.
+    if (!on) for (const p of this.polls.values()) if (p.sessionId === sessionId) void this.finishPoll(p, { decision: "none" }, TO_TERMINAL);
     return on;
   }
 
