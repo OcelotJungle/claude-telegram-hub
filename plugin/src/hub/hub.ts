@@ -158,6 +158,7 @@ type Inbound = { content: string; meta: ChannelMeta; onSent(): void };
 // results of topic commands.
 type Held = { message: Message } | { inbound: Inbound };
 // Topic messages of a session waiting to go to its window together.
+type AnswerGroup = { api: TelegramApi; poll: Poll; index: number; messages: Message[]; parts: string[]; timer: ReturnType<typeof setTimeout> };
 type Batch = { api: TelegramApi; messages: Message[]; quietTimer: ReturnType<typeof setTimeout>; maxTimer: ReturnType<typeof setTimeout> };
 // A /cleanup under way: the id of its command, the context the module
 // reported before compacting, and whether the window is compacting or
@@ -297,6 +298,9 @@ export class Hub {
   private permissions = new Map<string, { sessionId: string; requestId: string } & Formatted>();
   // Open AskUserQuestion polls, by the key in their buttons' data; one per session.
   private polls = new Map<string, Poll>();
+  // Messages that answer a poll's question, by poll key: those sent together
+  // (an album, a few lines) wait out a quiet window and answer once.
+  private answerGroups = new Map<string, AnswerGroup>();
   // Subagent cards by `${sessionId}:${cardId}`: text is the latest Markdown
   // version, shown what the message holds now (undefined until it is sent).
   private cards = new Map<string, Card>();
@@ -438,6 +442,8 @@ export class Hub {
     this.running = false;
     // Polling stops first, so no batch starts after the flush.
     this.abort.abort();
+    // Waiting answers answer at once, before the polls go to the terminal.
+    await Promise.all([...this.answerGroups.keys()].map(key => this.takeAnswer(key)));
     // Waiting batches go at once, while the windows are still connected; an
     // update handled meanwhile may start one more.
     while (this.batches.size || this.batchSends.size) {
@@ -1603,10 +1609,11 @@ ${msg.text}`);
     await this.deliver(api, route.sessionId, rest);
   }
 
-  // A message while the session's poll is open answers its question; a "!"
-  // message cancels the poll and goes on to the agent as an ordinary message,
-  // since the agent waits for the answer and has no turn to stop. Returns the
-  // message to deliver, or undefined when nothing is left of it.
+  // A message sent after the open poll's question showed answers it; an
+  // earlier one, or one sent while the question is not shown yet, reaches the
+  // agent. A "!" message cancels the poll and goes on to the agent as an
+  // ordinary message, since the agent waits for the answer and has no turn to
+  // stop. Returns the message to deliver, or undefined when nothing is left of it.
   private async toPoll(api: TelegramApi, sessionId: string, m: Message): Promise<Message | undefined> {
     let p: Poll | undefined;
     for (const open of this.polls.values()) if (open.sessionId === sessionId) p = open;
@@ -1615,15 +1622,51 @@ ${msg.text}`);
     if (role === "pass") return m;
     if (role === "cancel") {
       void this.finishPoll(p, { decision: "deny", reason: CANCEL_REASON }, CANCELLED);
+      // Answer messages still waiting reach the agent before this one.
+      await this.takeAnswer(p.key);
       const plain = withoutInterrupt(m);
       return plain.text === "" ? undefined : plain;
     }
+    const shownAs = p.messageIds[p.index];
+    if (shownAs === undefined || m.message_id <= shownAs || p.done) return m;
     const text = m.text ?? m.caption ?? (m.rich_message ? await this.richContent(api, m.rich_message) : undefined);
-    const answer = [text, await this.fileMark(api, m)].filter(s => s !== undefined && s !== "").join(" ");
-    if (!answer || p.done) return m;
-    this.log.info(`question poll ${p.key}: answered by message ${m.message_id}`);
-    await this.answerPoll(p, answer);
+    const part = [text, await this.fileMark(api, m)].filter(s => s !== undefined && s !== "").join(" ");
+    if (!part) return m;
+    this.addAnswer(api, p, m, part);
     return undefined;
+  }
+
+  // An answer message waits for the ones sent with it, like a batch.
+  private addAnswer(api: TelegramApi, p: Poll, m: Message, part: string): void {
+    const quietMs = this.opts.batchQuietMs ?? BATCH_QUIET_MS;
+    const g = this.answerGroups.get(p.key);
+    if (g && g.index === p.index) {
+      g.messages.push(m);
+      g.parts.push(part);
+      clearTimeout(g.timer);
+      g.timer = setTimeout(() => void this.takeAnswer(p.key), quietMs);
+      return;
+    }
+    if (g) void this.takeAnswer(p.key);
+    const timer = setTimeout(() => void this.takeAnswer(p.key), quietMs);
+    this.answerGroups.set(p.key, { api, poll: p, index: p.index, messages: [m], parts: [part], timer });
+  }
+
+  // The waiting messages answer their question, their parts after blank
+  // lines; when the question was answered or the poll ended meanwhile,
+  // they go on to the agent instead.
+  private async takeAnswer(key: string): Promise<void> {
+    const g = this.answerGroups.get(key);
+    if (!g) return;
+    this.answerGroups.delete(key);
+    clearTimeout(g.timer);
+    const p = g.poll;
+    if (p.done || p.index !== g.index) {
+      for (const m of g.messages) if (!this.holdForCleanup(p.sessionId, m)) await this.deliver(g.api, p.sessionId, m);
+      return;
+    }
+    this.log.info(`question poll ${key}: answered by message(s) ${g.messages.map(m => m.message_id).join(", ")}`);
+    await this.answerPoll(p, g.parts.join("\n\n"));
   }
 
   // Messages for a session without a window: kept for its start under way,

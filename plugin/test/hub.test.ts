@@ -43,6 +43,10 @@ const LONG_GRACE_MS = 2000;
 // Topic messages that come together go as one; a short quiet window keeps
 // the other tests quick.
 const BATCH_QUIET_MS = 5;
+// Time for the hub to take in a sent question's message id: only messages
+// after it answer the question. A slow send keeps a question unsent.
+const SHOWN_MS = 50;
+const SLOW_SEND_MS = 300;
 
 let fake: FakeTelegram;
 let hub: Hub;
@@ -2151,8 +2155,8 @@ describe("commands", () => {
       });
       // The "will compact" message is still being sent when the failure comes.
       fake.delayNext("sendMessage", SLOW_SEND_MS);
-      const startedId = fake.lastMessageId + 1;
       command("/cleanup");
+      const startedId = fake.nextMessageId;
       const failed = await reply(runner, t => t.startsWith("⚠️"));
       expect(failed.text).toBe("⚠️ /cleanup не выполнена: компакт не удался: boom. Сессию не трогаю");
       expect(failed.disable_notification).toBe(false);
@@ -2853,6 +2857,11 @@ describe("questions", () => {
   const press = (data: string, messageId: number) => fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId, data }));
   const say = (text?: string, extra?: Record<string, unknown>) => fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text, extra }));
   const polled = (n = 1) => waitFor(() => fake.callsOf("sendMessage")[n - 1]);
+  const shown = async (n = 1) => {
+    const msg = await polled(n);
+    await Bun.sleep(SHOWN_MS);
+    return msg;
+  };
   const edits = () => fake.callsOf("editMessageText");
 
   test("a single choice is answered by its button, and the message shows the answer instead of the buttons", async () => {
@@ -2900,7 +2909,7 @@ describe("questions", () => {
     const answer = ask([Q1]);
     const msg = await polled();
     press(dataOf(msg, 2), fake.lastMessageId);
-    const hint = await polled(2);
+    const hint = await shown(2);
     expect(hint.text).toBe(CUSTOM_HINT);
     say("Зелёный");
     expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Зелёный" } });
@@ -2913,7 +2922,7 @@ describe("questions", () => {
     await startHub();
     await enabled("a");
     const answer = ask([Q1]);
-    await polled();
+    await shown();
     say("любой");
     expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "любой" } });
   });
@@ -2922,13 +2931,60 @@ describe("questions", () => {
     await startHub();
     await enabled("a");
     const answer = ask([Q1]);
-    await polled();
+    await shown();
     fake.files.set("P2", { path: "photos/p.jpg", body: new Uint8Array([9]) });
     say(undefined, { caption: "look", photo: [{ file_id: "P1", file_unique_id: "u1" }, { file_id: "P2", file_unique_id: "u2" }] });
     const res = await answer;
     const given = String(field(field(res, "answers"), "Какой цвет?"));
     expect(field(res, "decision")).toBe("allow");
     expect(given.startsWith(`look (photo: ${join(dir, "inbox")}`)).toBe(true);
+  });
+
+  test("a message older than the question reaches the agent, and the poll stays open", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const answer = ask([Q1]);
+    const msg = await shown();
+    const id = fake.lastMessageId;
+    say("раньше", { message_id: id - 1 });
+    expect(await a.next("inbound")).toMatchObject({ content: "раньше" });
+    press(dataOf(msg, 0), id);
+    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Красный" } });
+  });
+
+  test("a message sent while the question is not shown yet reaches the agent", async () => {
+    await startHub();
+    const a = await enabled("a");
+    fake.delayNext("sendMessage", SLOW_SEND_MS);
+    const answer = ask([Q1]);
+    const msg = await polled();
+    say("пока нет");
+    expect(await a.next("inbound")).toMatchObject({ content: "пока нет" });
+    press(dataOf(msg, 0), fake.lastMessageId);
+    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Красный" } });
+  });
+
+  test("messages sent together answer once, joined by blank lines", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const answer = ask([Q1]);
+    await shown();
+    say("раз");
+    say("два");
+    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "раз\n\nдва" } });
+    await Bun.sleep(SETTLE_MS);
+    expect(a.messages.filter(m => m.type === "inbound")).toEqual([]);
+  });
+
+  test("an album answers once, with a file mark for each file", async () => {
+    await startHub();
+    await enabled("a");
+    const answer = ask([Q1]);
+    await shown();
+    say(undefined, { caption: "смотри", media_group_id: "G1", document: { file_id: "D1", file_unique_id: "d1", file_name: "a.txt" } });
+    say(undefined, { media_group_id: "G1", document: { file_id: "D2", file_unique_id: "d2", file_name: "b.txt" } });
+    const given = "смотри (document: a.txt, file_id: D1)\n\n(document: b.txt, file_id: D2)";
+    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": given } });
   });
 
   test("a topic command works as usual and leaves the poll open", async () => {

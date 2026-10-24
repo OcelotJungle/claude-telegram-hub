@@ -13,6 +13,10 @@ type Params = Record<string, unknown>;
 type Call = { method: string; params: Params };
 type Failure = { code: number; description: string; retry_after?: number };
 
+// One message_id sequence for the bot's messages and the user's, as in a
+// real chat: a message sent after another has a larger id.
+let messageCounter = 1;
+
 const sentText = z.looseObject({ text: z.string() });
 
 export class FakeTelegram {
@@ -23,7 +27,7 @@ export class FakeTelegram {
   private updates: Update[] = [];
   private nextUpdateId = 1;
   private nextThreadId = 100;
-  private nextMessageId = 1000;
+  private lastSent = 0;
   private waiting: { resolve: () => void } | undefined;
   private activePoll: { abort: (r: Response) => void } | undefined;
   private failures = new Map<string, Failure[]>();
@@ -83,7 +87,12 @@ export class FakeTelegram {
 
   // The message_id of the last message sent.
   get lastMessageId(): number {
-    return this.nextMessageId - 1;
+    return this.lastSent;
+  }
+
+  // The message_id the next message, the bot's or the user's, gets.
+  get nextMessageId(): number {
+    return messageCounter;
   }
 
   callsOf(method: string): Params[] {
@@ -148,7 +157,7 @@ export class FakeTelegram {
         if (thread != null && this.deletedTopics.has(Number(thread))) {
           return json({ ok: false, error_code: 400, description: "Bad Request: message thread not found" }, 400);
         }
-        const message = () => ({ message_id: this.nextMessageId++, chat: { id: Number(params.chat_id) }, text: params.text });
+        const message = () => ({ message_id: (this.lastSent = messageCounter++), chat: { id: Number(params.chat_id) }, text: params.text });
         return ok(method === "sendMediaGroup" ? arr(params.media).map(message) : message());
       }
       case "createForumTopic":
@@ -209,8 +218,6 @@ function json(body: unknown, status = 200): Response {
 function ok(result: unknown): Response {
   return json({ ok: true, result });
 }
-
-let messageCounter = 1;
 
 export function topicMsg(o: {
   chatId: number | string;
