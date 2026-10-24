@@ -52,8 +52,6 @@ export function filesRejectedPrompt(error: string): string {
 const HUB_TELEGRAM_TIMEOUT_MS = 150_000;
 // Tools that wait for the user's answer: the agent is not working meanwhile.
 const WAITS_FOR_USER = new Set(["AskUserQuestion"]);
-// A topic message starting with this stops the agent's turn and takes its place.
-const INTERRUPT_PREFIX = "!";
 // With the mode off, a finished turn chimes in the terminal only if this
 // long has passed since the user last typed in the terminal (a question
 // always chimes).
@@ -67,7 +65,7 @@ let chimeConfigWarned = false;
 export function interruptPrompt(content: string, meta: ChannelMeta): string {
   const attrs = Object.entries(meta).map(([k, v]) => ` ${k}="${v.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;")}"`).join("");
   return (
-    'tg-hub: the user interrupted your work from Telegram with this topic message (it starts with "!"). ' +
+    "tg-hub: the user interrupted your work from Telegram with this topic message. " +
     "It is their message, as if it came through the channel: answer it.\n" +
     `<channel source="tg-hub"${attrs}>\n${content}\n</channel>`
   );
@@ -407,10 +405,10 @@ export class PluginCore {
     this.client.send({ type: "busy", busy });
   }
 
-  // A message starting with "!" to a working agent stops its turn and comes
-  // in its place; when that fails, it comes as a channel message.
-  private deliver(content: string, meta: ChannelMeta): void {
-    const interrupt = this.busy && content.trimStart().startsWith(INTERRUPT_PREFIX);
+  // A message the hub flagged as an interrupt stops a working agent's turn
+  // and comes in its place; when that fails, it comes as a channel message.
+  private deliver(content: string, meta: ChannelMeta, flagged: boolean): void {
+    const interrupt = this.busy && flagged;
     this.inbound = this.inbound.then(async () => {
       if (interrupt) {
         try {
@@ -479,7 +477,7 @@ export class PluginCore {
         this.setEnabled(m.enabled);
         return;
       case "inbound":
-        this.deliver(m.content, m.meta);
+        this.deliver(m.content, m.meta, m.interrupt === true);
         return;
       case "switchSession":
         this.switchSession(m.sessionId, m.transcriptPath, m.cwd);

@@ -65,7 +65,9 @@ export type PluginToHub =
 
 export type HubToPlugin =
   | { type: "state"; enabled: boolean; topicTitle?: string }
-  | { type: "inbound"; content: string; meta: ChannelMeta }
+  // interrupt: the message stops the agent's turn if it works (the user
+  // started it with "!", which the hub strips from content).
+  | { type: "inbound"; content: string; meta: ChannelMeta; interrupt?: true }
   | { type: "res"; id: string; ok: boolean; result?: unknown; error?: string }
   | { type: "ack"; id: string }
   // Every send of a sendFiles message left the hub's queue; error if any failed.

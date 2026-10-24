@@ -64,9 +64,11 @@ const EXIT_POLL_MS = 200;
 const CLEANUP_SETTLE_MS = 3000;
 // How long /cleanup waits for the module to report its compact.
 const CLEANUP_COMPACT_MS = 600_000;
-// A topic message starting with it reaches a compacting window at once, as
-// it interrupts the agent (the plugin's own prefix).
+// A topic message starting with it interrupts a working agent; it reaches a
+// compacting window at once. The hub strips it and tells the window by a flag.
 const INTERRUPT_PREFIX = "!";
+// The prefix with the whitespace around it, as stripped from the text.
+const INTERRUPT_MARK = /^\s*!\s*/;
 // The size of a removed skill in tokens, roughly.
 const CHARS_PER_TOKEN = 4;
 const CLEANUP_BUSY = "⏳ /cleanup уже идёт";
@@ -1536,15 +1538,20 @@ ${msg.text}`);
       return this.toInactive(api, sessionId, messages);
     }
     this.setEnabled(sessionId, true);
+    // Only the first message of a batch can interrupt: a "!" message starts
+    // its own batch. The agent gets the text without the "!".
+    const interrupt = isInterrupt(first);
+    const flag = interrupt ? { interrupt: true as const } : {};
+    const head = interrupt ? withoutInterrupt(first) : first;
     if (!rest.length) {
-      const { content, meta } = await this.inboundOf(api, first);
+      const { content, meta } = await this.inboundOf(api, head);
       if (ws.data.reportsSeen) this.reactLater(first.message_id);
-      this.send(ws, { type: "inbound", content, meta });
+      this.send(ws, { type: "inbound", content, meta, ...flag });
       this.log.info(`message ${first.message_id} in topic ${first.message_thread_id} → session ${sessionId}: ${shapeOf(first, content)}`);
       return;
     }
     const parts: string[] = [];
-    for (const m of messages) parts.push(await this.itemContent(api, m));
+    for (const m of [head, ...rest]) parts.push(await this.itemContent(api, m));
     const content = parts.join("\n\n");
     if (ws.data.reportsSeen) {
       for (const id of ids) this.reactLater(id);
@@ -1552,12 +1559,11 @@ ${msg.text}`);
       const oldest = this.batchIds.keys().next();
       if (this.batchIds.size > MAX_BATCH_IDS && !oldest.done) this.batchIds.delete(oldest.value);
     }
-    this.send(ws, { type: "inbound", content, meta: baseMeta(first) });
+    this.send(ws, { type: "inbound", content, meta: baseMeta(first), ...flag });
     this.log.info(`messages ${ids.join(", ")} in topic ${first.message_thread_id} → session ${sessionId}: ${messages.map(kindOfMessage).join(", ")}, ${content.length} chars`);
   }
 
-  // A message of a batch: its own text first, so a "!" stays at the start,
-  // then its files named.
+  // A message of a batch: its own text first, then its files named.
   private async itemContent(api: TelegramApi, m: Message): Promise<string> {
     const text = m.text ?? m.caption ?? (m.rich_message ? await this.richContent(api, m.rich_message) : undefined);
     const mark = await this.fileMark(api, m);
@@ -2243,8 +2249,6 @@ function kindOfMessage(m: Message): string {
   return (["rich_message", "photo", "document", "voice", "audio", "video", "video_note", "sticker"] as const).find(k => m[k]) ?? "text";
 }
 
-// The plugin interrupts the agent for such a message. A forward starts with
-// its mark there, so it never does.
 // Puts a held message before the held ones that came after it: a batch
 // rerouted when its window closed is older than what was held meanwhile.
 // message_id grows within a chat; a command result goes last.
@@ -2254,8 +2258,17 @@ function keepInOrder(held: Held[], h: Held): void {
   else held.splice(at, 0, h);
 }
 
+// A message that interrupts the agent: its own text starts with "!". A
+// forward carries someone else's text, so it never does.
 function isInterrupt(m: Message): boolean {
   return !m.forward_origin && (m.text ?? m.caption ?? "").trimStart().startsWith(INTERRUPT_PREFIX);
+}
+
+// The message as the agent gets it: the "!" is a signal for the hub only. A
+// caption left empty goes, so a photo is still named.
+function withoutInterrupt(m: Message): Message {
+  if (m.text !== undefined) return { ...m, text: m.text.replace(INTERRUPT_MARK, "") };
+  return { ...m, caption: m.caption?.replace(INTERRUPT_MARK, "") || undefined };
 }
 
 // Who sent a topic message and when; a batch carries its first message's.

@@ -22,27 +22,27 @@ function replyTo(original: Partial<Message>, extra: Partial<Message> = {}): Mess
 }
 
 describe("reply context", () => {
-  test("a reply to the bot's message goes after the text, after a blank line", () => {
-    expect(withContext(replyTo({ from: BOT, text: "line 1\nline 2" }), "answer", BOT.id)).toBe("answer\n\n[reply to your message]\n> line 1\n> line 2");
+  test("a reply to the bot's message goes before the text, a blank line between", () => {
+    expect(withContext(replyTo({ from: BOT, text: "line 1\nline 2" }), "answer", BOT.id)).toBe("[reply to your message]\n> line 1\n> line 2\n\nanswer");
   });
 
   test("a reply to the user's own message", () => {
-    expect(withContext(replyTo({ from: USER, text: "earlier" }), "answer", BOT.id)).toBe("answer\n\n[reply to the user's own message]\n> earlier");
+    expect(withContext(replyTo({ from: USER, text: "earlier" }), "answer", BOT.id)).toBe("[reply to the user's own message]\n> earlier\n\nanswer");
   });
 
   test("a reply to another person names them", () => {
-    expect(withContext(replyTo({ from: OTHER, text: "hi" }), "answer", BOT.id)).toBe("answer\n\n[reply to a message from Ivan Petrov (@ivan)]\n> hi");
+    expect(withContext(replyTo({ from: OTHER, text: "hi" }), "answer", BOT.id)).toBe("[reply to a message from Ivan Petrov (@ivan)]\n> hi\n\nanswer");
   });
 
   test("a quote is shown whole, however long", () => {
     const long = "q".repeat(MAX_REPLY_CHARS + 50);
     const m = replyTo({ from: BOT, text: `${long} and more` }, { quote: { text: `${long}\n\nend`, position: 0 } });
-    expect(withContext(m, "answer", BOT.id)).toBe(`answer\n\n[quote from your message]\n> ${long}\n>\n> end`);
+    expect(withContext(m, "answer", BOT.id)).toBe(`[quote from your message]\n> ${long}\n>\n> end\n\nanswer`);
   });
 
   test("a long original is shortened with a marker", () => {
     const m = replyTo({ from: BOT, text: "a".repeat(MAX_REPLY_CHARS + 1) });
-    expect(withContext(m, "answer", BOT.id)).toBe(`answer\n\n[reply to your message]\n> ${"a".repeat(MAX_REPLY_CHARS)}\n(message shortened)`);
+    expect(withContext(m, "answer", BOT.id)).toBe(`[reply to your message]\n> ${"a".repeat(MAX_REPLY_CHARS)}\n(message shortened)\n\nanswer`);
   });
 
   test("an original of exactly the limit has no marker", () => {
@@ -52,18 +52,18 @@ describe("reply context", () => {
 
   test("a media original gives its mark and caption, nothing downloaded", () => {
     const photo = replyTo({ from: OTHER, photo: [{ file_id: "p1", file_unique_id: "u1", width: 1, height: 1 }], caption: "sunset" });
-    expect(withContext(photo, "answer", BOT.id)).toBe("answer\n\n[reply to a message from Ivan Petrov (@ivan)]\n> (photo) sunset");
+    expect(withContext(photo, "answer", BOT.id)).toBe("[reply to a message from Ivan Petrov (@ivan)]\n> (photo) sunset\n\nanswer");
     const doc = replyTo({ from: USER, document: { file_id: "d1", file_unique_id: "u2", file_name: "plan.pdf" } });
-    expect(withContext(doc, "answer", BOT.id)).toBe("answer\n\n[reply to the user's own message]\n> (document: plan.pdf)");
+    expect(withContext(doc, "answer", BOT.id)).toBe("[reply to the user's own message]\n> (document: plan.pdf)\n\nanswer");
     const voice = replyTo({ from: USER, voice: { file_id: "v1", file_unique_id: "u3", duration: 3 } });
-    expect(withContext(voice, "answer", BOT.id)).toBe("answer\n\n[reply to the user's own message]\n> (voice message)");
+    expect(withContext(voice, "answer", BOT.id)).toBe("[reply to the user's own message]\n> (voice message)\n\nanswer");
   });
 
   test("a rich original gives its text with files named by file_id", () => {
     // Built as an update: the Bot API types want rich text as objects, Telegram also sends strings.
     const rich = must(topicMsg({ chatId: CHAT.id, fromId: BOT.id, extra: { from: BOT, rich_message: { blocks: [{ type: "paragraph", text: "rich" }] } } }).message);
     const m = msg({ from: USER, text: "answer", reply_to_message: rich });
-    expect(withContext(m, "answer", BOT.id)).toBe("answer\n\n[reply to your message]\n> rich");
+    expect(withContext(m, "answer", BOT.id)).toBe("[reply to your message]\n> rich\n\nanswer");
   });
 
   test("the topic's service message is not a reply", () => {
@@ -80,27 +80,27 @@ describe("reply context", () => {
       external_reply: { origin: { type: "channel", date: 0, chat: { id: -100, type: "channel", title: "News" }, message_id: 5 } },
       quote: { text: "quoted", position: 0 },
     });
-    expect(withContext(m, "answer", BOT.id)).toBe("answer\n\n[reply to a message from another chat: News]\n> quoted");
+    expect(withContext(m, "answer", BOT.id)).toBe("[reply to a message from another chat: News]\n> quoted\n\nanswer");
     const bare = msg({ from: USER, text: "answer", external_reply: { origin: { type: "hidden_user", date: 0, sender_user_name: "Anon" } } });
-    expect(withContext(bare, "answer", BOT.id)).toBe("answer\n\n[reply to a message from another chat: Anon]");
+    expect(withContext(bare, "answer", BOT.id)).toBe("[reply to a message from another chat: Anon]\n\nanswer");
   });
 
   test("another bot's message is named, not taken for this bot's", () => {
     const other = { id: 5, is_bot: true, first_name: "Group", username: "GroupAnonymousBot" };
-    expect(withContext(replyTo({ from: other, text: "hi" }), "answer", BOT.id)).toBe("answer\n\n[reply to a message from Group (@GroupAnonymousBot)]\n> hi");
+    expect(withContext(replyTo({ from: other, text: "hi" }), "answer", BOT.id)).toBe("[reply to a message from Group (@GroupAnonymousBot)]\n> hi\n\nanswer");
   });
 
   test("the cut counts code points of the text, not the media mark", () => {
     const emoji = "😀";
     const text = `${"a".repeat(MAX_REPLY_CHARS - 1)}${emoji}tail`;
     const m = replyTo({ from: BOT, photo: [{ file_id: "p1", file_unique_id: "u1", width: 1, height: 1 }], caption: text });
-    expect(withContext(m, "answer", BOT.id)).toBe(`answer\n\n[reply to your message]\n> (photo) ${"a".repeat(MAX_REPLY_CHARS - 1)}${emoji}\n(message shortened)`);
+    expect(withContext(m, "answer", BOT.id)).toBe(`[reply to your message]\n> (photo) ${"a".repeat(MAX_REPLY_CHARS - 1)}${emoji}\n(message shortened)\n\nanswer`);
     const exact = replyTo({ from: BOT, photo: [{ file_id: "p1", file_unique_id: "u1", width: 1, height: 1 }], caption: `${"a".repeat(MAX_REPLY_CHARS - 1)}${emoji}` });
     expect(withContext(exact, "answer", BOT.id)).not.toContain("(message shortened)");
   });
 
-  test("a '!' reply still starts with the user's text", () => {
-    expect(withContext(replyTo({ from: BOT, text: "earlier" }, { text: "!stop" }), "!stop", BOT.id).startsWith("!stop")).toBe(true);
+  test("a reply with no text left (a lone \"!\") is the reply alone", () => {
+    expect(withContext(replyTo({ from: BOT, text: "earlier" }, { text: "!" }), "", BOT.id)).toBe("[reply to your message]\n> earlier");
   });
 });
 

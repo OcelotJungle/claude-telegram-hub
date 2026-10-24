@@ -38,7 +38,7 @@ export const pluginToHub: z.ZodType<PluginToHub> = z.union([
 
 export const hubToPlugin: z.ZodType<HubToPlugin> = z.union([
   z.object({ type: z.literal("state"), enabled: z.boolean(), topicTitle: z.string().optional() }),
-  z.object({ type: z.literal("inbound"), content: z.string(), meta: z.record(z.string(), z.string()) }),
+  z.object({ type: z.literal("inbound"), content: z.string(), meta: z.record(z.string(), z.string()), interrupt: z.literal(true).optional() }),
   z.object({ type: z.literal("res"), id: z.string(), ok: z.boolean(), result: z.unknown().optional(), error: z.string().optional() }),
   z.object({ type: z.literal("ack"), id: z.string() }),
   z.object({ type: z.literal("filesSent"), id: z.string(), error: z.string().optional() }),

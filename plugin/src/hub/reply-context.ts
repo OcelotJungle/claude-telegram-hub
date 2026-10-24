@@ -1,6 +1,6 @@
-// What a topic message replies to, quotes or forwards, as plain lines around
-// its text for the agent. The forward mark goes before the text and the reply
-// after it, so a message that starts with "!" still starts with it.
+// What a topic message replies to, quotes or forwards, as plain lines before
+// its text for the agent, the way Telegram shows them: the reply first, then
+// a blank line, then the forward mark and the text.
 import type { TelegramChat, TelegramMessageOrigin, TelegramUser } from "@gramio/types";
 import type { Message } from "./telegram.ts";
 
@@ -16,7 +16,10 @@ type Media = Pick<Message, "photo" | "document" | "voice" | "audio" | "video" | 
 export function withContext(m: Message, content: string, botId: number | undefined): string {
   const forward = m.forward_origin ? `${forwardMark(m.forward_origin)}\n` : "";
   const reply = replyBlock(m, botId);
-  return `${forward}${content}${reply ? `\n\n${reply}` : ""}`;
+  const body = `${forward}${content}`;
+  // A lone "!" leaves no text: then the reply is all there is.
+  if (!reply) return body;
+  return body ? `${reply}\n\n${body}` : reply;
 }
 
 function forwardMark(o: TelegramMessageOrigin): string {

@@ -247,12 +247,14 @@ describe("inbound", () => {
     expect(a.messages.some(m => m.type === "inbound")).toBe(false);
   });
 
-  test("a reply carries what it answers after the text, a forward its origin before it", async () => {
+  test("a reply carries what it answers before the text, a forward its origin before it", async () => {
     await startHub();
     const a = await enabled("a");
     const original = { message_id: 50, date: 0, chat: { id: Number(GROUP), type: "supergroup" }, from: { id: 1, is_bot: true, first_name: "Hub" }, text: "готово" };
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!стоп", extra: { reply_to_message: original } }));
-    expect((await a.next("inbound")).content).toBe("!стоп\n\n[reply to your message]\n> готово");
+    const stop = await a.next("inbound");
+    expect(stop.content).toBe("[reply to your message]\n> готово\n\nстоп");
+    expect(stop.interrupt).toBe(true);
     const origin = { type: "hidden_user", date: 0, sender_user_name: "Аноним" };
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "смотри", extra: { forward_origin: origin } }));
     expect((await a.next("inbound", m => m.content.endsWith("смотри"))).content).toBe("[forwarded from Аноним]\nсмотри");
@@ -474,6 +476,7 @@ describe("inbound", () => {
 describe("batching", () => {
   const msg = (text?: string, extra?: Record<string, unknown>) => topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text, extra });
   const inbounds = (c: { messages: { type: string; content?: unknown }[] }) => c.messages.filter(m => m.type === "inbound").map(m => m.content);
+  const flags = (c: { messages: { type: string; interrupt?: unknown }[] }) => c.messages.filter(m => m.type === "inbound").map(m => m.interrupt);
 
   test("an album of photos reaches the agent as one notification naming every photo", async () => {
     await startHub();
@@ -493,7 +496,7 @@ describe("batching", () => {
     expect(inbounds(a).length).toBe(1);
   });
 
-  test('an album captioned "!x" while the agent works starts with "!x"', async () => {
+  test('an album captioned "!x" while the agent works interrupts and starts with "x"', async () => {
     await startHub();
     const a = await enabled("a");
     a.send({ type: "busy", busy: true });
@@ -503,7 +506,8 @@ describe("batching", () => {
     fake.pushUpdate(msg(undefined, { caption: "!x", photo: photo("B1") }));
     fake.pushUpdate(msg(undefined, { photo: photo("B2") }));
     const inbound = await a.next("inbound");
-    expect(inbound.content.startsWith("!x (photo: ")).toBe(true);
+    expect(inbound.content.startsWith("x (photo: ")).toBe(true);
+    expect(inbound.interrupt).toBe(true);
   });
 
   test("forwards and the text sent after them come as one notification", async () => {
@@ -550,7 +554,17 @@ describe("batching", () => {
     fake.pushUpdate(msg("!b"));
     fake.pushUpdate(msg("c"));
     await waitFor(() => inbounds(a).length === 2);
-    expect(inbounds(a)).toEqual(["a", "!b\n\nc"]);
+    expect(inbounds(a)).toEqual(["a", "b\n\nc"]);
+    expect(flags(a)).toEqual([undefined, true]);
+  });
+
+  test('a lone "!" interrupts with an empty message', async () => {
+    await startHub();
+    const a = await enabled("a");
+    fake.pushUpdate(msg("!"));
+    const inbound = await a.next("inbound");
+    expect(inbound.content).toBe("");
+    expect(inbound.interrupt).toBe(true);
   });
 
   test('a forward whose text starts with "!" is no interrupt and joins the batch', async () => {
@@ -561,6 +575,7 @@ describe("batching", () => {
     await waitFor(() => inbounds(a).length === 1);
     await Bun.sleep(50);
     expect(inbounds(a)).toEqual(["a\n\n[forwarded from X]\n!b"]);
+    expect(flags(a)).toEqual([undefined]);
   });
 
   test("seeing the first message of a batch takes ✍ off all of its messages", async () => {
@@ -2378,7 +2393,9 @@ describe("commands", () => {
       command("/cleanup");
       await reply(runner, t => t.startsWith("🧹 Сожму"));
       command(" !stop now");
-      expect((await a.next("inbound")).content).toBe(" !stop now");
+      const stop = await a.next("inbound");
+      expect(stop.content).toBe("stop now");
+      expect(stop.interrupt).toBe(true);
       h.release();
     });
 
@@ -2426,7 +2443,7 @@ describe("commands", () => {
       release();
       await reply(runner, t => t.startsWith("⚠️ /cleanup не выполнена"));
       await waitFor(() => contents().length === 2, 1000, "both batches before the quiet window ends");
-      expect(contents()).toEqual(["before", "!stop\n\nafter"]);
+      expect(contents()).toEqual(["before", "stop\n\nafter"]);
     });
 
     test("a compact that does not end in time drops /cleanup loudly, hands the held messages to the window and ignores the late report", async () => {

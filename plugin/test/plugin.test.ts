@@ -397,7 +397,7 @@ describe("PluginCore", () => {
     ]);
   });
 
-  test("a message starting with ! stops the working agent and comes in its place, before the next one", async () => {
+  test("a \"!\" message stops the working agent and comes in its place without the \"!\", before the next one", async () => {
     await enabledCore();
     append(assistantText("Смотрю", "tool_use", "i1"), assistantTool("Bash", "i1"));
     await waitFor(() => fake.callsOf("sendChatAction").length >= 1, 3000, "busy");
@@ -412,7 +412,7 @@ describe("PluginCore", () => {
     expect(channel.map(m => m.content)).toEqual(["смотри в src"]);
     const prompt = interrupts[0].prompt;
     expect(prompt).toContain(`message_id="${u.message?.message_id}"`);
-    expect(prompt).toContain("\n!стоп, не туда\n</channel>");
+    expect(prompt).toContain(">\nстоп, не туда\n</channel>");
   });
 
   test("an interrupting message wears ✍ until it is in the agent's context", async () => {
@@ -438,11 +438,24 @@ describe("PluginCore", () => {
     );
   });
 
-  test("a message starting with ! to an idle agent is just a message", async () => {
+  test("a \"!\" message to an idle agent is just a message", async () => {
     await enabledCore();
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!привет" }));
     await waitFor(() => channel.length === 1, 3000, "channel message");
     expect(interrupts).toEqual([]);
+    expect(channel.map(m => m.content)).toEqual(["привет"]);
+  });
+
+  test("content starting with \"!\" without the hub's flag does not interrupt", async () => {
+    await enabledCore();
+    append(assistantText("Смотрю", "tool_use", "i4"), assistantTool("Bash", "i4"));
+    await waitFor(() => fake.callsOf("sendChatAction").length >= 1, 3000, "busy");
+    // A pasted document has no text or caption, so the hub sees no "!".
+    const rich_message = { blocks: [{ type: "paragraph", text: "!важно" }] };
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, extra: { rich_message } }));
+    await waitFor(() => channel.length === 1, 3000, "channel message");
+    expect(interrupts).toEqual([]);
+    expect(channel.map(m => m.content)).toEqual(["!важно"]);
   });
 
   test("a message still arrives when the interrupt fails", async () => {
