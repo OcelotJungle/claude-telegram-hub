@@ -91,6 +91,28 @@ export type TurnEndBody = {
   kind?: TurnEndKind;
 };
 
+// One question of an AskUserQuestion call, as the tool input carries it.
+export type AskQuestion = {
+  question: string;
+  header: string;
+  options: { label: string; description: string; preview?: string }[];
+  multiSelect: boolean;
+};
+
+// Body the AskUserQuestion PreToolUse hook POSTs to /question; the hub holds
+// the request open until the topic answers.
+export type QuestionBody = {
+  messagingSocket?: string;
+  session_id: string;
+  tool_input: { questions: AskQuestion[] };
+};
+
+// The hub's answer to /question; "none" leaves the dialog to the terminal.
+// answers maps a question's text to the chosen labels joined with ", ".
+export type QuestionDecision =
+  | { decision: "allow"; answers: Record<string, string> }
+  | { decision: "deny"; reason: string }
+  | { decision: "none" };
 
 // Body the SessionStart hook POSTs to /hook.
 export type HookBody = {

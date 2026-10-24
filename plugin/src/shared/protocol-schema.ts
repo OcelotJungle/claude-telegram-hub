@@ -1,7 +1,7 @@
 // Runtime checks of the protocol messages, typed against protocol.ts: a
 // message type changed on one side and not here fails the type check.
 // protocol.ts itself has no imports, so the function hooks module can use it.
-import type { CleanupReport, CommandReply, EnableResult, HookBody, HubToPlugin, LimitsPost, PluginToHub, QueuedFile, RateLimit, TerminateRequest, TurnEndBody } from "./protocol.ts";
+import type { AskQuestion, CleanupReport, CommandReply, EnableResult, HookBody, HubToPlugin, LimitsPost, PluginToHub, QuestionBody, QuestionDecision, QueuedFile, RateLimit, TerminateRequest, TurnEndBody } from "./protocol.ts";
 
 import { z } from "zod";
 
@@ -64,6 +64,25 @@ export const turnEndBody: z.ZodType<TurnEndBody> = z.object({
   final: z.boolean(),
   kind: z.enum(["ask", "done"]).optional(),
 });
+
+const askQuestion: z.ZodType<AskQuestion> = z.object({
+  question: z.string(),
+  header: z.string(),
+  options: z.array(z.object({ label: z.string(), description: z.string(), preview: z.string().optional() })).min(1),
+  multiSelect: z.boolean().catch(false),
+});
+
+export const questionBody: z.ZodType<QuestionBody> = z.object({
+  messagingSocket: z.string().optional(),
+  session_id: z.string(),
+  tool_input: z.object({ questions: z.array(askQuestion).min(1) }),
+});
+
+export const questionDecision: z.ZodType<QuestionDecision> = z.union([
+  z.object({ decision: z.literal("allow"), answers: z.record(z.string(), z.string()) }),
+  z.object({ decision: z.literal("deny"), reason: z.string() }),
+  z.object({ decision: z.literal("none") }),
+]);
 
 // A reply without notify is sent silently.
 export const commandReply: z.ZodType<CommandReply> = z.object({ sessionId: z.string(), id: z.string(), text: z.string(), notify: z.boolean().catch(false) });

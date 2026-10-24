@@ -3,8 +3,9 @@ import type { Config } from "../shared/config.ts";
 import type { Logger } from "../shared/log.ts";
 import type { Entity, Formatted } from "../shared/markdown.ts";
 import type { OutFile } from "../shared/media.ts";
-import type { ChannelMeta, EnableResult, HookBody, HubToPlugin, LimitsReading, PermissionBehavior, PluginToHub, TopicCommand } from "../shared/protocol.ts";
+import type { AskQuestion, ChannelMeta, EnableResult, HookBody, HubToPlugin, LimitsReading, PermissionBehavior, PluginToHub, QuestionDecision, TopicCommand } from "../shared/protocol.ts";
 import type { OutItem, Piece } from "./outbox.ts";
+import type { Poll } from "./questions.ts";
 import type { SessionRecord } from "./sessions.ts";
 import type { Button, Message, TelegramApi, Update } from "./telegram.ts";
 import type { RichMessage } from "./rich.ts";
@@ -24,7 +25,7 @@ import { field } from "../shared/guards.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
-import { cleanupReport, commandReply, hookBody, limitsPost, pluginToHub, sendFilesMessage, sendMessage, terminateRequest, turnEndBody } from "../shared/protocol-schema.ts";
+import { cleanupReport, commandReply, hookBody, limitsPost, pluginToHub, questionBody, sendFilesMessage, sendMessage, terminateRequest, turnEndBody } from "../shared/protocol-schema.ts";
 import { tokens } from "../shared/tokens.ts";
 import { loadCards, saveCards } from "./cards.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
@@ -36,6 +37,7 @@ import { accountOf, SessionStore, topicName } from "./sessions.ts";
 import { isThreadNotFound, TelegramError } from "./telegram.ts";
 import { media, richPhotos, richToMarkdown } from "./rich.ts";
 import { withContext } from "./reply-context.ts";
+import { answerLine, CANCEL_REASON, CANCELLED, checkedLabels, CUSTOM_HINT, parsePollPress, PICK_ONE, POLL_PREFIX, questionButtons, questionText, STALE_POLL, TO_TERMINAL, withOutcome } from "./questions.ts";
 import { richPieces } from "./rich-out.ts";
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath } from "./video.ts";
 import { EXEC_CARD_MS, EXEC_CHECK_MS, EXEC_MAX_AGE_MS, Execs } from "./exec.ts";
@@ -69,6 +71,8 @@ const CLEANUP_COMPACT_MS = 600_000;
 const INTERRUPT_PREFIX = "!";
 // The prefix with the whitespace around it, as stripped from the text.
 const INTERRUPT_MARK = /^\s*!\s*/;
+// The outbox id of a poll's question: poll:<key>:<index>#<piece>.
+const POLL_ITEM = /^poll:([0-9a-f]+):(\d+)#/;
 // The size of a removed skill in tokens, roughly.
 const CHARS_PER_TOKEN = 4;
 const CLEANUP_BUSY = "⏳ /cleanup уже идёт";
@@ -291,6 +295,8 @@ export class Hub {
   private botId: number | undefined;
   // Permission prompts sent to topics, by the key in their buttons' data.
   private permissions = new Map<string, { sessionId: string; requestId: string } & Formatted>();
+  // Open AskUserQuestion polls, by the key in their buttons' data; one per session.
+  private polls = new Map<string, Poll>();
   // Subagent cards by `${sessionId}:${cardId}`: text is the latest Markdown
   // version, shown what the message holds now (undefined until it is sent).
   private cards = new Map<string, Card>();
@@ -438,6 +444,8 @@ export class Hub {
       await Promise.all([...this.batches.keys(), ...this.batchSends.keys()].map(sid => this.flushBatch(sid)));
     }
     this.batchIds.clear();
+    // Open polls go back to the terminal, which the next hub cannot answer.
+    await Promise.allSettled([...this.polls.values()].map(p => this.finishPoll(p, { decision: "none" }, TO_TERMINAL)));
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.spoolTimer) clearInterval(this.spoolTimer);
     if (this.typingTimer) clearInterval(this.typingTimer);
@@ -517,6 +525,20 @@ export class Hub {
       this.enqueue(r.data.sessionId, `cmd-${r.data.id}`, r.data.text, r.data.notify);
       return new Response("ok");
     }
+    if (url.pathname === "/question" && req.method === "POST") {
+      const r = questionBody.safeParse(await req.json().catch(() => undefined));
+      if (!r.success) return new Response("bad question body", { status: 400 });
+      const { messagingSocket, session_id: hookSession, tool_input } = r.data;
+      // The window's current session may differ from the hook's after a
+      // session switch; the window knows the one with the topic.
+      let target: WS | undefined;
+      for (const ws of this.conns) if (messagingSocket !== undefined && ws.data.windowKey === messagingSocket) target = ws;
+      const sessionId = (target ?? this.connOf(hookSession))?.data.sessionId ?? hookSession;
+      if (!this.store.get(sessionId)?.enabled) return Response.json({ decision: "none" });
+      // The answer may take hours; the hook's own timeout bounds the wait.
+      server.timeout(req, 0);
+      return Response.json(await this.askQuestion(sessionId, tool_input.questions, req.signal));
+    }
     return new Response("not found", { status: 404 });
   }
 
@@ -591,7 +613,11 @@ export class Hub {
     this.conns.delete(ws);
     const sid = ws.data.sessionId;
     if (sid) this.log.info(`window for session ${sid} disconnected`);
-    if (sid && !this.connOf(sid)) this.stopping.delete(sid);
+    if (sid && !this.connOf(sid)) {
+      this.stopping.delete(sid);
+      // Without its window the session cannot take an answer any more.
+      for (const p of this.polls.values()) if (p.sessionId === sid) void this.finishPoll(p, { decision: "none" }, TO_TERMINAL);
+    }
     const cleanup = sid ? this.cleanups.get(sid) : undefined;
     if (sid && cleanup && !this.connOf(sid)) {
       if (cleanup.phase === "exiting") {
@@ -936,6 +962,140 @@ ${msg.text}`);
     await api.editMessageText(groupId, press.messageId, `${p.text}\n\n${outcome}`, p.entities).catch(e => this.log.warn(`editing a permission message failed: ${e}`));
   }
 
+  // --- questions ------------------------------------------------------------
+
+  // An AskUserQuestion call from the PreToolUse hook: the questions go to the
+  // topic one at a time, and the promise settles with the topic's answer, or
+  // with "none" when the call goes back to the terminal (the hook gave up,
+  // the window left, the hub stops). A newer poll of the session ends the old one.
+  private askQuestion(sessionId: string, questions: AskQuestion[], signal: AbortSignal): Promise<QuestionDecision> {
+    for (const old of this.polls.values()) if (old.sessionId === sessionId) void this.finishPoll(old, { decision: "none" }, TO_TERMINAL);
+    const key = randomUUID().replaceAll("-", "").slice(0, PERMISSION_KEY_CHARS);
+    return new Promise(resolve => {
+      const p: Poll = { key, sessionId, questions, answers: {}, index: 0, checked: new Set(), messageIds: [], outcomes: [], done: false, resolve };
+      this.polls.set(key, p);
+      if (signal.aborted) {
+        void this.finishPoll(p, { decision: "none" }, TO_TERMINAL);
+        return;
+      }
+      signal.addEventListener("abort", () => void this.finishPoll(p, { decision: "none" }, TO_TERMINAL), { once: true });
+      this.log.info(`question poll ${key} for session ${sessionId}: ${questions.length} question(s)`);
+      this.queueQuestion(p);
+    });
+  }
+
+  private queueQuestion(p: Poll): void {
+    const f = questionText(p.questions, p.index);
+    const piece = { text: f.text, silent: false, buttons: questionButtons(p), ...(f.entities.length ? { entities: f.entities } : {}) };
+    if (this.outbox.add(`poll:${p.key}:${p.index}`, p.sessionId, [piece])) void this.pump(p.sessionId);
+  }
+
+  private async finishPoll(p: Poll, decision: QuestionDecision, outcome: string): Promise<void> {
+    if (p.done) return;
+    p.done = true;
+    this.polls.delete(p.key);
+    p.outcomes[p.index] = outcome;
+    p.resolve(decision);
+    this.log.info(`question poll ${p.key} of session ${p.sessionId}: ${decision.decision}`);
+    await this.showOutcome(p, p.index);
+  }
+
+  // A sent question shows its outcome instead of the buttons; one still in
+  // the queue takes its outcome along when it goes.
+  private async showOutcome(p: Poll, i: number): Promise<void> {
+    const id = p.messageIds[i];
+    const outcome = p.outcomes[i];
+    const api = this.opts.api;
+    const groupId = this.opts.config().groupId;
+    if (id === undefined || outcome === undefined || !api || !groupId) return;
+    const f = withOutcome(questionText(p.questions, i), outcome);
+    await api.editMessageText(groupId, id, f.text, f.entities).catch(e => this.log.warn(`editing a question message failed: ${e}`));
+  }
+
+  private async answerPoll(p: Poll, answer: string): Promise<void> {
+    const q = p.questions[p.index];
+    p.answers[q.question] = answer;
+    if (p.index + 1 < p.questions.length) {
+      const i = p.index;
+      p.outcomes[i] = answerLine(answer);
+      p.index++;
+      p.checked = new Set();
+      this.queueQuestion(p);
+      await this.showOutcome(p, i);
+      return;
+    }
+    await this.finishPoll(p, { decision: "allow", answers: { ...p.answers } }, answerLine(answer));
+  }
+
+  // A button under a question. The poll changes before any await, so a
+  // second press right after sees the new state; every press gets one answer.
+  private async onPollPress(api: TelegramApi, groupId: string, press: { id: string; data: string; messageId: number; fromId: string }): Promise<void> {
+    const warn = (what: string) => (e: unknown) => this.log.warn(`${what} failed: ${e}`);
+    const ack = (text?: string) => api.answerCallbackQuery(press.id, text).catch(warn("answering a button press"));
+    const parsed = parsePollPress(press.data);
+    const p = parsed ? this.polls.get(parsed.key) : undefined;
+    const q = p?.questions[p.index];
+    const action = parsed?.action;
+    const valid = p && q && parsed?.index === p.index && action !== undefined && (typeof action === "number" ? action >= 1 && action <= q.options.length : action !== "done" || q.multiSelect);
+    if (!valid || !p || !q || action === undefined) {
+      await ack(STALE_POLL);
+      await api.removeKeyboard(groupId, press.messageId).catch(warn("removing the buttons"));
+      return;
+    }
+    if (action === "cancel") {
+      this.log.info(`question poll ${p.key} cancelled by ${press.fromId}`);
+      const done = this.finishPoll(p, { decision: "deny", reason: CANCEL_REASON }, CANCELLED);
+      await ack();
+      await done;
+      return;
+    }
+    if (action === "custom") {
+      this.enqueue(p.sessionId, `qhint-${p.key}-${p.index}-${randomUUID()}`, CUSTOM_HINT, false, false);
+      await ack();
+      return;
+    }
+    if (action === "done") {
+      if (!p.checked.size) {
+        await ack(PICK_ONE);
+        return;
+      }
+      const done = this.answerPoll(p, checkedLabels(q, p.checked));
+      await ack();
+      await done;
+      return;
+    }
+    if (!q.multiSelect) {
+      const done = this.answerPoll(p, q.options[action - 1].label);
+      await ack();
+      await done;
+      return;
+    }
+    if (p.checked.has(action)) p.checked.delete(action);
+    else p.checked.add(action);
+    const f = questionText(p.questions, p.index);
+    const buttons = questionButtons(p);
+    await ack();
+    await api.editMessageText(groupId, press.messageId, f.text, f.entities, buttons).catch(warn("editing a question message"));
+  }
+
+  // A question's turn in the queue. A poll that ended meanwhile is not sent
+  // when it never showed; a question answered or ended while queued goes
+  // with its outcome and without buttons.
+  private async sendQuestion(api: TelegramApi, groupId: string, sessionId: string, item: OutItem, key: string, i: number): Promise<void> {
+    const p = this.polls.get(key);
+    const outcome = p?.outcomes[i];
+    if (!p) {
+      this.log.info(`question poll ${key} ended before its question ${i + 1} was sent; skipping it`);
+      return;
+    }
+    const { text } = item;
+    const buttons = outcome === undefined ? questionButtons(p) : undefined;
+    const body = outcome === undefined ? text : `${text}\n\n${outcome}`;
+    const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, body, false, item.entities, buttons));
+    p.messageIds[i] = sent.message_id;
+    if (outcome === undefined && p.outcomes[i] !== undefined) await this.showOutcome(p, i);
+  }
+
   // --- subagent cards -------------------------------------------------------
 
   // The first version of a card is queued like any text, so it keeps its place
@@ -1200,6 +1360,9 @@ ${msg.text}`);
       this.scheduleCardEdit(item.card, card);
       return;
     }
+    // A notice that replaced a rejected question keeps its id but is plain text.
+    const poll = item.notice ? null : POLL_ITEM.exec(item.id);
+    if (!queued && poll) return this.sendQuestion(api, groupId, sessionId, item, poll[1], Number(poll[2]));
     if (!queued) {
       const { text } = item;
       const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, text, item.silent, item.entities, item.buttons));
@@ -1274,6 +1437,10 @@ ${msg.text}`);
       return;
     }
     this.log.error(`Telegram rejected a message for session ${item.sessionId}: ${reason}\n--- text ---\n${item.text}\n--- end ---`);
+    // A question the topic cannot show is asked in the terminal.
+    const pollKey = item.notice ? undefined : POLL_ITEM.exec(item.id)?.[1];
+    const poll = pollKey ? this.polls.get(pollKey) : undefined;
+    if (poll) void this.finishPoll(poll, { decision: "none" }, TO_TERMINAL);
     if (item.notice) {
       this.outbox.remove(item.id);
       this.settled(item);
@@ -1414,6 +1581,7 @@ ${msg.text}`);
       return;
     }
     if (press?.data.startsWith("x:")) return this.onExecPress(api, press);
+    if (press?.data.startsWith(POLL_PREFIX) && cfg.groupId) return this.onPollPress(api, cfg.groupId, press);
     if (press && cfg.groupId) return this.onPermissionPress(api, cfg.groupId, press);
     const route = routeUpdate(u, cfg, this.store, id => this.isConnected(id));
     const m = u.message;
@@ -1428,9 +1596,30 @@ ${msg.text}`);
       await this.flushBatch(route.sessionId);
       return this.onHubCommand(route.sessionId, hubCmd, m);
     }
+    if (await this.toPoll(api, route.sessionId, m)) return;
     if (route.action === "inactive") return this.toInactive(api, route.sessionId, [m]);
     if (this.holdForCleanup(route.sessionId, m)) return;
     await this.deliver(api, route.sessionId, m);
+  }
+
+  // A message while the session's poll is open answers its question; a "!"
+  // message cancels the poll and goes on to the agent. True when taken.
+  private async toPoll(api: TelegramApi, sessionId: string, m: Message): Promise<boolean> {
+    let p: Poll | undefined;
+    for (const open of this.polls.values()) if (open.sessionId === sessionId) p = open;
+    if (!p) return false;
+    const role = pollRole(m, this.botUsername);
+    if (role === "pass") return false;
+    if (role === "cancel") {
+      void this.finishPoll(p, { decision: "deny", reason: CANCEL_REASON }, CANCELLED);
+      return false;
+    }
+    const text = m.text ?? m.caption ?? (m.rich_message ? await this.richContent(api, m.rich_message) : undefined);
+    const answer = [text, await this.fileMark(api, m)].filter(s => s !== undefined && s !== "").join(" ");
+    if (!answer || p.done) return false;
+    this.log.info(`question poll ${p.key}: answered by message ${m.message_id}`);
+    await this.answerPoll(p, answer);
+    return true;
   }
 
   // Messages for a session without a window: kept for its start under way,
@@ -2266,6 +2455,13 @@ function keepInOrder(held: Held[], h: Held): void {
 // forward carries someone else's text, so it never does.
 function isInterrupt(m: Message): boolean {
   return !m.forward_origin && (m.text ?? m.caption ?? "").trimStart().startsWith(INTERRUPT_PREFIX);
+}
+
+// What a topic message does to an open poll: a command works as usual and
+// leaves it open, a "!" message cancels it, anything else is the answer.
+function pollRole(m: Message, botUsername: string | undefined): "pass" | "cancel" | "answer" {
+  if (m.text !== undefined && (commandOf(m.text, botUsername) || hubCommandOf(m.text, botUsername))) return "pass";
+  return isInterrupt(m) ? "cancel" : "answer";
 }
 
 // The message as the agent gets it: the "!" is a signal for the hub only. A

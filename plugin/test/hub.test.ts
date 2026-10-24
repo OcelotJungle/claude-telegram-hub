@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { cleanupSummary, Hub } from "../src/hub/hub.ts";
+import { CANCEL_REASON, CANCELLED, CUSTOM_HINT, PICK_ONE, STALE_POLL, TO_TERMINAL } from "../src/hub/questions.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
 import { cleanTranscript } from "../src/hub/skill-cleanup.ts";
 import { saveExecs } from "../src/hub/exec-store.ts";
@@ -2815,4 +2816,245 @@ describe("topic commands", () => {
     expect(body).toContain("line 40");
     expect(Number(field(file, "size"))).toBeLessThanOrEqual(FILE_LIMIT);
   }, RUN_MS + WAIT_MS);
+});
+
+describe("questions", () => {
+  const Q1 = {
+    question: "Какой цвет?",
+    header: "Цвет",
+    options: [
+      { label: "Красный", description: "тёплый" },
+      { label: "Синий", description: "" },
+    ],
+    multiSelect: false,
+  };
+  const Q1_TEXT = "Цвет\nКакой цвет?\n\n1. Красный — тёплый\n2. Синий";
+  const Q2 = {
+    question: "Что добавить?",
+    header: "Добавки",
+    options: [
+      { label: "Сыр", description: "" },
+      { label: "Лук", description: "" },
+      { label: "Перец", description: "" },
+    ],
+    multiSelect: true,
+  };
+  const ask = (questions: object[], signal?: AbortSignal): Promise<unknown> =>
+    fetch(`http://127.0.0.1:${port}/question`, {
+      method: "POST",
+      body: JSON.stringify({ messagingSocket: "win-a", session_id: "a", tool_input: { questions } }),
+      ...(signal ? { signal } : {}),
+    })
+      .then(r => r.json())
+      .catch((e: unknown) => String(e));
+  const rows = (params: unknown) => arr(field(field(params, "reply_markup"), "inline_keyboard")).map(arr);
+  const keys = (params: unknown) => rows(params).map(r => r.map(b => field(b, "text")));
+  const dataOf = (params: unknown, row: number, col = 0) => String(field(rows(params)[row][col], "callback_data"));
+  const press = (data: string, messageId: number) => fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId, data }));
+  const say = (text?: string, extra?: Record<string, unknown>) => fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text, extra }));
+  const polled = (n = 1) => waitFor(() => fake.callsOf("sendMessage")[n - 1]);
+  const edits = () => fake.callsOf("editMessageText");
+
+  test("a single choice is answered by its button, and the message shows the answer instead of the buttons", async () => {
+    await startHub();
+    await enabled("a");
+    const answer = ask([Q1]);
+    const msg = await polled();
+    const id = fake.lastMessageId;
+    expect(msg.text).toBe(Q1_TEXT);
+    expect(fake.texts()[0].disable_notification).toBe(false);
+    expect(keys(msg)).toEqual([["1. Красный"], ["2. Синий"], ["✏️ Свой вариант", "✖️ Отменить"]]);
+    press(dataOf(msg, 1), id);
+    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Синий" } });
+    const edit = await waitFor(() => edits()[0]);
+    expect(edit).toMatchObject({ message_id: id, text: `${Q1_TEXT}\n\n✅ Синий` });
+    expect(edit.reply_markup).toBeUndefined();
+    await waitFor(() => fake.callsOf("answerCallbackQuery").length === 1);
+  });
+
+  test("a multiple choice toggles options and is answered by «Готово» with the labels joined", async () => {
+    await startHub();
+    await enabled("a");
+    const answer = ask([Q2]);
+    const msg = await polled();
+    const id = fake.lastMessageId;
+    expect(keys(msg)).toEqual([["1. Сыр"], ["2. Лук"], ["3. Перец"], ["✅ Готово"], ["✏️ Свой вариант", "✖️ Отменить"]]);
+    press(dataOf(msg, 3), id);
+    await waitFor(() => fake.callsOf("answerCallbackQuery").some(c => c.text === PICK_ONE));
+    expect(edits()).toEqual([]);
+    press(dataOf(msg, 0), id);
+    press(dataOf(msg, 2), id);
+    const toggled = await waitFor(() => edits()[1]);
+    expect(toggled.text).toBe("Добавки\nЧто добавить?\n\n1. Сыр\n2. Лук\n3. Перец");
+    expect(keys(toggled).slice(0, 3)).toEqual([["☑️ 1. Сыр"], ["2. Лук"], ["☑️ 3. Перец"]]);
+    press(dataOf(msg, 3), id);
+    expect(await answer).toEqual({ decision: "allow", answers: { "Что добавить?": "Сыр, Перец" } });
+    const last = await waitFor(() => edits()[2]);
+    expect(String(last.text).endsWith("\n\n✅ Сыр, Перец")).toBe(true);
+    expect(last.reply_markup).toBeUndefined();
+  });
+
+  test("«Свой вариант» asks for a message, and the next message is the answer, not an inbound", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const answer = ask([Q1]);
+    const msg = await polled();
+    press(dataOf(msg, 2), fake.lastMessageId);
+    const hint = await polled(2);
+    expect(hint.text).toBe(CUSTOM_HINT);
+    say("Зелёный");
+    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Зелёный" } });
+    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n✅ Зелёный`));
+    await Bun.sleep(SETTLE_MS);
+    expect(a.messages.filter(m => m.type === "inbound")).toEqual([]);
+  });
+
+  test("a message sent without the button answers too", async () => {
+    await startHub();
+    await enabled("a");
+    const answer = ask([Q1]);
+    await polled();
+    say("любой");
+    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "любой" } });
+  });
+
+  test("a photo answers with its caption and file mark", async () => {
+    await startHub();
+    await enabled("a");
+    const answer = ask([Q1]);
+    await polled();
+    fake.files.set("P2", { path: "photos/p.jpg", body: new Uint8Array([9]) });
+    say(undefined, { caption: "look", photo: [{ file_id: "P1", file_unique_id: "u1" }, { file_id: "P2", file_unique_id: "u2" }] });
+    const res = await answer;
+    const given = String(field(field(res, "answers"), "Какой цвет?"));
+    expect(field(res, "decision")).toBe("allow");
+    expect(given.startsWith(`look (photo: ${join(dir, "inbox")}`)).toBe(true);
+  });
+
+  test("a topic command works as usual and leaves the poll open", async () => {
+    await startHub();
+    await enabled("a");
+    const answer = ask([Q1]);
+    const msg = await polled();
+    const id = fake.lastMessageId;
+    say("/info");
+    await waitFor(async () => (await (await fetch(`http://127.0.0.1:${port}/commands?session=a`)).text()).includes("info"));
+    press(dataOf(msg, 0), id);
+    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Красный" } });
+  });
+
+  test('a "!" message cancels the poll and reaches the agent as an interrupt', async () => {
+    await startHub();
+    const a = await enabled("a");
+    const answer = ask([Q1]);
+    await polled();
+    say("!стоп");
+    expect(await answer).toEqual({ decision: "deny", reason: CANCEL_REASON });
+    expect(await a.next("inbound")).toMatchObject({ content: "стоп", interrupt: true });
+    await waitFor(() => edits().some(e => String(e.text).endsWith(`\n\n${CANCELLED}`)));
+  });
+
+  test("«Отменить» denies the question", async () => {
+    await startHub();
+    await enabled("a");
+    const answer = ask([Q1]);
+    const msg = await polled();
+    press(dataOf(msg, 2, 1), fake.lastMessageId);
+    expect(await answer).toEqual({ decision: "deny", reason: CANCEL_REASON });
+    const edit = await waitFor(() => edits()[0]);
+    expect(edit.text).toBe(`${Q1_TEXT}\n\n${CANCELLED}`);
+  });
+
+  test("several questions come one at a time and are answered together", async () => {
+    await startHub();
+    await enabled("a");
+    const answer = ask([Q1, Q2]);
+    const first = await polled();
+    const firstId = fake.lastMessageId;
+    expect(String(first.text).startsWith("Вопрос 1 из 2: Цвет\nКакой цвет?")).toBe(true);
+    press(dataOf(first, 0), firstId);
+    const second = await polled(2);
+    expect(String(second.text).startsWith("Вопрос 2 из 2: Добавки\n")).toBe(true);
+    press(dataOf(first, 1), firstId);
+    await waitFor(() => fake.callsOf("answerCallbackQuery").some(c => c.text === STALE_POLL));
+    press(dataOf(second, 1), fake.lastMessageId);
+    press(dataOf(second, 3), fake.lastMessageId);
+    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Красный", "Что добавить?": "Лук" } });
+  });
+
+  test("a button of a poll the hub does not know answers «Опрос устарел» and loses its buttons", async () => {
+    await startHub();
+    await enabled("a");
+    press("q:deadbeef:0:1", 77);
+    await waitFor(() => fake.callsOf("editMessageReplyMarkup")[0]);
+    expect(fake.callsOf("editMessageReplyMarkup")[0]).toMatchObject({ chat_id: GROUP, message_id: 77 });
+    expect(fake.callsOf("answerCallbackQuery")[0]).toMatchObject({ text: STALE_POLL });
+  });
+
+  test("with the mode off the hub leaves the question to the terminal", async () => {
+    await startHub();
+    const a = await enabled("a");
+    await req(a, { op: "disable" });
+    expect(await ask([Q1])).toEqual({ decision: "none" });
+    expect(fake.callsOf("sendMessage")).toEqual([]);
+  });
+
+  test("a hook that stops waiting moves the poll to the terminal", async () => {
+    await startHub();
+    await enabled("a");
+    const ctl = new AbortController();
+    const answer = ask([Q1], ctl.signal);
+    await polled();
+    ctl.abort();
+    await answer;
+    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`));
+  });
+
+  test("a new poll of the session closes the old one", async () => {
+    await startHub();
+    await enabled("a");
+    const old = ask([Q1]);
+    await polled();
+    const fresh = ask([Q2]);
+    expect(await old).toEqual({ decision: "none" });
+    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`));
+    const msg = await polled(2);
+    press(dataOf(msg, 0), fake.lastMessageId);
+    press(dataOf(msg, 3), fake.lastMessageId);
+    expect(await fresh).toEqual({ decision: "allow", answers: { "Что добавить?": "Сыр" } });
+  });
+
+  test("a stopping hub moves the poll to the terminal", async () => {
+    await startHub();
+    await enabled("a");
+    const answer = ask([Q1]);
+    await polled();
+    await hub.stop();
+    expect(await answer).toEqual({ decision: "none" });
+    expect(edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`)).toBe(true);
+  });
+
+  test("a window that goes away moves its poll to the terminal", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const answer = ask([Q1]);
+    await polled();
+    a.close();
+    expect(await answer).toEqual({ decision: "none" });
+    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`));
+  });
+
+  test("a poll message Telegram rejects leaves the question to the terminal", async () => {
+    await startHub();
+    await enabled("a");
+    fake.failNext("sendMessage", { code: 400, description: "Bad Request: message text is empty" });
+    fake.failNext("sendMessage", { code: 400, description: "Bad Request: message text is empty" });
+    expect(await ask([Q1])).toEqual({ decision: "none" });
+  });
+
+  test("a body that is not a question is refused", async () => {
+    await startHub();
+    const res = await fetch(`http://127.0.0.1:${port}/question`, { method: "POST", body: "{}" });
+    expect(res.status).toBe(400);
+  });
 });
