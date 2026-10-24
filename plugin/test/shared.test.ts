@@ -1,10 +1,23 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { writeFileSync } from "fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { chunk } from "../src/shared/chunk.ts";
-import { chimeCommand, defaultTurnEndChime, playChime } from "../src/shared/chime.ts";
+import { chimeCommand, defaultTurnEndChime, playChime, spawnShellDetached } from "../src/shared/chime.ts";
 import { idleMs, loadConfig, loadToken, paths } from "../src/shared/config.ts";
-import { tempDir } from "./helpers.ts";
+import { tempDir, waitFor } from "./helpers.ts";
+
+const CHIME_WAIT_MS = 10_000;
+
+// Writes to argv[2] whether this process has a console window: none, hidden or visible.
+const CONSOLE_PROBE = [
+  `import { dlopen, FFIType } from "bun:ffi";`,
+  `import { writeFileSync } from "fs";`,
+  `const k32 = dlopen("kernel32.dll", { GetConsoleWindow: { args: [], returns: FFIType.ptr } });`,
+  `const u32 = dlopen("user32.dll", { IsWindowVisible: { args: [FFIType.ptr], returns: FFIType.bool } });`,
+  `const hwnd = k32.symbols.GetConsoleWindow();`,
+  `writeFileSync(process.argv[2] ?? "", hwnd === null ? "none" : u32.symbols.IsWindowVisible(hwnd) ? "visible" : "hidden");`,
+  ``,
+].join("\n");
 
 describe("chunk", () => {
   const plain = (text: string) => ({ text, entities: [] });
@@ -207,5 +220,21 @@ describe("chime", () => {
     playChime("", "done", cmd => ran.push(cmd));
     expect(ran).toEqual(["beep done"]);
     expect(() => playChime("beep", "ask", () => { throw new Error("no shell"); })).not.toThrow();
+  });
+
+  // A program the shell starts must not get a visible console: Windows
+  // Terminal, the default terminal, would open it as a window.
+  test.skipIf(process.platform !== "win32")("spawnShellDetached starts the command without a visible console window", async () => {
+    const dir = tempDir();
+    try {
+      const out = join(dir, "console.txt");
+      const probe = join(dir, "probe.ts");
+      writeFileSync(probe, CONSOLE_PROBE);
+      spawnShellDetached(`"${process.execPath}" "${probe}" "${out}"`);
+      await waitFor(() => existsSync(out) && readFileSync(out, "utf8") !== "", CHIME_WAIT_MS, "probe");
+      expect(readFileSync(out, "utf8")).not.toBe("visible");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
