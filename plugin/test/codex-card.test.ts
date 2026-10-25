@@ -23,8 +23,8 @@ const CONTINUING_EVENTS = [
   { type: "item.completed", item: { type: "reasoning", text: "Next reasoning" } },
   { type: "item.completed", item: { type: "command_execution", id: "next", command: "next command" } },
 ];
-const PLURAL_CASES = [[0, "команд"], [1, "команда"], [2, "команды"], [5, "команд"], [11, "команд"], [12, "команд"], [21, "команда"], [22, "команды"], [25, "команд"]] as const;
-const TERMINAL_CASES = [["question", "❓ Codex ждёт ответа"], ["failed", "❌ ошибка через"], ["orphaned", "❌ ошибка через"], ["limit", "❌ ошибка через"], ["cancelled", "⏹ остановлен через"]] as const;
+const PLURAL_CASES = [[0, "действий"], [1, "действие"], [2, "действия"], [5, "действий"], [11, "действий"], [12, "действий"], [21, "действие"], [22, "действия"], [25, "действий"]] as const;
+const TERMINAL_CASES = [["question", "❓ Codex ждёт ответа"], ["failed", "❌ "], ["orphaned", "❌ "], ["limit", "❌ "], ["cancelled", "⏹ "]] as const;
 
 const line = (record: object) => `${JSON.stringify(record)}\n`;
 const text = (value: string) => ({ type: "text", text: value });
@@ -97,7 +97,7 @@ describe("Codex cards", () => {
     expect(s.last()).toStartWith([
       "🤖 **codex** · sol · high",
       "Review the parser",
-      "⏳ 0 с · 0 команд · событие 18:39",
+      "⏳ 0 с · 0 действий · событие 18:39",
       "`git status`",
     ].join("\n"));
   });
@@ -109,7 +109,7 @@ describe("Codex cards", () => {
     s.start();
     s.write(assistant("m1", "codex job running"));
     s.tick();
-    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nFix tests\n⏳ 0 с · 0 команд · событие 18:39");
+    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nFix tests\n⏳ 0 с · 0 действий · событие 18:39");
     expect(s.last()).not.toContain("haiku");
     expect(s.last()).not.toContain("Inspecting the parser");
     expect(s.last()).not.toContain("codex job running");
@@ -152,7 +152,7 @@ describe("Codex cards", () => {
     expect(s.last()).not.toContain("old restart");
     expect(s.last()).toContain("New output");
     expect(s.last()).toContain("More output");
-    expect(s.last()).toContain("1 команда");
+    expect(s.last()).toContain("1 действие");
     expect(s.last()).toContain("`[18:40]` 🔁 restart 1/3: new attempt");
   });
 
@@ -223,7 +223,7 @@ describe("Codex cards", () => {
       s.state({ status, error: "Repeated error" });
       s.tick();
     }
-    expect(s.last()).toContain("❌ ошибка через");
+    expect(s.last()).toContain("❌ ");
     expect(s.last()).not.toContain("❌ Repeated error");
     s.state({ status: "starting", error: "Repeated error" });
     s.tick();
@@ -234,7 +234,7 @@ describe("Codex cards", () => {
     expect(s.last()).not.toContain("❌");
     s.state({ status: "failed", error: "Repeated error" });
     s.tick();
-    expect(s.last()).toContain("❌ ошибка через");
+    expect(s.last()).toContain("❌ ");
     expect(s.last().split("❌ Repeated error")).toHaveLength(2);
     s.tick();
     expect(s.last().split("❌ Repeated error")).toHaveLength(2);
@@ -258,10 +258,10 @@ describe("Codex cards", () => {
     s.attach("wait");
     s.tick();
     expect(s.last()).toContain("New event");
-    expect(s.last()).toContain("1 команда");
+    expect(s.last()).toContain("1 действие");
     s.attach("wait");
     s.tick();
-    expect(s.last()).toContain("1 команда");
+    expect(s.last()).toContain("1 действие");
   });
 
   test("many long interim summaries are discarded without filling or splitting the Codex card", () => {
@@ -306,7 +306,7 @@ describe("Codex cards", () => {
     expect(render).toHaveBeenCalledTimes(2);
     s.events(command("a", "new command"));
     s.tick();
-    expect(s.last()).toContain("1 команда");
+    expect(s.last()).toContain("1 действие");
     render.mockClear();
     s.tick();
     expect(render).not.toHaveBeenCalled();
@@ -334,14 +334,14 @@ describe("Codex cards", () => {
     s.tick();
     expect(s.last()).toContain("codex job final report");
     expect(s.last()).toContain("More final details");
-    expect(s.last()).toContain("✅ готово за");
+    expect(s.last()).toMatch(/✅ \d+ с · /);
     s.tick(SETTLE_MS);
     expect(s.cards.at(-1)?.final).toBe(true);
     // The closed card still tells which Codex model did the work.
-    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nFix tests\n✅ готово за");
+    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nFix tests\n✅ ");
   });
 
-  test.each(PLURAL_CASES)("%i completed commands use %s", (count, form) => {
+  test.each(PLURAL_CASES)("%i actions from completed commands use %s", (count, form) => {
     const s = setup();
     s.state();
     s.start();
@@ -363,10 +363,10 @@ describe("Codex cards", () => {
     expect(s.last()).not.toContain("secret second line");
     s.events(command("b", long));
     s.tick();
-    expect(s.last()).toContain("1 команда · событие 18:40\n`older command`");
+    expect(s.last()).toContain("1 действие · событие 18:40\n`older command`");
     s.events(command("a", "older command"));
     s.tick();
-    expect(s.last()).toContain("2 команды · событие 18:40");
+    expect(s.last()).toContain("2 действия · событие 18:40");
     expect(s.last()).not.toContain("older command");
   });
 
@@ -381,7 +381,7 @@ describe("Codex cards", () => {
     expect(s.last()).toContain(expected);
     expect(s.cards.at(-1)?.final).toBe(false);
     if (status !== "question") {
-      expect(s.last()).toContain("1 команда");
+      expect(s.last()).toContain("1 действие");
       expect(s.last().split("❌ Runner explanation")).toHaveLength(2);
     } else expect(s.last()).not.toContain("❌ Runner explanation");
     s.write(assistant("final", "Final worker answer", "end_turn"));
@@ -402,7 +402,7 @@ describe("Codex cards", () => {
     expect(s.cards.at(-1)?.final).toBe(false);
     s.state({ status: "cancelled", error: null });
     s.tick();
-    expect(s.last()).toContain("⏹ остановлен");
+    expect(s.last()).toMatch(/⏹ \d+ с · /);
     expect(s.last()).not.toContain("❌");
   });
 
@@ -430,7 +430,7 @@ describe("Codex cards", () => {
     expect(s.last()).not.toContain("sol · high");
     s.write(assistant("final", "Fallback final", "end_turn"));
     s.tick();
-    expect(s.last()).toContain("✅ готово");
+    expect(s.last()).toMatch(/✅ \d+ (?:с|мин) · \d+ действи(?:е|я|й)/);
     expect(s.last()).toContain("Fallback final");
   });
 
@@ -490,10 +490,10 @@ describe("Codex cards", () => {
     s.attach();
     s.tick();
     expect(s.cards.at(-1)).toMatchObject({ id: "a1-1", final: false });
-    expect(s.last()).toContain("0 команд");
+    expect(s.last()).toContain("0 действий");
     s.events(command("new", "new command"));
     s.tick();
-    expect(s.last()).toContain("1 команда");
+    expect(s.last()).toContain("1 действие");
   });
 });
 

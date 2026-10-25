@@ -499,7 +499,7 @@ describe("PluginCore", () => {
     await waitFor(() => sent().length === 1, 3000, "card");
     expect(sent()[0]).toEqual({ text: "🤖 Explore\nFind it\n⏳ 0 с · 0 действий\n\n[18:39] Looking", silent: true, topic: 100 });
     appendFileSync(agent, line({ ...assistantText("Found", "end_turn", "s2"), isSidechain: true, timestamp }));
-    await waitFor(() => fake.callsOf("editMessageText").some(c => String(c.text).includes("✅ готово")), 3000, "final edit");
+    await waitFor(() => fake.callsOf("editMessageText").some(c => /✅ \d+ с · \d+ действи(?:е|я|й)/.test(String(c.text))), 3000, "final edit");
     expect(String(fake.callsOf("editMessageText").at(-1)?.text)).toEndWith("[18:39] Looking\n\n[18:39] Found");
     expect(sent().length).toBe(1);
   });

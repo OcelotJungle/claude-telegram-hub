@@ -291,16 +291,16 @@ class Agent {
     const took = duration((this.ended ?? this.env.now()) - this.started);
     const job = this.codexJob();
     if (job?.state) {
-      const acts = `${job.commands} ${plural(job.commands, "команда", "команды", "команд")}`;
+      const acts = `${job.commands} ${plural(job.commands, "действие", "действия", "действий")}`;
       switch (job.state.status) {
         case "question":
           return "❓ Codex ждёт ответа";
         case "failed":
         case "orphaned":
         case "limit":
-          return `❌ ошибка через ${took} · ${acts}`;
+          return `❌ ${took} · ${acts}`;
         case "cancelled":
-          return `⏹ остановлен через ${took} · ${acts}`;
+          return `⏹ ${took} · ${acts}`;
       }
       if (this.status === "running" || this.isWaiting()) {
         const first = job.currentCommand?.trim().split("\n")[0];
@@ -309,11 +309,11 @@ class Agent {
       }
       switch (this.status) {
         case "done":
-          return `✅ готово за ${took} · ${acts}`;
+          return `✅ ${took} · ${acts}`;
         case "failed":
-          return `❌ ошибка через ${took} · ${acts}`;
+          return `❌ ${took} · ${acts}`;
         case "stopped":
-          return `⏹ остановлен через ${took} · ${acts}`;
+          return `⏹ ${took} · ${acts}`;
       }
     }
     if (this.isWaiting()) return `⏸ ждёт фоновую задачу · ${duration(this.env.now() - (this.ended ?? this.env.now()))}`;
@@ -322,11 +322,11 @@ class Agent {
       case "running":
         return `⏳ ${took} · ${acts}${this.lastTool ? `\n\`${this.lastTool.replaceAll("`", "'")}\`` : ""}`;
       case "done":
-        return `✅ готово за ${took} · ${acts}`;
+        return `✅ ${took} · ${acts}`;
       case "failed":
-        return `❌ ошибка через ${took} · ${acts}`;
+        return `❌ ${took} · ${acts}`;
       case "stopped":
-        return `⏹ остановлен через ${took} · ${acts}`;
+        return `⏹ ${took} · ${acts}`;
     }
   }
 

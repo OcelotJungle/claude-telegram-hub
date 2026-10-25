@@ -73,7 +73,7 @@ describe("SubagentWatcher", () => {
     expect(s.cards.at(-1)?.text).toContain("⏳ 4 с · 2 действия\n`Grep x`");
     write(assistant("m3", "end_turn", text("Found it")));
     s.advance(SEND_EVERY_MS);
-    const done = "🤖 **Explore** · haiku\nFind the parser\n✅ готово за 7 с · 2 действия\n\n`[18:39]` Looking around\n\n`[18:39]` Found it";
+    const done = "🤖 **Explore** · haiku\nFind the parser\n✅ 7 с · 2 действия\n\n`[18:39]` Looking around\n\n`[18:39]` Found it";
     expect(s.cards.at(-1)).toEqual({ id: "a1-0", final: false, text: done });
     // The card closes once the agent has not gone on for SETTLE_MS.
     s.advance(SETTLE_MS - SECOND);
@@ -125,7 +125,7 @@ describe("SubagentWatcher", () => {
     // Claude Code's record when only the auto mode classifier's response broke off.
     write(line({ type: "assistant", isApiErrorMessage: true, error: "server_error", message: { id: "e1", role: "assistant", content: [text("API Error: The response stopped arriving.")], stop_reason: "stop_sequence" } }));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toContain("✅ готово");
+    expect(s.cards.at(-1)?.text).toMatch(/✅ \d+ (?:с|мин) · \d+ действи(?:е|я|й)/);
     write(assistant("m2", "tool_use", text("Build done")));
     s.advance(SEND_EVERY_MS);
     const last = s.cards.at(-1)?.text ?? "";
@@ -197,7 +197,7 @@ describe("SubagentWatcher", () => {
       write(notice("bk1", "<status>completed</status>"));
       write(assistant("m3", "end_turn", text("All done")));
       s.advance(SEND_EVERY_MS);
-      expect(s.cards.at(-1)?.text).toContain("✅ готово");
+      expect(s.cards.at(-1)?.text).toMatch(/✅ \d+ (?:с|мин) · \d+ действи(?:е|я|й)/);
       s.advance(SETTLE_MS);
       expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true });
     });
@@ -223,7 +223,7 @@ describe("SubagentWatcher", () => {
       write(notice("mon1", "<status>failed</status>"));
       s.advance(SEND_EVERY_MS);
       s.advance(SETTLE_MS);
-      expect(s.cards.at(-1)).toMatchObject({ final: true, text: expect.stringContaining("✅ готово") });
+      expect(s.cards.at(-1)).toMatchObject({ final: true, text: expect.stringMatching(/✅ \d+ (?:с|мин) · \d+ действи(?:е|я|й)/) });
     });
 
     test("a TaskStop of the task ends it", () => {
@@ -231,7 +231,7 @@ describe("SubagentWatcher", () => {
       write(taskStop("bk1"));
       s.advance(SEND_EVERY_MS);
       s.advance(SETTLE_MS);
-      expect(s.cards.at(-1)).toMatchObject({ final: true, text: expect.stringContaining("✅ готово") });
+      expect(s.cards.at(-1)).toMatchObject({ final: true, text: expect.stringMatching(/✅ \d+ (?:с|мин) · \d+ действи(?:е|я|й)/) });
     });
 
     test("it waits for WAIT_MAX_MS, then the card closes and a later wake opens a new one", () => {
@@ -239,7 +239,7 @@ describe("SubagentWatcher", () => {
       s.advance(WAIT_MAX_MS - SECOND);
       expect(s.cards.at(-1)?.final).toBe(false);
       s.advance(SECOND);
-      expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true, text: expect.stringContaining("✅ готово") });
+      expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true, text: expect.stringMatching(/✅ \d+ (?:с|мин) · \d+ действи(?:е|я|й)/) });
       write(assistant("m3", "tool_use", text("Woken")));
       s.advance(SEND_EVERY_MS);
       expect(s.cards.at(-1)).toMatchObject({ id: "a1-1", final: false });
@@ -249,7 +249,7 @@ describe("SubagentWatcher", () => {
       const { s } = waiting();
       s.w.taskStatus("a1", "completed");
       s.advance(SECOND);
-      expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true, text: expect.stringContaining("✅ готово") });
+      expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true, text: expect.stringMatching(/✅ \d+ (?:с|мин) · \d+ действи(?:е|я|й)/) });
     });
   });
 
@@ -304,7 +304,7 @@ describe("SubagentWatcher", () => {
     write(assistant("m1", "tool_use", tool("Read", { file_path: "a.ts" })));
     write(assistant("m2", "tool_use", tool("SubagentHandback", { message: "All fixed." })));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toContain("✅ готово за 0 с · 2 действия");
+    expect(s.cards.at(-1)?.text).toContain("✅ 0 с · 2 действия");
     s.advance(SETTLE_MS);
     expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true });
   });
@@ -319,7 +319,7 @@ describe("SubagentWatcher", () => {
     s.w.taskStatus("a1", "killed");
     s.w.taskStatus("nobody", "failed");
     s.advance(SECOND);
-    expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true, text: expect.stringContaining("⏹ остановлен через 1 с · 1 действие") });
+    expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true, text: expect.stringContaining("⏹ 1 с · 1 действие") });
   });
 
   test("a card is first sent only while allowed, then kept up to date", () => {
