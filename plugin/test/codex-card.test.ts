@@ -56,7 +56,7 @@ describe("Codex cards", () => {
     watcher.start();
     const agent = join(dir, "agent-a1.jsonl");
     writeFileSync(agent, "");
-    const writeMeta = (agentType = "codex-worker") => writeFileSync(join(dir, "agent-a1.meta.json"), JSON.stringify({ agentType, description: "Fix tests", model: "haiku" }));
+    const writeMeta = (agentType = "codex-worker", description = "Fix tests") => writeFileSync(join(dir, "agent-a1.meta.json"), JSON.stringify({ agentType, description, model: "haiku" }));
     if (meta) writeMeta();
     return {
       watcher, cards, writeMeta,
@@ -87,6 +87,24 @@ describe("Codex cards", () => {
     };
   }
 
+  test.each([
+    ["Codex Sol review of spec", "Review of spec"],
+    ["Review the parser", "Review the parser"],
+  ])("worker task %s is displayed as %s on its own line", (description, expected) => {
+    const s = setup();
+    s.writeMeta("codex-worker", description);
+    s.state();
+    s.start();
+    s.events(command("check", "git status", "item.started"));
+    s.tick();
+    expect(s.last()).toStartWith([
+      "🤖 **codex\\-worker** · Codex gpt\\-6\\.1\\-sol · high",
+      expected,
+      "⏳ 0 с · 0 команд · событие 18:39",
+      "`git status`",
+    ].join("\n"));
+  });
+
   test("start result reads history and agent messages wait for a continuing event", () => {
     const s = setup();
     s.state();
@@ -94,7 +112,7 @@ describe("Codex cards", () => {
     s.start();
     s.write(assistant("m1", "codex job running"));
     s.tick();
-    expect(s.last()).toStartWith("🤖 **codex\\-worker** · Fix tests · Codex gpt\\-6\\.1\\-sol/high\n⏳ 0 с · 0 команд · событие 18:39");
+    expect(s.last()).toStartWith("🤖 **codex\\-worker** · Codex gpt\\-6\\.1\\-sol · high\nFix tests\n⏳ 0 с · 0 команд · событие 18:39");
     expect(s.last()).not.toContain("haiku");
     expect(s.last()).not.toContain("Inspecting the parser");
     expect(s.last()).not.toContain("codex job running");
@@ -149,7 +167,7 @@ describe("Codex cards", () => {
     s.tick();
     s.writeMeta();
     s.tick();
-    expect(s.last()).toContain("Codex gpt\\-6\\.1\\-sol/high");
+    expect(s.last()).toContain("Codex gpt\\-6\\.1\\-sol · high");
     expect(s.last()).toContain("Earlier event");
   });
 
@@ -235,7 +253,7 @@ describe("Codex cards", () => {
     s.attach("wait");
     s.write(assistant("summary", "codex job restored"));
     s.tick();
-    expect(s.last()).toContain("Codex gpt\\-6\\.1\\-sol/high");
+    expect(s.last()).toContain("Codex gpt\\-6\\.1\\-sol · high");
     expect(s.last()).not.toContain("codex job restored");
     expect(s.last()).not.toContain("Old event");
     expect(s.last()).not.toContain("old restart");
@@ -321,7 +339,7 @@ describe("Codex cards", () => {
     s.tick(SETTLE_MS);
     expect(s.cards.at(-1)?.final).toBe(true);
     // The closed card still tells which Codex model did the work.
-    expect(s.last()).toStartWith("🤖 **codex\\-worker** · Fix tests · Codex gpt\\-6\\.1\\-sol/high\n✅ готово за");
+    expect(s.last()).toStartWith("🤖 **codex\\-worker** · Codex gpt\\-6\\.1\\-sol · high\nFix tests\n✅ готово за");
   });
 
   test.each(PLURAL_CASES)("%i completed commands use %s", (count, form) => {
@@ -342,11 +360,11 @@ describe("Codex cards", () => {
     const long = "x".repeat(COMMAND_LIMIT + 1);
     s.events(command("a", "older command", "item.started") + command("b", `${long}\nsecret second line`, "item.started"));
     s.tick(MINUTE);
-    expect(s.last()).toContain(` · \`${long.slice(0, COMMAND_LIMIT)}…\` · событие 18:40`);
+    expect(s.last()).toContain(` · событие 18:40\n\`${long.slice(0, COMMAND_LIMIT)}…\``);
     expect(s.last()).not.toContain("secret second line");
     s.events(command("b", long));
     s.tick();
-    expect(s.last()).toContain("1 команда · `older command`");
+    expect(s.last()).toContain("1 команда · событие 18:40\n`older command`");
     s.events(command("a", "older command"));
     s.tick();
     expect(s.last()).toContain("2 команды · событие 18:40");
@@ -427,12 +445,12 @@ describe("Codex cards", () => {
     s.state();
     s.events("not json\n" + line({ type: 123 }) + event("item.completed", { type: "agent_message", text: 123 }) + message("Valid message") + command("valid", "valid command", "item.started"));
     s.tick();
-    expect(s.last()).toContain("Codex gpt\\-6\\.1\\-sol/high");
+    expect(s.last()).toContain("Codex gpt\\-6\\.1\\-sol · high");
     expect(s.last()).toContain("Valid message");
     expect(s.last()).not.toContain("codex job fallback");
     s.rawState("{");
     s.tick();
-    expect(s.last()).toContain("Codex gpt\\-6\\.1\\-sol/high");
+    expect(s.last()).toContain("Codex gpt\\-6\\.1\\-sol · high");
   });
 
   test("ordinary agents do not read Codex events or filter their own text", () => {

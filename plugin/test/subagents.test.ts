@@ -62,16 +62,16 @@ describe("SubagentWatcher", () => {
     write(assistant("m1", "tool_use", tool("Read", { file_path: "C:\\src\\parse.ts" })));
     s.advance(SEND_EVERY_MS);
     expect(s.cards).toEqual([
-      { id: "a1-0", final: false, text: "🤖 **Explore** · Find the parser · haiku\n⏳ 0 с · 1 действие · `Read parse.ts`\n\n`[18:39]` Looking around" },
+      { id: "a1-0", final: false, text: "🤖 **Explore** · haiku\nFind the parser\n⏳ 0 с · 1 действие\n`Read parse.ts`\n\n`[18:39]` Looking around" },
     ]);
     write(assistant("m2", "tool_use", tool("Grep", { pattern: "x" })));
     s.advance(SECOND);
     expect(s.cards.length).toBe(1);
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toContain("⏳ 4 с · 2 действия · `Grep x`");
+    expect(s.cards.at(-1)?.text).toContain("⏳ 4 с · 2 действия\n`Grep x`");
     write(assistant("m3", "end_turn", text("Found it")));
     s.advance(SEND_EVERY_MS);
-    const done = "🤖 **Explore** · Find the parser · haiku\n✅ готово за 7 с · 2 действия\n\n`[18:39]` Looking around\n\n`[18:39]` Found it";
+    const done = "🤖 **Explore** · haiku\nFind the parser\n✅ готово за 7 с · 2 действия\n\n`[18:39]` Looking around\n\n`[18:39]` Found it";
     expect(s.cards.at(-1)).toEqual({ id: "a1-0", final: false, text: done });
     // The card closes once the agent has not gone on for SETTLE_MS.
     s.advance(SETTLE_MS - SECOND);
@@ -89,18 +89,18 @@ describe("SubagentWatcher", () => {
     write(line({ type: "user", isSidechain: true, message: { role: "user", content: "Find it" } }));
     write(assistant("m0", "tool_use", tool("Grep", { pattern: "x" })));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · Find the parser · opus\n");
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · opus\nFind the parser\n");
     write(answer("m1", "claude-opus-5-5", "high"));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · Find the parser · opus 5\\.5 high\n");
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · opus 5\\.5 · high\nFind the parser\n");
     // Claude Code's own message does not change it; a new effort does.
     write(answer("m2", "<synthetic>"));
     write(answer("m3", "claude-haiku-4-5-20251001", "low"));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · Find the parser · haiku 4\\.5 low\n");
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · haiku 4\\.5 · low\nFind the parser\n");
     write(answer("m4", "gpt-proxy"));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · Find the parser · gpt\\-proxy\n");
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · gpt\\-proxy\nFind the parser\n");
   });
 
   test("an agent that goes on after a turn end keeps its card", () => {
@@ -245,7 +245,7 @@ describe("SubagentWatcher", () => {
     const write = s.agent("a1");
     write(assistant("m1", "tool_use", tool("Bash", {})));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.map(c => c.text)).toEqual(["🤖 **Субагент**\n⏳ 0 с · 1 действие · `Bash`"]);
+    expect(s.cards.map(c => c.text)).toEqual(["🤖 **Субагент**\n⏳ 0 с · 1 действие\n`Bash`"]);
     s.advance(SECOND);
     expect(s.cards.length).toBe(1);
     s.advance(SEND_EVERY_MS);
@@ -373,6 +373,6 @@ describe("SubagentWatcher", () => {
     const write = s.agent("a1", { agentType: "general-purpose", description: "Fix *all* [bugs]" });
     write(assistant("m1", "tool_use", text("ok")));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards[0]?.text).toStartWith("🤖 **general\\-purpose** · Fix \\*all\\* \\[bugs\\]\n");
+    expect(s.cards[0]?.text).toStartWith("🤖 **general\\-purpose**\nFix \\*all\\* \\[bugs\\]\n");
   });
 });

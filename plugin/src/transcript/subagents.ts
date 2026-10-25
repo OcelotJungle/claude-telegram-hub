@@ -41,6 +41,9 @@ const CLOCK_PAD = 2;
 const MAX_COMMAND_CHARS = 60;
 // claude-opus-5-5, claude-haiku-4-5-20251001: shown as "opus 5.5".
 const CLAUDE_MODEL = /^claude-([a-z]+)-(\d+)-(\d+)\b/;
+// A codex-worker task named after Codex, as "Codex Sol review of spec": the
+// card's first line names Codex already.
+const CODEX_PREFIX = /^codex\b(?:\s+(?:luna|sol|astra|gpt-[\w.-]+))?(?:\s+(?:low|medium|high|xhigh|max|ultra)\b)?\s*[:·—–-]?\s*/i;
 
 // A subagent's card as Markdown. final: its last version (the agent stopped,
 // or the card is full and continues in the next one).
@@ -266,9 +269,11 @@ class Agent {
     const m = this.meta;
     // The worker only relays: the model doing the work is Codex's.
     const state = this.codexJob()?.state;
-    const model = state ? `Codex ${state.slug}/${state.effort}` : m?.agentType === "codex-worker" ? undefined : (this.model ?? m?.model);
-    const head = [`🤖 **${escapeMd(m?.agentType ?? "Субагент")}**`, ...[m?.description, model].filter(s => s !== undefined && s !== "").map(s => escapeMd(s ?? ""))].join(" · ");
-    return [`${head}\n${status}`, ...texts.map(e => `\`[${clock(e.at)}]\`${STARTS_WITH_BLOCK.test(e.text) ? "\n" : " "}${e.text}`)].join("\n\n");
+    const model = state ? `Codex ${state.slug} · ${state.effort}` : m?.agentType === "codex-worker" ? undefined : (this.model ?? m?.model);
+    const head = [`🤖 **${escapeMd(m?.agentType ?? "Субагент")}**`, ...(model ? [escapeMd(model)] : [])].join(" · ");
+    const description = m?.agentType === "codex-worker" && m.description ? codexTask(m.description) : m?.description;
+    const task = description ? `${escapeMd(description)}\n` : "";
+    return [`${head}\n${task}${status}`, ...texts.map(e => `\`[${clock(e.at)}]\`${STARTS_WITH_BLOCK.test(e.text) ? "\n" : " "}${e.text}`)].join("\n\n");
   }
 
   private codexJob(): CodexJob | undefined {
@@ -293,7 +298,7 @@ class Agent {
       if (this.status === "running" || this.isWaiting()) {
         const first = job.currentCommand?.trim().split("\n")[0];
         const command = first && first.length > MAX_COMMAND_CHARS ? `${first.slice(0, MAX_COMMAND_CHARS)}…` : first;
-        return `⏳ ${took} · ${acts}${command ? ` · \`${command.replaceAll("`", "'")}\`` : ""}${job.eventAt === undefined ? "" : ` · событие ${clock(job.eventAt)}`}`;
+        return `⏳ ${took} · ${acts}${job.eventAt === undefined ? "" : ` · событие ${clock(job.eventAt)}`}${command ? `\n\`${command.replaceAll("`", "'")}\`` : ""}`;
       }
       switch (this.status) {
         case "done":
@@ -308,7 +313,7 @@ class Agent {
     const acts = `${this.tools} ${plural(this.tools, "действие", "действия", "действий")}`;
     switch (this.status) {
       case "running":
-        return `⏳ ${took} · ${acts}${this.lastTool ? ` · \`${this.lastTool.replaceAll("`", "'")}\`` : ""}`;
+        return `⏳ ${took} · ${acts}${this.lastTool ? `\n\`${this.lastTool.replaceAll("`", "'")}\`` : ""}`;
       case "done":
         return `✅ готово за ${took} · ${acts}`;
       case "failed":
@@ -391,15 +396,21 @@ export class SubagentWatcher {
   }
 }
 
+// A codex-worker task without the Codex model in front of it.
+function codexTask(description: string): string {
+  const rest = description.replace(CODEX_PREFIX, "");
+  return rest ? rest.charAt(0).toUpperCase() + rest.slice(1) : description;
+}
+
 // The model and effort an assistant record was answered with, as "opus 5.5
-// high"; Claude Code's own messages carry the model "<synthetic>".
+// · high"; Claude Code's own messages carry the model "<synthetic>".
 function recordModel(rec: unknown): string | undefined {
   const model = field(field(rec, "message"), "model");
   if (field(rec, "type") !== "assistant" || typeof model !== "string" || !model || model.startsWith("<")) return undefined;
   const [, family, major, minor] = model.match(CLAUDE_MODEL) ?? [];
   const name = family && major && minor ? `${family} ${major}.${minor}` : model;
   const effort = field(rec, "effort");
-  return typeof effort === "string" && effort ? `${name} ${effort}` : name;
+  return typeof effort === "string" && effort ? `${name} · ${effort}` : name;
 }
 
 // When a transcript record was written (ms), from its timestamp.
