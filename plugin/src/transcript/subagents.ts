@@ -17,6 +17,10 @@ const SEND_EVERY_MS = 3000;
 // response broke off, and a stop hook can send the agent on. An agent that
 // goes on within this long keeps its card; its card is closed only after it.
 export const SETTLE_MS = 120_000;
+// An agent that ended its turn with a background task of its own running
+// (Bash, Monitor) is waiting for its notification, not done: its card stays
+// open this long, and is closed after it.
+export const WAIT_MAX_MS = 60 * 60_000;
 // One text of a subagent in its card is cut to this.
 export const MAX_CARD_TEXT = 1500;
 // A card stays one Telegram message (4096 characters) with room for its
@@ -78,6 +82,8 @@ class Agent {
   // The agent's end came from its task notification, not its transcript: it
   // will not go on, and its card closes without waiting.
   private certain = false;
+  // The agent's own live background tasks (ids).
+  private tasks = new Set<string>();
   private dirty = false;
   private idle = false;
   private lastSent = 0;
@@ -120,10 +126,12 @@ class Agent {
     this.tailer.pollNow();
     this.meta ??= this.readMeta();
     if (this.sealed) return;
-    const stopped = this.status !== "running";
-    const final = stopped && (this.certain || this.env.now() - (this.ended ?? 0) >= SETTLE_MS);
+    const waiting = this.isWaiting();
+    const stopped = this.status !== "running" && !waiting;
+    const final = this.status !== "running" && (this.certain || this.env.now() - (this.ended ?? 0) >= (this.tasks.size ? WAIT_MAX_MS : SETTLE_MS));
     // A running card's time goes on even while the agent writes nothing, as
-    // when it thinks for long, so the card shows it is alive.
+    // when it thinks for long, so the card shows it is alive; a waiting
+    // card's too.
     if (!this.dirty && !final && (stopped || !this.shown)) return;
     if (!this.shown && !this.env.canStart()) return;
     // The final message comes in several records: wait until all are read.
@@ -138,7 +146,18 @@ class Agent {
     this.lastSent = this.env.now();
   }
 
+  // The turn ended, but a background task of the agent's own will wake it.
+  private isWaiting(): boolean {
+    return this.status === "done" && !this.certain && this.tasks.size > 0 && this.env.now() - (this.ended ?? 0) < WAIT_MAX_MS;
+  }
+
   private feed(ev: TranscriptEvent, at: number): void {
+    if (ev.kind === "task_started") this.tasks.add(ev.taskId);
+    else if (ev.kind === "task_status" && this.tasks.delete(ev.taskId) && !this.tasks.size && this.status !== "running") {
+      // The last task ended: the agent is about to be woken, and the card
+      // must not close before its record is read.
+      this.ended = this.env.now();
+    }
     if (ev.kind !== "text" && ev.kind !== "tool_use" && ev.kind !== "turn_end" && ev.kind !== "api_error") return;
     if (this.status !== "running" && ev.messageId !== this.endMessage) {
       // A closed card stays as it is: the agent got a new message
@@ -203,6 +222,7 @@ class Agent {
   }
 
   private statusLine(): string {
+    if (this.isWaiting()) return `⏸ ждёт фоновую задачу · ${duration(this.env.now() - (this.ended ?? this.env.now()))}`;
     const took = duration((this.ended ?? this.env.now()) - this.started);
     const acts = `${this.tools} ${plural(this.tools, "действие", "действия", "действий")}`;
     switch (this.status) {

@@ -3,7 +3,7 @@ import type { Card } from "../src/transcript/subagents.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
-import { MAX_CARD, SETTLE_MS, SubagentWatcher } from "../src/transcript/subagents.ts";
+import { MAX_CARD, SETTLE_MS, SubagentWatcher, WAIT_MAX_MS } from "../src/transcript/subagents.ts";
 import { tempDir } from "./helpers.ts";
 
 const SEND_EVERY_MS = 3000;
@@ -95,6 +95,114 @@ describe("SubagentWatcher", () => {
     expect(last).toContain("⏳ 3 с · 1 действие");
     expect(last).toEndWith("Build done");
     expect(s.cards.every(c => c.id === "a1-0" && !c.final)).toBe(true);
+  });
+
+  describe("an agent with a background task", () => {
+    const bgBash = (id: string) => line({ type: "user", isSidechain: true, message: { role: "user", content: [{ type: "tool_result", content: `Command running in background with ID: ${id}.` }] }, toolUseResult: { stdout: "", backgroundTaskId: id } });
+    const monitor = (id: string) => line({ type: "user", isSidechain: true, message: { role: "user", content: [{ type: "tool_result", content: `Monitor started (task ${id})` }] }, toolUseResult: { taskId: id, timeoutMs: 1_800_000, persistent: false } });
+    const notice = (id: string, tail: string) =>
+      line({ type: "user", isSidechain: true, isMeta: true, message: { role: "user", content: `[SYSTEM NOTIFICATION]\n\n<task-notification>\n<task-id>${id}</task-id>\n${tail}\n</task-notification>` } });
+    const taskStop = (id: string) =>
+      line({ type: "user", isSidechain: true, message: { role: "user", content: [{ type: "tool_result", content: "{}" }] }, toolUseResult: { message: `Successfully stopped task: ${id} (sleep 9)`, task_id: id, task_type: "local_bash" } });
+
+    function waiting() {
+      const s = setup();
+      s.w.start();
+      const write = s.agent("a1");
+      write(assistant("m1", "tool_use", tool("Bash", { command: "make", run_in_background: true })));
+      write(bgBash("bk1"));
+      write(assistant("m2", "end_turn", text("Waiting for the task")));
+      s.advance(SEND_EVERY_MS);
+      return { s, write };
+    }
+
+    test("a turn end keeps the card open with a waiting status", () => {
+      const { s } = waiting();
+      expect(s.cards.at(-1)?.text).toContain("⏸ ждёт фоновую задачу · 0 с");
+      expect(s.cards.at(-1)?.text).not.toContain("✅");
+      s.advance(SETTLE_MS + MINUTE);
+      expect(s.cards.at(-1)).toMatchObject({ final: false, text: expect.stringContaining("⏸ ждёт фоновую задачу · 3 мин") });
+      expect(s.cards.some(c => c.final)).toBe(false);
+    });
+
+    test("the waiting time goes on like a running card's", () => {
+      const { s } = waiting();
+      const sent = s.cards.length;
+      s.advance(SEND_EVERY_MS);
+      expect(s.cards.length).toBe(sent + 1);
+      expect(s.cards.at(-1)?.text).toContain("⏸ ждёт фоновую задачу · 3 с");
+    });
+
+    test("a record wakes it: the same card goes on", () => {
+      const { s, write } = waiting();
+      s.advance(10 * MINUTE);
+      write(notice("bk1", "<status>completed</status>\n<summary>done</summary>"));
+      write(assistant("m3", "tool_use", tool("Read", { file_path: "a.ts" })));
+      s.advance(SEND_EVERY_MS);
+      expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: false, text: expect.stringContaining("⏳ 10 мин · 2 действия") });
+      expect(s.cards.every(c => c.id === "a1-0" && !c.final)).toBe(true);
+    });
+
+    test("after the task ends, the next turn end closes the card as usual", () => {
+      const { s, write } = waiting();
+      s.advance(10 * MINUTE);
+      write(notice("bk1", "<status>completed</status>"));
+      write(assistant("m3", "end_turn", text("All done")));
+      s.advance(SEND_EVERY_MS);
+      expect(s.cards.at(-1)?.text).toContain("✅ готово");
+      s.advance(SETTLE_MS);
+      expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true });
+    });
+
+    test("a Monitor's event notification without a status does not end the task", () => {
+      const s = setup();
+      s.w.start();
+      const write = s.agent("a1");
+      write(monitor("mon1"));
+      write(assistant("m1", "end_turn", text("Waiting for the monitor")));
+      write(notice("mon1", "<summary>Monitor event: haiku done</summary>"));
+      s.advance(SEND_EVERY_MS);
+      s.advance(SETTLE_MS * 2);
+      expect(s.cards.at(-1)).toMatchObject({ final: false, text: expect.stringContaining("⏸ ждёт фоновую задачу") });
+    });
+
+    test("a notification with any status ends the task", () => {
+      const s = setup();
+      s.w.start();
+      const write = s.agent("a1");
+      write(monitor("mon1"));
+      write(assistant("m1", "end_turn", text("Waiting")));
+      write(notice("mon1", "<status>failed</status>"));
+      s.advance(SEND_EVERY_MS);
+      s.advance(SETTLE_MS);
+      expect(s.cards.at(-1)).toMatchObject({ final: true, text: expect.stringContaining("✅ готово") });
+    });
+
+    test("a TaskStop of the task ends it", () => {
+      const { s, write } = waiting();
+      write(taskStop("bk1"));
+      s.advance(SEND_EVERY_MS);
+      s.advance(SETTLE_MS);
+      expect(s.cards.at(-1)).toMatchObject({ final: true, text: expect.stringContaining("✅ готово") });
+    });
+
+    test("it waits for WAIT_MAX_MS, then the card closes and a later wake opens a new one", () => {
+      const { s, write } = waiting();
+      s.advance(WAIT_MAX_MS - SECOND);
+      expect(s.cards.at(-1)?.final).toBe(false);
+      s.advance(SECOND);
+      expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true, text: expect.stringContaining("✅ готово") });
+      write(assistant("m3", "tool_use", text("Woken")));
+      s.advance(SEND_EVERY_MS);
+      expect(s.cards.at(-1)).toMatchObject({ id: "a1-1", final: false });
+    });
+
+    test("the parent's notification closes the card at once", () => {
+      const { s } = waiting();
+      s.w.taskStatus("a1", "completed");
+      s.advance(SECOND);
+      expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true, text: expect.stringContaining("✅ готово") });
+    });
   });
 
   test("a running card's time goes on while the agent writes nothing", () => {

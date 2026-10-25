@@ -13,6 +13,8 @@ const DETAIL_FIELDS = ["file_path", "notebook_path", "description", "pattern", "
 const CHANNEL_MESSAGE_ID = /<channel\b[^>]*\bmessage_id="(\d+)"/g;
 // Claude Code's record for Esc: "[Request interrupted by user]", or "… for tool use]".
 const INTERRUPTED = /^\[Request interrupted by user\b/;
+// How the result of a TaskStop call begins.
+const TASK_STOPPED = "Successfully stopped task";
 // The model name of messages Claude Code writes itself.
 const SYNTHETIC_MODEL = "<synthetic>";
 
@@ -39,6 +41,9 @@ export type TranscriptEvent =
   // A background task (a subagent among them) stopped: completed, failed or
   // killed. taskId of a subagent is its agent id.
   | { kind: "task_status"; taskId: string; status: string }
+  // A subagent started a background task (Bash, Monitor): it will be woken
+  // when the task ends.
+  | { kind: "task_started"; taskId: string }
   // Topic messages that reached the agent's context: Telegram message ids.
   | { kind: "channel_seen"; messageIds: number[] }
   // The user stopped the turn (Esc).
@@ -82,7 +87,23 @@ export function parseRecord(r: unknown): TranscriptEvent[] {
 // A record of a subagent's own transcript (subagents/agent-<id>.jsonl): all
 // of them are sidechain records.
 export function parseAgentRecord(r: unknown): TranscriptEvent[] {
-  return isObject(r) && r.type === "assistant" ? parseAssistant(r) : [];
+  if (!isObject(r)) return [];
+  if (r.type === "assistant") return parseAssistant(r);
+  return r.type === "user" ? parseAgentUser(r) : [];
+}
+
+// A tool result or a task notification in a subagent's transcript: the
+// subagent's own background tasks start and end there. A Monitor's event
+// notification has no <status>: the Monitor goes on.
+function parseAgentUser(r: Rec): TranscriptEvent[] {
+  const res = r.toolUseResult;
+  const started = field(res, "backgroundTaskId") ?? field(res, "taskId");
+  if (typeof started === "string" && started) return [{ kind: "task_started", taskId: started }];
+  // TaskStop's result.
+  const stopped = field(res, "task_id");
+  const message = field(res, "message");
+  if (typeof stopped === "string" && typeof message === "string" && message.startsWith(TASK_STOPPED)) return [{ kind: "task_status", taskId: stopped, status: "killed" }];
+  return r.isMeta === true ? taskStatus(contentText(r)) : [];
 }
 
 function parseAssistant(r: Rec): TranscriptEvent[] {
