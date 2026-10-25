@@ -26,7 +26,6 @@ import { toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { cleanupReport, commandReply, hookBody, limitsPost, pluginToHub, questionBody, sendFilesMessage, sendMessage, terminateRequest, turnEndBody } from "../shared/protocol-schema.ts";
-import { tokens } from "../shared/tokens.ts";
 import { loadCards, saveCards } from "./cards.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
 import { messageKind } from "./message-kind.ts";
@@ -73,10 +72,9 @@ const INTERRUPT_PREFIX = "!";
 const INTERRUPT_MARK = /^\s*!\s*/;
 // The outbox id of a poll's question: poll:<key>:<index>#<piece>.
 const POLL_ITEM = /^poll:([0-9a-f]+):(\d+)#/;
-// The size of a removed skill in tokens, roughly.
-const CHARS_PER_TOKEN = 4;
 const CLEANUP_BUSY = "⏳ /cleanup уже идёт";
-const CLEANUP_STOPPED = " Сессия остановлена.";
+const CLEANUP_STOPPED = "\nСессия завершена.";
+const CLEANUP_RELAUNCHED = "\nСессия снова запущена: пришли сообщения из темы.";
 // Messages a starting session holds; more are dropped.
 const MAX_HELD = 50;
 const MS_PER_SECOND = 1000;
@@ -133,7 +131,7 @@ const BOT_COMMANDS = [
   { command: "compact", description: "Сжать контекст; /compact N — окно автокомпакта" },
   { command: "run", description: "Запустить сессию; /run N — на аккаунте N" },
   { command: "stop", description: "Завершить сессию" },
-  { command: "cleanup", description: "Сжать контекст и убрать накопившиеся скиллы" },
+  { command: "cleanup", description: "Сжать контекст, убрать накопившиеся скиллы и завершить сессию" },
   { command: "exec", description: "Команда в PowerShell в папке сессии" },
   { command: "cmd", description: "Команда в cmd в папке сессии" },
   { command: "bash", description: "Команда в Git Bash в папке сессии" },
@@ -163,18 +161,15 @@ type Held = { message: Message } | { inbound: Inbound };
 // Topic messages of a session waiting to go to its window together.
 type AnswerGroup = { api: TelegramApi; poll: Poll; index: number; messages: Message[]; parts: string[]; timer: ReturnType<typeof setTimeout> };
 type Batch = { api: TelegramApi; messages: Message[]; quietTimer: ReturnType<typeof setTimeout>; maxTimer: ReturnType<typeof setTimeout> };
-// A /cleanup under way: the id of its command, the context the module
-// reported before compacting, and whether the window is compacting or
-// exiting. noRelaunch: a /stop came meanwhile. held: topic messages for the
-// session from the start of the compact on, the window still open or not.
+// A /cleanup under way: the id of its command and whether the window is
+// compacting or exiting. held: topic messages for the session from the start
+// of the compact on, the window still open or not.
 // compactTimer: gives up on a compact the module never reports. startMsg:
 // the module's "will compact" reply once in the topic; ended: the outcome
 // replaces it, so it goes as soon as it is there.
 type Cleanup = {
   id: string;
-  before?: number;
   phase: "compacting" | "exiting";
-  noRelaunch?: boolean;
   held: Held[];
   compactTimer?: ReturnType<typeof setTimeout>;
   startMsg?: number;
@@ -1982,7 +1977,7 @@ ${msg.text}`);
   // --- /cleanup ---------------------------------------------------------------
 
   // The module compacts the session, the window ends, the hub empties the
-  // skills Claude Code remembers in the transcript and starts it again.
+  // skills Claude Code remembers in the transcript; the session stays ended.
   private startCleanup(sessionId: string, args: string): void {
     if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, false);
     if (!this.connOf(sessionId)) return this.notice(sessionId, "Сессия не запущена", false);
@@ -2017,16 +2012,12 @@ ${msg.text}`);
     api.deleteMessage(groupId, id).catch(e => this.log.warn(`deleting the /cleanup notice ${id} failed: ${e}`));
   }
 
-  // The first /stop only keeps the session from starting again; a second one
-  // ends a compacting window at once, the transcript untouched.
+  // /stop ends a compacting window at once, the /cleanup dropped and the
+  // transcript untouched; an exiting one is ending already.
   private stopDuringCleanup(sessionId: string, c: Cleanup): void {
-    if (!c.noRelaunch) {
-      c.noRelaunch = true;
-      this.log.info(`/stop during /cleanup of session ${sessionId}: it will not start again`);
-      return this.notice(sessionId, "⏹ После /cleanup сессию не запущу", false);
-    }
     if (c.phase === "compacting") {
-      this.log.info(`second /stop during the /cleanup compact of session ${sessionId}: ending the window, the transcript untouched`);
+      this.log.info(`/stop during the /cleanup compact of session ${sessionId}: ending the window, the transcript untouched`);
+      this.cleanupOutcome(sessionId, c, "⏹ /cleanup отменена, скиллы не убраны");
       this.dropCleanup(sessionId, true);
     }
     this.terminate(sessionId);
@@ -2073,13 +2064,12 @@ ${msg.text}`);
       return this.dropCleanup(sessionId);
     }
     this.log.info(`/cleanup of session ${sessionId}: compacted${before === undefined ? "" : ` from ${before} tokens`}; ending the window`);
-    if (before !== undefined) c.before = before;
     c.phase = "exiting";
     this.terminate(sessionId);
   }
 
   // The window is gone: once Claude Code has exited, the skills go from the
-  // transcript and the session starts again.
+  // transcript.
   private async finishCleanup(sessionId: string, c: Cleanup, pid: number | undefined): Promise<void> {
     const current = () => this.running && this.cleanups.get(sessionId) === c;
     const alive = this.opts.isAlive ?? isAlive;
@@ -2114,7 +2104,7 @@ ${msg.text}`);
       try {
         const result = await (this.opts.cleanTranscript ?? cleanTranscript)(path, Date.now());
         this.log.info(`/cleanup of session ${sessionId}: ${path}: ${result.kind}${result.kind === "cleaned" ? `, ${result.records} record(s), backup ${result.backup}` : ""}`);
-        text = cleanupSummary(c.before, result);
+        text = cleanupSummary(result);
       } catch (e) {
         const why = e instanceof Error ? e.message : String(e);
         this.log.warn(`/cleanup of session ${sessionId}: emptying the skills in ${path} failed: ${why}`);
@@ -2131,10 +2121,10 @@ ${msg.text}`);
     }
     // Messages that came meanwhile still reach the agent, as a message to a
     // stopped session starts it. The summary stands for the start notice.
-    const relaunch = !c.noRelaunch || c.held.length > 0;
-    this.cleanupOutcome(sessionId, c, relaunch ? text : text + CLEANUP_STOPPED);
+    const relaunch = c.held.length > 0;
+    this.cleanupOutcome(sessionId, c, text + (relaunch ? CLEANUP_RELAUNCHED : CLEANUP_STOPPED));
     if (relaunch) this.launch(sessionId, undefined, c.held, false);
-    else this.log.info(`/cleanup of session ${sessionId}: done; not starting it again after /stop`);
+    else this.log.info(`/cleanup of session ${sessionId}: done; the session stays ended`);
   }
 
   // The transcript the hook named, else the one found by the session id.
@@ -2472,18 +2462,14 @@ function spawnDetached(command: string[]): void {
   child.unref();
 }
 
-// The /cleanup summary in the topic: the context before the compact, then
-// what came of the skills.
-export function cleanupSummary(before: number | undefined, r: CleanupResult): string {
-  const was = before === undefined ? undefined : `Контекст был ${tokens(before)}`;
+// The /cleanup summary in the topic: what came of the skills.
+export function cleanupSummary(r: CleanupResult): string {
   if (r.kind === "format") {
     const version = r.version ? ` (Claude Code ${r.version})` : "";
-    return `🧹 ${was ? `${was}. ` : ""}⚠️ Формат транскрипта изменился, скиллы не убраны${version}`;
+    return `🧹 ⚠️ Формат транскрипта изменился, скиллы не убраны${version}`;
   }
-  if (r.kind === "nothing" || !r.skills.length) return was ? `🧹 ${was}, скиллов в контексте не было` : "🧹 Скиллов в контексте не было";
-  const size = tokens(Math.round(r.skills.reduce((n, s) => n + s.chars, 0) / CHARS_PER_TOKEN));
-  const list = `${r.skills.map(s => s.name).join(", ")} (~${size})`;
-  return was ? `🧹 ${was}, убраны скиллы: ${list}` : `🧹 Убраны скиллы: ${list}`;
+  if (r.kind === "nothing" || !r.skills.length) return "🧹 Очистка выполнена";
+  return `🧹 Убраны скиллы: ${r.skills.map(s => s.name).join(", ")}`;
 }
 
 // Queue item ids are `<plugin message id>#<n>`, replacements add `.<m>`.

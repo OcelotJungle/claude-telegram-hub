@@ -175,7 +175,7 @@ describe("limits shared through the hub", () => {
 });
 
 describe("/cleanup", () => {
-  const STARTED = "🧹 Сожму контекст, когда агент закончит ход, и перезапущу сессию без накопившихся скиллов.";
+  const STARTED = "🧹 Сожму контекст, когда агент закончит ход, уберу накопившиеся скиллы и завершу сессию.";
 
   function runner(commands: { id: string; name: string; args: string }[], compact: (args: string | undefined) => Promise<{ tokensBefore?: number; tokensAfter?: number; skip?: string }>) {
     const posted: { path: string; body: unknown }[] = [];

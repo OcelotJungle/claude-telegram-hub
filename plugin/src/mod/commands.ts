@@ -150,10 +150,10 @@ export class Runner {
   }
 
   // /cleanup: compacts after the compactions already asked for, then tells
-  // the hub the sizes or the error. The hub ends the window, empties the
-  // remembered skills and starts the session again.
+  // the hub the sizes or the error. The hub ends the window and empties the
+  // remembered skills.
   private async cleanup(to: Target, args: string): Promise<void> {
-    await this.reply(to, "🧹 Сожму контекст, когда агент закончит ход, и перезапущу сессию без накопившихся скиллов.", false);
+    await this.reply(to, "🧹 Сожму контекст, когда агент закончит ход, уберу накопившиеся скиллы и завершу сессию.", false);
     await Promise.all(this.running);
     const report = async (o: Outcome) => {
       const body: CleanupReport = { sessionId: to.sessionId, id: to.id };

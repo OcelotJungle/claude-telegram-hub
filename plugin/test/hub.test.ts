@@ -2112,29 +2112,25 @@ describe("commands", () => {
 
     const backups = (folder: string) => readdirSync(folder).filter(f => f.startsWith(`${SID}.cleanup-`));
 
-    test("/cleanup compacts, ends the window, empties the skills and starts the session again", async () => {
+    test("/cleanup compacts, ends the window, empties the skills and leaves the session ended", async () => {
       const { a, spawned, transcript, folder } = await liveSession(SKILLS);
       const { runner, compacted } = mod(SID);
       command("/cleanup keep the plan");
       const started = await reply(runner, t => t.startsWith("🧹 Сожму"));
-      expect(started.text).toBe("🧹 Сожму контекст, когда агент закончит ход, и перезапущу сессию без накопившихся скиллов.");
+      expect(started.text).toBe("🧹 Сожму контекст, когда агент закончит ход, уберу накопившиеся скиллы и завершу сессию.");
       expect(started.disable_notification).toBe(true);
       const startedId = fake.lastMessageId;
       await pollUntil(runner, () => terminated(a));
       expect(compacted).toStrictEqual(["keep the plan"]);
       await windowEnds(a);
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
-      expect(summary.text).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k)");
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Сожму")));
+      expect(summary.text).toBe("🧹 Убраны скиллы: a, b\nСессия завершена.");
       expect(summary.disable_notification).toBe(false);
       // The summary takes the place of the "will compact" message.
       await waitFor(() => fake.callsOf("deleteMessage").length);
       expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
-      // The summary stands for the start notice.
-      await plugin(SID);
       await Bun.sleep(SETTLE_MS);
-      expect(sentText(t => t.startsWith("🚀"))).toBeUndefined();
+      expect(spawned).toEqual([]);
       expect(fake.callsOf("editMessageText")).toEqual([]);
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
       expect(backups(folder).length).toBe(1);
@@ -2143,7 +2139,7 @@ describe("commands", () => {
 
     test("a message during /cleanup waits and reaches the session started again", async () => {
       let alive = true;
-      const { a } = await liveSession(SKILLS, { isAlive: () => alive });
+      const { a, spawned } = await liveSession(SKILLS, { isAlive: () => alive });
       const { runner } = mod(SID);
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
@@ -2152,9 +2148,15 @@ describe("commands", () => {
       command("meanwhile");
       await Bun.sleep(SETTLE_MS);
       alive = false;
-      await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Сожму")));
+      expect(summary.text).toBe("🧹 Убраны скиллы: a, b\nСессия снова запущена: пришли сообщения из темы.");
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
       const w = await plugin(SID);
       expect((await w.next("inbound")).content).toBe("meanwhile");
+      // The summary stands for the start notice.
+      await Bun.sleep(SETTLE_MS);
+      expect(sentText(t => t.startsWith("🚀"))).toBeUndefined();
     });
 
     test("a failed compact leaves the window and the transcript alone", async () => {
@@ -2206,55 +2208,18 @@ describe("commands", () => {
       expect(spawned).toEqual([]);
     });
 
-    test("/stop during /cleanup still empties the skills but does not relaunch", async () => {
-      const { a, spawned, transcript } = await liveSession(SKILLS);
-      const h = held();
-      const { runner } = mod(SID, undefined, undefined, h.answer);
-      command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Сожму"));
-      command("/stop");
-      const noted = await waitFor(() => sentText(t => t.startsWith("⏹")));
-      expect(noted.text).toBe("⏹ После /cleanup сессию не запущу");
-      expect(noted.disable_notification).toBe(true);
-      h.release();
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
-      expect(summary.text).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k) Сессия остановлена.");
-      expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
-      await Bun.sleep(SETTLE_MS);
-      expect(spawned).toEqual([]);
-    });
-
-    test("a message after /stop during /cleanup starts the session again for it", async () => {
-      let alive = true;
-      const { a, spawned } = await liveSession(SKILLS, { isAlive: () => alive });
-      const { runner } = mod(SID);
-      command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Сожму"));
-      command("/stop");
-      await waitFor(() => sentText(t => t.startsWith("⏹ После")));
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      await waitFor(() => !hub.isConnected(SID));
-      command("meanwhile");
-      await Bun.sleep(SETTLE_MS);
-      alive = false;
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
-      expect(summary.text).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k)");
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
-    });
-
-    test("a second /stop during the compact ends the window without editing", async () => {
+    test("/stop during the compact ends the window at once, the transcript untouched", async () => {
       const { a, spawned, transcript, original, folder } = await liveSession(SKILLS);
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
       await reply(runner, t => t.startsWith("🧹 Сожму"));
+      const startedId = fake.lastMessageId;
       command("/stop");
-      await waitFor(() => sentText(t => t.startsWith("⏹ После")));
-      command("/stop");
+      const cancelled = await waitFor(() => sentText(t => t === "⏹ /cleanup отменена, скиллы не убраны"));
+      expect(cancelled.disable_notification).toBe(false);
+      await waitFor(() => fake.callsOf("deleteMessage").length);
+      expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
       await windowEnds(a);
       await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
       await Bun.sleep(SETTLE_MS);
@@ -2264,7 +2229,7 @@ describe("commands", () => {
       h.release();
     });
 
-    test("a second /stop during the compact does not hand held messages to the dying window", async () => {
+    test("/stop during the compact does not hand held messages to the dying window", async () => {
       const { a, spawned } = await liveSession(SKILLS);
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
@@ -2272,8 +2237,6 @@ describe("commands", () => {
       await reply(runner, t => t.startsWith("🧹 Сожму"));
       command("meanwhile");
       await heldForCleanup();
-      command("/stop");
-      await waitFor(() => sentText(t => t.startsWith("⏹ После")));
       command("/stop");
       await windowEnds(a);
       await waitFor(() => spawned.length);
@@ -2316,30 +2279,30 @@ describe("commands", () => {
       expect(a.messages.some(m => m.type === "inbound")).toBe(false);
     }, RUN_MS + WAIT_MS);
 
-    test("an unknown transcript format still relaunches with the warning", async () => {
+    test("an unknown transcript format leaves the session ended with the warning", async () => {
       const odd = JSON.stringify({ parentUuid: "p", type: "attachment", attachment: { type: "invoked_skills", names: ["x"] }, uuid: "u1", version: VERSION });
       const { a, spawned, transcript, original } = await liveSession([odd]);
       const { runner } = mod(SID);
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
-      expect(summary.text).toBe(`🧹 Контекст был 180k. ⚠️ Формат транскрипта изменился, скиллы не убраны (Claude Code ${VERSION})`);
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Сожму")));
+      expect(summary.text).toBe(`🧹 ⚠️ Формат транскрипта изменился, скиллы не убраны (Claude Code ${VERSION})\nСессия завершена.`);
+      await Bun.sleep(SETTLE_MS);
+      expect(spawned).toEqual([]);
       expect(readFileSync(transcript, "utf8")).toBe(original);
     });
 
-    test("nothing to remove says so and starts the session again", async () => {
+    test("nothing to remove reports completion and leaves the session ended", async () => {
       const { a, spawned } = await liveSession([]);
       const { runner } = mod(SID);
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
-      expect(summary.text).toBe("🧹 Контекст был 180k, скиллов в контексте не было");
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Сожму")));
+      expect(summary.text).toBe("🧹 Очистка выполнена\nСессия завершена.");
+      await Bun.sleep(SETTLE_MS);
+      expect(spawned).toEqual([]);
     });
 
     test("a second /cleanup and /run wait for the first", async () => {
@@ -2391,8 +2354,8 @@ describe("commands", () => {
       command("meanwhile");
       await Bun.sleep(SETTLE_MS);
       alive = false;
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
-      expect(summary.text).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k)");
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Сожму")));
+      expect(summary.text).toBe("🧹 Убраны скиллы: a, b");
       const window = must(w, "window");
       expect((await window.next("inbound")).content).toBe("meanwhile");
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
@@ -2523,19 +2486,17 @@ describe("commands", () => {
       h.release();
     });
 
-    test("a second /stop while the window ends after the compact changes nothing", async () => {
+    test("/stop while the window ends after the compact changes nothing", async () => {
       const { a, spawned, transcript } = await liveSession(SKILLS);
       const { runner } = mod(SID);
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
       command("/stop");
-      await waitFor(() => sentText(t => t.startsWith("⏹ После")));
-      command("/stop");
       await Bun.sleep(SETTLE_MS);
       expect(a.messages.filter(m => m.type === "terminate").length).toBe(1);
       await windowEnds(a);
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
-      expect(summary.text).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k) Сессия остановлена.");
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Сожму")));
+      expect(summary.text).toBe("🧹 Убраны скиллы: a, b\nСессия завершена.");
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
       await Bun.sleep(SETTLE_MS);
       expect(spawned).toEqual([]);
@@ -2559,7 +2520,7 @@ describe("commands", () => {
       expect(spawned).toEqual([]);
     });
 
-    test("a window that ends without naming its process is waited out, then cleaned and started again", async () => {
+    test("a window that ends without naming its process is waited out, then cleaned and left ended", async () => {
       // A pid would be waited for and found alive; without one the hub only waits a moment.
       const { a, spawned, transcript } = await liveSession(SKILLS, { isAlive: () => true, cleanupSettleMs: SETTLE_MS });
       const { runner } = mod(SID);
@@ -2567,15 +2528,15 @@ describe("commands", () => {
       await pollUntil(runner, () => terminated(a));
       await a.next("terminate");
       a.close();
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Контекст")));
-      expect(summary.text).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k)");
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Сожму")));
+      expect(summary.text).toBe("🧹 Убраны скиллы: a, b\nСессия завершена.");
       expect(log.lines.some(l => l.includes("the Claude Code process is unknown"))).toBe(true);
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
+      await Bun.sleep(SETTLE_MS);
+      expect(spawned).toEqual([]);
     });
 
-    test("a failed transcript edit says so loudly and still starts the session again", async () => {
+    test("a failed transcript edit says so loudly and leaves the session ended", async () => {
       const { a, spawned, transcript, original } = await liveSession(SKILLS, {
         cleanTranscript: async () => {
           throw new Error("disk");
@@ -2586,33 +2547,31 @@ describe("commands", () => {
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
       const warning = await waitFor(() => sentText(t => t.startsWith("⚠️ Скиллы")));
-      expect(warning.text).toBe("⚠️ Скиллы не убраны: disk");
+      expect(warning.text).toBe("⚠️ Скиллы не убраны: disk\nСессия завершена.");
       expect(warning.disable_notification).toBe(false);
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
+      await Bun.sleep(SETTLE_MS);
+      expect(spawned).toEqual([]);
       expect(readFileSync(transcript, "utf8")).toBe(original);
     });
   });
 });
 
 describe("cleanupSummary", () => {
-  const BEFORE = 180_000;
   const BACKUP = "x.cleanup-1.jsonl";
 
-  test("removed skills with their size, with and without the size before", () => {
+  test("removed skills are listed without sizes", () => {
     const r = { kind: "cleaned" as const, skills: [{ name: "a", chars: 4000 }, { name: "b", chars: 72_000 }], records: 2, backup: BACKUP };
-    expect(cleanupSummary(BEFORE, r)).toBe("🧹 Контекст был 180k, убраны скиллы: a, b (~19k)");
-    expect(cleanupSummary(undefined, r)).toBe("🧹 Убраны скиллы: a, b (~19k)");
+    expect(cleanupSummary(r)).toBe("🧹 Убраны скиллы: a, b");
   });
 
-  test("no skills, found or remembered, says there were none", () => {
-    expect(cleanupSummary(BEFORE, { kind: "nothing" })).toBe("🧹 Контекст был 180k, скиллов в контексте не было");
-    expect(cleanupSummary(undefined, { kind: "cleaned", skills: [], records: 1, backup: BACKUP })).toBe("🧹 Скиллов в контексте не было");
+  test("nothing to remove and empty skills both report completion", () => {
+    expect(cleanupSummary({ kind: "nothing" })).toBe("🧹 Очистка выполнена");
+    expect(cleanupSummary({ kind: "cleaned", skills: [], records: 1, backup: BACKUP })).toBe("🧹 Очистка выполнена");
   });
 
   test("an unknown format names the Claude Code version when it is known", () => {
-    expect(cleanupSummary(BEFORE, { kind: "format", version: "1.0.0" })).toBe("🧹 Контекст был 180k. ⚠️ Формат транскрипта изменился, скиллы не убраны (Claude Code)");
-    expect(cleanupSummary(undefined, { kind: "format" })).toBe("🧹 ⚠️ Формат транскрипта изменился, скиллы не убраны");
+    expect(cleanupSummary({ kind: "format", version: "1.0.0" })).toBe("🧹 ⚠️ Формат транскрипта изменился, скиллы не убраны (Claude Code)");
+    expect(cleanupSummary({ kind: "format" })).toBe("🧹 ⚠️ Формат транскрипта изменился, скиллы не убраны");
   });
 });
 
