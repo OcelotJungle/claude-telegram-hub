@@ -259,7 +259,10 @@ class Agent {
 
   private render(texts: Entry[], status: string): string {
     const m = this.meta;
-    const head = [`🤖 **${escapeMd(m?.agentType ?? "Субагент")}**`, ...[m?.description, m?.agentType === "codex-worker" ? undefined : m?.model].filter(s => s !== undefined && s !== "").map(s => escapeMd(s ?? ""))].join(" · ");
+    // The worker only relays: the model doing the work is Codex's.
+    const state = this.codexJob()?.state;
+    const model = state ? `Codex ${state.slug}/${state.effort}` : m?.agentType === "codex-worker" ? undefined : m?.model;
+    const head = [`🤖 **${escapeMd(m?.agentType ?? "Субагент")}**`, ...[m?.description, model].filter(s => s !== undefined && s !== "").map(s => escapeMd(s ?? ""))].join(" · ");
     return [`${head}\n${status}`, ...texts.map(e => `\`[${clock(e.at)}]\`${STARTS_WITH_BLOCK.test(e.text) ? "\n" : " "}${e.text}`)].join("\n\n");
   }
 
@@ -285,7 +288,7 @@ class Agent {
       if (this.status === "running" || this.isWaiting()) {
         const first = job.currentCommand?.trim().split("\n")[0];
         const command = first && first.length > MAX_COMMAND_CHARS ? `${first.slice(0, MAX_COMMAND_CHARS)}…` : first;
-        return `⏳ ${took} · Codex ${job.state.slug}/${job.state.effort} · ${acts}${command ? ` · \`${command.replaceAll("`", "'")}\`` : ""}${job.eventAt === undefined ? "" : ` · событие ${clock(job.eventAt)}`}`;
+        return `⏳ ${took} · ${acts}${command ? ` · \`${command.replaceAll("`", "'")}\`` : ""}${job.eventAt === undefined ? "" : ` · событие ${clock(job.eventAt)}`}`;
       }
       switch (this.status) {
         case "done":

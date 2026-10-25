@@ -94,7 +94,7 @@ describe("Codex cards", () => {
     s.start();
     s.write(assistant("m1", "codex job running"));
     s.tick();
-    expect(s.last()).toStartWith("🤖 **codex\\-worker** · Fix tests\n⏳ 0 с · Codex gpt-6.1-sol/high · 0 команд · событие 18:39");
+    expect(s.last()).toStartWith("🤖 **codex\\-worker** · Fix tests · Codex gpt\\-6\\.1\\-sol/high\n⏳ 0 с · 0 команд · событие 18:39");
     expect(s.last()).not.toContain("haiku");
     expect(s.last()).not.toContain("Inspecting the parser");
     expect(s.last()).not.toContain("codex job running");
@@ -149,7 +149,7 @@ describe("Codex cards", () => {
     s.tick();
     s.writeMeta();
     s.tick();
-    expect(s.last()).toContain("Codex gpt-6.1-sol/high");
+    expect(s.last()).toContain("Codex gpt\\-6\\.1\\-sol/high");
     expect(s.last()).toContain("Earlier event");
   });
 
@@ -235,7 +235,7 @@ describe("Codex cards", () => {
     s.attach("wait");
     s.write(assistant("summary", "codex job restored"));
     s.tick();
-    expect(s.last()).toContain("Codex gpt-6.1-sol/high");
+    expect(s.last()).toContain("Codex gpt\\-6\\.1\\-sol/high");
     expect(s.last()).not.toContain("codex job restored");
     expect(s.last()).not.toContain("Old event");
     expect(s.last()).not.toContain("old restart");
@@ -320,6 +320,8 @@ describe("Codex cards", () => {
     expect(s.last()).toContain("✅ готово за");
     s.tick(SETTLE_MS);
     expect(s.cards.at(-1)?.final).toBe(true);
+    // The closed card still tells which Codex model did the work.
+    expect(s.last()).toStartWith("🤖 **codex\\-worker** · Fix tests · Codex gpt\\-6\\.1\\-sol/high\n✅ готово за");
   });
 
   test.each(PLURAL_CASES)("%i completed commands use %s", (count, form) => {
@@ -425,12 +427,12 @@ describe("Codex cards", () => {
     s.state();
     s.events("not json\n" + line({ type: 123 }) + event("item.completed", { type: "agent_message", text: 123 }) + message("Valid message") + command("valid", "valid command", "item.started"));
     s.tick();
-    expect(s.last()).toContain("Codex gpt-6.1-sol/high");
+    expect(s.last()).toContain("Codex gpt\\-6\\.1\\-sol/high");
     expect(s.last()).toContain("Valid message");
     expect(s.last()).not.toContain("codex job fallback");
     s.rawState("{");
     s.tick();
-    expect(s.last()).toContain("Codex gpt-6.1-sol/high");
+    expect(s.last()).toContain("Codex gpt\\-6\\.1\\-sol/high");
   });
 
   test("ordinary agents do not read Codex events or filter their own text", () => {
