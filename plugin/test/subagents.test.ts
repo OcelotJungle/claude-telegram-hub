@@ -80,6 +80,29 @@ describe("SubagentWatcher", () => {
     expect(s.cards.at(-1)).toEqual({ id: "a1-0", final: true, text: done });
   });
 
+  test("the header shows the model and effort of the agent's latest answer, the launch alias until then", () => {
+    const s = setup();
+    s.w.start();
+    const write = s.agent("a1", { agentType: "Explore", description: "Find the parser", model: "opus" });
+    const answer = (id: string, model: string, effort?: string) =>
+      line({ type: "assistant", isSidechain: true, effort, message: { id, role: "assistant", model, content: [tool("Grep", { pattern: "x" })], stop_reason: "tool_use" } });
+    write(line({ type: "user", isSidechain: true, message: { role: "user", content: "Find it" } }));
+    write(assistant("m0", "tool_use", tool("Grep", { pattern: "x" })));
+    s.advance(SEND_EVERY_MS);
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · Find the parser · opus\n");
+    write(answer("m1", "claude-opus-5-5", "high"));
+    s.advance(SEND_EVERY_MS);
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · Find the parser · opus 5\\.5 high\n");
+    // Claude Code's own message does not change it; a new effort does.
+    write(answer("m2", "<synthetic>"));
+    write(answer("m3", "claude-haiku-4-5-20251001", "low"));
+    s.advance(SEND_EVERY_MS);
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · Find the parser · haiku 4\\.5 low\n");
+    write(answer("m4", "gpt-proxy"));
+    s.advance(SEND_EVERY_MS);
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · Find the parser · gpt\\-proxy\n");
+  });
+
   test("an agent that goes on after a turn end keeps its card", () => {
     const s = setup();
     s.w.start();

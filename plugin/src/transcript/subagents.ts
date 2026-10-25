@@ -39,6 +39,8 @@ const CONTINUED = "⬇️ продолжение ниже";
 const STARTS_WITH_BLOCK = /^(#{1,6} |[-*+] |\d+[.)] |>|```)/;
 const CLOCK_PAD = 2;
 const MAX_COMMAND_CHARS = 60;
+// claude-opus-5-5, claude-haiku-4-5-20251001: shown as "opus 5.5".
+const CLAUDE_MODEL = /^claude-([a-z]+)-(\d+)-(\d+)\b/;
 
 // A subagent's card as Markdown. final: its last version (the agent stopped,
 // or the card is full and continues in the next one).
@@ -70,6 +72,8 @@ type Env = {
 class Agent {
   private tailer: TranscriptTailer;
   private meta: Meta | undefined;
+  // The model and effort of the agent's latest answer, as "opus 5.5 high".
+  private model: string | undefined;
   private status: Status = "running";
   // The message whose records end the agent's run.
   private endMessage: string | undefined;
@@ -110,6 +114,7 @@ class Agent {
       fromStart,
       onRecord: rec => {
         this.idle = false;
+        this.model = recordModel(rec) ?? this.model;
         const discovery = discoverCodexJob(rec);
         const at = recordTime(rec) ?? env.now();
         const events = parseAgentRecord(rec);
@@ -261,7 +266,7 @@ class Agent {
     const m = this.meta;
     // The worker only relays: the model doing the work is Codex's.
     const state = this.codexJob()?.state;
-    const model = state ? `Codex ${state.slug}/${state.effort}` : m?.agentType === "codex-worker" ? undefined : m?.model;
+    const model = state ? `Codex ${state.slug}/${state.effort}` : m?.agentType === "codex-worker" ? undefined : (this.model ?? m?.model);
     const head = [`🤖 **${escapeMd(m?.agentType ?? "Субагент")}**`, ...[m?.description, model].filter(s => s !== undefined && s !== "").map(s => escapeMd(s ?? ""))].join(" · ");
     return [`${head}\n${status}`, ...texts.map(e => `\`[${clock(e.at)}]\`${STARTS_WITH_BLOCK.test(e.text) ? "\n" : " "}${e.text}`)].join("\n\n");
   }
@@ -384,6 +389,17 @@ export class SubagentWatcher {
       return [];
     }
   }
+}
+
+// The model and effort an assistant record was answered with, as "opus 5.5
+// high"; Claude Code's own messages carry the model "<synthetic>".
+function recordModel(rec: unknown): string | undefined {
+  const model = field(field(rec, "message"), "model");
+  if (field(rec, "type") !== "assistant" || typeof model !== "string" || !model || model.startsWith("<")) return undefined;
+  const [, family, major, minor] = model.match(CLAUDE_MODEL) ?? [];
+  const name = family && major && minor ? `${family} ${major}.${minor}` : model;
+  const effort = field(rec, "effort");
+  return typeof effort === "string" && effort ? `${name} ${effort}` : name;
 }
 
 // When a transcript record was written (ms), from its timestamp.
