@@ -153,10 +153,8 @@ export class CodexJob {
         this.commands++;
         this.running.delete(item.id);
       }
-    } else if (event.type === "item.completed" && item.text.trim()) {
-      const entry = { at, text: item.text };
-      if (item.type === "agent_message") this.pending = entry;
-      else this.entries.push(entry);
+    } else if (event.type === "item.completed" && item.type === "agent_message" && item.text.trim()) {
+      this.pending = { at, text: item.text };
     }
   }
 }

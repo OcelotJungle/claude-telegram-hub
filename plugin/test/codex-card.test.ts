@@ -87,7 +87,7 @@ describe("Codex cards", () => {
     };
   }
 
-  test("start result reads history, agent messages wait for the next event, reasoning is ordinary text", () => {
+  test("start result reads history and agent messages wait for a continuing event", () => {
     const s = setup();
     s.state();
     s.events(message("Inspecting the parser"));
@@ -98,11 +98,29 @@ describe("Codex cards", () => {
     expect(s.last()).not.toContain("haiku");
     expect(s.last()).not.toContain("Inspecting the parser");
     expect(s.last()).not.toContain("codex job running");
-    s.events(reasoning("Checking the boundary"));
+    s.events(message("Checking the boundary") + command("check", "check boundary", "item.started"));
     s.tick(MINUTE);
     expect(s.last()).toContain("`[18:39]` Inspecting the parser");
     expect(s.last()).toContain("`[18:40]` Checking the boundary");
     expect(s.last()).toContain("событие 18:40");
+  });
+
+  test("reasoning stays hidden, releases a held agent_message and updates event time", () => {
+    const s = setup();
+    s.state();
+    s.start();
+    s.events(reasoning("Hidden reasoning before message"));
+    s.tick();
+    expect(s.last()).not.toContain("Hidden reasoning before message");
+    expect(s.last()).toContain("событие 18:39");
+    s.events(message("Visible progress"));
+    s.tick();
+    expect(s.last()).not.toContain("Visible progress");
+    s.events(reasoning("Hidden reasoning after message"));
+    s.tick(MINUTE);
+    expect(s.last()).toContain("`[18:39]` Visible progress");
+    expect(s.last()).toContain("событие 18:40");
+    expect(s.cards.every(card => !card.text.includes("Hidden reasoning"))).toBe(true);
   });
 
   test.each(["reply", "attach"])("%s follows from the end, ignores old notes, and keeps the captured boundary until meta arrives", verb => {
@@ -111,14 +129,14 @@ describe("Codex cards", () => {
     s.events(message("Old output") + command("old", "old command"));
     s.attach(verb);
     s.tick();
-    s.events(message("New output") + reasoning("New reasoning") + command("new", "new command"));
+    s.events(message("New output") + message("More output") + command("new", "new command"));
     s.state({ notes: ["17:01 old restart", "18:40 restart 1/3: new attempt"] });
     s.writeMeta();
     s.tick(MINUTE);
     expect(s.last()).not.toContain("Old output");
     expect(s.last()).not.toContain("old restart");
     expect(s.last()).toContain("New output");
-    expect(s.last()).toContain("New reasoning");
+    expect(s.last()).toContain("More output");
     expect(s.last()).toContain("1 команда");
     expect(s.last()).toContain("`[18:40]` 🔁 restart 1/3: new attempt");
   });
@@ -126,7 +144,7 @@ describe("Codex cards", () => {
   test("discovery via start result survives late meta", () => {
     const s = setup(false);
     s.state();
-    s.events(reasoning("Earlier event"));
+    s.events(message("Earlier event") + command("early", "early command", "item.started"));
     s.start();
     s.tick();
     s.writeMeta();
@@ -144,7 +162,7 @@ describe("Codex cards", () => {
     expect(s.last()).not.toContain("Codex final report");
     s.events(event("turn.completed"));
     s.tick();
-    s.events(reasoning("Another run"));
+    s.events(message("Another run") + command("another", "another command", "item.started"));
     s.tick();
     expect(s.cards.every(card => !card.text.includes("Codex final report"))).toBe(true);
   });
@@ -160,7 +178,7 @@ describe("Codex cards", () => {
       event("item.updated", { type: "todo_list", items: [] }),
       line({ type: "error", message: "Retrying" }),
       event("turn.completed"),
-      reasoning("Another turn"),
+      message("Another turn") + command("another", "another command", "item.started"),
     ]) {
       s.events(value);
       s.tick();
@@ -211,7 +229,7 @@ describe("Codex cards", () => {
     const s = setup();
     s.state({ notes: ["17:01 old restart"] });
     s.start();
-    s.events(reasoning("Old event"));
+    s.events(message("Old event") + command("old", "old command", "item.started"));
     s.watcher.stop();
     s.watcher.start();
     s.attach("wait");
@@ -221,7 +239,7 @@ describe("Codex cards", () => {
     expect(s.last()).not.toContain("codex job restored");
     expect(s.last()).not.toContain("Old event");
     expect(s.last()).not.toContain("old restart");
-    s.events(reasoning("New event") + command("new", "new command"));
+    s.events(message("New event") + command("new", "new command"));
     s.attach("wait");
     s.tick();
     expect(s.last()).toContain("New event");
@@ -235,7 +253,7 @@ describe("Codex cards", () => {
     const s = setup();
     s.state();
     s.start();
-    s.events(reasoning("Live Codex text"));
+    s.events(message("Live Codex text") + command("live", "live command", "item.started"));
     s.tick();
     for (let index = 0; index < SUMMARY_COUNT; index++) {
       s.write(assistant(`summary-${index}`, `codex job ${"x".repeat(MAX_CARD_TEXT)}`));
@@ -405,10 +423,10 @@ describe("Codex cards", () => {
     s.tick();
     expect(s.last()).toContain("codex job fallback");
     s.state();
-    s.events("not json\n" + line({ type: 123 }) + event("item.completed", { type: "agent_message", text: 123 }) + reasoning("Valid reasoning"));
+    s.events("not json\n" + line({ type: 123 }) + event("item.completed", { type: "agent_message", text: 123 }) + message("Valid message") + command("valid", "valid command", "item.started"));
     s.tick();
     expect(s.last()).toContain("Codex gpt-6.1-sol/high");
-    expect(s.last()).toContain("Valid reasoning");
+    expect(s.last()).toContain("Valid message");
     expect(s.last()).not.toContain("codex job fallback");
     s.rawState("{");
     s.tick();
@@ -420,7 +438,7 @@ describe("Codex cards", () => {
     s.writeMeta("Explore");
     s.state();
     s.start();
-    s.events(reasoning("Codex event"));
+    s.events(message("Codex event") + command("codex", "codex command", "item.started"));
     s.write(assistant("summary", "codex job worker text"));
     s.tick();
     expect(s.last()).toContain("haiku");
@@ -432,9 +450,9 @@ describe("Codex cards", () => {
     const s = setup();
     s.state();
     s.start();
-    s.events(reasoning("Long old reasoning ".repeat(COMMAND_LIMIT)));
+    s.events(message("Long old message ".repeat(COMMAND_LIMIT)) + command("old", "old command", "item.started"));
     s.tick();
-    s.events(reasoning("After shrink"), true);
+    s.events(message("After shrink") + command("new", "new command", "item.started"), true);
     s.tick();
     expect(s.last()).toContain("After shrink");
   });
