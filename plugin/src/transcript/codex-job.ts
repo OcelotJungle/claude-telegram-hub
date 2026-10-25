@@ -8,7 +8,8 @@ import { TranscriptTailer } from "./tail.ts";
 const JOB = "\\d{8}-\\d{6}-[0-9a-f]+";
 const STARTED = new RegExp(`\\bjob (${JOB}) started:`);
 const ATTACHED = new RegExp(`(?:^|[\\s/\\\\\"'])codex-run\\.py[\"']?\\s+(?:reply|attach|wait)\\s+(${JOB})\\b`);
-const WORKER_TEXT = new RegExp(`^(?:codex job |job ${JOB} (?:started|resumed with the reply))`);
+// The worker may capitalise the line it relays: "Job … started:".
+const WORKER_TEXT = new RegExp(`^(?:codex job |job ${JOB} (?:started|resumed with the reply))`, "i");
 const NOTE = /^([01]\d|2[0-3]):([0-5]\d)\s+(.+)$/;
 const FAILURE_STATUSES = new Set(["failed", "orphaned", "limit", "cancelled"]);
 

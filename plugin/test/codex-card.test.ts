@@ -319,11 +319,13 @@ describe("Codex cards", () => {
     s.write(assistant("summary", "codex job interim"));
     s.write(assistant("launch", `job ${JOB} started: slug`));
     s.write(assistant("resume", `job ${JOB} resumed with the reply`));
+    s.write(assistant("relayed", `Job ${JOB} started: gpt-6-luna / high\n\nWaiting for the job to finish.`));
     s.write(assistant("normal", "Worker explanation"));
     s.tick();
     expect(s.last()).not.toContain("codex job interim");
     expect(s.last()).not.toContain("started:");
     expect(s.last()).not.toContain("resumed with");
+    expect(s.last()).not.toContain("Waiting for the job");
     expect(s.last()).toContain("Worker explanation");
     // Multiple records of the final message share its message id and turn end.
     s.write(assistant("final", "codex job final report", "end_turn"));
