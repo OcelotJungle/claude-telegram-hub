@@ -41,9 +41,6 @@ const CONTINUED = "⬇️ продолжение ниже";
 const STARTS_WITH_BLOCK = /^(#{1,6} |[-*+] |\d+[.)] |>|```)/;
 const CLOCK_PAD = 2;
 const MAX_COMMAND_CHARS = 60;
-// A codex-worker task named after Codex, as "Codex Sol review of spec": the
-// card's first line names Codex already.
-const CODEX_PREFIX = /^codex\b(?:\s+(?:luna|sol|astra|gpt-[\w.-]+))?(?:\s+(?:low|medium|high|xhigh|max|ultra)\b)?\s*[:·—–-]?\s*/i;
 
 // A subagent's card as Markdown. final: its last version (the agent stopped,
 // or the card is full and continues in the next one).
@@ -155,7 +152,7 @@ class Agent {
     this.meta ??= this.readMeta();
     this.tailer.pollNow();
     if (this.sealed) return;
-    if (this.meta?.agentType === "codex-worker" && this.codex) {
+    if (this.meta?.agentType === "codex" && this.codex) {
       const entries = this.codex.poll();
       if (this.codex.state) {
         this.seen = true;
@@ -276,19 +273,18 @@ class Agent {
     const state = this.codexJob()?.state;
     const model = state
       ? [this.env.versions.label(codexModel(state.slug)), state.effort]
-      : m?.agentType === "codex-worker"
+      : m?.agentType === "codex"
         ? []
         : this.model
           ? [this.env.versions.label(this.model.model), this.model.effort]
           : [m?.model];
     const head = [`🤖 **${escapeMd(m?.agentType ?? "Субагент")}**`, ...model.filter((s): s is string => !!s).map(escapeMd)].join(" · ");
-    const description = m?.agentType === "codex-worker" && m.description ? codexTask(m.description) : m?.description;
-    const task = description ? `${escapeMd(description)}\n` : "";
+    const task = m?.description ? `${escapeMd(m.description)}\n` : "";
     return [`${head}\n${task}${status}`, ...texts.map(e => `\`[${clock(e.at)}]\`${STARTS_WITH_BLOCK.test(e.text) ? "\n" : " "}${e.text}`)].join("\n\n");
   }
 
   private codexJob(): CodexJob | undefined {
-    return this.meta?.agentType === "codex-worker" && this.codex?.state ? this.codex : undefined;
+    return this.meta?.agentType === "codex" && this.codex?.state ? this.codex : undefined;
   }
 
   private statusLine(): string {
@@ -407,12 +403,6 @@ export class SubagentWatcher {
       return [];
     }
   }
-}
-
-// A codex-worker task without the Codex model in front of it.
-function codexTask(description: string): string {
-  const rest = description.replace(CODEX_PREFIX, "");
-  return rest ? rest.charAt(0).toUpperCase() + rest.slice(1) : description;
 }
 
 // When a transcript record was written (ms), from its timestamp.
