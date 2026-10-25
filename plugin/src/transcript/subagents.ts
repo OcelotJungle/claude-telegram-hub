@@ -18,7 +18,7 @@ const SEND_EVERY_MS = 3000;
 // goes on within this long keeps its card; its card is closed only after it.
 export const SETTLE_MS = 120_000;
 // An agent that ended its turn with a background task of its own running
-// (Bash, Monitor) is waiting for its notification, not done: its card stays
+// (Bash, Monitor, Agent) is waiting for its notification, not done: its card stays
 // open this long, and is closed after it.
 export const WAIT_MAX_MS = 60 * 60_000;
 // One text of a subagent in its card is cut to this.

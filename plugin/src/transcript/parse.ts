@@ -41,7 +41,7 @@ export type TranscriptEvent =
   // A background task (a subagent among them) stopped: completed, failed or
   // killed. taskId of a subagent is its agent id.
   | { kind: "task_status"; taskId: string; status: string }
-  // A subagent started a background task (Bash, Monitor): it will be woken
+  // A subagent started a background task (Bash, Monitor, Agent): it will be woken
   // when the task ends.
   | { kind: "task_started"; taskId: string }
   // Topic messages that reached the agent's context: Telegram message ids.
@@ -97,7 +97,9 @@ export function parseAgentRecord(r: unknown): TranscriptEvent[] {
 // notification has no <status>: the Monitor goes on.
 function parseAgentUser(r: Rec): TranscriptEvent[] {
   const res = r.toolUseResult;
-  const started = field(res, "backgroundTaskId") ?? field(res, "taskId");
+  // A background agent's notification has its agent id as the task id.
+  const agent = field(res, "isAsync") === true ? field(res, "agentId") : undefined;
+  const started = field(res, "backgroundTaskId") ?? field(res, "taskId") ?? agent;
   if (typeof started === "string" && started) return [{ kind: "task_started", taskId: started }];
   // TaskStop's result.
   const stopped = field(res, "task_id");

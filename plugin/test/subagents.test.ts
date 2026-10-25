@@ -125,6 +125,17 @@ describe("SubagentWatcher", () => {
       expect(s.cards.some(c => c.final)).toBe(false);
     });
 
+    test("a background agent of its own is a task it waits for", () => {
+      const s = setup();
+      s.w.start();
+      const write = s.agent("a1");
+      write(assistant("m1", "tool_use", tool("Agent", { description: "Review", prompt: "Review it", run_in_background: true })));
+      write(line({ type: "user", isSidechain: true, message: { role: "user", content: [{ type: "tool_result", content: [{ type: "text", text: "Async agent launched successfully." }] }] }, toolUseResult: { isAsync: true, status: "async_launched", agentId: "ag7", description: "Review" } }));
+      write(assistant("m2", "end_turn", text("Waiting for the review")));
+      s.advance(SETTLE_MS + MINUTE);
+      expect(s.cards.at(-1)).toMatchObject({ final: false, text: expect.stringContaining("⏸ ждёт фоновую задачу") });
+    });
+
     test("the waiting time goes on like a running card's", () => {
       const { s } = waiting();
       const sent = s.cards.length;
