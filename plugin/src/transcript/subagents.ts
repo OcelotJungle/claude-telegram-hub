@@ -2,11 +2,13 @@ import type { Logger } from "../shared/log.ts";
 import type { TranscriptEvent } from "./parse.ts";
 
 import { readdirSync, readFileSync } from "fs";
+import { homedir } from "os";
 import { join } from "path";
 import { z } from "zod";
 import { field } from "../shared/guards.ts";
 import { nullLogger } from "../shared/log.ts";
 import { toTelegram } from "../shared/markdown.ts";
+import { CodexJob, discoverCodexJob, isCodexWorkerSummary } from "./codex-job.ts";
 import { parseAgentRecord } from "./parse.ts";
 import { TranscriptTailer } from "./tail.ts";
 
@@ -36,6 +38,7 @@ const CONTINUED = "⬇️ продолжение ниже";
 // gets its time on a line of its own, so the block stays one.
 const STARTS_WITH_BLOCK = /^(#{1,6} |[-*+] |\d+[.)] |>|```)/;
 const CLOCK_PAD = 2;
+const MAX_COMMAND_CHARS = 60;
 
 // A subagent's card as Markdown. final: its last version (the agent stopped,
 // or the card is full and continues in the next one).
@@ -60,6 +63,7 @@ type Env = {
   now(): number;
   sendEveryMs: number;
   log: Logger;
+  codexJobsDir: string;
 };
 
 // One subagent: its status and texts, in cards of at most one message each.
@@ -88,6 +92,11 @@ class Agent {
   private idle = false;
   private lastSent = 0;
   private sentText = "";
+  private codex: CodexJob | undefined;
+  private codexStatus: string | undefined;
+  private finalMessages = new Set<string>();
+  // Until the job becomes available, summaries stay visible as a fallback.
+  private workerSummaries = new Set<Entry>();
 
   constructor(
     readonly id: string,
@@ -101,8 +110,15 @@ class Agent {
       fromStart,
       onRecord: rec => {
         this.idle = false;
+        const discovery = discoverCodexJob(rec);
         const at = recordTime(rec) ?? env.now();
-        for (const ev of parseAgentRecord(rec)) this.feed(ev, at);
+        const events = parseAgentRecord(rec);
+        // Split final messages carry their turn end alongside each text block.
+        for (const ev of events) if (ev.kind === "turn_end") this.finalMessages.add(ev.messageId);
+        for (const ev of events) this.feed(ev, at);
+        if (discovery && this.codex?.discovery.id !== discovery.id) {
+          this.codex = new CodexJob(discovery, env.codexJobsDir, env.now, env.log);
+        }
       },
       onIdle: () => {
         this.idle = true;
@@ -123,9 +139,26 @@ class Agent {
   }
 
   tick(): void {
-    this.tailer.pollNow();
     this.meta ??= this.readMeta();
+    this.tailer.pollNow();
     if (this.sealed) return;
+    if (this.meta?.agentType === "codex-worker" && this.codex) {
+      const entries = this.codex.poll();
+      if (this.codex.state) {
+        this.seen = true;
+        if (this.workerSummaries.size) {
+          this.texts = this.texts.filter(entry => !this.workerSummaries.has(entry));
+          this.workerSummaries.clear();
+        }
+      }
+      const state = this.codex.state;
+      const status = state ? JSON.stringify([state.status, state.slug, state.effort, this.codex.commands, this.codex.currentCommand, this.codex.eventAt]) : undefined;
+      if (entries.length || status !== this.codexStatus) this.dirty = true;
+      this.codexStatus = status;
+      for (const entry of entries) {
+        this.addText(entry.text, entry.at);
+      }
+    }
     const waiting = this.isWaiting();
     const stopped = this.status !== "running" && !waiting;
     const final = this.status !== "running" && (this.certain || this.env.now() - (this.ended ?? 0) >= (this.tasks.size ? WAIT_MAX_MS : SETTLE_MS));
@@ -167,8 +200,12 @@ class Agent {
     }
     this.seen = true;
     this.dirty = true;
-    if (ev.kind === "text") this.addText(ev.text, at);
-    else if (ev.kind === "tool_use") {
+    if (ev.kind === "text") {
+      const summary = isCodexWorkerSummary(ev.text) && !this.finalMessages.has(ev.messageId);
+      if (this.codexJob() && summary) return;
+      const entry = this.addText(ev.text, at);
+      if (summary) this.workerSummaries.add(entry);
+    } else if (ev.kind === "tool_use") {
       this.tools++;
       this.lastTool = ev.detail ? `${ev.name} ${ev.detail}` : ev.name;
       // A subagent that hands its report back stops there, with no turn end
@@ -177,16 +214,18 @@ class Agent {
     } else this.finish("done", ev.messageId);
   }
 
-  private addText(t: string, at: number): void {
+  private addText(t: string, at: number): Entry {
     const trimmed = t.trim();
     const entry = { at, text: trimmed.length > MAX_CARD_TEXT ? `${trimmed.slice(0, MAX_CARD_TEXT)}…` : trimmed };
     if (this.texts.length && toTelegram(this.render([...this.texts, entry], this.statusLine())).text.length > MAX_CARD) {
       if (this.shown) this.env.send({ id: this.cardId(), text: this.render(this.texts, CONTINUED), final: true });
       this.part++;
       this.texts = [];
+      this.workerSummaries.clear();
       this.shown = false;
     }
     this.texts.push(entry);
+    return entry;
   }
 
   // The agent went on before its card closed: the same run, the same card.
@@ -209,6 +248,9 @@ class Agent {
     this.ended = undefined;
     this.tools = 0;
     this.lastTool = undefined;
+    this.codex = undefined;
+    this.codexStatus = undefined;
+    this.workerSummaries.clear();
   }
 
   private cardId(): string {
@@ -217,13 +259,44 @@ class Agent {
 
   private render(texts: Entry[], status: string): string {
     const m = this.meta;
-    const head = [`🤖 **${escapeMd(m?.agentType ?? "Субагент")}**`, ...[m?.description, m?.model].filter(s => s !== undefined && s !== "").map(s => escapeMd(s ?? ""))].join(" · ");
+    const head = [`🤖 **${escapeMd(m?.agentType ?? "Субагент")}**`, ...[m?.description, m?.agentType === "codex-worker" ? undefined : m?.model].filter(s => s !== undefined && s !== "").map(s => escapeMd(s ?? ""))].join(" · ");
     return [`${head}\n${status}`, ...texts.map(e => `\`[${clock(e.at)}]\`${STARTS_WITH_BLOCK.test(e.text) ? "\n" : " "}${e.text}`)].join("\n\n");
   }
 
+  private codexJob(): CodexJob | undefined {
+    return this.meta?.agentType === "codex-worker" && this.codex?.state ? this.codex : undefined;
+  }
+
   private statusLine(): string {
-    if (this.isWaiting()) return `⏸ ждёт фоновую задачу · ${duration(this.env.now() - (this.ended ?? this.env.now()))}`;
     const took = duration((this.ended ?? this.env.now()) - this.started);
+    const job = this.codexJob();
+    if (job?.state) {
+      const acts = `${job.commands} ${plural(job.commands, "команда", "команды", "команд")}`;
+      switch (job.state.status) {
+        case "question":
+          return "❓ Codex ждёт ответа";
+        case "failed":
+        case "orphaned":
+        case "limit":
+          return `❌ ошибка через ${took} · ${acts}`;
+        case "cancelled":
+          return `⏹ остановлен через ${took} · ${acts}`;
+      }
+      if (this.status === "running" || this.isWaiting()) {
+        const first = job.currentCommand?.trim().split("\n")[0];
+        const command = first && first.length > MAX_COMMAND_CHARS ? `${first.slice(0, MAX_COMMAND_CHARS)}…` : first;
+        return `⏳ ${took} · Codex ${job.state.slug}/${job.state.effort} · ${acts}${command ? ` · \`${command.replaceAll("`", "'")}\`` : ""}${job.eventAt === undefined ? "" : ` · событие ${clock(job.eventAt)}`}`;
+      }
+      switch (this.status) {
+        case "done":
+          return `✅ готово за ${took} · ${acts}`;
+        case "failed":
+          return `❌ ошибка через ${took} · ${acts}`;
+        case "stopped":
+          return `⏹ остановлен через ${took} · ${acts}`;
+      }
+    }
+    if (this.isWaiting()) return `⏸ ждёт фоновую задачу · ${duration(this.env.now() - (this.ended ?? this.env.now()))}`;
     const acts = `${this.tools} ${plural(this.tools, "действие", "действия", "действий")}`;
     switch (this.status) {
       case "running":
@@ -266,6 +339,7 @@ export class SubagentWatcher {
       sendEveryMs?: number;
       now?(): number;
       log?: Logger;
+      codexJobsDir?: string;
     },
   ) {
     this.env = {
@@ -274,6 +348,7 @@ export class SubagentWatcher {
       now: opts.now ?? Date.now,
       sendEveryMs: opts.sendEveryMs ?? SEND_EVERY_MS,
       log: opts.log ?? nullLogger,
+      codexJobsDir: opts.codexJobsDir ?? join(homedir(), ".claude", "codex-jobs"),
     };
   }
 
