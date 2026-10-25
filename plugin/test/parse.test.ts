@@ -220,6 +220,23 @@ describe("user records", () => {
     const blocks = { ...rec, message: { role: "user", content: [{ type: "text", text: content.replace("completed", "killed") }] } };
     expect(parseRecord(blocks)).toEqual([{ kind: "task_status", taskId: "a1b2c3", status: "killed" }]);
   });
+
+  test("an agent that stopped to wait for its own background work has not stopped", () => {
+    // Claude Code 2.1.x writes this each time a background agent ends a turn with a task of its own still running.
+    const content = [
+      "<task-notification>",
+      "<task-id>a1b2c3</task-id>",
+      "<status>completed</status>",
+      '<summary>Agent "Dev run" is waiting on its own background work</summary>',
+      "<note>This agent stopped with background work of its own still running. It may resume on its own when that work completes or reports, and the same task-id notifies again if it does; the result below may be interim.</note>",
+      "<result>This agent has not reported yet.</result>",
+      "</task-notification>",
+    ].join("\n");
+    const rec = { ...userBase, origin: { kind: "task-notification" }, message: { role: "user", content } };
+    expect(parseRecord(rec)).toEqual([]);
+    const queued = { type: "attachment", attachment: { type: "queued_command", prompt: content, commandMode: "task-notification", origin: { kind: "task-notification" } } };
+    expect(parseRecord(queued)).toEqual([]);
+  });
 });
 
 describe("topic messages reaching the agent", () => {

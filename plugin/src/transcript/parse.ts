@@ -15,6 +15,9 @@ const CHANNEL_MESSAGE_ID = /<channel\b[^>]*\bmessage_id="(\d+)"/g;
 const INTERRUPTED = /^\[Request interrupted by user\b/;
 // How the result of a TaskStop call begins.
 const TASK_STOPPED = "Successfully stopped task";
+// The note of a notification Claude Code writes each time a background agent
+// ends a turn with a task of its own still running: the agent goes on.
+const AGENT_WAITING = /<note>[^<]*background work of its own still running/;
 // The model name of messages Claude Code writes itself.
 const SYNTHETIC_MODEL = "<synthetic>";
 
@@ -165,9 +168,10 @@ function toolDetail(input: unknown): string | undefined {
 
 // Claude Code tells the agent a background task stopped with a prompt
 // holding a <task-notification>: a prompt of its own when the agent is idle,
-// a queued command absorbed into the running turn otherwise.
+// a queued command absorbed into the running turn otherwise. A background
+// agent waiting for its own task is told about as completed too, with a note.
 function taskStatus(text: string): TranscriptEvent[] {
-  if (!text.includes("<task-notification>")) return [];
+  if (!text.includes("<task-notification>") || AGENT_WAITING.test(text)) return [];
   const taskId = text.match(/<task-id>([^<]+)<\/task-id>/)?.[1];
   const status = text.match(/<status>([^<]+)<\/status>/)?.[1];
   return taskId && status ? [{ kind: "task_status", taskId: taskId.trim(), status: status.trim() }] : [];
