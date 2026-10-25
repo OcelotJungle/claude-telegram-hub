@@ -3,6 +3,7 @@ import type { Card } from "../src/transcript/subagents.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
+import { ModelVersions } from "../src/transcript/model-versions.ts";
 import { MAX_CARD, SETTLE_MS, SubagentWatcher, WAIT_MAX_MS } from "../src/transcript/subagents.ts";
 import { tempDir } from "./helpers.ts";
 
@@ -24,7 +25,7 @@ describe("SubagentWatcher", () => {
     for (const w of watchers.splice(0)) w.stop();
   });
 
-  function setup(opts: { canStart?: () => boolean } = {}) {
+  function setup(opts: { canStart?: () => boolean; versions?: ModelVersions } = {}) {
     const dir = join(tempDir(), "subagents");
     const cards: Card[] = [];
     let now = START;
@@ -34,6 +35,7 @@ describe("SubagentWatcher", () => {
       canStart: opts.canStart ?? (() => true),
       intervalMs: 60_000,
       now: () => now,
+      ...(opts.versions ? { versions: opts.versions } : {}),
     });
     watchers.push(w);
     return {
@@ -92,15 +94,27 @@ describe("SubagentWatcher", () => {
     expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · opus\nFind the parser\n");
     write(answer("m1", "claude-opus-5-5", "high"));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · opus 5\\.5 · high\nFind the parser\n");
+    // The newest version seen of its line: the line alone.
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · opus · high\nFind the parser\n");
     // Claude Code's own message does not change it; a new effort does.
     write(answer("m2", "<synthetic>"));
     write(answer("m3", "claude-haiku-4-5-20251001", "low"));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · haiku 4\\.5 · low\nFind the parser\n");
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · haiku · low\nFind the parser\n");
     write(answer("m4", "gpt-proxy"));
     s.advance(SEND_EVERY_MS);
     expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · gpt\\-proxy\nFind the parser\n");
+  });
+
+  test("a model older than the newest seen of its line keeps its version", () => {
+    const versions = new ModelVersions();
+    versions.see({ kind: "claude", line: "haiku", version: "5.5" });
+    const s = setup({ versions });
+    s.w.start();
+    const write = s.agent("a1", { agentType: "Explore", description: "Find the parser" });
+    write(line({ type: "assistant", isSidechain: true, effort: "low", message: { id: "m1", role: "assistant", model: "claude-haiku-4-5-20251001", content: [tool("Grep", { pattern: "x" })], stop_reason: "tool_use" } }));
+    s.advance(SEND_EVERY_MS);
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · haiku 4\\.5 · low\n");
   });
 
   test("an agent that goes on after a turn end keeps its card", () => {

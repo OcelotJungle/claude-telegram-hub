@@ -15,6 +15,7 @@ import { BYTES_PER_MB, MAX_CAPTION, MAX_UPLOAD } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { enableResult } from "../shared/protocol-schema.ts";
 import { transcriptPathFor } from "../transcript/locate.ts";
+import { ModelVersions, recordModel } from "../transcript/model-versions.ts";
 import { parseRecord } from "../transcript/parse.ts";
 import { Relay } from "../transcript/relay.ts";
 import { SubagentWatcher } from "../transcript/subagents.ts";
@@ -146,6 +147,8 @@ export class PluginCore {
   private transcriptPath: string;
   private tailer: TranscriptTailer | undefined;
   private subagents: SubagentWatcher | undefined;
+  // The newest model versions seen, so cards name a current model by its line.
+  private versions: ModelVersions;
   private relay: Relay;
   private client: HubClient;
   private titles: Titles = {};
@@ -170,6 +173,7 @@ export class PluginCore {
     this.sessionId = opts.sessionId;
     this.cwd = opts.cwd;
     this.log = opts.log;
+    this.versions = new ModelVersions(join(opts.stateDir, "model-versions.json"), opts.log);
     this.now = opts.now ?? Date.now;
     this.relay = new Relay({ isOwnTool, onFinalClose: kind => this.turnClosed(kind), now: this.now });
     this.transcriptPath = transcriptPathFor(opts.sessionId, opts.cwd, opts.configDir);
@@ -349,11 +353,15 @@ export class PluginCore {
       intervalMs: this.opts.tailIntervalMs,
       sendEveryMs: this.opts.cardEveryMs,
       log: this.log,
+      versions: this.versions,
     });
     this.subagents.start();
   }
 
   private onRecord(rec: unknown): void {
+    // The session's own answers tell a new model version as well.
+    const answered = recordModel(rec);
+    if (answered) this.versions.see(answered.model);
     for (const ev of parseRecord(rec).flatMap(e => this.settleApiError(e))) {
       this.flush(this.relay.feed(ev));
       if (ev.kind === "terminal_input") this.lastInputAt = this.now();

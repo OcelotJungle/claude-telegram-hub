@@ -1,4 +1,5 @@
 import type { Logger } from "../shared/log.ts";
+import type { Model } from "./model-versions.ts";
 import type { TranscriptEvent } from "./parse.ts";
 
 import { readdirSync, readFileSync } from "fs";
@@ -9,6 +10,7 @@ import { field } from "../shared/guards.ts";
 import { nullLogger } from "../shared/log.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { CodexJob, discoverCodexJob, isCodexWorkerSummary } from "./codex-job.ts";
+import { codexModel, ModelVersions, recordModel } from "./model-versions.ts";
 import { parseAgentRecord } from "./parse.ts";
 import { TranscriptTailer } from "./tail.ts";
 
@@ -39,8 +41,6 @@ const CONTINUED = "⬇️ продолжение ниже";
 const STARTS_WITH_BLOCK = /^(#{1,6} |[-*+] |\d+[.)] |>|```)/;
 const CLOCK_PAD = 2;
 const MAX_COMMAND_CHARS = 60;
-// claude-opus-5-5, claude-haiku-4-5-20251001: shown as "opus 5.5".
-const CLAUDE_MODEL = /^claude-([a-z]+)-(\d+)-(\d+)\b/;
 // A codex-worker task named after Codex, as "Codex Sol review of spec": the
 // card's first line names Codex already.
 const CODEX_PREFIX = /^codex\b(?:\s+(?:luna|sol|astra|gpt-[\w.-]+))?(?:\s+(?:low|medium|high|xhigh|max|ultra)\b)?\s*[:·—–-]?\s*/i;
@@ -69,14 +69,15 @@ type Env = {
   sendEveryMs: number;
   log: Logger;
   codexJobsDir: string;
+  versions: ModelVersions;
 };
 
 // One subagent: its status and texts, in cards of at most one message each.
 class Agent {
   private tailer: TranscriptTailer;
   private meta: Meta | undefined;
-  // The model and effort of the agent's latest answer, as "opus 5.5 high".
-  private model: string | undefined;
+  // The model and effort of the agent's latest answer.
+  private model: { model: Model; effort: string | undefined } | undefined;
   private status: Status = "running";
   // The message whose records end the agent's run.
   private endMessage: string | undefined;
@@ -117,7 +118,11 @@ class Agent {
       fromStart,
       onRecord: rec => {
         this.idle = false;
-        this.model = recordModel(rec) ?? this.model;
+        const answered = recordModel(rec);
+        if (answered) {
+          this.model = answered;
+          env.versions.see(answered.model);
+        }
         const discovery = discoverCodexJob(rec);
         const at = recordTime(rec) ?? env.now();
         const events = parseAgentRecord(rec);
@@ -269,8 +274,14 @@ class Agent {
     const m = this.meta;
     // The worker only relays: the model doing the work is Codex's.
     const state = this.codexJob()?.state;
-    const model = state ? `Codex ${state.slug} · ${state.effort}` : m?.agentType === "codex-worker" ? undefined : (this.model ?? m?.model);
-    const head = [`🤖 **${escapeMd(m?.agentType ?? "Субагент")}**`, ...(model ? [escapeMd(model)] : [])].join(" · ");
+    const model = state
+      ? [this.env.versions.label(codexModel(state.slug)), state.effort]
+      : m?.agentType === "codex-worker"
+        ? []
+        : this.model
+          ? [this.env.versions.label(this.model.model), this.model.effort]
+          : [m?.model];
+    const head = [`🤖 **${escapeMd(m?.agentType ?? "Субагент")}**`, ...model.filter((s): s is string => !!s).map(escapeMd)].join(" · ");
     const description = m?.agentType === "codex-worker" && m.description ? codexTask(m.description) : m?.description;
     const task = description ? `${escapeMd(description)}\n` : "";
     return [`${head}\n${task}${status}`, ...texts.map(e => `\`[${clock(e.at)}]\`${STARTS_WITH_BLOCK.test(e.text) ? "\n" : " "}${e.text}`)].join("\n\n");
@@ -353,6 +364,7 @@ export class SubagentWatcher {
       now?(): number;
       log?: Logger;
       codexJobsDir?: string;
+      versions?: ModelVersions;
     },
   ) {
     this.env = {
@@ -362,6 +374,7 @@ export class SubagentWatcher {
       sendEveryMs: opts.sendEveryMs ?? SEND_EVERY_MS,
       log: opts.log ?? nullLogger,
       codexJobsDir: opts.codexJobsDir ?? join(homedir(), ".claude", "codex-jobs"),
+      versions: opts.versions ?? new ModelVersions(),
     };
   }
 
@@ -400,17 +413,6 @@ export class SubagentWatcher {
 function codexTask(description: string): string {
   const rest = description.replace(CODEX_PREFIX, "");
   return rest ? rest.charAt(0).toUpperCase() + rest.slice(1) : description;
-}
-
-// The model and effort an assistant record was answered with, as "opus 5.5
-// · high"; Claude Code's own messages carry the model "<synthetic>".
-function recordModel(rec: unknown): string | undefined {
-  const model = field(field(rec, "message"), "model");
-  if (field(rec, "type") !== "assistant" || typeof model !== "string" || !model || model.startsWith("<")) return undefined;
-  const [, family, major, minor] = model.match(CLAUDE_MODEL) ?? [];
-  const name = family && major && minor ? `${family} ${major}.${minor}` : model;
-  const effort = field(rec, "effort");
-  return typeof effort === "string" && effort ? `${name} · ${effort}` : name;
 }
 
 // When a transcript record was written (ms), from its timestamp.
