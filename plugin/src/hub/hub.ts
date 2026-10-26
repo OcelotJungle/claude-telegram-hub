@@ -27,6 +27,7 @@ import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { cleanupReport, commandReply, hookBody, limitsPost, pluginToHub, questionBody, sendFilesMessage, sendMessage, terminateRequest, turnEndBody } from "../shared/protocol-schema.ts";
 import { loadCards, saveCards } from "./cards.ts";
+import { CodexLimits } from "./codex-limits.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
@@ -181,6 +182,7 @@ type Cleanup = {
 const cleanupStartKey = (c: Cleanup) => `cmd-${c.id}.0#0`;
 
 export type HubOptions = {
+  codexSessionsDir?: string;
   port: number;
   sessionsFile: string;
   outboxFile: string;
@@ -292,6 +294,7 @@ export class Hub {
   private commands = new Map<string, { cmd: TopicCommand; timer: ReturnType<typeof setTimeout> }[]>();
   // The latest rate-limit reading of each session, with its account then.
   private limits = new Map<string, LimitsReading & { account?: string }>();
+  private codexLimits: CodexLimits;
   private botUsername: string | undefined;
   private botId: number | undefined;
   // Permission prompts sent to topics, by the key in their buttons' data.
@@ -361,6 +364,7 @@ export class Hub {
   private log: Logger;
 
   constructor(private opts: HubOptions) {
+    this.codexLimits = new CodexLimits(opts.codexSessionsDir);
     this.store = new SessionStore(opts.sessionsFile);
     this.log = opts.log;
     this.outbox = new Outbox(opts.outboxFile, opts.log);
@@ -527,6 +531,7 @@ export class Hub {
       return new Response("ok");
     }
     if (url.pathname === "/limits" && req.method === "GET") return Response.json(this.freshestLimits(url.searchParams.get("session") ?? "") ?? null);
+    if (url.pathname === "/codex-limits" && req.method === "GET") return Response.json(await this.codexLimits.read() ?? null);
     if (url.pathname === "/reply" && req.method === "POST") {
       const r = commandReply.safeParse(await req.json().catch(() => undefined));
       if (!r.success) return new Response("bad reply", { status: 400 });

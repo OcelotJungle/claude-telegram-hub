@@ -22,10 +22,26 @@ const usage = (o: { tokens?: number; limits?: Usage["rateLimits"]; breakdown?: P
 });
 
 describe("/info text", () => {
+  test("Codex follows Claude, orders windows and rounds percentages", () => {
+    const text = infoText(usage(), NOW, undefined, { at: NOW, rateLimits: [
+      { kind: "seven_day", percentUsed: 22.4 },
+      { kind: "five_hour", percentUsed: 40.7, resetsAt: new Date(NOW + 2 * 60 * 60_000).toISOString() },
+    ] });
+    expect(text).toStartWith("**Лимиты Claude**\n");
+    expect(text).toContain("\n\n**Лимиты Codex**\n5 часов: 41% (сброс через 2 ч)\nНеделя: 22%\n\n**Контекст**");
+  });
+
+  test("Codex has its own staleness and resets expired usage to zero", () => {
+    const rateLimits = [{ kind: "five_hour", percentUsed: 41, resetsAt: new Date(NOW).toISOString() }];
+    expect(infoText(usage(), NOW, NOW, { at: NOW - 72 * 60_000, rateLimits })).toContain("**Лимиты Codex** (данные 1 ч 12 мин назад)\n5 часов: 0%\n\n");
+    expect(infoText(usage(), NOW, NOW, { at: NOW - 59_000, rateLimits })).toContain("**Лимиты Codex**\n");
+    expect(infoText(usage(), NOW)).not.toContain("Codex");
+  });
+
   test("limits with time to reset, context, the autocompact window and how much of its threshold is used", () => {
     expect(infoText(usage({ tokens: 128_400 }), NOW)).toBe(
       [
-        "**Лимиты**",
+        "**Лимиты Claude**",
         "5 часов: 30% (сброс через 1 ч 20 мин)",
         "Неделя: 36% (сброс через 4 д 6 ч)",
         "",
@@ -39,7 +55,7 @@ describe("/info text", () => {
 
   test("before the first model response there are no limits and the context is an estimate", () => {
     const text = infoText(usage({ limits: [] }), NOW);
-    expect(text).toContain("Лимиты: нет данных — появятся после первого ответа модели");
+    expect(text).toContain("Лимиты Claude: нет данных — появятся после первого ответа модели");
     expect(text).toContain("Сейчас: ≈36k токенов (оценка)");
     expect(text).toContain("Использовано 12% до автокомпакта");
   });
@@ -74,8 +90,8 @@ describe("/info text", () => {
   });
 
   test("limits read over a minute ago say how old they are", () => {
-    expect(infoText(usage({ tokens: 1 }), NOW, NOW - 59_000)).toStartWith("**Лимиты**\n");
-    expect(infoText(usage({ tokens: 1 }), NOW, NOW - 72 * 60_000)).toStartWith("**Лимиты** (данные 1 ч 12 мин назад)\n");
+    expect(infoText(usage({ tokens: 1 }), NOW, NOW - 59_000)).toStartWith("**Лимиты Claude**\n");
+    expect(infoText(usage({ tokens: 1 }), NOW, NOW - 72 * 60_000)).toStartWith("**Лимиты Claude** (данные 1 ч 12 мин назад)\n");
   });
 
   test("without a breakdown only the status line figure is shown", () => {
@@ -126,7 +142,7 @@ describe("limits shared through the hub", () => {
   const OWN = [{ kind: "five_hour", percentUsed: 30, resetsAt: "2026-01-01T13:00:00.000Z" }];
   const FRESH = [{ kind: "five_hour", percentUsed: 64, resetsAt: "2026-01-01T13:00:00.000Z" }];
 
-  function runner(answer: () => { status: number; text: string }) {
+  function runner(answer: () => { status: number; text: string }, codex: () => { status: number; text: string } = () => ({ status: 200, text: "null" })) {
     const posted: { path: string; body: unknown }[] = [];
     let commands = [{ id: "c1", name: "info", args: "" }];
     const r = new Runner("http://hub", {
@@ -140,6 +156,7 @@ describe("limits shared through the hub", () => {
           return { status: 200, text: "ok" };
         }
         if (new URL(url).pathname === "/limits") return answer();
+        if (new URL(url).pathname === "/codex-limits") return codex();
         const list = commands;
         commands = [];
         return { status: 200, text: JSON.stringify(list) };
@@ -154,7 +171,23 @@ describe("limits shared through the hub", () => {
     const s = runner(() => ({ status: 200, text: JSON.stringify({ at: NOW - 5 * 60_000, rateLimits: FRESH }) }));
     await s.r.poll();
     await Bun.sleep(50);
-    expect(s.info()).toStartWith("**Лимиты** (данные 5 мин назад)\n5 часов: 64%");
+    expect(s.info()).toStartWith("**Лимиты Claude** (данные 5 мин назад)\n5 часов: 64%");
+  });
+
+  test("/info fetches Codex limits and tolerates failures", async () => {
+    const answers = [
+      () => ({ status: 200, text: JSON.stringify({ at: NOW, rateLimits: FRESH }) }),
+      () => ({ status: 500, text: "" }),
+      () => ({ status: 200, text: "{broken" }),
+      () => { throw new Error("offline"); },
+    ];
+    for (const [index, answer] of answers.entries()) {
+      const s = runner(() => ({ status: 200, text: "null" }), answer);
+      await s.r.poll();
+      await Bun.sleep(50);
+      expect(s.info()).toStartWith("**Лимиты Claude**");
+      expect(s.info().includes("**Лимиты Codex**")).toBe(index === 0);
+    }
   });
 
   test("without a reading in the hub /info shows the session's own", async () => {
@@ -162,7 +195,7 @@ describe("limits shared through the hub", () => {
       const s = runner(answer);
       await s.r.poll();
       await Bun.sleep(50);
-      expect(s.info()).toStartWith("**Лимиты**\n5 часов: 30%");
+      expect(s.info()).toStartWith("**Лимиты Claude**\n5 часов: 30%");
     }
   });
 

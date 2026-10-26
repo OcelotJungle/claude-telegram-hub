@@ -84,6 +84,7 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
   port = await freePort();
   hub = new Hub({
     port,
+    codexSessionsDir: join(dir, "codex-sessions"),
     sessionsFile: join(dir, "sessions.json"),
     outboxFile: join(dir, "outbox.json"),
     cardsFile: join(dir, "cards.json"),
@@ -1806,7 +1807,7 @@ describe("commands", () => {
     const sent = await reply(runner, t => t.startsWith("Лимиты"));
     expect(sent).toMatchObject({ message_thread_id: 100, disable_notification: false });
     expect(sent.text).toContain("Сейчас: 128k токенов");
-    expect(arr(field(arr(field(sent.rich_message, "blocks"))[0], "text"))[0]).toEqual({ type: "bold", text: "Лимиты" });
+    expect(arr(field(arr(field(sent.rich_message, "blocks"))[0], "text"))[0]).toEqual({ type: "bold", text: "Лимиты Claude" });
     expect(a.messages.some(m => m.type === "inbound")).toBe(false);
     expect(new SessionStore(join(dir, "sessions.json")).get("a")?.enabled).toBe(false);
   });
@@ -1986,6 +1987,21 @@ describe("commands", () => {
     expect(await get("c")).toEqual(reading(9000, 90));
     expect(await get("nobody")).toBeNull();
     expect((await fetch(`http://127.0.0.1:${port}/limits`, { method: "POST", body: "{}" })).status).toBe(400);
+  });
+
+  test("/codex-limits returns null or a rollout reading", async () => {
+    await startHub();
+    const get = () => fetch(`http://127.0.0.1:${port}/codex-limits`);
+    expect(await (await get()).json()).toBeNull();
+    const day = join(dir, "codex-sessions", "2026", "10", "26");
+    mkdirSync(day, { recursive: true });
+    const timestamp = "2026-01-01T12:56:47.467Z";
+    writeFileSync(join(day, "rollout-test.jsonl"), JSON.stringify({ timestamp, type: "event_msg", payload: { type: "token_count", rate_limits: {
+      limit_id: "codex", primary: { used_percent: 41, window_minutes: 300 },
+    } } }));
+    const response = await get();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ at: Date.parse(timestamp), rateLimits: [{ kind: "five_hour", percentUsed: 41 }] });
   });
 
   test("the same reply posted twice is sent once", async () => {

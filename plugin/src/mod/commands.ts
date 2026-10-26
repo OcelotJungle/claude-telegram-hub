@@ -115,8 +115,8 @@ export class Runner {
     if (cmd.name === "info") {
       try {
         const usage = await this.deps.usage();
-        const shared = await this.sharedLimits(sessionId);
-        await this.reply(to, shared ? infoText({ ...usage, rateLimits: shared.rateLimits }, this.deps.now(), shared.at) : infoText(usage, this.deps.now()), true);
+        const [shared, codex] = await Promise.all([this.sharedLimits(sessionId), this.codexLimits()]);
+        await this.reply(to, infoText(shared ? { ...usage, rateLimits: shared.rateLimits } : usage, this.deps.now(), shared?.at, codex), true);
       } catch (e) {
         await this.reply(to, `⚠️ /info не выполнена: ${message(e)}`, true);
       }
@@ -219,6 +219,17 @@ export class Runner {
     }
   }
 
+  private async codexLimits(): Promise<LimitsReading | undefined> {
+    try {
+      const res = await this.deps.http(`${this.base}/codex-limits`);
+      if (res.status !== 200) return undefined;
+      const value: unknown = JSON.parse(res.text);
+      return isLimitsReading(value) ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   // The status line's figure, else the local estimate (right after a
   // compaction); undefined when the engine cannot tell.
   private async contextTokens(): Promise<number | undefined> {
@@ -258,16 +269,26 @@ export class Runner {
 }
 
 // limitsAt: when the limits were read, if known.
-export function infoText(u: Usage, now: number, limitsAt?: number): string {
+export function infoText(u: Usage, now: number, limitsAt?: number, codex?: LimitsReading): string {
   const lines: string[] = [];
-  if (!u.rateLimits.length) lines.push("Лимиты: нет данных — появятся после первого ответа модели");
+  if (!u.rateLimits.length) lines.push("Лимиты Claude: нет данных — появятся после первого ответа модели");
   else {
     const age = limitsAt === undefined ? 0 : now - limitsAt;
-    lines.push(age >= STALE_LIMITS_MS ? `**Лимиты** (данные ${duration(age)} назад)` : "**Лимиты**");
+    lines.push(age >= STALE_LIMITS_MS ? `**Лимиты Claude** (данные ${duration(age)} назад)` : "**Лимиты Claude**");
     const order = (kind: string) => (LIMIT_ORDER.includes(kind) ? LIMIT_ORDER.indexOf(kind) : LIMIT_ORDER.length);
     for (const l of [...u.rateLimits].sort((a, b) => order(a.kind) - order(b.kind))) {
       const left = l.resetsAt ? Date.parse(l.resetsAt) - now : NaN;
       lines.push(`${LIMIT_NAMES[l.kind] ?? l.kind}: ${l.percentUsed}%${left > 0 ? ` (сброс через ${duration(left)})` : ""}`);
+    }
+  }
+  if (codex) {
+    const age = now - codex.at;
+    lines.push("", age >= STALE_LIMITS_MS ? `**Лимиты Codex** (данные ${duration(age)} назад)` : "**Лимиты Codex**");
+    const order = (kind: string) => (LIMIT_ORDER.includes(kind) ? LIMIT_ORDER.indexOf(kind) : LIMIT_ORDER.length);
+    for (const limit of [...codex.rateLimits].sort((a, b) => order(a.kind) - order(b.kind))) {
+      const left = limit.resetsAt ? Date.parse(limit.resetsAt) - now : NaN;
+      const percent = left <= 0 ? 0 : Math.round(limit.percentUsed);
+      lines.push(`${LIMIT_NAMES[limit.kind] ?? limit.kind}: ${percent}%${left > 0 ? ` (сброс через ${duration(left)})` : ""}`);
     }
   }
   lines.push("", "**Контекст**");
