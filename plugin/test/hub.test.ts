@@ -1385,6 +1385,43 @@ describe("subagent cards", () => {
     expect(fake.callsOf("editMessageText").map(c => c.message_id)).toEqual([x]);
   });
 
+  test("a done card reopens only with the flag, persists and keeps its message", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send(card("x-0", "Earlier question", true));
+    await waitFor(() => fake.texts().length === 1);
+    const id = fake.lastMessageId;
+    // Another message does not affect where the card is edited.
+    a.send(card("y-0", "Another card", true));
+    await waitFor(() => fake.texts().length === 2);
+    a.send({ ...card("x-0", "Ignored late version"), reopen: false });
+    await Bun.sleep(SHOWN_MS);
+    expect(fake.callsOf("editMessageText")).toEqual([]);
+    a.send({ ...card("x-0", "Earlier question\nContinuation"), reopen: true });
+    await waitFor(() => fake.callsOf("editMessageText").length === 1);
+    expect(fake.callsOf("editMessageText")[0]).toMatchObject({ message_id: id, text: "Earlier question\nContinuation" });
+    expect(fake.texts().length).toBe(2);
+    // A restart must remember that the formerly done card can change.
+    await hub.stop();
+    await startHub();
+    const b = await enabled("a");
+    b.send(card("x-0", "Continuation final", true));
+    await waitFor(() => fake.callsOf("editMessageText").length === 2);
+    expect(fake.callsOf("editMessageText")[1]).toMatchObject({ message_id: id, text: "Continuation final" });
+    b.send(card("x-0", "Ignored after final"));
+    await Bun.sleep(SHOWN_MS);
+    expect(fake.callsOf("editMessageText").length).toBe(2);
+  });
+
+  test("reopen sends a missing card as a new message", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send({ ...card("unknown-0", "Restored history\nContinuation"), reopen: true });
+    await waitFor(() => fake.texts().length === 1);
+    expect(fake.texts()[0]?.text).toBe("Restored history\nContinuation");
+    expect(fake.callsOf("editMessageText")).toEqual([]);
+  });
+
   test("edits are throttled, and only the latest version goes", async () => {
     await startHub({ cardEditMs: 400 });
     const a = await enabled("a");

@@ -8,6 +8,7 @@ import { TranscriptTailer } from "./tail.ts";
 const JOB = "\\d{8}-\\d{6}-[0-9a-f]+";
 const STARTED = new RegExp(`\\bjob (${JOB}) started:`);
 const ATTACHED = new RegExp(`(?:^|[\\s/\\\\\"'])codex-run\\.py[\"']?\\s+(?:reply|attach|wait)\\s+(${JOB})\\b`);
+const PROMPT = new RegExp(`^(?:reply|attach):[ \\t]+(${JOB})(?=[ \\t\\r\\n]|$)`, "m");
 // The worker may capitalise the line it relays: "Job … started:".
 const WORKER_TEXT = new RegExp(`^(?:codex job |job ${JOB} (?:started|resumed with the reply))`, "i");
 const NOTE = /^([01]\d|2[0-3]):([0-5]\d)\s+(.+)$/;
@@ -29,7 +30,7 @@ const itemSchema = z.discriminatedUnion("type", [
 const textBlockSchema = z.object({ type: z.literal("text"), text: z.string() });
 const toolSchema = z.object({ type: z.literal("tool_use"), name: z.literal("Bash"), input: z.object({ command: z.string() }) });
 const resultSchema = z.object({ type: z.literal("tool_result"), content: z.union([z.string(), z.array(z.unknown())]) });
-const recordSchema = z.object({ type: z.string(), message: z.object({ content: z.array(z.unknown()) }) });
+const recordSchema = z.object({ type: z.string(), message: z.object({ content: z.union([z.string(), z.array(z.unknown())]) }) });
 
 export type CodexDiscovery = { id: string; fromStart: boolean };
 export type CodexEntry = { at: number; text: string };
@@ -38,7 +39,17 @@ export type CodexEntry = { at: number; text: string };
 export function discoverCodexJob(record: unknown): CodexDiscovery | undefined {
   const parsed = recordSchema.safeParse(record);
   if (!parsed.success) return undefined;
-  for (const block of parsed.data.message.content) {
+  const content = parsed.data.message.content;
+  if (parsed.data.type === "user") {
+    const prompt = typeof content === "string" ? content : content.flatMap(block => {
+      const text = textBlockSchema.safeParse(block);
+      return text.success ? [text.data.text] : [];
+    }).join("\n");
+    const id = prompt.match(PROMPT)?.[1];
+    if (id) return { id, fromStart: false };
+  }
+  if (typeof content === "string") return undefined;
+  for (const block of content) {
     if (parsed.data.type === "assistant") {
       const tool = toolSchema.safeParse(block);
       const id = tool.success ? tool.data.input.command.match(ATTACHED)?.[1] : undefined;

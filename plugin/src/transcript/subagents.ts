@@ -44,7 +44,7 @@ const MAX_COMMAND_CHARS = 60;
 
 // A subagent's card as Markdown. final: its last version (the agent stopped,
 // or the card is full and continues in the next one).
-export type Card = { id: string; text: string; final: boolean };
+export type Card = { id: string; text: string; final: boolean; reopen?: boolean };
 
 type Status = "running" | "done" | "failed" | "stopped";
 
@@ -67,6 +67,7 @@ type Env = {
   log: Logger;
   codexJobsDir: string;
   versions: ModelVersions;
+  jobs: Map<string, Agent>;
 };
 
 // One subagent: its status and texts, in cards of at most one message each.
@@ -83,6 +84,12 @@ class Agent {
   private tools = 0;
   private lastTool: string | undefined;
   private part = 0;
+  private cardAgentId: string;
+  private baseWorkMs = 0;
+  private baseCommands = 0;
+  private handedOver = false;
+  private displayed = false;
+  private reopenCard = false;
   private texts: Entry[] = [];
   private seen = false;
   private shown = false;
@@ -110,6 +117,7 @@ class Agent {
     private env: Env,
   ) {
     this.started = env.now();
+    this.cardAgentId = id;
     this.tailer = new TranscriptTailer({
       path: join(dir, `agent-${id}.jsonl`),
       fromStart,
@@ -129,6 +137,7 @@ class Agent {
         if (discovery && this.codex?.discovery.id !== discovery.id) {
           this.codex = new CodexJob(discovery, env.codexJobsDir, env.now, env.log);
         }
+        this.adoptJob();
       },
       onIdle: () => {
         this.idle = true;
@@ -139,7 +148,7 @@ class Agent {
   }
 
   finish(status: Status, messageId?: string, certain = false): void {
-    if (!this.seen) return;
+    if (this.handedOver || !this.seen) return;
     if (certain) this.certain = true;
     if (this.status === status) return;
     this.status = status;
@@ -149,8 +158,10 @@ class Agent {
   }
 
   tick(): void {
+    if (this.handedOver) return;
     this.meta ??= this.readMeta();
     this.tailer.pollNow();
+    this.adoptJob();
     if (this.sealed) return;
     if (this.meta?.agentType === "codex" && this.codex) {
       const entries = this.codex.poll();
@@ -182,11 +193,39 @@ class Agent {
     const text = this.render(this.texts, this.statusLine());
     this.dirty = false;
     if (!final && text === this.sentText) return;
-    this.env.send({ id: this.cardId(), text, final });
+    this.send(text, final);
     this.shown = true;
     this.sealed = final;
     this.sentText = text;
     this.lastSent = this.env.now();
+  }
+
+  private adoptJob(): void {
+    if (this.meta?.agentType !== "codex" || !this.codex || this.displayed) return;
+    const owner = this.env.jobs.get(this.codex.discovery.id);
+    if (!owner || owner === this || owner.handedOver) return;
+    this.cardAgentId = owner.cardAgentId;
+    this.part = owner.part;
+    this.texts = [...owner.texts, ...this.texts];
+    this.workerSummaries = new Set([...owner.workerSummaries, ...this.workerSummaries]);
+    this.baseWorkMs = owner.workMs();
+    this.baseCommands = owner.baseCommands + (owner.codex?.commands ?? 0);
+    this.shown = true;
+    this.displayed = true;
+    this.reopenCard = true;
+    this.dirty = true;
+    owner.handedOver = true;
+    this.env.jobs.set(this.codex.discovery.id, this);
+  }
+
+  private workMs(): number {
+    return this.baseWorkMs + Math.max(0, (this.ended ?? this.env.now()) - this.started);
+  }
+
+  private send(text: string, final: boolean): void {
+    this.env.send({ id: this.cardId(), text, final, ...(this.reopenCard ? { reopen: true } : {}) });
+    this.displayed = true;
+    if (this.meta?.agentType === "codex" && this.codex) this.env.jobs.set(this.codex.discovery.id, this);
   }
 
   // The turn ended, but a background task of the agent's own will wake it.
@@ -228,8 +267,9 @@ class Agent {
     const trimmed = t.trim();
     const entry = { at, text: trimmed.length > MAX_CARD_TEXT ? `${trimmed.slice(0, MAX_CARD_TEXT)}…` : trimmed };
     if (this.texts.length && toTelegram(this.render([...this.texts, entry], this.statusLine())).text.length > MAX_CARD) {
-      if (this.shown) this.env.send({ id: this.cardId(), text: this.render(this.texts, CONTINUED), final: true });
+      if (this.shown) this.send(this.render(this.texts, CONTINUED), true);
       this.part++;
+      this.reopenCard = false;
       this.texts = [];
       this.workerSummaries.clear();
       this.shown = false;
@@ -248,6 +288,11 @@ class Agent {
 
   private reopen(): void {
     this.part++;
+    this.cardAgentId = this.id;
+    this.baseWorkMs = 0;
+    this.baseCommands = 0;
+    this.displayed = false;
+    this.reopenCard = false;
     this.texts = [];
     this.shown = false;
     this.sealed = false;
@@ -264,7 +309,7 @@ class Agent {
   }
 
   private cardId(): string {
-    return `${this.id}-${this.part}`;
+    return `${this.cardAgentId}-${this.part}`;
   }
 
   private render(texts: Entry[], status: string): string {
@@ -288,10 +333,11 @@ class Agent {
   }
 
   private statusLine(): string {
-    const took = duration((this.ended ?? this.env.now()) - this.started);
+    const took = duration(this.workMs());
     const job = this.codexJob();
     if (job?.state) {
-      const acts = `${job.commands} ${plural(job.commands, "действие", "действия", "действий")}`;
+      const commands = this.baseCommands + job.commands;
+      const acts = `${commands} ${plural(commands, "действие", "действия", "действий")}`;
       switch (job.state.status) {
         case "question":
           return "❓ Codex ждёт ответа";
@@ -371,6 +417,7 @@ export class SubagentWatcher {
       log: opts.log ?? nullLogger,
       codexJobsDir: opts.codexJobsDir ?? join(homedir(), ".claude", "codex-jobs"),
       versions: opts.versions ?? new ModelVersions(),
+      jobs: new Map(),
     };
   }
 
@@ -383,6 +430,7 @@ export class SubagentWatcher {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.agents.clear();
+    this.env.jobs.clear();
   }
 
   // From a task notification in the main transcript.

@@ -14,6 +14,9 @@ const START = new Date(2026, 9, 25, 18, 39).getTime();
 const JOB = "20260101-120000-abcd";
 const COMMAND_LIMIT = 60;
 const SUMMARY_COUNT = 10;
+const FIRST_RUN_MS = 17 * MINUTE;
+const ANSWER_PAUSE_MS = 40 * MINUTE;
+const REPLY_RUN_MS = 2 * MINUTE;
 const RETRY_CASES = [["failed", false], ["limit", false], ["failed", true], ["limit", true]] as const;
 const CONTINUING_EVENTS = [
   { type: "turn.started" },
@@ -60,6 +63,15 @@ describe("Codex cards", () => {
     if (meta) writeMeta();
     return {
       watcher, cards, writeMeta,
+      worker(id: string, prompt?: string | ReturnType<typeof text>[], meta = true) {
+        const path = join(dir, `agent-${id}.jsonl`);
+        writeFileSync(path, prompt === undefined ? "" : line({ type: "user", message: { content: prompt } }));
+        if (meta) writeFileSync(join(dir, `agent-${id}.meta.json`), JSON.stringify({ agentType: "codex", description: "Continue the fix" }));
+        return (value: string) => appendFileSync(path, value);
+      },
+      workerMeta(id: string) {
+        writeFileSync(join(dir, `agent-${id}.meta.json`), JSON.stringify({ agentType: "codex", description: "Continue the fix" }));
+      },
       state(extra: object = {}) {
         mkdirSync(job, { recursive: true });
         writeFileSync(join(job, "state.json"), JSON.stringify({ status: "running", slug: "gpt-6.1-sol", effort: "high", notes: [], ...extra }));
@@ -100,6 +112,156 @@ describe("Codex cards", () => {
       "⏳ 0 с · 0 действий · событие 18:39",
       "`git status`",
     ].join("\n"));
+  });
+
+  test.each([false, true])("reply adopts a sealed card with texts, work time, commands and the latest task (blocks: %s)", blocks => {
+    const s = setup();
+    s.state();
+    s.start();
+    s.events(message("Earlier Codex progress") + command("old", "old command"));
+    s.tick();
+    s.state({ status: "question" });
+    s.write(assistant("question", "Earlier worker question", "end_turn"));
+    s.tick(FIRST_RUN_MS);
+    s.tick(SETTLE_MS);
+    expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true });
+    s.tick(ANSWER_PAUSE_MS);
+    const prompt = `reply: ${JOB}\nAnswer the question`;
+    const write = s.worker("a2", blocks ? [text(prompt)] : prompt);
+    // The proxy prepares its reply before it invokes codex-run.py reply.
+    write(line(bash("read instructions", "Read")));
+    s.tick();
+    expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: false, reopen: true });
+    s.state();
+    s.events(message("Reply progress") + command("reply", "reply command"));
+    s.tick(REPLY_RUN_MS);
+    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nContinue the fix\n⏳ 19 мин · 2 действия");
+    expect(s.last()).toContain("Earlier Codex progress");
+    expect(s.last()).toContain("Earlier worker question");
+    expect(s.last()).toContain("Reply progress");
+    expect(new Set(s.cards.map(card => card.id))).toEqual(new Set(["a1-0"]));
+    s.state({ status: "done" });
+    write(assistant("reply-final", "Reply final", "end_turn"));
+    s.tick();
+    s.tick(SETTLE_MS);
+    expect(s.last()).toContain("✅ 19 мин · 2 действия");
+    expect(s.last()).toContain("Reply final");
+    expect(s.cards.at(-1)?.final).toBe(true);
+  });
+
+  test("attach adopts an unsealed card and its old owner never sends again", () => {
+    const s = setup();
+    s.state();
+    s.start();
+    s.write(assistant("old", "Earlier worker text"));
+    s.events(command("old", "old command"));
+    s.tick();
+    s.worker("a2", `attach: ${JOB}`);
+    s.tick();
+    const boundary = s.cards.length;
+    s.write(assistant("late", "Old owner must stay silent", "end_turn"));
+    s.watcher.taskStatus("a1", "completed");
+    s.events(message("Attached progress") + command("attached", "attached command"));
+    s.tick(SETTLE_MS);
+    expect(s.cards.length).toBeGreaterThan(boundary);
+    expect(s.cards.slice(boundary).every(card => card.id === "a1-0" && card.reopen && !card.final)).toBe(true);
+    expect(s.last()).toContain("Earlier worker text");
+    expect(s.last()).toContain("Attached progress");
+    expect(s.last()).toContain("2 действия");
+    expect(s.last()).not.toContain("Old owner must stay silent");
+  });
+
+  test("a prompt without an earlier owner starts a new card and skips existing events", () => {
+    const s = setup();
+    s.state();
+    s.events(message("Unseen old progress") + command("old", "old command"));
+    s.worker("a2", `reply: ${JOB}`);
+    s.tick();
+    expect(s.cards.at(-1)).toMatchObject({ id: "a2-0", final: false });
+    expect(s.cards.at(-1)?.reopen).toBeUndefined();
+    expect(s.last()).not.toContain("Unseen old progress");
+    expect(s.last()).toContain("0 действий");
+  });
+
+  test("a plugin restart forgets the earlier owner and a continuation gets a new card", () => {
+    const s = setup();
+    s.state();
+    s.start();
+    s.write(assistant("old", "Earlier session history"));
+    s.tick();
+    s.watcher.stop();
+    s.watcher.start();
+    s.worker("a2", `reply: ${JOB}`);
+    s.tick();
+    expect(s.cards.at(-1)?.id).toBe("a2-0");
+    expect(s.cards.at(-1)?.reopen).toBeUndefined();
+    expect(s.last()).not.toContain("Earlier session history");
+  });
+
+  test.each(["reply", "attach", "wait"])("command discovery with %s still adopts before its own card appears", verb => {
+    const s = setup();
+    s.state();
+    s.start();
+    s.write(assistant("old", "Earlier history"));
+    s.tick();
+    const write = s.worker("a2");
+    write(line(bash(`codex-run.py ${verb} ${JOB}`)));
+    s.tick();
+    expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", reopen: true });
+    expect(s.last()).toContain("Earlier history");
+  });
+
+  test("a worker whose own card was shown does not adopt on command discovery", () => {
+    const s = setup();
+    s.state();
+    s.start();
+    s.write(assistant("old", "Earlier worker text"));
+    s.tick();
+    const write = s.worker("a2");
+    write(assistant("new", "Own card text"));
+    s.tick();
+    expect(s.cards.at(-1)?.id).toBe("a2-0");
+    write(line(bash(`codex-run.py attach ${JOB}`)));
+    s.tick();
+    expect(s.cards.at(-1)).toMatchObject({ id: "a2-0", final: false });
+    expect(s.cards.at(-1)?.reopen).toBeUndefined();
+    expect(s.last()).not.toContain("Earlier worker text");
+  });
+
+  test("late metadata still allows prompt adoption before the worker shows a card", () => {
+    const s = setup();
+    s.state();
+    s.start();
+    s.tick();
+    s.worker("a2", `attach: ${JOB}`, false);
+    s.tick();
+    s.workerMeta("a2");
+    s.tick();
+    expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", reopen: true });
+    expect(s.last()).toContain("Continue the fix");
+  });
+
+  test("adopted cards split normally and a later worker takes the latest part and totals", () => {
+    const s = setup();
+    s.state();
+    s.start();
+    s.events(command("old", "old command"));
+    s.write(assistant("long-1", "a".repeat(MAX_CARD_TEXT)));
+    s.write(assistant("long-2", "b".repeat(MAX_CARD_TEXT)));
+    s.tick();
+    const write = s.worker("a2", `attach: ${JOB}`);
+    s.tick();
+    write(assistant("long-3", "c".repeat(MAX_CARD_TEXT)));
+    s.events(command("reply", "reply command"));
+    s.tick(MINUTE);
+    expect(s.cards.some(card => card.id === "a1-0" && card.final && card.reopen && card.text.includes("⬇️ продолжение ниже"))).toBe(true);
+    expect(s.cards.at(-1)).toMatchObject({ id: "a1-1", final: false });
+    expect(s.cards.at(-1)?.reopen).toBeUndefined();
+    s.worker("a3", `attach: ${JOB}`);
+    s.tick();
+    expect(s.cards.at(-1)).toMatchObject({ id: "a1-1", reopen: true });
+    expect(s.last()).toContain("c".repeat(MAX_CARD_TEXT));
+    expect(s.last()).toContain("1 мин · 2 действия");
   });
 
   test("start result reads history and agent messages wait for a continuing event", () => {
@@ -497,7 +659,7 @@ describe("Codex cards", () => {
   });
 });
 
-test("Codex discovery validates records, uses full Bash commands and only tool results", () => {
+test("Codex discovery validates records and uses prompts, full Bash commands and start results", () => {
   expect(discoverCodexJob(bash(`python ${"long-path/".repeat(COMMAND_LIMIT)}codex-run.py reply ${JOB}`))).toEqual({ id: JOB, fromStart: false });
   expect(discoverCodexJob(result([text(`job ${JOB} started: model`)]))).toEqual({ id: JOB, fromStart: true });
   expect(discoverCodexJob(bash(`echo reply ${JOB}`))).toBeUndefined();
@@ -505,4 +667,10 @@ test("Codex discovery validates records, uses full Bash commands and only tool r
   expect(discoverCodexJob(bash("codex-run.py reply ../../unsafe"))).toBeUndefined();
   expect(discoverCodexJob(result({ text: `job ${JOB} started: model` }))).toBeUndefined();
   expect(discoverCodexJob(null)).toBeUndefined();
+  expect(discoverCodexJob({ type: "user", message: { content: `reply: ${JOB}\nAnswer` } })).toEqual({ id: JOB, fromStart: false });
+  expect(discoverCodexJob({ type: "user", message: { content: [text("Instructions"), text(`attach: ${JOB}`)] } })).toEqual({ id: JOB, fromStart: false });
+  expect(discoverCodexJob({ type: "user", message: { content: "reply: ../../unsafe" } })).toBeUndefined();
+  expect(discoverCodexJob({ type: "user", message: { content: `Mention reply: ${JOB}` } })).toBeUndefined();
+  expect(discoverCodexJob({ type: "assistant", message: { content: [text(`reply: ${JOB}`)] } })).toBeUndefined();
+  expect(discoverCodexJob(result(`reply: ${JOB}`))).toBeUndefined();
 });

@@ -1138,20 +1138,23 @@ ${msg.text}`);
   // among the session's messages; later versions edit that message, at most
   // every CARD_EDIT_MS.
   private onCard(msg: Extract<PluginToHub, { type: "card" }>): void {
-    this.upsertCard(msg.sessionId, msg.id, msg.text, msg.final);
+    this.upsertCard(msg.sessionId, msg.id, msg.text, msg.final, undefined, msg.reopen);
   }
 
   // A subagent's card or a topic command's: buttons, when given, go under it.
-  private upsertCard(sessionId: string, cardId: string, markdown: string, final: boolean, buttons?: Button[][]): void {
+  private upsertCard(sessionId: string, cardId: string, markdown: string, final: boolean, buttons?: Button[][], reopen = false): void {
     if (!this.store.get(sessionId)) return;
     const key = `${sessionId}:${cardId}`;
     const card = this.cards.get(key);
-    // A finished card stays finished: a late version changes nothing.
-    if (card?.done) return;
+    // Only an explicit continuation may change a finished card.
+    if (card?.done && !reopen) return;
     if (card) {
+      const reopened = card.done && reopen;
+      if (reopened) card.done = false;
       card.text = markdown;
       card.final = final;
       card.buttons = buttons;
+      if (reopened) this.saveCards();
       if (card.messageId !== undefined) this.scheduleCardEdit(key, card);
       return;
     }

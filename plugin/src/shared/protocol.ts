@@ -53,8 +53,9 @@ export type PluginToHub =
   | { type: "title"; title: string }
   | { type: "terminalInput" }
   // A subagent's card as Markdown: one Telegram message, sent once and then
-  // edited in place. final: the card will not change any more.
-  | { type: "card"; id: string; sessionId: string; text: string; final: boolean }
+  // edited in place. final: the card closes; reopen explicitly allows a
+  // continuation to update a closed card.
+  | { type: "card"; id: string; sessionId: string; text: string; final: boolean; reopen?: boolean }
   // Topic messages that reached the agent's context, by Telegram message id.
   | { type: "seen"; messageIds: number[] }
   // The agent started working, or stopped: its turn ended or it waits for the user.
