@@ -4,7 +4,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { field, isObject } from "../src/shared/guards.ts";
-import { discoverCodexJob } from "../src/transcript/codex-job.ts";
+import { discoverExecutorJob, EXECUTORS } from "../src/transcript/codex-job.ts";
 import { MAX_CARD_TEXT, SETTLE_MS, SubagentWatcher } from "../src/transcript/subagents.ts";
 import { tempDir } from "./helpers.ts";
 
@@ -39,38 +39,40 @@ const message = (value: string) => event("item.completed", { type: "agent_messag
 const reasoning = (value: string) => event("item.completed", { type: "reasoning", text: value });
 const command = (id: string, value: string, type = "item.completed") => event(type, { id, type: "command_execution", command: value });
 
-describe("Codex cards", () => {
+describe("Executor cards", () => {
   const cleanups: (() => void)[] = [];
   afterEach(() => {
     for (const cleanup of cleanups.splice(0).reverse()) cleanup();
   });
 
-  function setup(meta = true) {
+  function setup(meta = true, executor = "codex") {
     const root = tempDir("codex-card-");
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));
     const dir = join(root, "subagents");
-    const jobs = join(root, "codex-jobs");
+    const codexJobs = join(root, "codex-jobs");
+    const volunteerJobs = join(root, "volunteer-jobs");
+    const jobs = executor === "volunteer" ? volunteerJobs : codexJobs;
     const job = join(jobs, JOB);
     mkdirSync(dir);
     const cards: Card[] = [];
     let now = START;
-    const watcher = new SubagentWatcher({ dir, codexJobsDir: jobs, onCard: card => cards.push(card), canStart: () => true, now: () => now });
+    const watcher = new SubagentWatcher({ dir, codexJobsDir: codexJobs, volunteerJobsDir: volunteerJobs, onCard: card => cards.push(card), canStart: () => true, now: () => now });
     cleanups.push(() => watcher.stop());
     watcher.start();
     const agent = join(dir, "agent-a1.jsonl");
     writeFileSync(agent, "");
-    const writeMeta = (agentType = "codex", description = "Fix tests") => writeFileSync(join(dir, "agent-a1.meta.json"), JSON.stringify({ agentType, description, model: "haiku" }));
+    const writeMeta = (agentType = executor, description = "Fix tests") => writeFileSync(join(dir, "agent-a1.meta.json"), JSON.stringify({ agentType, description, model: "haiku" }));
     if (meta) writeMeta();
     return {
       watcher, cards, writeMeta,
-      worker(id: string, prompt?: string | ReturnType<typeof text>[], meta = true) {
+      worker(id: string, prompt?: string | ReturnType<typeof text>[], hasMeta = true, workerExecutor = executor) {
         const path = join(dir, `agent-${id}.jsonl`);
         writeFileSync(path, prompt === undefined ? "" : line({ type: "user", message: { content: prompt } }));
-        if (meta) writeFileSync(join(dir, `agent-${id}.meta.json`), JSON.stringify({ agentType: "codex", description: "Continue the fix" }));
+        if (hasMeta) writeFileSync(join(dir, `agent-${id}.meta.json`), JSON.stringify({ agentType: workerExecutor, description: "Continue the fix" }));
         return (value: string) => appendFileSync(path, value);
       },
-      workerMeta(id: string) {
-        writeFileSync(join(dir, `agent-${id}.meta.json`), JSON.stringify({ agentType: "codex", description: "Continue the fix" }));
+      workerMeta(id: string, workerExecutor = executor) {
+        writeFileSync(join(dir, `agent-${id}.meta.json`), JSON.stringify({ agentType: workerExecutor, description: "Continue the fix" }));
       },
       state(extra: object = {}) {
         mkdirSync(job, { recursive: true });
@@ -80,6 +82,15 @@ describe("Codex cards", () => {
         mkdirSync(job, { recursive: true });
         writeFileSync(join(job, "state.json"), value);
       },
+      stateFor(workerExecutor: string, extra: object = {}) {
+        const workerJobs = workerExecutor === "volunteer" ? volunteerJobs : codexJobs;
+        const workerJob = join(workerJobs, JOB);
+        mkdirSync(workerJob, { recursive: true });
+        const defaults = workerExecutor === "volunteer"
+          ? { status: "running", slug: "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", effort: "-", notes: [] }
+          : { status: "running", slug: "gpt-6.1-sol", effort: "high", notes: [] };
+        writeFileSync(join(workerJob, "state.json"), JSON.stringify({ ...defaults, ...extra }));
+      },
       events(value: string, replace = false) {
         mkdirSync(job, { recursive: true });
         if (replace) writeFileSync(join(job, "events.jsonl"), value);
@@ -87,7 +98,7 @@ describe("Codex cards", () => {
       },
       write(value: string) { appendFileSync(agent, value); },
       start() { appendFileSync(agent, line(result(`job ${JOB} started: gpt-6.1-sol / high, cwd C:/repo`))); },
-      attach(verb = "reply") { appendFileSync(agent, line(bash(`python -I "C:/Users/someone/.claude/tools/codex-run.py" ${verb} ${JOB} --prompt-file reply.md`))); },
+      attach(verb = "reply", workerExecutor = executor) { appendFileSync(agent, line(bash(`python -I "C:/Users/someone/.claude/tools/${workerExecutor}-run.py" ${verb} ${JOB} --prompt-file reply.md`))); },
       tick(ms = STEP) { now += ms; watcher.tick(); },
       last() { return cards.at(-1)?.text ?? ""; },
       agent() {
@@ -657,20 +668,170 @@ describe("Codex cards", () => {
     s.tick();
     expect(s.last()).toContain("1 действие");
   });
+
+  test.each([
+    ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter · nemotron\\-3\\-ultra\\-550b\\-a55b"],
+    ["groq/openai/gpt-oss-120b", "groq · gpt\\-oss\\-120b"],
+    ["zhipu/glm-4.5", "zhipu · glm\\-4\\.5"],
+    ["single-model", "single\\-model"],
+  ])("volunteer header formats model slug %s", (slug, expected) => {
+    const s = setup(true, "volunteer");
+    s.state({ slug, effort: "-" });
+    s.start();
+    s.tick();
+    expect(s.last()).toStartWith(`🤖 **volunteer** · ${expected}\nFix tests\n⏳`);
+    expect(s.last()).not.toContain("medium");
+    expect(s.last()).not.toContain(" · -");
+  });
+
+  test("executor reply prompt before metadata captures the existing note boundary", () => {
+    for (const executor of ["codex", "volunteer"]) {
+      const s = setup(false, executor);
+      s.state({ notes: ["17:01 previous model switch"] });
+      const write = s.worker("a2", undefined, false, executor);
+      write(line({ type: "user", message: { content: `reply: ${JOB}` } }));
+      s.tick();
+      expect(s.last()).toStartWith(`🤖 **${executor}**`);
+      expect(s.last()).not.toContain("previous model switch");
+      s.state({ notes: ["17:01 previous model switch", "18:40 current model switch"] });
+      s.tick();
+      expect(s.last()).not.toContain("previous model switch");
+      expect(s.last().split("current model switch")).toHaveLength(2);
+      s.workerMeta("a2", executor);
+      s.tick();
+      expect(s.last().split("current model switch")).toHaveLength(2);
+    }
+  });
+
+  test.each(["codex", "volunteer"])("a %s Bash script selects its executor before metadata", executor => {
+    const s = setup(false, executor);
+    const write = s.worker("a2", undefined, false, executor);
+    write(line(bash(`python -I C:/tools/${executor}-run.py reply ${JOB}`)));
+    s.tick();
+    expect(s.last()).toStartWith(`🤖 **${executor}**`);
+  });
+
+  test("ambiguous reply waits for a job directory or metadata", () => {
+    const s = setup(false);
+    const write = s.worker("a2", undefined, false);
+    write(line({ type: "user", message: { content: `reply: ${JOB}` } }));
+    s.tick();
+    expect(s.cards).toHaveLength(0);
+
+    s.stateFor("codex");
+    s.stateFor("volunteer");
+    write(line({ type: "user", message: { content: `attach: ${JOB}` } }));
+    s.tick();
+    expect(s.cards).toHaveLength(0);
+
+    s.workerMeta("a2", "volunteer");
+    s.tick();
+    expect(s.last()).toStartWith("🤖 **volunteer**");
+  });
+
+  test("unknown reply waits until exactly one matching job directory appears", () => {
+    const s = setup(false);
+    const write = s.worker("a2", undefined, false);
+    write(line({ type: "user", message: { content: `reply: ${JOB}` } }));
+    s.tick();
+    expect(s.cards).toHaveLength(0);
+    s.stateFor("volunteer");
+    write(line({ type: "user", message: { content: `attach: ${JOB}` } }));
+    s.tick();
+    expect(s.last()).toStartWith("🤖 **volunteer**");
+  });
+
+  test("volunteer model switches update the header and append every note once", () => {
+    const s = setup(true, "volunteer");
+    s.state();
+    s.start();
+    s.tick();
+    s.state({ slug: "groq/openai/gpt-oss-120b", notes: ["16:05 model old:free failed: APIError 502; switching to groq/openai/gpt-oss-120b", "16:09 model old failed; switching to groq/openai/gpt-oss-120b"] });
+    s.tick();
+    expect(s.last()).toStartWith("🤖 **volunteer** · groq · gpt\\-oss\\-120b");
+    expect(s.last().split("🔁 model old")).toHaveLength(3);
+    s.tick();
+    expect(s.last().split("🔁 model old")).toHaveLength(3);
+  });
+
+  test("volunteer digest stays hidden, no-free-model failure and final report stay visible", () => {
+    const s = setup(true, "volunteer");
+    s.state({ status: "failed", error: "no free models available: exhausted" });
+    s.start();
+    s.write(assistant("digest", `volunteer job ${JOB} · running · requesty/novita/ling-3.1-flash · 61 min · last activity 16:11 · 2 commands since last check · switches 4`));
+    s.write(assistant("launch", `python -I C:/Users/test/.claude/tools/volunteer-run.py wait ${JOB}`));
+    s.write(assistant("prompt-file", "Prompt: C:/repo/.tmp/volunteer-prompt-abc.md"));
+    s.write(assistant("waiting", `(still running; call: wait ${JOB})`));
+    s.write(assistant("final", "STATUS: failed\nSummary\nNo free models were available.", "end_turn"));
+    s.tick();
+    s.tick(SETTLE_MS);
+    expect(s.last()).not.toContain("commands since last check");
+    expect(s.last()).not.toContain("volunteer-run.py");
+    expect(s.last()).not.toContain("volunteer-prompt-");
+    expect(s.last()).not.toContain("still running; call");
+    expect(s.last()).toContain("❌ no free models available: exhausted");
+    expect(s.last()).toContain("STATUS: failed");
+    expect(s.last()).toContain("No free models were available.");
+    expect(s.cards.at(-1)?.final).toBe(true);
+  });
+
+  test("volunteer question status uses the lowercase executor label", () => {
+    const s = setup(true, "volunteer");
+    s.state({ status: "question" });
+    s.start();
+    s.tick();
+    expect(s.last()).toContain("❓ volunteer ждёт ответа");
+  });
+
+  test.each(["reply", "attach"])("volunteer %s reuses the existing card", verb => {
+    const s = setup(true, "volunteer");
+    s.state();
+    s.start();
+    s.events(message("Earlier volunteer progress") + command("old", "inspect files"));
+    s.tick();
+    const write = s.worker("a2", `${verb}: ${JOB}`);
+    s.tick();
+    expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", reopen: true });
+    s.state({ slug: "groq/openai/gpt-oss-120b" });
+    s.events(message("Continued volunteer progress") + command("new", "update files"));
+    write(assistant("final", "Volunteer report", "end_turn"));
+    s.tick(REPLY_RUN_MS);
+    expect(new Set(s.cards.map(card => card.id))).toEqual(new Set(["a1-0"]));
+    expect(s.last()).toContain("Earlier volunteer progress");
+    expect(s.last()).toContain("Continued volunteer progress");
+    expect(s.last()).toContain("Volunteer report");
+  });
+
+  test("Codex and volunteer jobs with the same id keep separate cards", () => {
+    const s = setup();
+    s.stateFor("codex");
+    s.stateFor("volunteer");
+    s.start();
+    s.tick();
+    const write = s.worker("a2", undefined, true, "volunteer");
+    write(line(result(`job ${JOB} started: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free`)));
+    s.tick();
+    expect(new Set(s.cards.map(card => card.id))).toEqual(new Set(["a1-0", "a2-0"]));
+    expect(s.cards.filter(card => card.id === "a1-0").at(-1)?.text).toContain("**codex**");
+    expect(s.cards.filter(card => card.id === "a2-0").at(-1)?.text).toContain("**volunteer**");
+  });
 });
 
-test("Codex discovery validates records and uses prompts, full Bash commands and start results", () => {
-  expect(discoverCodexJob(bash(`python ${"long-path/".repeat(COMMAND_LIMIT)}codex-run.py reply ${JOB}`))).toEqual({ id: JOB, fromStart: false });
-  expect(discoverCodexJob(result([text(`job ${JOB} started: model`)]))).toEqual({ id: JOB, fromStart: true });
-  expect(discoverCodexJob(bash(`echo reply ${JOB}`))).toBeUndefined();
-  expect(discoverCodexJob(bash(`codex-run.py reply ${JOB}`, "Read"))).toBeUndefined();
-  expect(discoverCodexJob(bash("codex-run.py reply ../../unsafe"))).toBeUndefined();
-  expect(discoverCodexJob(result({ text: `job ${JOB} started: model` }))).toBeUndefined();
-  expect(discoverCodexJob(null)).toBeUndefined();
-  expect(discoverCodexJob({ type: "user", message: { content: `reply: ${JOB}\nAnswer` } })).toEqual({ id: JOB, fromStart: false });
-  expect(discoverCodexJob({ type: "user", message: { content: [text("Instructions"), text(`attach: ${JOB}`)] } })).toEqual({ id: JOB, fromStart: false });
-  expect(discoverCodexJob({ type: "user", message: { content: "reply: ../../unsafe" } })).toBeUndefined();
-  expect(discoverCodexJob({ type: "user", message: { content: `Mention reply: ${JOB}` } })).toBeUndefined();
-  expect(discoverCodexJob({ type: "assistant", message: { content: [text(`reply: ${JOB}`)] } })).toBeUndefined();
-  expect(discoverCodexJob(result(`reply: ${JOB}`))).toBeUndefined();
+test("executor discovery validates records and detects prompts, full Bash commands and start results", () => {
+  const discoverCodex = (record: unknown) => discoverExecutorJob(record, EXECUTORS.codex);
+  const discoverVolunteer = (record: unknown) => discoverExecutorJob(record, EXECUTORS.volunteer);
+  expect(discoverCodex(bash(`python ${"long-path/".repeat(COMMAND_LIMIT)}codex-run.py reply ${JOB}`))).toEqual({ id: JOB, fromStart: false, source: "command" });
+  expect(discoverVolunteer(bash(`python ${"long-path/".repeat(COMMAND_LIMIT)}volunteer-run.py attach ${JOB}`))).toEqual({ id: JOB, fromStart: false, source: "command" });
+  expect(discoverCodex(result([text(`job ${JOB} started: model`)]))).toEqual({ id: JOB, fromStart: true, source: "started" });
+  expect(discoverCodex(bash(`echo reply ${JOB}`))).toBeUndefined();
+  expect(discoverCodex(bash(`codex-run.py reply ${JOB}`, "Read"))).toBeUndefined();
+  expect(discoverCodex(bash("codex-run.py reply ../../unsafe"))).toBeUndefined();
+  expect(discoverCodex(result({ text: `job ${JOB} started: model` }))).toBeUndefined();
+  expect(discoverCodex(null)).toBeUndefined();
+  expect(discoverCodex({ type: "user", message: { content: `reply: ${JOB}\nAnswer` } })).toEqual({ id: JOB, fromStart: false, source: "prompt" });
+  expect(discoverCodex({ type: "user", message: { content: [text("Instructions"), text(`attach: ${JOB}`)] } })).toEqual({ id: JOB, fromStart: false, source: "prompt" });
+  expect(discoverCodex({ type: "user", message: { content: "reply: ../../unsafe" } })).toBeUndefined();
+  expect(discoverCodex({ type: "user", message: { content: `Mention reply: ${JOB}` } })).toBeUndefined();
+  expect(discoverCodex({ type: "assistant", message: { content: [text(`reply: ${JOB}`)] } })).toBeUndefined();
+  expect(discoverCodex(result(`reply: ${JOB}`))).toBeUndefined();
 });

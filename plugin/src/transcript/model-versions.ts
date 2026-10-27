@@ -26,6 +26,14 @@ export function codexModel(slug: string): Model {
   return line && version ? { kind: "codex", line, version } : { kind: "other", name: slug };
 }
 
+export function volunteerModelLabel(slug: string): string {
+  const parts = slug.split("/");
+  if (parts.length < 2) return slug;
+  const provider = parts[0];
+  const model = parts.at(-1)?.replace(/:free$/, "");
+  return provider && model ? `${provider} · ${model}` : slug;
+}
+
 // The model of an assistant record and the effort it answered with; Claude
 // Code's own messages carry the model "<synthetic>".
 export function recordModel(rec: unknown): { model: Model; effort: string | undefined } | undefined {

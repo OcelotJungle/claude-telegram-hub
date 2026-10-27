@@ -1,13 +1,22 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
-import { claudeModel, codexModel, compareVersions, ModelVersions } from "../src/transcript/model-versions.ts";
+import { claudeModel, codexModel, compareVersions, ModelVersions, volunteerModelLabel } from "../src/transcript/model-versions.ts";
 import { tempDir } from "./helpers.ts";
 
 // File times a step apart, so a rewrite is seen as a change.
 const LATER_S = 10;
 
 describe("model names", () => {
+  test.each([
+    ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter · nemotron-3-ultra-550b-a55b"],
+    ["groq/openai/gpt-oss-120b", "groq · gpt-oss-120b"],
+    ["zhipu/glm-4.5", "zhipu · glm-4.5"],
+    ["single-model", "single-model"],
+  ])("volunteer slug %s becomes %s", (slug, expected) => {
+    expect(volunteerModelLabel(slug)).toBe(expected);
+  });
+
   test("Claude and Codex names split into line and version, others stay whole", () => {
     expect(claudeModel("claude-opus-5-5")).toEqual({ kind: "claude", line: "opus", version: "5.5" });
     expect(claudeModel("claude-haiku-4-5-20251001")).toEqual({ kind: "claude", line: "haiku", version: "4.5" });

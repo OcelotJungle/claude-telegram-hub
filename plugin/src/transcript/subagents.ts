@@ -1,16 +1,17 @@
 import type { Logger } from "../shared/log.ts";
+import type { ExecutorConfig, ExecutorDiscovery, ExecutorType } from "./codex-job.ts";
 import type { Model } from "./model-versions.ts";
 import type { TranscriptEvent } from "./parse.ts";
 
-import { readdirSync, readFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { z } from "zod";
 import { field } from "../shared/guards.ts";
 import { nullLogger } from "../shared/log.ts";
 import { toTelegram } from "../shared/markdown.ts";
-import { CodexJob, discoverCodexJob, isCodexWorkerSummary } from "./codex-job.ts";
-import { codexModel, ModelVersions, recordModel } from "./model-versions.ts";
+import { discoverExecutorJob, isExecutorWorkerSummary, ExecutorJob, EXECUTORS } from "./codex-job.ts";
+import { codexModel, ModelVersions, recordModel, volunteerModelLabel } from "./model-versions.ts";
 import { parseAgentRecord } from "./parse.ts";
 import { TranscriptTailer } from "./tail.ts";
 
@@ -65,7 +66,7 @@ type Env = {
   now(): number;
   sendEveryMs: number;
   log: Logger;
-  codexJobsDir: string;
+  executorJobsDirs: Map<ExecutorType, string>;
   versions: ModelVersions;
   jobs: Map<string, Agent>;
 };
@@ -104,8 +105,11 @@ class Agent {
   private idle = false;
   private lastSent = 0;
   private sentText = "";
-  private codex: CodexJob | undefined;
-  private codexStatus: string | undefined;
+  private executor: ExecutorConfig | undefined;
+  private executorJob: ExecutorJob | undefined;
+  private executorMetaChecked = false;
+  private pendingDiscovery: ExecutorDiscovery | undefined;
+  private executorStatus: string | undefined;
   private finalMessages = new Set<string>();
   // Until the job becomes available, summaries stay visible as a fallback.
   private workerSummaries = new Set<Entry>();
@@ -128,15 +132,33 @@ class Agent {
           this.model = answered;
           env.versions.see(answered.model);
         }
-        const discovery = discoverCodexJob(rec);
+        this.checkExecutor();
+        if (!this.executorJob) {
+          if (!this.executorMetaChecked && this.pendingDiscovery) {
+            const resolved = this.executorForJob(this.pendingDiscovery.id);
+            if (resolved) {
+              this.executor = resolved;
+              this.executorJob = new ExecutorJob(this.pendingDiscovery, this.executorJobsDir(resolved), this.env.now, this.env.log);
+              this.pendingDiscovery = undefined;
+            }
+          }
+        }
+        if (!this.executorJob) {
+          const result = this.executorMetaChecked
+            ? this.executor ? this.discoverForExecutor(rec, this.executor) : undefined
+            : this.executor ? this.discoverForExecutor(rec, this.executor) : this.discoverExecutor(rec);
+          if (result?.executor) {
+            this.executor = result.executor;
+            this.executorJob = new ExecutorJob(result.discovery, this.executorJobsDir(result.executor), this.env.now, this.env.log);
+          } else if (result) {
+            this.pendingDiscovery = result.discovery;
+          }
+        }
         const at = recordTime(rec) ?? env.now();
         const events = parseAgentRecord(rec);
         // Split final messages carry their turn end alongside each text block.
         for (const ev of events) if (ev.kind === "turn_end") this.finalMessages.add(ev.messageId);
         for (const ev of events) this.feed(ev, at);
-        if (discovery && this.codex?.discovery.id !== discovery.id) {
-          this.codex = new CodexJob(discovery, env.codexJobsDir, env.now, env.log);
-        }
         this.adoptJob();
       },
       onIdle: () => {
@@ -145,6 +167,51 @@ class Agent {
       log: env.log,
     });
     this.tailer.open();
+  }
+
+  private checkExecutor(): void {
+    if (this.executorMetaChecked) return;
+    const parsed = metaSchema.safeParse(this.readMeta());
+    if (!parsed.success) return;
+    this.meta = parsed.data;
+    if (this.meta.agentType === undefined) return;
+    this.executorMetaChecked = true;
+    const executor = executorForAgentType(this.meta.agentType);
+    this.executor = executor;
+    if (executor && this.pendingDiscovery && !this.executorJob) {
+      this.executorJob = new ExecutorJob(this.pendingDiscovery, this.executorJobsDir(executor), this.env.now, this.env.log);
+      this.pendingDiscovery = undefined;
+    }
+    this.adoptJob();
+  }
+
+  private discoverForExecutor(record: unknown, executor: ExecutorConfig): { executor: ExecutorConfig; discovery: ExecutorDiscovery } | undefined {
+    const discovery = discoverExecutorJob(record, executor);
+    return discovery ? { executor, discovery } : undefined;
+  }
+
+  private discoverExecutor(record: unknown): { executor?: ExecutorConfig; discovery: ExecutorDiscovery } | undefined {
+    const codex = this.discoverForExecutor(record, EXECUTORS.codex);
+    const volunteer = this.discoverForExecutor(record, EXECUTORS.volunteer);
+    const command = [codex, volunteer].find(result => result?.discovery.source === "command");
+    if (command) return command;
+
+    const discoveries = [codex, volunteer].filter((result): result is { executor: ExecutorConfig; discovery: ExecutorDiscovery } => result !== undefined);
+    if (discoveries.length === 0) return undefined;
+    const executor = this.executorForJob(discoveries[0].discovery.id);
+    if (executor) return { executor, discovery: discoveries[0].discovery };
+    return { discovery: discoveries[0].discovery };
+  }
+
+  private executorForJob(id: string): ExecutorConfig | undefined {
+    const existing = [EXECUTORS.codex, EXECUTORS.volunteer].filter(executor =>
+      existsSync(join(this.executorJobsDir(executor), id)),
+    );
+    return existing.length === 1 ? existing[0] : undefined;
+  }
+
+  private executorJobsDir(executor: ExecutorConfig): string {
+    return this.env.executorJobsDirs.get(executor.agentType) ?? join(homedir(), executor.jobsDir);
   }
 
   finish(status: Status, messageId?: string, certain = false): void {
@@ -160,22 +227,23 @@ class Agent {
   tick(): void {
     if (this.handedOver) return;
     this.meta ??= this.readMeta();
+    this.checkExecutor();
     this.tailer.pollNow();
     this.adoptJob();
     if (this.sealed) return;
-    if (this.meta?.agentType === "codex" && this.codex) {
-      const entries = this.codex.poll();
-      if (this.codex.state) {
+    if (this.executor && this.executorJob) {
+      const entries = this.executorJob.poll();
+      if (this.executorJob.state) {
         this.seen = true;
         if (this.workerSummaries.size) {
           this.texts = this.texts.filter(entry => !this.workerSummaries.has(entry));
           this.workerSummaries.clear();
         }
       }
-      const state = this.codex.state;
-      const status = state ? JSON.stringify([state.status, state.slug, state.effort, this.codex.commands, this.codex.currentCommand, this.codex.eventAt]) : undefined;
-      if (entries.length || status !== this.codexStatus) this.dirty = true;
-      this.codexStatus = status;
+      const state = this.executorJob.state;
+      const status = state ? JSON.stringify([state.status, state.slug, state.effort, this.executorJob.commands, this.executorJob.currentCommand, this.executorJob.eventAt]) : undefined;
+      if (entries.length || status !== this.executorStatus) this.dirty = true;
+      this.executorStatus = status;
       for (const entry of entries) {
         this.addText(entry.text, entry.at);
       }
@@ -201,21 +269,22 @@ class Agent {
   }
 
   private adoptJob(): void {
-    if (this.meta?.agentType !== "codex" || !this.codex || this.displayed) return;
-    const owner = this.env.jobs.get(this.codex.discovery.id);
+    if (!this.executor || !this.executorJob || this.displayed) return;
+    const jobKey = `${this.executor.agentType}:${this.executorJob.discovery.id}`;
+    const owner = this.env.jobs.get(jobKey);
     if (!owner || owner === this || owner.handedOver) return;
     this.cardAgentId = owner.cardAgentId;
     this.part = owner.part;
     this.texts = [...owner.texts, ...this.texts];
     this.workerSummaries = new Set([...owner.workerSummaries, ...this.workerSummaries]);
     this.baseWorkMs = owner.workMs();
-    this.baseCommands = owner.baseCommands + (owner.codex?.commands ?? 0);
+    this.baseCommands = owner.baseCommands + (owner.executorJob?.commands ?? 0);
     this.shown = true;
     this.displayed = true;
     this.reopenCard = true;
     this.dirty = true;
     owner.handedOver = true;
-    this.env.jobs.set(this.codex.discovery.id, this);
+    this.env.jobs.set(jobKey, this);
   }
 
   private workMs(): number {
@@ -225,7 +294,10 @@ class Agent {
   private send(text: string, final: boolean): void {
     this.env.send({ id: this.cardId(), text, final, ...(this.reopenCard ? { reopen: true } : {}) });
     this.displayed = true;
-    if (this.meta?.agentType === "codex" && this.codex) this.env.jobs.set(this.codex.discovery.id, this);
+    if (this.executor && this.executorJob) {
+      const jobKey = `${this.executor.agentType}:${this.executorJob.discovery.id}`;
+      this.env.jobs.set(jobKey, this);
+    }
   }
 
   // The turn ended, but a background task of the agent's own will wake it.
@@ -250,8 +322,8 @@ class Agent {
     this.seen = true;
     this.dirty = true;
     if (ev.kind === "text") {
-      const summary = isCodexWorkerSummary(ev.text) && !this.finalMessages.has(ev.messageId);
-      if (this.codexJob() && summary) return;
+      const summary = this.executor && isExecutorWorkerSummary(ev.text, this.executor) && !this.finalMessages.has(ev.messageId);
+      if (this.getExecutorJob() && summary) return;
       const entry = this.addText(ev.text, at);
       if (summary) this.workerSummaries.add(entry);
     } else if (ev.kind === "tool_use") {
@@ -303,8 +375,11 @@ class Agent {
     this.ended = undefined;
     this.tools = 0;
     this.lastTool = undefined;
-    this.codex = undefined;
-    this.codexStatus = undefined;
+    this.executor = undefined;
+    this.executorJob = undefined;
+    this.executorMetaChecked = false;
+    this.pendingDiscovery = undefined;
+    this.executorStatus = undefined;
     this.workerSummaries.clear();
   }
 
@@ -314,33 +389,42 @@ class Agent {
 
   private render(texts: Entry[], status: string): string {
     const m = this.meta;
-    // The worker only relays: the model doing the work is Codex's.
-    const state = this.codexJob()?.state;
-    const model = state
-      ? [this.env.versions.label(codexModel(state.slug)), state.effort]
-      : m?.agentType === "codex"
-        ? []
-        : this.model
-          ? [this.env.versions.label(this.model.model), this.model.effort]
-          : [m?.model];
-    const head = [`🤖 **${escapeMd(m?.agentType ?? "Субагент")}**`, ...model.filter((s): s is string => !!s).map(escapeMd)].join(" · ");
+    // The worker only relays: the model doing the work is the executor's.
+    const state = this.getExecutorJob()?.state;
+    let model: string[] = [];
+    if (state) {
+      if (this.executor?.agentType === "volunteer") {
+        model = [volunteerModelLabel(state.slug)];
+      } else {
+        // Codex: use existing model formatting
+        model = [this.env.versions.label(codexModel(state.slug)), state.effort];
+      }
+    } else if (this.executor) {
+      model = [];
+    } else {
+      const modelLabel = this.model ? this.env.versions.label(this.model.model) : (m?.model ?? "");
+      const effort = this.model?.effort ?? "";
+      model = [modelLabel, effort].filter((s): s is string => s !== "");
+    }
+    const head = [`🤖 **${escapeMd(this.executor?.displayName ?? m?.agentType ?? "Субагент")}**`, ...model.map(escapeMd)].join(" · ");
     const task = m?.description ? `${escapeMd(m.description)}\n` : "";
     return [`${head}\n${task}${status}`, ...texts.map(e => `\`[${clock(e.at)}]\`${STARTS_WITH_BLOCK.test(e.text) ? "\n" : " "}${e.text}`)].join("\n\n");
   }
 
-  private codexJob(): CodexJob | undefined {
-    return this.meta?.agentType === "codex" && this.codex?.state ? this.codex : undefined;
+  private getExecutorJob(): ExecutorJob | undefined {
+    return this.executor && this.executorJob?.state ? this.executorJob : undefined;
   }
 
   private statusLine(): string {
     const took = duration(this.workMs());
-    const job = this.codexJob();
+    const job = this.getExecutorJob();
     if (job?.state) {
       const commands = this.baseCommands + job.commands;
       const acts = `${commands} ${plural(commands, "действие", "действия", "действий")}`;
+      const displayName = this.executor?.statusName ?? "Codex";
       switch (job.state.status) {
         case "question":
-          return "❓ Codex ждёт ответа";
+          return `❓ ${displayName} ждёт ответа`;
         case "failed":
         case "orphaned":
         case "limit":
@@ -406,6 +490,7 @@ export class SubagentWatcher {
       now?(): number;
       log?: Logger;
       codexJobsDir?: string;
+      volunteerJobsDir?: string;
       versions?: ModelVersions;
     },
   ) {
@@ -415,7 +500,10 @@ export class SubagentWatcher {
       now: opts.now ?? Date.now,
       sendEveryMs: opts.sendEveryMs ?? SEND_EVERY_MS,
       log: opts.log ?? nullLogger,
-      codexJobsDir: opts.codexJobsDir ?? join(homedir(), ".claude", "codex-jobs"),
+      executorJobsDirs: new Map([
+        [EXECUTORS.codex.agentType, opts.codexJobsDir ?? join(homedir(), EXECUTORS.codex.jobsDir)],
+        [EXECUTORS.volunteer.agentType, opts.volunteerJobsDir ?? join(homedir(), EXECUTORS.volunteer.jobsDir)],
+      ]),
       versions: opts.versions ?? new ModelVersions(),
       jobs: new Map(),
     };
@@ -458,6 +546,12 @@ function recordTime(rec: unknown): number | undefined {
   const ts = field(rec, "timestamp");
   const ms = typeof ts === "string" ? Date.parse(ts) : NaN;
   return Number.isNaN(ms) ? undefined : ms;
+}
+
+function executorForAgentType(agentType: string | undefined): ExecutorConfig | undefined {
+  if (agentType === "codex") return EXECUTORS.codex;
+  if (agentType === "volunteer") return EXECUTORS.volunteer;
+  return undefined;
 }
 
 // Local wall-clock time, as 18:39.

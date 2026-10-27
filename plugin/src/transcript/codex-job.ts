@@ -6,11 +6,6 @@ import { z } from "zod";
 import { TranscriptTailer } from "./tail.ts";
 
 const JOB = "\\d{8}-\\d{6}-[0-9a-f]+";
-const STARTED = new RegExp(`\\bjob (${JOB}) started:`);
-const ATTACHED = new RegExp(`(?:^|[\\s/\\\\\"'])codex-run\\.py[\"']?\\s+(?:reply|attach|wait)\\s+(${JOB})\\b`);
-const PROMPT = new RegExp(`^(?:reply|attach):[ \\t]+(${JOB})(?=[ \\t\\r\\n]|$)`, "m");
-// The worker may capitalise the line it relays: "Job … started:".
-const WORKER_TEXT = new RegExp(`^(?:codex job |job ${JOB} (?:started|resumed with the reply))`, "i");
 const NOTE = /^([01]\d|2[0-3]):([0-5]\d)\s+(.+)$/;
 const FAILURE_STATUSES = new Set(["failed", "orphaned", "limit", "cancelled"]);
 
@@ -32,28 +27,88 @@ const toolSchema = z.object({ type: z.literal("tool_use"), name: z.literal("Bash
 const resultSchema = z.object({ type: z.literal("tool_result"), content: z.union([z.string(), z.array(z.unknown())]) });
 const recordSchema = z.object({ type: z.string(), message: z.object({ content: z.union([z.string(), z.array(z.unknown())]) }) });
 
-export type CodexDiscovery = { id: string; fromStart: boolean };
-export type CodexEntry = { at: number; text: string };
+export type ExecutorDiscovery = { id: string; fromStart: boolean; source: "command" | "prompt" | "started" };
+export type ExecutorEntry = { at: number; text: string };
 
-// Keep the full command: the transcript parser's display detail is truncated.
-export function discoverCodexJob(record: unknown): CodexDiscovery | undefined {
+export type ExecutorType = "codex" | "volunteer";
+
+type ExecutorConfigInput = {
+  agentType: ExecutorType;
+  jobsDir: string;
+  scriptName: string;
+  summaryPrefix: string;
+  promptFilePrefix: string;
+  displayName: string;
+  statusName: string;
+};
+
+export type ExecutorConfig = ExecutorConfigInput & {
+  commandRegex: RegExp;
+  promptRegex: RegExp;
+  startedRegex: RegExp;
+  workerTextRegex: RegExp[];
+};
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function makeExecutorConfig(input: ExecutorConfigInput): ExecutorConfig {
+  const scriptName = escapeRegex(input.scriptName);
+  const promptFilePrefix = escapeRegex(input.promptFilePrefix);
+  return {
+    ...input,
+    commandRegex: new RegExp(`(?:^|[\\s/\\\\\"'])${scriptName}[\"']?\\s+(?:reply|attach|wait)\\s+(${JOB})\\b`),
+    promptRegex: new RegExp(`^(?:reply:|attach:)[ \\t]+(${JOB})(?=[ \\t\\r\\n]|$)`, "m"),
+    startedRegex: new RegExp(`\\bjob (${JOB}) started:`),
+    workerTextRegex: [
+      new RegExp(`^(?:${escapeRegex(input.summaryPrefix)}|job ${JOB} (?:started|resumed with the reply))`, "i"),
+      new RegExp(`^python\\s+-I\\s+.*${scriptName}.*\\s(?:start|wait|attach|reply|cancel)\\b`, "i"),
+      new RegExp(`(?:^|[\\\\/])${promptFilePrefix}[^\\s]*`, "i"),
+      new RegExp(`^\\(still running; call: wait ${JOB}\\)`, "i"),
+    ],
+  };
+}
+
+export const EXECUTORS = {
+  codex: makeExecutorConfig({
+    agentType: "codex",
+    jobsDir: ".claude/codex-jobs",
+    scriptName: "codex-run.py",
+    summaryPrefix: "codex job ",
+    promptFilePrefix: "codex-prompt-",
+    displayName: "codex",
+    statusName: "Codex",
+  }),
+  volunteer: makeExecutorConfig({
+    agentType: "volunteer",
+    jobsDir: ".claude/volunteer-jobs",
+    scriptName: "volunteer-run.py",
+    summaryPrefix: "volunteer job ",
+    promptFilePrefix: "volunteer-prompt-",
+    displayName: "volunteer",
+    statusName: "volunteer",
+  }),
+} as const satisfies Record<ExecutorType, ExecutorConfig>;
+
+export function discoverExecutorJob(record: unknown, executor: ExecutorConfig): ExecutorDiscovery | undefined {
   const parsed = recordSchema.safeParse(record);
   if (!parsed.success) return undefined;
   const content = parsed.data.message.content;
+
   if (parsed.data.type === "user") {
     const prompt = typeof content === "string" ? content : content.flatMap(block => {
       const text = textBlockSchema.safeParse(block);
       return text.success ? [text.data.text] : [];
     }).join("\n");
-    const id = prompt.match(PROMPT)?.[1];
-    if (id) return { id, fromStart: false };
+    const id = prompt.match(executor.promptRegex)?.[1];
+    if (id) return { id, fromStart: false, source: "prompt" };
   }
   if (typeof content === "string") return undefined;
   for (const block of content) {
     if (parsed.data.type === "assistant") {
       const tool = toolSchema.safeParse(block);
-      const id = tool.success ? tool.data.input.command.match(ATTACHED)?.[1] : undefined;
-      if (id) return { id, fromStart: false };
+      const id = tool.success ? tool.data.input.command.match(executor.commandRegex)?.[1] : undefined;
+      if (id) return { id, fromStart: false, source: "command" };
     } else if (parsed.data.type === "user") {
       const result = resultSchema.safeParse(block);
       if (!result.success) continue;
@@ -62,32 +117,33 @@ export function discoverCodexJob(record: unknown): CodexDiscovery | undefined {
         const parsed = textBlockSchema.safeParse(b);
         return parsed.success ? [parsed.data.text] : [];
       }).join("\n");
-      const id = text.match(STARTED)?.[1];
-      if (id) return { id, fromStart: true };
+      const id = text.match(executor.startedRegex)?.[1];
+      if (id) return { id, fromStart: true, source: "started" };
     }
   }
   return undefined;
 }
 
-export function isCodexWorkerSummary(text: string): boolean {
-  return WORKER_TEXT.test(text.trimStart());
+export function isExecutorWorkerSummary(text: string, executor: ExecutorConfig): boolean {
+  const value = text.trimStart();
+  return executor.workerTextRegex.some(pattern => pattern.test(value));
 }
 
 // Polls one job; owning an instance captures the reply's event and note boundary
 // even when the agent's meta file has not arrived yet.
-export class CodexJob {
+export class ExecutorJob {
   state: z.infer<typeof stateSchema> | undefined;
   commands = 0;
   eventAt: number | undefined;
   private tailer: TranscriptTailer;
-  private pending: CodexEntry | undefined;
-  private entries: CodexEntry[] = [];
+  private pending: ExecutorEntry | undefined;
+  private entries: ExecutorEntry[] = [];
   private running = new Map<string, string>();
   private notes: string[] | undefined;
   private error: string | undefined;
 
   constructor(
-    readonly discovery: CodexDiscovery,
+    readonly discovery: ExecutorDiscovery,
     private dir: string,
     private now: () => number,
     log: Logger,
@@ -106,7 +162,7 @@ export class CodexJob {
     return [...this.running.values()].at(-1);
   }
 
-  poll(): CodexEntry[] {
+  poll(): ExecutorEntry[] {
     this.readState();
     if (this.state) this.tailer.pollNow();
     return this.entries.splice(0);
