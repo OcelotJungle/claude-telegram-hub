@@ -45,7 +45,7 @@ const MAX_COMMAND_CHARS = 60;
 
 // A subagent's card as Markdown. final: its last version (the agent stopped,
 // or the card is full and continues in the next one).
-export type Card = { id: string; text: string; final: boolean; reopen?: boolean };
+export type Card = { id: string; text: string; final: boolean; reopen?: boolean; replyTo?: string };
 
 type Status = "running" | "done" | "failed" | "stopped";
 
@@ -91,6 +91,7 @@ class Agent {
   private handedOver = false;
   private displayed = false;
   private reopenCard = false;
+  private replyTo: string | undefined;
   private texts: Entry[] = [];
   private seen = false;
   private shown = false;
@@ -292,7 +293,8 @@ class Agent {
   }
 
   private send(text: string, final: boolean): void {
-    this.env.send({ id: this.cardId(), text, final, ...(this.reopenCard ? { reopen: true } : {}) });
+    this.env.send({ id: this.cardId(), text, final, ...(this.reopenCard ? { reopen: true } : {}), ...(this.replyTo ? { replyTo: this.replyTo } : {}) });
+    this.replyTo = undefined;
     this.displayed = true;
     if (this.executor && this.executorJob) {
       const jobKey = `${this.executor.agentType}:${this.executorJob.discovery.id}`;
@@ -339,8 +341,10 @@ class Agent {
     const trimmed = t.trim();
     const entry = { at, text: trimmed.length > MAX_CARD_TEXT ? `${trimmed.slice(0, MAX_CARD_TEXT)}…` : trimmed };
     if (this.texts.length && toTelegram(this.render([...this.texts, entry], this.statusLine())).text.length > MAX_CARD) {
+      const previousCardId = this.cardId();
       if (this.shown) this.send(this.render(this.texts, CONTINUED), true);
       this.part++;
+      this.replyTo = this.shown ? previousCardId : undefined;
       this.reopenCard = false;
       this.texts = [];
       this.workerSummaries.clear();
@@ -359,7 +363,10 @@ class Agent {
   }
 
   private reopen(): void {
+    const previousCardId = this.cardId();
+    const previousWasShown = this.shown;
     this.part++;
+    this.replyTo = previousWasShown ? previousCardId : undefined;
     this.cardAgentId = this.id;
     this.baseWorkMs = 0;
     this.baseCommands = 0;

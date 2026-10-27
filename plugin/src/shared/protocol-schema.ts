@@ -30,7 +30,7 @@ export const pluginToHub: z.ZodType<PluginToHub> = z.union([
   z.object({ type: z.literal("permission"), requestId: z.string().optional(), toolName: z.string(), description: z.string(), inputPreview: z.string().optional() }),
   z.object({ type: z.literal("title"), title: z.string() }),
   z.object({ type: z.literal("terminalInput") }),
-  z.object({ type: z.literal("card"), id: z.string(), sessionId: z.string(), text: z.string(), final: z.boolean(), reopen: z.boolean().optional() }),
+  z.object({ type: z.literal("card"), id: z.string(), sessionId: z.string(), text: z.string(), final: z.boolean(), reopen: z.boolean().optional(), replyTo: z.string().optional() }),
   z.object({ type: z.literal("seen"), messageIds: z.array(z.number()) }),
   z.object({ type: z.literal("busy"), busy: z.boolean() }),
   z.object({ type: z.literal("exiting"), pid: z.number() }),

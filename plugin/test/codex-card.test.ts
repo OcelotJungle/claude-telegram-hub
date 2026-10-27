@@ -136,6 +136,7 @@ describe("Executor cards", () => {
     s.tick(FIRST_RUN_MS);
     s.tick(SETTLE_MS);
     expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true });
+    expect(s.cards.at(-1)?.replyTo).toBeUndefined();
     s.tick(ANSWER_PAUSE_MS);
     const prompt = `reply: ${JOB}\nAnswer the question`;
     const write = s.worker("a2", blocks ? [text(prompt)] : prompt);
@@ -175,7 +176,7 @@ describe("Executor cards", () => {
     s.events(message("Attached progress") + command("attached", "attached command"));
     s.tick(SETTLE_MS);
     expect(s.cards.length).toBeGreaterThan(boundary);
-    expect(s.cards.slice(boundary).every(card => card.id === "a1-0" && card.reopen && !card.final)).toBe(true);
+    expect(s.cards.slice(boundary).every(card => card.id === "a1-0" && card.reopen && !card.final && card.replyTo === undefined)).toBe(true);
     expect(s.last()).toContain("Earlier worker text");
     expect(s.last()).toContain("Attached progress");
     expect(s.last()).toContain("2 действия");
@@ -190,6 +191,7 @@ describe("Executor cards", () => {
     s.tick();
     expect(s.cards.at(-1)).toMatchObject({ id: "a2-0", final: false });
     expect(s.cards.at(-1)?.reopen).toBeUndefined();
+    expect(s.cards.at(-1)?.replyTo).toBeUndefined();
     expect(s.last()).not.toContain("Unseen old progress");
     expect(s.last()).toContain("0 действий");
   });

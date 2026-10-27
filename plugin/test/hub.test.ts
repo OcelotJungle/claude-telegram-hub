@@ -1371,6 +1371,50 @@ describe("subagent cards", () => {
     expect(fake.callsOf("editMessageText").length).toBe(1);
   });
 
+  test("a new part replies to the previous card in the same topic", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send(card("x-0", "first", true));
+    await waitFor(() => fake.texts().length === 1);
+    const previousMessageId = fake.lastMessageId;
+    a.send({ ...card("x-1", "continued"), replyTo: "x-0" });
+    await waitFor(() => fake.texts().length === 2);
+    expect(fake.callsOf("sendMessage")[1]).toMatchObject({
+      message_thread_id: 100,
+      reply_parameters: { message_id: previousMessageId, allow_sending_without_reply: true },
+    });
+  });
+
+  test("an unknown previous card sends without reply parameters", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send({ ...card("x-1", "continued"), replyTo: "missing-0" });
+    await waitFor(() => fake.texts().length === 1);
+    expect(fake.callsOf("sendMessage")[0]?.reply_parameters).toBeUndefined();
+  });
+
+  test("a queued card keeps its reply target across a hub restart", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send(card("x-0", "first", true));
+    await waitFor(() => fake.texts().length === 1);
+    const previousMessageId = fake.lastMessageId;
+    fake.hangNext("sendMessage");
+    a.send({ type: "send", id: "blocker", sessionId: "a", text: "wait", notify: false });
+    await Bun.sleep(50);
+    a.send({ ...card("x-1", "continued"), replyTo: "x-0" });
+    await Bun.sleep(50);
+    await hub.stop();
+    await startHub();
+    await enabled("a");
+    await waitFor(() => fake.texts().some(t => t.text === "continued"), 5000);
+    const continued = fake.callsOf("sendMessage").find(c => c.text === "continued");
+    expect(continued).toMatchObject({
+      message_thread_id: 100,
+      reply_parameters: { message_id: previousMessageId, allow_sending_without_reply: true },
+    });
+  });
+
   test("a restarted hub goes on editing the cards it sent", async () => {
     await startHub();
     const a = await enabled("a");

@@ -21,7 +21,7 @@ const MAX_SEEN = 5000;
 // notice: it replaced a piece Telegram rejected. buttons: an inline keyboard
 // under a text piece. card: the piece is the first version of this subagent
 // card; the hub sends the card's latest version in its place.
-export type Piece = { text: string; silent: boolean; entities?: Entity[]; rich?: Block[]; files?: OutFile[]; notice?: boolean; buttons?: Button[][]; card?: string };
+export type Piece = { text: string; silent: boolean; entities?: Entity[]; rich?: Block[]; files?: OutFile[]; notice?: boolean; buttons?: Button[][]; card?: string; cardReplyTo?: string };
 export type OutItem = Piece & { id: string; sessionId: string };
 
 type Data = { items: OutItem[]; seen: string[] };
@@ -39,6 +39,7 @@ const dataSchema: z.ZodType<Data> = z.object({
       notice: z.boolean().optional(),
       buttons: z.array(z.array(z.object({ text: z.string(), data: z.string() }))).optional(),
       card: z.string().optional(),
+      cardReplyTo: z.string().optional(),
     }),
   ),
   seen: z.array(z.string()),

@@ -349,11 +349,12 @@ describe("SubagentWatcher", () => {
     write(assistant("m1", "tool_use", text(chunk)));
     s.advance(SEND_EVERY_MS);
     expect(s.cards.map(c => c.id)).toEqual(["a1-0"]);
+    expect(s.cards[0]?.replyTo).toBeUndefined();
     write(assistant("m2", "tool_use", text(chunk)));
     s.advance(SECOND);
     expect(s.cards[1]).toEqual({ id: "a1-0", final: true, text: `🤖 **Субагент**\n⬇️ продолжение ниже\n\n\`[18:39]\` ${chunk}\n\n\`[18:39]\` ${chunk}` });
     s.advance(SEND_EVERY_MS);
-    expect(s.cards[2]).toMatchObject({ id: "a1-1", final: false });
+    expect(s.cards[2]).toMatchObject({ id: "a1-1", final: false, replyTo: "a1-0" });
     expect(s.cards.every(c => c.text.length <= MAX_CARD)).toBe(true);
   });
 
@@ -367,7 +368,7 @@ describe("SubagentWatcher", () => {
     expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true });
     write(assistant("m2", "tool_use", text("second run")));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)).toEqual({ id: "a1-1", final: false, text: "🤖 **Субагент**\n⏳ 0 с · 0 действий\n\n`[18:41]` second run" });
+    expect(s.cards.at(-1)).toEqual({ id: "a1-1", final: false, replyTo: "a1-0", text: "🤖 **Субагент**\n⏳ 0 с · 0 действий\n\n`[18:41]` second run" });
   });
 
   test("each text shows when the agent wrote it, by its record's time", () => {

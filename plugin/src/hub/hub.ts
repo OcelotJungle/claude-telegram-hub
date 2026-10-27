@@ -1157,11 +1157,11 @@ ${msg.text}`);
   // among the session's messages; later versions edit that message, at most
   // every CARD_EDIT_MS.
   private onCard(msg: Extract<PluginToHub, { type: "card" }>): void {
-    this.upsertCard(msg.sessionId, msg.id, msg.text, msg.final, undefined, msg.reopen);
+    this.upsertCard(msg.sessionId, msg.id, msg.text, msg.final, undefined, msg.reopen, msg.replyTo);
   }
 
   // A subagent's card or a topic command's: buttons, when given, go under it.
-  private upsertCard(sessionId: string, cardId: string, markdown: string, final: boolean, buttons?: Button[][], reopen = false): void {
+  private upsertCard(sessionId: string, cardId: string, markdown: string, final: boolean, buttons?: Button[][], reopen = false, replyTo?: string): void {
     if (!this.store.get(sessionId)) return;
     const key = `${sessionId}:${cardId}`;
     const card = this.cards.get(key);
@@ -1185,7 +1185,7 @@ ${msg.text}`);
     this.saveCards();
     const [first] = textPieces(markdown, true);
     // The outbox remembers sent ids: a card sent anew needs a new one.
-    if (first && this.outbox.add(`card-${randomUUID()}`, sessionId, [{ ...first, card: key }])) void this.pump(sessionId);
+    if (first && this.outbox.add(`card-${randomUUID()}`, sessionId, [{ ...first, card: key, ...(replyTo ? { cardReplyTo: `${sessionId}:${replyTo}` } : {}) }])) void this.pump(sessionId);
   }
 
   // On the card's creation, first send and end: its text in between is the
@@ -1410,7 +1410,8 @@ ${msg.text}`);
       const text = card.text;
       const f = cardFormat(text);
       const buttons = card.buttons;
-      const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, f.text, true, f.entities, buttons));
+      const replyTo = item.cardReplyTo ? this.cards.get(item.cardReplyTo)?.messageId : undefined;
+      const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, f.text, true, f.entities, buttons, replyTo));
       card.messageId = sent.message_id;
       card.shown = text;
       card.lastEdit = Date.now();
