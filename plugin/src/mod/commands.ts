@@ -2,9 +2,30 @@
 // The module runs inside Claude Code with no Node: everything outside comes
 // in as Deps (the engine's `$` calls), so this file imports only types and
 // plain helpers from shared/ that need nothing at run time.
-import type { CleanupReport, LimitsReading, RateLimit, TopicCommand } from "../shared/protocol.ts";
+import type { CleanupReport, LimitsReading, RateLimit, TopicCommand, VolunteerLimitsResult } from "../shared/protocol.ts";
 
 import { MILLION, THOUSAND, tokens } from "../shared/tokens.ts";
+
+function isVolunteerLimitsResult(v: unknown): v is VolunteerLimitsResult {
+  if (typeof v !== "object" || v === null || !("kind" in v)) return false;
+  if (v.kind === "none") return true;
+  if (v.kind === "error") return "reason" in v && typeof v.reason === "string";
+  if (v.kind !== "ok") return false;
+  return (
+    "at" in v && typeof v.at === "number" &&
+    "dayPercent" in v && typeof v.dayPercent === "number" &&
+    (!("resetsAt" in v) || typeof v.resetsAt === "number") &&
+    "providers" in v && Array.isArray(v.providers) &&
+    v.providers.every((p: unknown) => {
+      if (typeof p !== "object" || p === null) return false;
+      return (
+        "name" in p && typeof p.name === "string" &&
+        "used" in p && typeof p.used === "number" &&
+        "cap" in p && (p.cap === null || typeof p.cap === "number")
+      );
+    })
+  );
+}
 
 // /stop of a session with more context than this compacts it first, so a
 // resume does not cache all of it again.
@@ -17,7 +38,7 @@ const MINUTES_PER_HOUR = 60;
 const HOURS_PER_DAY = 24;
 const PERCENT = 100;
 // Limits read longer ago than this say how old they are.
-const STALE_LIMITS_MS = 60_000;
+const STALE_LIMITS_MS = 300_000;
 // Polls in a row on which the compaction failed with no turn running before
 // the failure is reported: a turn may start just as it is tried.
 const COMPACT_TRIES = 3;
@@ -115,8 +136,16 @@ export class Runner {
     if (cmd.name === "info") {
       try {
         const usage = await this.deps.usage();
-        const [shared, codex] = await Promise.all([this.sharedLimits(sessionId), this.codexLimits()]);
-        await this.reply(to, infoText(shared ? { ...usage, rateLimits: shared.rateLimits } : usage, this.deps.now(), shared?.at, codex), true);
+        const [shared, codex, volunteer] = await Promise.all([
+          this.sharedLimits(sessionId),
+          this.codexLimits(),
+          this.volunteerLimits(),
+        ]);
+        await this.reply(
+          to,
+          infoText(shared ? { ...usage, rateLimits: shared.rateLimits } : usage, this.deps.now(), shared?.at, codex, volunteer),
+          true
+        );
       } catch (e) {
         await this.reply(to, `⚠️ /info не выполнена: ${message(e)}`, true);
       }
@@ -230,6 +259,17 @@ export class Runner {
     }
   }
 
+  private async volunteerLimits(): Promise<VolunteerLimitsResult | undefined> {
+    try {
+      const res = await this.deps.http(`${this.base}/volunteer-limits`);
+      if (res.status !== 200) return undefined;
+      const value: unknown = JSON.parse(res.text);
+      return isVolunteerLimitsResult(value) ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   // The status line's figure, else the local estimate (right after a
   // compaction); undefined when the engine cannot tell.
   private async contextTokens(): Promise<number | undefined> {
@@ -269,7 +309,13 @@ export class Runner {
 }
 
 // limitsAt: when the limits were read, if known.
-export function infoText(u: Usage, now: number, limitsAt?: number, codex?: LimitsReading): string {
+export function infoText(
+  u: Usage,
+  now: number,
+  limitsAt?: number,
+  codex?: LimitsReading,
+  volunteer?: VolunteerLimitsResult
+): string {
   const lines: string[] = [];
   if (!u.rateLimits.length) lines.push("Лимиты Claude: нет данных — появятся после первого ответа модели");
   else {
@@ -290,6 +336,25 @@ export function infoText(u: Usage, now: number, limitsAt?: number, codex?: Limit
       const percent = left <= 0 ? 0 : Math.round(limit.percentUsed);
       lines.push(`${LIMIT_NAMES[limit.kind] ?? limit.kind}: ${percent}%${left > 0 ? ` (сброс через ${duration(left)})` : ""}`);
     }
+  }
+  if (volunteer) {
+    if (volunteer.kind === "ok") {
+      const age = now - volunteer.at;
+      lines.push("", age >= STALE_LIMITS_MS ? `**Лимиты волонтёров** (данные ${duration(age)} назад)` : "**Лимиты волонтёров**");
+      const resetsLeft = volunteer.resetsAt ? volunteer.resetsAt - now : NaN;
+      if (resetsLeft > 0) {
+      lines.push(`День: ${Math.round(volunteer.dayPercent)}% (сброс через ${duration(resetsLeft)})`);
+      } else {
+        lines.push("День: 0%");
+      }
+      const providerLines = volunteer.providers.map((p) =>
+        p.cap !== null ? `${p.name} ${p.used}/${p.cap}` : `${p.name} ${p.used} запр.`
+      );
+      lines.push(providerLines.join(" · "));
+    } else if (volunteer.kind === "error") {
+      lines.push("", `Лимиты волонтёров: нет данных — ${volunteer.reason}`);
+    }
+    // kind === "none" produces no block
   }
   lines.push("", "**Контекст**");
   const b = u.context.breakdown;

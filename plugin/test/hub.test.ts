@@ -78,6 +78,9 @@ type HubExtras = {
   cleanupSettleMs?: number;
   cleanTranscript?: typeof cleanTranscript;
   catchUpMs?: number;
+  volunteerLimitsScript?: string;
+  volunteerLimitsCommand?: string[];
+  volunteerLimitsTimeoutMs?: number;
 };
 
 async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number; batchQuietMs?: number; batchMaxMs?: number } & HubExtras = {}) {
@@ -117,6 +120,9 @@ async function startHub(o: { idleMs?: number; token?: boolean | string; commandP
     ...(o.cleanupExitMs ? { cleanupExitMs: o.cleanupExitMs } : {}),
     ...(o.cleanupSettleMs ? { cleanupSettleMs: o.cleanupSettleMs } : {}),
     ...(o.cleanTranscript ? { cleanTranscript: o.cleanTranscript } : {}),
+    ...(o.volunteerLimitsScript ? { volunteerLimitsScript: o.volunteerLimitsScript } : {}),
+    ...(o.volunteerLimitsCommand ? { volunteerLimitsCommand: o.volunteerLimitsCommand } : {}),
+    ...(o.volunteerLimitsTimeoutMs ? { volunteerLimitsTimeoutMs: o.volunteerLimitsTimeoutMs } : {}),
     defaultConfigDir: DEFAULT_DIR,
     defaultAccount: o.defaultAccount ?? (async () => undefined),
     execDir: join(dir, "exec"),
@@ -2002,6 +2008,96 @@ describe("commands", () => {
     const response = await get();
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ at: Date.parse(timestamp), rateLimits: [{ kind: "five_hour", percentUsed: 41 }] });
+  });
+
+  test("/volunteer-limits returns none when script missing", async () => {
+    await startHub({ volunteerLimitsScript: join(dir, "missing.py") });
+    const res = await fetch(`http://127.0.0.1:${port}/volunteer-limits`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ kind: "none" });
+  });
+
+  test("/volunteer-limits returns ok with parsed data", async () => {
+    const scriptPath = join(dir, "volunteer-models.py");
+    writeFileSync(scriptPath, `#!/usr/bin/env python3
+import sys, json
+print(json.dumps({
+  "checked_at": "2026-01-01T08:19:04Z",
+  "source": "proxy",
+  "day_percent": 6,
+  "used": 240,
+  "cap": 4200,
+  "reset_in_s": 56455,
+  "providers": { "openrouter": { "used": 39, "cap": 1000 }, "requesty": { "used": 7, "cap": 200 }, "groq": { "used": 194, "cap": 3000 }, "zhipu": { "used": 4, "cap": None } },
+  "error": None
+}))
+`);
+    await startHub({ volunteerLimitsScript: scriptPath });
+    const res = await fetch(`http://127.0.0.1:${port}/volunteer-limits`);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.kind).toBe("ok");
+    if (data.kind === "ok") {
+      expect(data.dayPercent).toBe(6);
+      expect(data.providers).toEqual([
+        { name: "OpenRouter", used: 39, cap: 1000 },
+        { name: "Requesty", used: 7, cap: 200 },
+        { name: "Groq", used: 194, cap: 3000 },
+        { name: "Z.ai", used: 4, cap: null },
+      ]);
+    }
+  });
+
+  test("/volunteer-limits returns error for source none", async () => {
+    const scriptPath = join(dir, "volunteer-models.py");
+    writeFileSync(scriptPath, `#!/usr/bin/env python3
+import sys, json
+print(json.dumps({
+  "checked_at": "2026-01-01T08:19:04Z",
+  "source": "none",
+  "day_percent": None,
+  "used": None,
+  "cap": None,
+  "reset_in_s": None,
+  "providers": None,
+  "error": "no proxy configured"
+}))
+`);
+    await startHub({ volunteerLimitsScript: scriptPath });
+    const res = await fetch(`http://127.0.0.1:${port}/volunteer-limits`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ kind: "error", reason: "no proxy configured" });
+  });
+
+  test("/volunteer-limits returns error for bad JSON", async () => {
+    const scriptPath = join(dir, "volunteer-models.py");
+    writeFileSync(scriptPath, `#!/usr/bin/env python3
+print("not json")
+`);
+    await startHub({ volunteerLimitsScript: scriptPath });
+    const res = await fetch(`http://127.0.0.1:${port}/volunteer-limits`);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.kind).toBe("error");
+    if (data.kind === "error") {
+      expect(data.reason).toContain("JSON");
+    }
+  });
+
+  test("/volunteer-limits returns error for script crash", async () => {
+    const scriptPath = join(dir, "volunteer-models.py");
+    writeFileSync(scriptPath, `#!/usr/bin/env python3
+import sys
+sys.exit(1)
+`);
+    await startHub({ volunteerLimitsScript: scriptPath });
+    const res = await fetch(`http://127.0.0.1:${port}/volunteer-limits`);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.kind).toBe("error");
+    if (data.kind === "error") {
+      expect(data.reason).toContain("script exited with code 1");
+    }
   });
 
   test("the same reply posted twice is sent once", async () => {

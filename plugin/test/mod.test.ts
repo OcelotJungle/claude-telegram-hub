@@ -1,4 +1,5 @@
 import type { Usage } from "../src/mod/commands.ts";
+import type { VolunteerLimitsResult } from "../src/shared/protocol.ts";
 
 import { describe, expect, test } from "bun:test";
 import { autocompactArg, infoText, Runner } from "../src/mod/commands.ts";
@@ -19,6 +20,20 @@ const usage = (o: { tokens?: number; limits?: Usage["rateLimits"]; breakdown?: P
     { kind: "seven_day", percentUsed: 36, resetsAt: "2026-01-01T18:00:00.000Z" },
     { kind: "five_hour", percentUsed: 30, resetsAt: "2026-01-01T13:00:00.000Z" },
   ],
+});
+
+const volunteerOk = (overrides: Partial<Omit<VolunteerLimitsResult, "kind">> = {}): VolunteerLimitsResult => ({
+  kind: "ok",
+  at: NOW - 2 * 60_000,
+  dayPercent: 6,
+  resetsAt: NOW + 15 * 60 * 60_000,
+  providers: [
+    { name: "OpenRouter", used: 39, cap: 1000 },
+    { name: "Requesty", used: 7, cap: 200 },
+    { name: "Groq", used: 194, cap: 3000 },
+    { name: "Z.ai", used: 4, cap: null },
+  ],
+  ...overrides,
 });
 
 describe("/info text", () => {
@@ -89,14 +104,67 @@ describe("/info text", () => {
     expect(text).toContain("spend_limit: 12%\n");
   });
 
-  test("limits read over a minute ago say how old they are", () => {
-    expect(infoText(usage({ tokens: 1 }), NOW, NOW - 59_000)).toStartWith("**Лимиты Claude**\n");
-    expect(infoText(usage({ tokens: 1 }), NOW, NOW - 72 * 60_000)).toStartWith("**Лимиты Claude** (данные 1 ч 12 мин назад)\n");
+  test("limits read over 5 minutes ago say how old they are", () => {
+    expect(infoText(usage({ tokens: 1 }), NOW, NOW - 4 * 60_000)).toStartWith("**Лимиты Claude**\n");
+    expect(infoText(usage({ tokens: 1 }), NOW, NOW - 6 * 60_000)).toStartWith("**Лимиты Claude** (данные 6 мин назад)\n");
   });
 
   test("without a breakdown only the status line figure is shown", () => {
     const text = infoText(usage({ tokens: 20_000, breakdown: null }), NOW);
     expect(text.endsWith("**Контекст**\nСейчас: 20k токенов")).toBe(true);
+  });
+
+  test("volunteer limits ok block after Codex", () => {
+    const text = infoText(usage(), NOW, undefined, { at: NOW, rateLimits: [] }, volunteerOk());
+    expect(text).toContain("\n\n**Лимиты волонтёров**\nДень: 6% (сброс через 15 ч)\nOpenRouter 39/1000 · Requesty 7/200 · Groq 194/3000 · Z.ai 4 запр.\n\n**Контекст**");
+  });
+
+  test("volunteer limits ok block after Claude when no Codex", () => {
+    const text = infoText(usage(), NOW, undefined, undefined, volunteerOk());
+    expect(text).toContain("\n\n**Лимиты волонтёров**\nДень: 6% (сброс через 15 ч)\nOpenRouter 39/1000 · Requesty 7/200 · Groq 194/3000 · Z.ai 4 запр.\n\n**Контекст**");
+  });
+
+  test("volunteer day percent rounds to an integer", () => {
+    const text = infoText(usage(), NOW, undefined, undefined, volunteerOk({ dayPercent: 6.7 }));
+    expect(text).toContain("День: 7% (сброс через 15 ч)");
+  });
+
+  test("volunteer limits passed reset shows 0% without suffix", () => {
+    const text = infoText(usage(), NOW, undefined, undefined, volunteerOk({ resetsAt: NOW - 1000 }));
+    expect(text).toContain("День: 0%\n");
+    // Check that the volunteer block doesn't have "сброс через"
+    const volIdx = text.indexOf("**Лимиты волонтёров**");
+    const ctxIdx = text.indexOf("**Контекст**");
+    const volBlock = text.slice(volIdx, ctxIdx);
+    expect(volBlock).not.toContain("сброс через");
+  });
+
+  test("volunteer limits error shows single line", () => {
+    const text = infoText(usage(), NOW, undefined, undefined, { kind: "error", reason: "timeout" });
+    expect(text).toContain("\n\nЛимиты волонтёров: нет данных — timeout\n\n**Контекст**");
+  });
+
+  test("volunteer limits none produces no block", () => {
+    const text = infoText(usage(), NOW, undefined, undefined, { kind: "none" });
+    expect(text).not.toContain("Лимиты волонтёров");
+  });
+
+  test("block order: Claude → Codex → volunteers → context", () => {
+    const text = infoText(usage(), NOW, undefined, { at: NOW, rateLimits: [] }, volunteerOk());
+    const claudeIdx = text.indexOf("**Лимиты Claude**");
+    const codexIdx = text.indexOf("**Лимиты Codex**");
+    const volIdx = text.indexOf("**Лимиты волонтёров**");
+    const ctxIdx = text.indexOf("**Контекст**");
+    expect(claudeIdx).toBeLessThan(codexIdx);
+    expect(codexIdx).toBeLessThan(volIdx);
+    expect(volIdx).toBeLessThan(ctxIdx);
+  });
+
+  test("volunteer limits staleness uses 5-minute threshold", () => {
+    const recent = volunteerOk({ at: NOW - 4 * 60_000 });
+    const stale = volunteerOk({ at: NOW - 6 * 60_000 });
+    expect(infoText(usage(), NOW, undefined, undefined, recent)).toContain("**Лимиты волонтёров**\n");
+    expect(infoText(usage(), NOW, undefined, undefined, stale)).toContain("**Лимиты волонтёров** (данные 6 мин назад)\n");
   });
 });
 
@@ -142,7 +210,11 @@ describe("limits shared through the hub", () => {
   const OWN = [{ kind: "five_hour", percentUsed: 30, resetsAt: "2026-01-01T13:00:00.000Z" }];
   const FRESH = [{ kind: "five_hour", percentUsed: 64, resetsAt: "2026-01-01T13:00:00.000Z" }];
 
-  function runner(answer: () => { status: number; text: string }, codex: () => { status: number; text: string } = () => ({ status: 200, text: "null" })) {
+  function runner(
+    answer: () => { status: number; text: string },
+    codex: () => { status: number; text: string } = () => ({ status: 200, text: "null" }),
+    volunteer: () => { status: number; text: string } = () => ({ status: 200, text: "null" })
+  ) {
     const posted: { path: string; body: unknown }[] = [];
     let commands = [{ id: "c1", name: "info", args: "" }];
     const r = new Runner("http://hub", {
@@ -157,6 +229,7 @@ describe("limits shared through the hub", () => {
         }
         if (new URL(url).pathname === "/limits") return answer();
         if (new URL(url).pathname === "/codex-limits") return codex();
+        if (new URL(url).pathname === "/volunteer-limits") return volunteer();
         const list = commands;
         commands = [];
         return { status: 200, text: JSON.stringify(list) };
@@ -187,6 +260,22 @@ describe("limits shared through the hub", () => {
       await Bun.sleep(50);
       expect(s.info()).toStartWith("**Лимиты Claude**");
       expect(s.info().includes("**Лимиты Codex**")).toBe(index === 0);
+    }
+  });
+
+  test("/info fetches volunteer limits and tolerates failures", async () => {
+    const answers = [
+      () => ({ status: 200, text: JSON.stringify({ kind: "ok", at: NOW, dayPercent: 6, resetsAt: NOW + 15 * 60 * 60_000, providers: [] }) }),
+      () => ({ status: 500, text: "" }),
+      () => ({ status: 200, text: "{broken" }),
+      () => { throw new Error("offline"); },
+    ];
+    for (const [index, answer] of answers.entries()) {
+      const s = runner(() => ({ status: 200, text: "null" }), () => ({ status: 200, text: "null" }), answer);
+      await s.r.poll();
+      await Bun.sleep(50);
+      expect(s.info()).toStartWith("**Лимиты Claude**");
+      expect(s.info().includes("**Лимиты волонтёров**")).toBe(index === 0);
     }
   });
 

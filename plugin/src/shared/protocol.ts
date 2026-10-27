@@ -23,6 +23,16 @@ export type CleanupReport = { sessionId: string; id: string; before?: number; af
 // (GET /limits?session=<id>, answered with a reading or null).
 export type RateLimit = { kind: string; percentUsed: number; resetsAt?: string };
 export type LimitsReading = { at: number; rateLimits: RateLimit[] };
+export type VolunteerLimitsResult =
+  | { kind: "none" }
+  | { kind: "error"; reason: string }
+  | {
+      kind: "ok";
+      at: number;
+      dayPercent: number;
+      resetsAt?: number;
+      providers: { name: string; used: number; cap: number | null }[];
+    };
 export type LimitsPost = LimitsReading & { sessionId: string };
 
 export type ChannelMeta = Record<string, string>;
