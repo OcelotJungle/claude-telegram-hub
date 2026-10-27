@@ -4,6 +4,7 @@
 // plain helpers from shared/ that need nothing at run time.
 import type { CleanupReport, LimitsReading, RateLimit, TopicCommand, VolunteerLimitsResult } from "../shared/protocol.ts";
 
+import { plural } from "../shared/plural.ts";
 import { MILLION, THOUSAND, tokens } from "../shared/tokens.ts";
 
 function isVolunteerLimitsResult(v: unknown): v is VolunteerLimitsResult {
@@ -343,14 +344,13 @@ export function infoText(
       lines.push("", age >= STALE_LIMITS_MS ? `**Лимиты волонтёров** (данные ${duration(age)} назад)` : "**Лимиты волонтёров**");
       const resetsLeft = volunteer.resetsAt ? volunteer.resetsAt - now : NaN;
       if (resetsLeft > 0) {
-      lines.push(`День: ${Math.round(volunteer.dayPercent)}% (сброс через ${duration(resetsLeft)})`);
+        lines.push(`День: ${Math.round(volunteer.dayPercent)}% (сброс через ${duration(resetsLeft)})`);
       } else {
         lines.push("День: 0%");
       }
-      const providerLines = volunteer.providers.map((p) =>
-        p.cap !== null ? `${p.name} ${p.used}/${p.cap}` : `${p.name} ${p.used} запр.`
-      );
-      lines.push(providerLines.join(" · "));
+      for (const p of volunteer.providers) {
+        lines.push(p.cap !== null ? `${p.name}: ${p.used}/${p.cap}` : `${p.name}: ${p.used} ${plural(p.used, "запрос", "запроса", "запросов")}`);
+      }
     } else if (volunteer.kind === "error") {
       lines.push("", `Лимиты волонтёров: нет данных — ${volunteer.reason}`);
     }

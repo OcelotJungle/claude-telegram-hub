@@ -116,12 +116,27 @@ describe("/info text", () => {
 
   test("volunteer limits ok block after Codex", () => {
     const text = infoText(usage(), NOW, undefined, { at: NOW, rateLimits: [] }, volunteerOk());
-    expect(text).toContain("\n\n**Лимиты волонтёров**\nДень: 6% (сброс через 15 ч)\nOpenRouter 39/1000 · Requesty 7/200 · Groq 194/3000 · Z.ai 4 запр.\n\n**Контекст**");
+    expect(text).toContain("\n\n**Лимиты волонтёров**\nДень: 6% (сброс через 15 ч)\nOpenRouter: 39/1000\nRequesty: 7/200\nGroq: 194/3000\nZ.ai: 4 запроса\n\n**Контекст**");
   });
 
   test("volunteer limits ok block after Claude when no Codex", () => {
     const text = infoText(usage(), NOW, undefined, undefined, volunteerOk());
-    expect(text).toContain("\n\n**Лимиты волонтёров**\nДень: 6% (сброс через 15 ч)\nOpenRouter 39/1000 · Requesty 7/200 · Groq 194/3000 · Z.ai 4 запр.\n\n**Контекст**");
+    expect(text).toContain("\n\n**Лимиты волонтёров**\nДень: 6% (сброс через 15 ч)\nOpenRouter: 39/1000\nRequesty: 7/200\nGroq: 194/3000\nZ.ai: 4 запроса\n\n**Контекст**");
+  });
+
+  test("an uncapped provider counts requests in words", () => {
+    const counts = [1, 2, 5, 11, 21, 112];
+    const lines = counts.map((used) =>
+      infoText(usage(), NOW, undefined, undefined, volunteerOk({ providers: [{ name: "Z.ai", used, cap: null }] })).split("\n").find((line) => line.startsWith("Z.ai:"))
+    );
+    expect(lines).toEqual([
+      "Z.ai: 1 запрос",
+      "Z.ai: 2 запроса",
+      "Z.ai: 5 запросов",
+      "Z.ai: 11 запросов",
+      "Z.ai: 21 запрос",
+      "Z.ai: 112 запросов",
+    ]);
   });
 
   test("volunteer day percent rounds to an integer", () => {
