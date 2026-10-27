@@ -11,7 +11,8 @@ const PROVIDER_NAMES: Record<string, string> = {
   openrouter: "OpenRouter",
   requesty: "Requesty",
   groq: "Groq",
-  zhipu: "Z.ai",
+  // Not "Z.ai": Telegram turns a domain-like name into a link.
+  zhipu: "Zhipu",
 };
 
 const commonScriptOutput = {
@@ -98,11 +99,10 @@ export class VolunteerLimits {
         const at = Date.parse(data.checked_at);
         const resetsAt = at + data.reset_in_s * MS_PER_SECOND;
 
-        const providers = Object.entries(data.providers).map(([key, value]) => ({
-          name: PROVIDER_NAMES[key] ?? key,
-          used: value.used,
-          cap: value.cap,
-        }));
+        // A provider whose cap is unknown says nothing about how much is left.
+        const providers = Object.entries(data.providers).flatMap(([key, value]) =>
+          value.cap === null ? [] : [{ name: PROVIDER_NAMES[key] ?? key, used: value.used, cap: value.cap }]
+        );
 
         return {
           kind: "ok",

@@ -31,7 +31,7 @@ export type VolunteerLimitsResult =
       at: number;
       dayPercent: number;
       resetsAt?: number;
-      providers: { name: string; used: number; cap: number | null }[];
+      providers: { name: string; used: number; cap: number }[];
     };
 export type LimitsPost = LimitsReading & { sessionId: string };
 

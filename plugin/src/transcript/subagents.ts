@@ -10,7 +10,6 @@ import { z } from "zod";
 import { field } from "../shared/guards.ts";
 import { nullLogger } from "../shared/log.ts";
 import { toTelegram } from "../shared/markdown.ts";
-import { plural } from "../shared/plural.ts";
 import { discoverExecutorJob, isExecutorWorkerSummary, ExecutorJob, EXECUTORS } from "./codex-job.ts";
 import { codexModel, ModelVersions, recordModel, volunteerModelLabel } from "./model-versions.ts";
 import { parseAgentRecord } from "./parse.ts";
@@ -575,4 +574,13 @@ function escapeMd(s: string): string {
 function duration(ms: number): string {
   const s = Math.max(0, Math.round(ms / MS_PER_SECOND));
   return s < SECONDS_PER_MINUTE ? `${s} с` : `${Math.floor(s / SECONDS_PER_MINUTE)} мин`;
+}
+
+// Russian plural forms: 1 действие, 2 действия, 5 действий.
+function plural(n: number, one: string, few: string, many: string): string {
+  const d = n % 10;
+  const dd = n % 100;
+  if (d === 1 && dd !== 11) return one;
+  if (d >= 2 && d <= 4 && (dd < 12 || dd > 14)) return few;
+  return many;
 }

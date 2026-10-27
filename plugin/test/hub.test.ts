@@ -2087,7 +2087,6 @@ print(json.dumps({
         { name: "OpenRouter", used: 39, cap: 1000 },
         { name: "Requesty", used: 7, cap: 200 },
         { name: "Groq", used: 194, cap: 3000 },
-        { name: "Z.ai", used: 4, cap: null },
       ]);
     }
   });

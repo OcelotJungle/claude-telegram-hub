@@ -53,7 +53,7 @@ async function writeScript(content: string): Promise<void> {
 }
 
 describe("VolunteerLimits", () => {
-  test("ok: parses script output and maps providers", async () => {
+  test("ok: parses script output, maps providers and drops one without a known cap", async () => {
     await writeScript(`#!/usr/bin/env python3
 import sys, json
 print(json.dumps(${scriptOutput()}))
@@ -69,8 +69,20 @@ print(json.dumps(${scriptOutput()}))
         { name: "OpenRouter", used: 39, cap: 1000 },
         { name: "Requesty", used: 7, cap: 200 },
         { name: "Groq", used: 194, cap: 3000 },
-        { name: "Z.ai", used: 4, cap: null },
       ]);
+    }
+  });
+
+  test("ok: zhipu with a cap is named Zhipu, not a domain Telegram links", async () => {
+    await writeScript(`#!/usr/bin/env python3
+import sys, json
+print(json.dumps(${scriptOutput({ providers: { zhipu: { used: 4, cap: 100 } } })}))
+`);
+    const reader = new VolunteerLimits(scriptPath, ["python", "-I"], 5000);
+    const result = await reader.read();
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.providers).toEqual([{ name: "Zhipu", used: 4, cap: 100 }]);
     }
   });
 

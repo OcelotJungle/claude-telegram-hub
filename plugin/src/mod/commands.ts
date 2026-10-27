@@ -4,7 +4,6 @@
 // plain helpers from shared/ that need nothing at run time.
 import type { CleanupReport, LimitsReading, RateLimit, TopicCommand, VolunteerLimitsResult } from "../shared/protocol.ts";
 
-import { plural } from "../shared/plural.ts";
 import { MILLION, THOUSAND, tokens } from "../shared/tokens.ts";
 
 function isVolunteerLimitsResult(v: unknown): v is VolunteerLimitsResult {
@@ -22,7 +21,7 @@ function isVolunteerLimitsResult(v: unknown): v is VolunteerLimitsResult {
       return (
         "name" in p && typeof p.name === "string" &&
         "used" in p && typeof p.used === "number" &&
-        "cap" in p && (p.cap === null || typeof p.cap === "number")
+        "cap" in p && typeof p.cap === "number"
       );
     })
   );
@@ -349,7 +348,7 @@ export function infoText(
         lines.push("День: 0%");
       }
       for (const p of volunteer.providers) {
-        lines.push(p.cap !== null ? `${p.name}: ${p.used}/${p.cap}` : `${p.name}: ${p.used} ${plural(p.used, "запрос", "запроса", "запросов")}`);
+        lines.push(`${p.name}: ${p.used}/${p.cap}`);
       }
     } else if (volunteer.kind === "error") {
       lines.push("", `Лимиты волонтёров: нет данных — ${volunteer.reason}`);
