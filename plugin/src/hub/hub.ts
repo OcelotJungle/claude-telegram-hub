@@ -1667,6 +1667,12 @@ ${msg.text}`);
       return;
     }
     if (!m) return;
+    // Whether Telegram sent a reply's quote shows only in the raw update.
+    const r = m.reply_to_message;
+    if (r && !r.forum_topic_created && r.message_id !== m.message_thread_id) {
+      const quote = m.quote ? `quote of ${Array.from(m.quote.text).length} chars${m.quote.is_manual ? "" : ", not manual"}` : "no quote";
+      this.log.info(`message ${m.message_id} replies to ${r.message_id}: ${quote}; fields ${Object.keys(m).join(", ")}`);
+    }
     const hubCmd = m.text !== undefined ? hubCommandOf(m.text, this.botUsername) : undefined;
     if (hubCmd) {
       // The messages before the command reach the agent first.
