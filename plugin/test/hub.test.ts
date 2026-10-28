@@ -185,10 +185,11 @@ describe("enable", () => {
   test('creates a topic named "<project> · <title>"', async () => {
     await startHub();
     const c = await plugin("s1");
+    const state = c.nextNew("state", m => m.enabled === true);
     const res = await req(c, { op: "enable", title: "Реализация хаба" });
+    await state;
     expect(res).toMatchObject({ ok: true, result: { topicTitle: `${projectName(CWD)} · Реализация хаба`, created: true } });
     expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: `${projectName(CWD)} · Реализация хаба` }]);
-    await c.next("state", m => m.enabled === true);
     expect(new SessionStore(join(dir, "sessions.json")).get("s1")).toEqual({ topicId: 100, title: "Реализация хаба", project: projectName(CWD), enabled: true, cwd: CWD, account: "2" });
   });
 
@@ -315,10 +316,8 @@ describe("interactive windows", () => {
   test("switching a CLI window to a new session turns it on without creating a topic", async () => {
     await startHub();
     const c = await connect(cliHello("old", { title: "Old title" }));
-    // The state the switch causes, not the hello state of the old session that is already in c.messages.
-    const sent = c.messages.length;
     c.send({ type: "session", sessionId: "new", cwd: CWD, entrypoint: "cli", title: "After clear" });
-    await waitFor(() => c.messages.slice(sent).some(m => m.type === "state" && m.enabled), 3000, "the new session turned on");
+    await c.nextNew("state", m => m.enabled);
     expect(new SessionStore(STORE_FILE()).get("new")).toMatchObject({ enabled: true, title: "After clear" });
     expect(new SessionStore(STORE_FILE()).get("old")?.enabled).toBe(true);
     expect(fake.callsOf("createForumTopic")).toEqual([]);
@@ -335,7 +334,7 @@ describe("interactive windows", () => {
     disabled.close();
     await waitFor(() => !hub.isConnected("disabled"), 3000, "disabled session window closed");
     window.send({ type: "session", sessionId: "disabled", cwd: CWD, entrypoint: "cli", title: "Disabled" });
-    await window.next("state", m => !m.enabled);
+    await window.nextNew("state", m => !m.enabled);
     await waitFor(() => new SessionStore(STORE_FILE()).get("disabled")?.title === "Disabled", 3000, "the new title");
     expect(new SessionStore(STORE_FILE()).get("disabled")).toMatchObject({ enabled: false, disabledByUser: true });
   });
@@ -349,15 +348,12 @@ describe("interactive windows", () => {
     await waitFor(() => !hub.isConnected("sdk-disabled"), 3000, "disabled session window closed");
     const c = await connect({ ...hello("old", "sdk-window"), entrypoint: "sdk-cli" });
     expect(new SessionStore(STORE_FILE()).get("old")?.enabled).toBe(true);
-    // Each wait takes the state that its own switch causes; the hello state (off for an SDK window) is already in c.messages.
-    const sentNext = c.messages.length;
     c.send({ type: "session", sessionId: "sdk-next", cwd: CWD, entrypoint: "sdk-cli", title: "SDK" });
-    await waitFor(() => c.messages.slice(sentNext).some(m => m.type === "state" && !m.enabled), 3000, "the state after the SDK switch");
+    await c.nextNew("state", m => !m.enabled);
     expect(new SessionStore(STORE_FILE()).get("sdk-next")).toBeUndefined();
     expect(new SessionStore(STORE_FILE()).get("old")?.enabled).toBe(true);
-    const sentDisabled = c.messages.length;
     c.send({ type: "session", sessionId: "sdk-disabled", cwd: CWD, entrypoint: "sdk-cli", title: "SDK title" });
-    await waitFor(() => c.messages.slice(sentDisabled).some(m => m.type === "state" && !m.enabled), 3000, "the state after the second SDK switch");
+    await c.nextNew("state", m => !m.enabled);
     await waitFor(() => new SessionStore(STORE_FILE()).get("sdk-disabled")?.title === "SDK title", 3000, "the SDK switch title");
     expect(new SessionStore(STORE_FILE()).get("sdk-disabled")).toMatchObject({ enabled: false, disabledByUser: true });
   });
@@ -368,7 +364,7 @@ describe("interactive windows", () => {
     await req(c, { op: "disable" });
     expect(new SessionStore(STORE_FILE()).get("s1")).toMatchObject({ enabled: false, disabledByUser: true });
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "вернись" }));
-    await c.next("inbound");
+    await c.nextNew("inbound");
     expect(new SessionStore(STORE_FILE()).get("s1")?.enabled).toBe(true);
     expect(new SessionStore(STORE_FILE()).get("s1")?.disabledByUser).toBeUndefined();
   });
@@ -434,7 +430,7 @@ describe("inbound", () => {
     const b = await enabled("b", "B");
     await req(b, { op: "disable" });
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 101, fromId: ME, text: "привет B" }));
-    const msg = await b.next("inbound");
+    const msg = await b.nextNew("inbound");
     expect(msg.content).toBe("привет B");
     expect(msg.meta).toMatchObject({ chat_id: GROUP, user_id: ME, user: "user" });
     await waitFor(() => b.messages.filter(m => m.type === "state").at(-1)?.enabled === true, 3000, "enabled state");
@@ -447,12 +443,12 @@ describe("inbound", () => {
     const a = await enabled("a");
     const original = { message_id: 50, date: 0, chat: { id: Number(GROUP), type: "supergroup" }, from: { id: 1, is_bot: true, first_name: "Hub" }, text: "готово" };
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!стоп", extra: { reply_to_message: original } }));
-    const stop = await a.next("inbound");
+    const stop = await a.nextNew("inbound");
     expect(stop.content).toBe("[reply to your message]\n> готово\n\nстоп");
     expect(stop.interrupt).toBe(true);
     const origin = { type: "hidden_user", date: 0, sender_user_name: "Аноним" };
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "смотри", extra: { forward_origin: origin } }));
-    expect((await a.next("inbound", m => m.content.endsWith("смотри"))).content).toBe("[forwarded from Аноним]\nсмотри");
+    expect((await a.nextNew("inbound", m => m.content.endsWith("смотри"))).content).toBe("[forwarded from Аноним]\nсмотри");
   });
 
   test("a message the agent has at once never wears ✍", async () => {
@@ -460,7 +456,7 @@ describe("inbound", () => {
     const a = await enabled("a");
     const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "привет" });
     fake.pushUpdate(u);
-    await a.next("inbound");
+    await a.nextNew("inbound");
     a.send({ type: "seen", messageIds: [u.message?.message_id] });
     await Bun.sleep(500);
     expect(fake.callsOf("setMessageReaction")).toEqual([]);
@@ -472,7 +468,7 @@ describe("inbound", () => {
     const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "привет" });
     const id = u.message?.message_id;
     fake.pushUpdate(u);
-    await a.next("inbound");
+    await a.nextNew("inbound");
     await waitFor(() => fake.callsOf("setMessageReaction").length === 1);
     expect(fake.callsOf("setMessageReaction")[0]).toEqual({ chat_id: GROUP, message_id: id, reaction: [{ type: "emoji", emoji: "✍" }] });
     a.send({ type: "seen", messageIds: [id] });
@@ -486,7 +482,7 @@ describe("inbound", () => {
     fake.hangNext("setMessageReaction");
     const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "привет" });
     fake.pushUpdate(u);
-    await a.next("inbound");
+    await a.nextNew("inbound");
     await waitFor(() => fake.callsOf("setMessageReaction").length === 1);
     a.send({ type: "seen", messageIds: [u.message?.message_id] });
     await waitFor(() => fake.callsOf("setMessageReaction").length === 3, 3000);
@@ -557,7 +553,7 @@ describe("inbound", () => {
     await old.next("state");
     expect((await req(old, { op: "enable", title: "T" })).ok).toBe(true);
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "привет" }));
-    await old.next("inbound");
+    await old.nextNew("inbound");
     await Bun.sleep(100);
     expect(fake.callsOf("setMessageReaction")).toEqual([]);
   });
@@ -582,7 +578,7 @@ describe("inbound", () => {
     ];
     const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text, extra: { entities } });
     fake.pushUpdate(u);
-    expect((await a.next("inbound")).content).toBe(text);
+    expect((await a.nextNew("inbound")).content).toBe(text);
     const line = log.lines.find(l => l.includes(`message ${u.message?.message_id}`));
     expect(line).toBe(`INFO message ${u.message?.message_id} in topic 100 → session a: text, ${text.length} chars, entities bold, code`);
   });
@@ -594,7 +590,7 @@ describe("inbound", () => {
     const rich_message = { blocks: [{ type: "heading", size: 2, text: "План" }, { type: "paragraph", text: ["Сначала ", { type: "bold", text: "v2g1" }] }] };
     const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, extra: { rich_message } });
     fake.pushUpdate(u);
-    const msg = await a.next("inbound");
+    const msg = await a.nextNew("inbound");
     expect(msg.content).toBe("## План\n\nСначала **v2g1**");
     expect(log.lines).toContain(`INFO message ${u.message?.message_id} in topic 100 → session a: rich_message, 25 chars`);
   });
@@ -611,7 +607,7 @@ describe("inbound", () => {
       ],
     };
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, extra: { rich_message } }));
-    const msg = await a.next("inbound");
+    const msg = await a.nextNew("inbound");
     const [photo, gone, doc] = msg.content.split("\n\n");
     expect(photo.startsWith(`(photo: ${join(dir, "inbox")}`)).toBe(true);
     expect(gone).toBe("(photo, file_id: GONE)");
@@ -637,7 +633,7 @@ describe("inbound", () => {
     fake.pushUpdate(topicMsg({ chatId: "-555", threadId: 100, fromId: ME, text: "other chat" }));
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: "42", text: "stranger" }));
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "mine" }));
-    const msg = await a.next("inbound");
+    const msg = await a.nextNew("inbound");
     expect(msg.content).toBe("mine");
     expect(a.messages.filter(m => m.type === "inbound").length).toBe(1);
     expect(log.lines.some(l => l.includes("-555"))).toBe(true);
@@ -651,7 +647,7 @@ describe("inbound", () => {
     fake.pushUpdate(
       topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, extra: { caption: "look", photo: [{ file_id: "P1", file_unique_id: "u1" }, { file_id: "P2", file_unique_id: "u2" }] } }),
     );
-    const msg = await a.next("inbound");
+    const msg = await a.nextNew("inbound");
     expect(msg.content).toBe("look");
     expect(msg.meta.image_path.startsWith(join(dir, "inbox"))).toBe(true);
   });
@@ -662,7 +658,7 @@ describe("inbound", () => {
     fake.pushUpdate(
       topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, extra: { document: { file_id: "D1", file_unique_id: "d", file_name: "a<b>.txt", file_size: 5, mime_type: "text/plain" } } }),
     );
-    const msg = await a.next("inbound");
+    const msg = await a.nextNew("inbound");
     expect(msg.content).toBe("(document: a_b_.txt)");
     expect(msg.meta).toMatchObject({ attachment_kind: "document", attachment_file_id: "D1", attachment_name: "a_b_.txt", attachment_size: "5" });
   });
@@ -681,7 +677,7 @@ describe("batching", () => {
     fake.pushUpdate(msg(undefined, { caption: "look", photo: photo("A1") }));
     fake.pushUpdate(msg(undefined, { photo: photo("A2") }));
     fake.pushUpdate(msg(undefined, { photo: photo("A3") }));
-    const inbound = await a.next("inbound");
+    const inbound = await a.nextNew("inbound");
     const parts = inbound.content.split("\n\n");
     expect(parts.length).toBe(3);
     expect(parts[0].startsWith(`look (photo: ${join(dir, "inbox")}`)).toBe(true);
@@ -700,7 +696,7 @@ describe("batching", () => {
     const photo = (id: string) => [{ file_id: id, file_unique_id: id }];
     fake.pushUpdate(msg(undefined, { caption: "!x", photo: photo("B1") }));
     fake.pushUpdate(msg(undefined, { photo: photo("B2") }));
-    const inbound = await a.next("inbound");
+    const inbound = await a.nextNew("inbound");
     expect(inbound.content.startsWith("x (photo: ")).toBe(true);
     expect(inbound.interrupt).toBe(true);
   });
@@ -712,7 +708,7 @@ describe("batching", () => {
     fake.pushUpdate(msg("раз", { forward_origin }));
     fake.pushUpdate(msg("два", { forward_origin }));
     fake.pushUpdate(msg("что скажешь?"));
-    expect((await a.next("inbound")).content).toBe("[forwarded from Аноним]\nраз\n\n[forwarded from Аноним]\nдва\n\nчто скажешь?");
+    expect((await a.nextNew("inbound")).content).toBe("[forwarded from Аноним]\nраз\n\n[forwarded from Аноним]\nдва\n\nчто скажешь?");
   });
 
   test("a message after the quiet window is a notification of its own", async () => {
@@ -757,7 +753,7 @@ describe("batching", () => {
     await startHub();
     const a = await enabled("a");
     fake.pushUpdate(msg("!"));
-    const inbound = await a.next("inbound");
+    const inbound = await a.nextNew("inbound");
     expect(inbound.content).toBe("");
     expect(inbound.interrupt).toBe(true);
   });
@@ -767,7 +763,7 @@ describe("batching", () => {
     const a = await enabled("a");
     fake.pushUpdate(msg("!"));
     fake.pushUpdate(msg("c"));
-    const inbound = await a.next("inbound");
+    const inbound = await a.nextNew("inbound");
     expect(inbound.content).toBe("c");
     expect(inbound.interrupt).toBe(true);
   });
@@ -789,7 +785,7 @@ describe("batching", () => {
     const us = [msg("one"), msg("two"), msg("three")];
     const ids = us.map(u => u.message?.message_id);
     for (const u of us) fake.pushUpdate(u);
-    await a.next("inbound");
+    await a.nextNew("inbound");
     await waitFor(() => fake.callsOf("setMessageReaction").length === 3);
     a.send({ type: "seen", messageIds: [ids[0]] });
     await waitFor(() => fake.callsOf("setMessageReaction").length === 6);
@@ -1994,7 +1990,7 @@ describe("starting and stopping sessions", () => {
     await a.next("terminate");
     await waitFor(() => texts().includes("⚠️ Не удалось завершить сессию за 0.2 с"), 3000);
     fake.pushUpdate(msg("/stop"));
-    await a.next("terminate");
+    await a.nextNew("terminate");
   });
 
   test("/stop of a closed session says so", async () => {
@@ -2124,7 +2120,7 @@ describe("commands", () => {
     const start = Date.now();
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "hello" }));
     command("/compact 200k");
-    expect((await a.next("inbound")).content).toBe("hello");
+    expect((await a.nextNew("inbound")).content).toBe("hello");
     expect(Date.now() - start).toBeLessThan(3000);
     await waitFor(async () => {
       await runner.poll();
@@ -2139,7 +2135,7 @@ describe("commands", () => {
     command("/info@other_bot");
     command("/start");
     // Sent together, they come as one notification.
-    expect((await a.next("inbound")).content).toBe("/info@other_bot\n\n/start");
+    expect((await a.nextNew("inbound")).content).toBe("/info@other_bot\n\n/start");
   });
 
   test("a command nobody picks up is reported in the topic", async () => {
@@ -3018,7 +3014,7 @@ sys.exit(1)
       command("/cleanup");
       await reply(runner, t => t.startsWith("🧹 Уборка"));
       command(" !stop now");
-      const stop = await a.next("inbound");
+      const stop = await a.nextNew("inbound");
       expect(stop.content).toBe("stop now");
       expect(stop.interrupt).toBe(true);
       h.release();
@@ -3216,7 +3212,7 @@ sys.exit(1)
       // flushed after BATCH_QUIET_MS, well before that.
       const w = await plugin(SID);
       command("newer");
-      await w.next("inbound", m => m.content.includes("newer"));
+      await w.nextNew("inbound", m => m.content.includes("newer"));
       const text = w.messages.filter(m => m.type === "inbound").map(m => m.content).join(" | ");
       expect(text.indexOf("older too")).toBeGreaterThan(text.indexOf("older"));
       expect(text.indexOf("newer")).toBeGreaterThan(text.indexOf("older too"));
@@ -3233,9 +3229,10 @@ sys.exit(1)
       await windowEnds(a);
       await waitFor(() => spawned.length);
       const w = await plugin(SID);
-      let got = "";
-      while (!got.includes(`m${COUNT}`)) got += `${got ? "\n\n" : ""}${(await w.next("inbound")).content}`;
-      expect(got).toBe(Array.from({ length: COUNT }, (_, i) => `m${i + 1}`).join("\n\n"));
+      // w is a new connection, so its inbound messages are all the batch; wait on the whole list, not one message at a time.
+      const got = () => w.messages.filter(m => m.type === "inbound").map(m => m.content).join("\n\n");
+      await waitFor(() => got().includes(`m${COUNT}`), 3000, `the last message m${COUNT}`);
+      expect(got()).toBe(Array.from({ length: COUNT }, (_, i) => `m${i + 1}`).join("\n\n"));
     });
   });
 });
@@ -3277,7 +3274,7 @@ describe("topic commands", () => {
     await startHub();
     const a = await enabled(SID);
     fake.pushUpdate(msg("/cmd echo привет && cd && exit /b 3"));
-    const inbound = await a.next("inbound", m => m.meta.source === "exec", RUN_MS);
+    const inbound = await a.nextNew("inbound", m => m.meta.source === "exec", RUN_MS);
     expect(inbound.meta.exit_code).toBe("3");
     expect(inbound.content).toContain("❌ код 3");
     expect(inbound.content).toContain("привет");
@@ -3664,7 +3661,7 @@ describe("questions", () => {
     const msg = await shown();
     const id = fake.lastMessageId;
     say("раньше", { message_id: id - 1 });
-    expect(await a.next("inbound")).toMatchObject({ content: "раньше" });
+    expect(await a.nextNew("inbound")).toMatchObject({ content: "раньше" });
     press(dataOf(msg, 0), id);
     expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Красный" } });
   });
@@ -3676,7 +3673,7 @@ describe("questions", () => {
     const answer = ask([Q1]);
     const msg = await polled();
     say("пока нет");
-    expect(await a.next("inbound")).toMatchObject({ content: "пока нет" });
+    expect(await a.nextNew("inbound")).toMatchObject({ content: "пока нет" });
     press(dataOf(msg, 0), fake.lastMessageId);
     expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Красный" } });
   });
@@ -3738,9 +3735,10 @@ describe("questions", () => {
     const a = await enabled("a");
     const answer = ask([Q1]);
     await polled();
+    const arrived = a.nextNew("inbound");
     say("!стоп");
     expect(await answer).toEqual({ decision: "deny", reason: CANCEL_REASON });
-    const inbound = await a.next("inbound");
+    const inbound = await arrived;
     expect(inbound).toMatchObject({ content: "стоп" });
     expect(field(inbound, "interrupt")).toBeUndefined();
     await waitFor(() => edits().some(e => String(e.text).endsWith(`\n\n${CANCELLED}`)));

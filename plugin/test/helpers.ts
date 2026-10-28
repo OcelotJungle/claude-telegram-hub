@@ -57,10 +57,16 @@ export async function wsClient(port: number, hello?: object) {
     ws,
     messages,
     send: (o: object) => ws.send(JSON.stringify(o)),
-    // The first message of the type that passes `pred`.
+    // Search all received messages, including messages received before this call.
     next: <K extends HubToPlugin["type"]>(type: K, pred: (m: Extract<HubToPlugin, { type: K }>) => boolean = () => true, timeoutMs = 3000) => {
       const ofType = (m: HubToPlugin): m is Extract<HubToPlugin, { type: K }> => m.type === type;
       return waitFor(() => messages.filter(ofType).find(pred), timeoutMs, `hub message ${type}`);
+    },
+    // The first matching message received after this wait starts.
+    nextNew: <K extends HubToPlugin["type"]>(type: K, pred: (m: Extract<HubToPlugin, { type: K }>) => boolean = () => true, timeoutMs = 3000) => {
+      const start = messages.length;
+      const ofType = (m: HubToPlugin): m is Extract<HubToPlugin, { type: K }> => m.type === type;
+      return waitFor(() => messages.slice(start).filter(ofType).find(pred), timeoutMs, `new hub message ${type}`);
     },
     close: () => ws.close(),
   };
