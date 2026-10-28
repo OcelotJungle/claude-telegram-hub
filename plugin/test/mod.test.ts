@@ -341,6 +341,13 @@ describe("/rename", () => {
     ]);
   });
 
+  test("a multi-line name is collapsed before running rename", async () => {
+    const s = runner([{ id: "c1", name: "rename", args: "  Спринт\n 3\tфинал  " }], async () => ({}));
+    await s.polls(5);
+    expect(s.ran).toEqual([["rename", "Спринт 3 финал"]]);
+    expect(s.posted.at(-1)).toEqual({ path: "/reply", body: { sessionId: "s", id: "c1.1", text: "✅ /rename Спринт 3 финал выполнена.", notify: false, replaces: { id: "c1.0", kind: "success" } } });
+  });
+
   test("a rejected rename is a warning that replaces the queued notice", async () => {
     const s = runner([{ id: "c1", name: "rename", args: "x" }], async () => {
       throw new Error("command not available");
@@ -355,6 +362,13 @@ describe("/rename", () => {
 
   test("bare /rename answers with the hint and runs nothing", async () => {
     const s = runner([{ id: "c1", name: "rename", args: "" }], async () => ({}));
+    await s.polls(3);
+    expect(s.ran).toEqual([]);
+    expect(s.posted).toEqual([{ path: "/reply", body: { sessionId: "s", id: "c1.0", text: HINT, notify: false } }]);
+  });
+
+  test("a whitespace-only name answers with the hint and runs nothing", async () => {
+    const s = runner([{ id: "c1", name: "rename", args: " \t\n  " }], async () => ({}));
     await s.polls(3);
     expect(s.ran).toEqual([]);
     expect(s.posted).toEqual([{ path: "/reply", body: { sessionId: "s", id: "c1.0", text: HINT, notify: false } }]);

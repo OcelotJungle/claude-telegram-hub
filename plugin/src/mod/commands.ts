@@ -214,16 +214,17 @@ export class Runner {
   // /rename <name> runs the session's own /rename once the session is idle;
   // the topic follows the new title through the hub's retitle, not here.
   private async rename(to: Target, name: string): Promise<void> {
-    if (!name) {
+    const normalizedName = name.replace(/\s+/g, " ").trim();
+    if (!normalizedName) {
       await this.reply(to, RENAME_HINT, "info");
       return;
     }
     const startedId = await this.reply(to, RENAME_STARTED, "info", undefined, true);
     try {
-      await this.deps.run("rename", name);
-      await this.reply(to, `✅ /rename ${name} выполнена.`, "info", { id: startedId, kind: "success" });
+      await this.deps.run("rename", normalizedName);
+      await this.reply(to, `✅ /rename ${normalizedName} выполнена.`, "info", { id: startedId, kind: "success" });
     } catch (e) {
-      await this.reply(to, `⚠️ /rename ${name} не выполнена: ${message(e)}`, "warning", { id: startedId, kind: "warning" });
+      await this.reply(to, `⚠️ /rename ${normalizedName} не выполнена: ${message(e)}`, "warning", { id: startedId, kind: "warning" });
     }
   }
 
