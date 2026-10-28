@@ -170,12 +170,16 @@ export class Runner {
   // Resolves once the compaction is over and its result is handed to the hub.
   private async compact(to: Target, args: string, started: string): Promise<void> {
     const run = (async () => {
-      await this.reply(to, started, "info");
-      const report = (o: Outcome) => this.reply(
-        to,
-        "ok" in o ? compactionText(o.ok) : `⚠️ Компакт не выполнен: ${o.error}`,
-        "error" in o ? "error" : o.ok.skip !== undefined ? "warning" : "info",
-      );
+      const startedId = await this.reply(to, started, "info", undefined, true);
+      const report = async (o: Outcome): Promise<void> => {
+        const success = "ok" in o && o.ok.skip === undefined;
+        await this.reply(
+          to,
+          "ok" in o ? compactionText(o.ok) : `⚠️ Компакт не выполнен: ${o.error}`,
+          "error" in o ? "error" : o.ok.skip !== undefined ? "warning" : "info",
+          { id: startedId, kind: success ? "success" : "warning" },
+        );
+      };
       await new Promise<void>(done => this.compactions.push({ args, failed: 0, report, done }));
     })();
     this.running.add(run);
@@ -187,7 +191,7 @@ export class Runner {
   // the hub the sizes or the error. The hub ends the window and empties the
   // remembered skills.
   private async cleanup(to: Target, args: string): Promise<void> {
-    await this.reply(to, "🧹 Уборка на очереди.", "info");
+    await this.reply(to, "🧹 Уборка на очереди.", "info", undefined, true);
     await Promise.all(this.running);
     const report = async (o: Outcome) => {
       const body: CleanupReport = { sessionId: to.sessionId, id: to.id };
@@ -286,11 +290,13 @@ export class Runner {
     }
   }
 
-  private async reply(to: { sessionId: string; id: string }, text: string, kind: MessageKind): Promise<void> {
+  private async reply(to: { sessionId: string; id: string }, text: string, kind: MessageKind, replaces?: { id: string; kind: "success" | "warning" }, awaitsResult?: true): Promise<string> {
     const n = this.replies.get(to.id) ?? 0;
     this.replies.set(to.id, n + 1);
-    this.unsent.push({ path: "/reply", body: JSON.stringify({ sessionId: to.sessionId, id: `${to.id}.${n}`, text, notify: notifies(kind) }) });
+    const id = `${to.id}.${n}`;
+    this.unsent.push({ path: "/reply", body: JSON.stringify({ sessionId: to.sessionId, id, text, notify: notifies(kind), ...(replaces ? { replaces } : {}), ...(awaitsResult ? { awaitsResult } : {}) }) });
     await this.flush();
+    return id;
   }
 
   // One at a time: the poll and a finishing command both flush, and two

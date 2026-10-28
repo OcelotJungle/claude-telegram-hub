@@ -167,15 +167,12 @@ type Batch = { api: TelegramApi; messages: Message[]; quietTimer: ReturnType<typ
 // A /cleanup under way: the id of its command and whether the window is
 // compacting or exiting. held: topic messages for the session from the start
 // of the compact on, the window still open or not.
-// compactTimer: gives up on a compact the module never reports. startMsg:
-// the module's "will compact" reply once in the topic; ended: the outcome
-// replaces it, so it goes as soon as it is there.
+// compactTimer: gives up on a compact the module never reports.
 type Cleanup = {
   id: string;
   phase: "compacting" | "exiting";
   held: Held[];
   compactTimer?: ReturnType<typeof setTimeout>;
-  startMsg?: number;
   ended?: boolean;
 };
 
@@ -346,9 +343,6 @@ export class Hub {
   // Messages of a /cleanup dropped by a second /stop, kept until the window
   // it ends is gone.
   private dyingHeld = new Map<string, Held[]>();
-  // The /cleanup a module reply belongs to, by its queue id: the first reply
-  // to the command is the "will compact" one.
-  private cleanupStarts = new Map<string, Cleanup>();
   // The start notices sent to a session's topic: Telegram message id and the
   // text it shows. They go once its agent starts working.
   private launchNotices = new Map<string, { id: number; text: string }[]>();
@@ -555,7 +549,7 @@ export class Hub {
     if (url.pathname === "/reply" && req.method === "POST") {
       const r = commandReply.safeParse(await req.json().catch(() => undefined));
       if (!r.success) return new Response("bad reply", { status: 400 });
-      this.enqueue(r.data.sessionId, `cmd-${r.data.id}`, r.data.text, r.data.notify);
+      this.enqueue(r.data.sessionId, `cmd-${r.data.id}`, r.data.text, r.data.notify, true, r.data.replaces, r.data.awaitsResult);
       return new Response("ok");
     }
     if (url.pathname === "/question" && req.method === "POST") {
@@ -661,7 +655,7 @@ export class Hub {
         void this.finishCleanup(sid, cleanup, ws.data.exitingPid);
       } else {
         this.log.info(`window for session ${sid} closed while compacting for /cleanup; /cleanup dropped`);
-        this.cleanupOutcome(sid, cleanup, "⚠️ Уборка не выполнена: окно закрылось до конца компакта", "warning");
+        this.cleanupOutcome(sid, cleanup, "⚠️ Уборка не выполнена: окно закрылось до конца компакта", "warning", "warning");
         this.dropCleanup(sid);
       }
     }
@@ -1266,12 +1260,12 @@ ${msg.text}`);
   // no ack and sends the text again. Agent text is Markdown: long formatted
   // text and tables go as rich messages, the rest as ordinary ones with
   // entities. The hub's own texts go as they are.
-  private enqueue(sessionId: string, sourceId: string, text: string, notify: boolean, markdown = true): void {
+  private enqueue(sessionId: string, sourceId: string, text: string, notify: boolean, markdown = true, replaces?: { id: string; kind: "success" | "warning" }, awaitsResult?: true): void {
     if (!this.store.get(sessionId)) {
       this.log.warn(`session ${sessionId} has no topic, text not sent:\n${text}`);
       return;
     }
-    const pieces = (markdown ? markdownPieces(text) : textPieces(text, false)).map((p, i) => ({ ...p, silent: !(notify && i === 0) }));
+    const pieces = (markdown ? markdownPieces(text) : textPieces(text, false)).map((p, i) => ({ ...p, silent: !(notify && i === 0), ...(i === 0 && replaces ? { resolution: { id: `cmd-${replaces.id}#0`, kind: replaces.kind } } : {}), ...(i === 0 && awaitsResult ? { keepId: true as const } : {}) }));
     if (pieces.length && this.outbox.add(sourceId, sessionId, pieces)) void this.pump(sessionId);
   }
 
@@ -1403,8 +1397,28 @@ ${msg.text}`);
     const api = this.requireApi();
     const groupId = this.requireGroup();
     const { rich, files: queued } = item;
+    if (item.resolution) {
+      const messageId = this.outbox.takeMessageId(item.resolution.id);
+      if (messageId !== undefined) {
+        if (item.resolution.kind === "success") {
+          try {
+            await api.editMessageText(groupId, messageId, item.text, item.entities);
+            return;
+          } catch (e) {
+            if (e instanceof TelegramError && e.code === 400 && /message is not modified/i.test(e.description)) return;
+            this.log.warn(`editing queued result message ${messageId} failed: ${e}`);
+          }
+        } else {
+          await api.deleteMessage(groupId, messageId).catch(e => this.log.warn(`deleting queued notice ${messageId} failed: ${e}`));
+        }
+      }
+      const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, item.text, item.silent, item.entities, item.buttons));
+      if (item.keepId) this.outbox.recordMessageId(item.id, sent.message_id);
+      return;
+    }
     if (rich) {
-      await this.sendToTopic(api, groupId, sessionId, thread => api.sendRichMessage(groupId, thread, rich, item.silent));
+      const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendRichMessage(groupId, thread, rich, item.silent));
+      if (item.keepId) this.outbox.recordMessageId(item.id, sent.message_id);
       return;
     }
     const card = item.card ? this.cards.get(item.card) : undefined;
@@ -1433,12 +1447,8 @@ ${msg.text}`);
     if (!queued) {
       const { text } = item;
       const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, text, item.silent, item.entities, item.buttons));
+      if (item.keepId) this.outbox.recordMessageId(item.id, sent.message_id);
       if (item.id.startsWith(LAUNCH_NOTICE)) this.launchNoticeSent(sessionId, sent.message_id, text);
-      const cleanup = this.cleanupStarts.get(item.id);
-      if (cleanup) {
-        cleanup.startMsg = sent.message_id;
-        if (cleanup.ended) this.dropCleanupStart(item.id, cleanup);
-      }
       return;
     }
     const lost = queued.filter(f => !existsSync(f.path));
@@ -2018,29 +2028,25 @@ ${msg.text}`);
     c.compactTimer = setTimeout(() => {
       if (this.cleanups.get(sessionId) !== c || c.phase !== "compacting") return;
       this.log.warn(`/cleanup of session ${sessionId}: no compact report in ${ms} ms; /cleanup dropped`);
-      this.cleanupOutcome(sessionId, c, `⚠️ Уборка не выполнена: компакт не закончился за ${ms / MS_PER_MINUTE} мин`, "warning");
+      this.cleanupOutcome(sessionId, c, `⚠️ Уборка не выполнена: компакт не закончился за ${ms / MS_PER_MINUTE} мин`, "warning", "warning");
       this.dropCleanup(sessionId);
     }, ms);
     this.cleanups.set(sessionId, c);
-    this.cleanupStarts.set(cleanupStartKey(c), c);
   }
 
-  // The outcome of a /cleanup takes the place of its "will compact" message:
-  // that one goes and the outcome comes as a new message. One still
+  // The outcome of a /cleanup resolves its "queued" message: a success edits it
+  // in place (silent); any other outcome deletes it and arrives as a new message,
+  // loud by its kind. One still
   // queued or being sent goes once it is in the topic.
-  private cleanupOutcome(sessionId: string, c: Cleanup, text: string, kind: MessageKind): void {
+  private cleanupOutcome(sessionId: string, c: Cleanup, text: string, kind: MessageKind, outcome: "success" | "warning"): void {
     c.ended = true;
-    if (c.startMsg !== undefined) this.dropCleanupStart(cleanupStartKey(c), c);
-    this.notice(sessionId, text, kind);
-  }
-
-  private dropCleanupStart(key: string, c: Cleanup): void {
-    this.cleanupStarts.delete(key);
-    const api = this.opts.api;
-    const groupId = this.opts.config().groupId;
-    if (c.startMsg === undefined || !api || !groupId) return;
-    const id = c.startMsg;
-    api.deleteMessage(groupId, id).catch(e => this.log.warn(`deleting the /cleanup notice ${id} failed: ${e}`));
+    const key = cleanupStartKey(c);
+    const pieces = textPieces(text, false).map((piece, index) => ({
+      ...piece,
+      silent: !notifies(kind),
+      ...(index === 0 ? { resolution: { id: key, kind: outcome } } : {}),
+    }));
+    if (this.outbox.add(`cleanup-result-${c.id}`, sessionId, pieces)) void this.pump(sessionId);
   }
 
   // /stop ends a compacting window at once, the /cleanup dropped and the
@@ -2048,7 +2054,7 @@ ${msg.text}`);
   private stopDuringCleanup(sessionId: string, c: Cleanup): void {
     if (c.phase === "compacting") {
       this.log.info(`/stop during the /cleanup compact of session ${sessionId}: ending the window, the transcript untouched`);
-      this.cleanupOutcome(sessionId, c, "⏹ Уборка отменена", "info");
+      this.cleanupOutcome(sessionId, c, "⏹ Уборка отменена", "info", "warning");
       this.dropCleanup(sessionId, true);
     }
     this.terminate(sessionId);
@@ -2062,7 +2068,6 @@ ${msg.text}`);
     const c = this.cleanups.get(sessionId);
     if (c) clearTimeout(c.compactTimer);
     // An ended one keeps its entry until its "will compact" message is there.
-    if (c && !c.ended) this.cleanupStarts.delete(cleanupStartKey(c));
     this.cleanups.delete(sessionId);
     const queued = this.commands.get(sessionId) ?? [];
     for (const e of queued.filter(e => e.cmd.name === "cleanup")) clearTimeout(e.timer);
@@ -2091,7 +2096,7 @@ ${msg.text}`);
     clearTimeout(c.compactTimer);
     if (error !== undefined) {
       this.log.warn(`/cleanup of session ${sessionId}: the compact failed: ${error}`);
-      this.cleanupOutcome(sessionId, c, `⚠️ Уборка не выполнена: компакт не удался: ${error}`, "error");
+      this.cleanupOutcome(sessionId, c, `⚠️ Уборка не выполнена: компакт не удался: ${error}`, "error", "warning");
       return this.dropCleanup(sessionId);
     }
     this.log.info(`/cleanup of session ${sessionId}: compacted${before === undefined ? "" : ` from ${before} tokens`}; ending the window`);
@@ -2117,20 +2122,22 @@ ${msg.text}`);
     if (this.connOf(sessionId)) {
       this.cleanups.delete(sessionId);
       this.log.warn(`/cleanup of session ${sessionId}: a window of the session connected again; the transcript untouched, ${c.held.length} held message(s) go to it`);
-      this.cleanupOutcome(sessionId, c, "⚠️ Уборка не выполнена: сессия снова открыта", "warning");
+      this.cleanupOutcome(sessionId, c, "⚠️ Уборка не выполнена: сессия снова открыта", "warning", "warning");
       return this.whenReady(() => this.sendHeld(sessionId, c.held));
     }
     if (pid !== undefined && alive(pid)) {
       this.cleanups.delete(sessionId);
       this.log.warn(`/cleanup of session ${sessionId}: Claude Code ${pid} did not exit; the transcript untouched, ${c.held.length} held message(s) dropped`);
-      return this.cleanupOutcome(sessionId, c, "⚠️ Уборка не выполнена: Claude Code не завершился", "error");
+      return this.cleanupOutcome(sessionId, c, "⚠️ Уборка не выполнена: Claude Code не завершился", "error", "warning");
     }
     const path = this.transcriptOf(sessionId);
     let text: string;
     let kind: MessageKind = "info";
+    let outcomeKind: "success" | "warning" = "success";
     if (!path) {
       this.log.warn(`/cleanup of session ${sessionId}: no transcript found`);
       kind = "warning";
+      outcomeKind = "warning";
       text = "⚠️ Уборка не выполнена: транскрипт не найден";
     } else {
       try {
@@ -2138,10 +2145,12 @@ ${msg.text}`);
         this.log.info(`/cleanup of session ${sessionId}: ${path}: ${result.kind}${result.kind === "cleaned" ? `, ${result.records} record(s), backup ${result.backup}` : ""}`);
         if (result.kind === "format") kind = "warning";
         text = cleanupSummary(result);
+        outcomeKind = result.kind === "format" ? "warning" : "success";
       } catch (e) {
         const why = e instanceof Error ? e.message : String(e);
         this.log.warn(`/cleanup of session ${sessionId}: emptying the skills in ${path} failed: ${why}`);
         kind = "error";
+        outcomeKind = "warning";
         text = `⚠️ Уборка не выполнена: ${why}`;
       }
     }
@@ -2150,13 +2159,13 @@ ${msg.text}`);
     // A window came back during the edit: it is not started a second time.
     if (this.connOf(sessionId)) {
       this.log.warn(`/cleanup of session ${sessionId}: a window of the session connected during the edit; not starting it, ${c.held.length} held message(s) go to it`);
-      this.cleanupOutcome(sessionId, c, text, kind);
+      this.cleanupOutcome(sessionId, c, text, kind, outcomeKind);
       return this.whenReady(() => this.sendHeld(sessionId, c.held));
     }
     // Messages that came meanwhile still reach the agent, as a message to a
     // stopped session starts it.
     const relaunch = c.held.length > 0;
-    this.cleanupOutcome(sessionId, c, text, kind);
+    this.cleanupOutcome(sessionId, c, text, kind, outcomeKind);
     if (relaunch) this.launch(sessionId, undefined, c.held);
     else {
       this.notice(sessionId, "⏹ Сессия завершена", "info");

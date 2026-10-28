@@ -6,6 +6,7 @@ import type { MessageKind } from "../src/shared/notification.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
+import { z } from "zod";
 import { cleanupSummary, Hub } from "../src/hub/hub.ts";
 import { CANCEL_REASON, CANCELLED, CUSTOM_HINT, PICK_ONE, STALE_POLL, TO_TERMINAL } from "../src/hub/questions.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
@@ -85,8 +86,8 @@ type HubExtras = {
   volunteerLimitsTimeoutMs?: number;
 };
 
-async function startHub(o: { idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number; batchQuietMs?: number; batchMaxMs?: number } & HubExtras = {}) {
-  port = await freePort();
+async function startHub(o: { port?: number; idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number; batchQuietMs?: number; batchMaxMs?: number } & HubExtras = {}) {
+  port = o.port ?? (await freePort());
   hub = new Hub({
     port,
     codexSessionsDir: join(dir, "codex-sessions"),
@@ -635,7 +636,7 @@ describe("send", () => {
       { text: "/info reply", kind: "info", loud: false },
       { text: "✅ /autocompact 80 выполнена.", kind: "info", loud: false },
       { text: "🗜 Компакт запущен…", kind: "info", loud: false },
-      { text: "✅ Контекст сжат: 180k → 24k токенов", kind: "info", loud: false },
+      { text: "✅ Компакт выполнен.", kind: "info", loud: false },
       { text: "🧹 Очистка выполнена", kind: "info", loud: false },
       { text: "✅ Сессия запущена", kind: "info", loud: false },
       { text: "🚀 Запускаю сессию…", kind: "info", loud: false },
@@ -1874,6 +1875,8 @@ describe("commands", () => {
 
   const command = (text: string, threadId = 100) => fake.pushUpdate(topicMsg({ chatId: GROUP, threadId, fromId: ME, text }));
   const sentText = (pred: (t: string) => boolean) => fake.texts().find(p => pred(p.text));
+  // The text a queued notice was edited into (success outcomes edit it in place).
+  const editedText = (pred: (t: string) => boolean) => fake.callsOf("editMessageText").find(c => typeof c.text === "string" && pred(c.text));
   // Polls like the mod's timer until the topic gets the text.
   const reply = (runner: Runner, pred: (t: string) => boolean) =>
     waitFor(
@@ -1953,7 +1956,7 @@ describe("commands", () => {
     expect(ran).toEqual([]);
   });
 
-  test("/compact compacts once no turn runs, says so silently and reports the result with sound", async () => {
+  test("/compact edits its queued notice into the successful result", async () => {
     await startHub();
     await enabled("a");
     const { runner, ran, compacted } = mod("a");
@@ -1962,15 +1965,87 @@ describe("commands", () => {
     const started = await reply(runner, t => t.startsWith("🗜"));
     expect(started.text).toBe("🗜 Компакт на очереди.");
     expect(started.disable_notification).toBe(true);
+    const startedId = fake.lastMessageId;
     await runner.poll();
     await Bun.sleep(50);
     expect(compacted).toStrictEqual([]);
     runner.turn(false);
-    const done = await reply(runner, t => t.startsWith("✅"));
-    expect(done.text).toBe("✅ Компакт выполнен.");
-    expect(done.disable_notification).toBe(true);
+    await waitFor(async () => {
+      await runner.poll();
+      return fake.callsOf("editMessageText").length === 1;
+    });
+    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "✅ Компакт выполнен." }]);
+    expect(fake.texts().filter(t => t.message_thread_id === 100)).toHaveLength(1);
     expect(compacted).toStrictEqual(["keep the plan"]);
     expect(ran).toEqual([]);
+  });
+
+  // The message ids the outbox file keeps once its queue is empty.
+  const storedIds = async () => {
+    const read = () => JSON.parse(readFileSync(join(dir, "outbox.json"), "utf8"));
+    await waitFor(() => arr(field(read(), "items")).length === 0);
+    return Object.entries(z.record(z.string(), z.number()).parse(field(read(), "messageIds"))).map(([, id]) => id);
+  };
+
+  test("an ordinary message leaves no message id in the outbox", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send({ type: "send", id: "x1", text: "plain text", notify: false });
+    await waitFor(() => sentText(t => t === "plain text"));
+    expect(await storedIds()).toEqual([]);
+  });
+
+  test("a queued notice keeps its id until the result arrives, then the id is gone", async () => {
+    await startHub();
+    await enabled("a");
+    const { runner } = mod("a");
+    runner.turn(true);
+    command("/compact");
+    await reply(runner, t => t.startsWith("🗜"));
+    expect(await storedIds()).toEqual([fake.lastMessageId]);
+    runner.turn(false);
+    await waitFor(async () => {
+      await runner.poll();
+      return fake.callsOf("editMessageText").length === 1;
+    });
+    expect(await storedIds()).toEqual([]);
+  });
+
+  test("a compact result arriving while its queued notice is being sent edits that notice", async () => {
+    await startHub();
+    await enabled("a");
+    const { runner } = mod("a");
+    fake.delayNext("sendMessage", SLOW_SEND_MS / 2);
+    command("/compact");
+    await waitFor(async () => {
+      await runner.poll();
+      return fake.callsOf("sendMessage").length > 0;
+    });
+    await waitFor(async () => {
+      await runner.poll();
+      return fake.callsOf("editMessageText").length === 1;
+    });
+    expect(fake.callsOf("editMessageText")[0]?.text).toBe("✅ Компакт выполнен.");
+    expect(fake.texts().filter(t => t.message_thread_id === 100)).toHaveLength(1);
+  });
+
+  test("a compact result after hub restart resolves the persisted Telegram message id", async () => {
+    await startHub();
+    await enabled("a");
+    const h = held();
+    const { runner } = mod("a", undefined, undefined, h.answer);
+    command("/compact");
+    await reply(runner, t => t.startsWith("🗜"));
+    const startedId = fake.lastMessageId;
+    const oldPort = port;
+    await hub.stop();
+    await startHub({ port: oldPort });
+    h.release();
+    await waitFor(async () => {
+      await runner.poll();
+      return fake.callsOf("editMessageText").length === 1;
+    });
+    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "✅ Компакт выполнен." }]);
   });
 
   test("a skipped compaction gives the reason", async () => {
@@ -1978,7 +2053,14 @@ describe("commands", () => {
     await enabled("a");
     const { runner } = mod("a", undefined, undefined, async () => ({ skip: "a hook vetoed it" }));
     command("/compact");
-    expect((await reply(runner, t => t.startsWith("⚠️"))).text).toBe("⚠️ Компакт пропущен: a hook vetoed it");
+    const started = await reply(runner, t => t.startsWith("🗜"));
+    const startedId = fake.lastMessageId;
+    const warning = await reply(runner, t => t.startsWith("⚠️"));
+    expect(warning.text).toBe("⚠️ Компакт пропущен: a hook vetoed it");
+    expect(warning.disable_notification).toBe(false);
+    await waitFor(() => fake.callsOf("deleteMessage").length === 1);
+    expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
+    expect(started.disable_notification).toBe(true);
   });
 
   test("a compaction that keeps failing with no turn running gives the reason", async () => {
@@ -1988,7 +2070,12 @@ describe("commands", () => {
       throw new Error("Not enough messages to compact.");
     });
     command("/compact");
+    const started = await reply(runner, t => t.startsWith("🗜"));
+    const startedId = fake.lastMessageId;
     expect((await reply(runner, t => t.startsWith("⚠️"))).text).toBe("⚠️ Компакт не выполнен: Not enough messages to compact.");
+    await waitFor(() => fake.callsOf("deleteMessage").length === 1);
+    expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
+    expect(started.disable_notification).toBe(true);
     expect(compacted).toStrictEqual([undefined, undefined, undefined]);
   });
 
@@ -2012,7 +2099,10 @@ describe("commands", () => {
       expect(compacted.length).toBe(i);
       runner.turn(false);
     }
-    await reply(runner, t => t.startsWith("✅"));
+    await waitFor(async () => {
+      await runner.poll();
+      return fake.callsOf("editMessageText").length === 1;
+    });
     expect(sentText(t => t.startsWith("⚠️"))).toBeUndefined();
   });
 
@@ -2227,6 +2317,7 @@ sys.exit(1)
     const { runner, compacted } = mod("a", undefined, undefined, h.answer);
     command("/stop");
     const started = await reply(runner, t => t.startsWith("🗜"));
+    const startedId = fake.lastMessageId;
     expect(started.text).toBe("🗜 Сожму контекст и завершу сессию. Повторный /stop завершит сразу.");
     expect(started.disable_notification).toBe(true);
     await waitFor(async () => {
@@ -2238,7 +2329,31 @@ sys.exit(1)
     expect(terminated(a)).toBe(false);
     h.release();
     await a.next("terminate");
-    await waitFor(() => sentText(t => t === "✅ Компакт выполнен."));
+    await waitFor(async () => {
+      await runner.poll();
+      return fake.callsOf("editMessageText").length === 1;
+    });
+    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "✅ Компакт выполнен." }]);
+    a.close();
+    await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
+  });
+
+  test("/stop deletes its compaction notice and sends a skipped result loudly", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const { runner } = mod("a", undefined, undefined, async () => ({ skip: "nothing to compact" }));
+    command("/stop");
+    const started = await reply(runner, t => t.startsWith("🗜 Сожму контекст"));
+    const startedId = fake.lastMessageId;
+    expect(started.disable_notification).toBe(true);
+    const warning = await reply(runner, t => t.startsWith("⚠️ Компакт пропущен"));
+    expect(warning.disable_notification).toBe(false);
+    expect(warning.text).toBe("⚠️ Компакт пропущен: nothing to compact");
+    await waitFor(() => fake.callsOf("deleteMessage").length === 1);
+    expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
+    await a.next("terminate");
+    a.close();
+    await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
   });
 
   test("/stop waits for a /compact from the topic", async () => {
@@ -2356,16 +2471,14 @@ sys.exit(1)
       await pollUntil(runner, () => terminated(a));
       expect(compacted).toStrictEqual(["keep the plan"]);
       await windowEnds(a);
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Уборка выполнена")));
-      expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
-      expect(summary.disable_notification).toBe(true);
+      // The summary edits the "will compact" message in place.
+      await waitFor(() => fake.callsOf("editMessageText").length);
+      expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🧹 Уборка выполнена, убраны скиллы: a, b." }]);
+      expect(sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди"))).toBeUndefined();
       await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
-      // The summary takes the place of the "will compact" message.
-      await waitFor(() => fake.callsOf("deleteMessage").length);
-      expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
       await Bun.sleep(SETTLE_MS);
       expect(spawned).toEqual([]);
-      expect(fake.callsOf("editMessageText")).toEqual([]);
+      expect(fake.callsOf("deleteMessage")).toEqual([]);
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
       expect(backups(folder).length).toBe(1);
     });
@@ -2381,7 +2494,7 @@ sys.exit(1)
       command("meanwhile");
       await Bun.sleep(SETTLE_MS);
       alive = false;
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Уборка выполнена")));
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди")));
       expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
       await waitFor(() => spawned.length);
       expect(spawned).toEqual([STARTED]);
@@ -2516,9 +2629,14 @@ sys.exit(1)
       const { a, spawned, transcript, original } = await liveSession([odd]);
       const { runner } = mod(SID);
       command("/cleanup");
+      const startedId = (await reply(runner, t => t.startsWith("🧹 Уборка на очереди")), fake.lastMessageId);
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
       const summary = await waitFor(() => sentText(t => t.startsWith("⚠️ Уборка не выполнена")));
+      // A failure deletes the queued notice and arrives as a new loud message.
+      expect(summary.disable_notification).toBe(false);
+      expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
+      expect(fake.callsOf("editMessageText")).toEqual([]);
       expect(summary.text).toBe(`⚠️ Уборка не выполнена: формат транскрипта изменился (Claude Code ${VERSION})`);
       await Bun.sleep(SETTLE_MS);
       expect(spawned).toEqual([]);
@@ -2531,7 +2649,7 @@ sys.exit(1)
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Уборка выполнена")));
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди")));
       expect(summary.text).toBe("🧹 Уборка выполнена.");
       await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
       await Bun.sleep(SETTLE_MS);
@@ -2587,7 +2705,7 @@ sys.exit(1)
       command("meanwhile");
       await Bun.sleep(SETTLE_MS);
       alive = false;
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Уборка выполнена")));
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди")));
       expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
       const window = must(w, "window");
       expect((await window.next("inbound")).content).toBe("meanwhile");
@@ -2728,7 +2846,7 @@ sys.exit(1)
       await Bun.sleep(SETTLE_MS);
       expect(a.messages.filter(m => m.type === "terminate").length).toBe(1);
       await windowEnds(a);
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Уборка выполнена")));
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди")));
       expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
       await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
@@ -2762,7 +2880,7 @@ sys.exit(1)
       await pollUntil(runner, () => terminated(a));
       await a.next("terminate");
       a.close();
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Уборка выполнена")));
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди")));
       expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
       await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
       expect(log.lines.some(l => l.includes("the Claude Code process is unknown"))).toBe(true);

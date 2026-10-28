@@ -21,10 +21,10 @@ const MAX_SEEN = 5000;
 // notice: it replaced a piece Telegram rejected. buttons: an inline keyboard
 // under a text piece. card: the piece is the first version of this subagent
 // card; the hub sends the card's latest version in its place.
-export type Piece = { text: string; silent: boolean; entities?: Entity[]; rich?: Block[]; files?: OutFile[]; notice?: boolean; buttons?: Button[][]; card?: string; cardReplyTo?: string };
+export type Piece = { text: string; silent: boolean; entities?: Entity[]; rich?: Block[]; files?: OutFile[]; notice?: boolean; buttons?: Button[][]; card?: string; cardReplyTo?: string; resolution?: { id: string; kind: "success" | "warning" }; keepId?: true };
 export type OutItem = Piece & { id: string; sessionId: string };
 
-type Data = { items: OutItem[]; seen: string[] };
+type Data = { items: OutItem[]; seen: string[]; messageIds: Record<string, number> };
 
 const dataSchema: z.ZodType<Data> = z.object({
   items: z.array(
@@ -40,16 +40,19 @@ const dataSchema: z.ZodType<Data> = z.object({
       buttons: z.array(z.array(z.object({ text: z.string(), data: z.string() }))).optional(),
       card: z.string().optional(),
       cardReplyTo: z.string().optional(),
+      resolution: z.object({ id: z.string(), kind: z.enum(["success", "warning"]) }).optional(),
+      keepId: z.literal(true).optional(),
     }),
   ),
   seen: z.array(z.string()),
+  messageIds: z.record(z.string(), z.number()).catch({}),
 });
 
 // The hub's delivery queue, on disk: a piece is written here before the
 // plugin gets its ack and leaves only after Telegram accepted it, so neither a
 // dead network nor a dead hub loses text.
 export class Outbox {
-  private data: Data = { items: [], seen: [] };
+  private data: Data = { items: [], seen: [], messageIds: {} };
 
   constructor(
     private file: string,
@@ -140,6 +143,28 @@ export class Outbox {
     item.text = text;
     delete item.entities;
     this.save();
+  }
+
+  messageId(id: string): number | undefined {
+    return this.data.messageIds[id];
+  }
+
+  // Only a queued notice's id is kept: its result edits or deletes it later.
+  recordMessageId(id: string, messageId: number): void {
+    this.data.messageIds[id] = messageId;
+    // A guard for notices whose result never comes (a window that died mid-compact).
+    const ids = Object.keys(this.data.messageIds);
+    if (ids.length > MAX_SEEN) for (const old of ids.slice(0, ids.length - MAX_SEEN)) delete this.data.messageIds[old];
+    this.save();
+  }
+
+  // The id of a queued notice, forgotten once its result uses it.
+  takeMessageId(id: string): number | undefined {
+    const messageId = this.data.messageIds[id];
+    if (messageId === undefined) return undefined;
+    delete this.data.messageIds[id];
+    this.save();
+    return messageId;
   }
 
   setFiles(id: string, files: OutFile[]): void {

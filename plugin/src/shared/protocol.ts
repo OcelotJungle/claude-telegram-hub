@@ -13,7 +13,7 @@ export const DEFAULT_PORT = 47613;
 // module that asks with &cleanup=1; it compacts with the args and reports
 // with POST /cleanup: the context sizes before and after, or the error.
 export type TopicCommand = { id: string; name: "info" | "compact" | "stop" | "cleanup"; args: string };
-export type CommandReply = { sessionId: string; id: string; text: string; notify: boolean };
+export type CommandReply = { sessionId: string; id: string; text: string; notify: boolean; replaces?: { id: string; kind: "success" | "warning" }; awaitsResult?: true };
 export type TerminateRequest = { sessionId: string; id: string };
 export type CleanupReport = { sessionId: string; id: string; before?: number; after?: number; error?: string };
 

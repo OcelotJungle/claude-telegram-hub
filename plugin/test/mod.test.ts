@@ -337,7 +337,7 @@ describe("/cleanup", () => {
     await s.polls(5);
     expect(s.compacted).toEqual(["keep the plan"]);
     expect(s.posted).toEqual([
-      { path: "/reply", body: { sessionId: "s", id: "c1.0", text: STARTED, notify: false } },
+      { path: "/reply", body: { sessionId: "s", id: "c1.0", text: STARTED, notify: false, awaitsResult: true } },
       { path: "/cleanup", body: { sessionId: "s", id: "c1", before: 210_000, after: 24_000 } },
     ]);
   });

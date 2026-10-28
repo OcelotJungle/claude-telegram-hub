@@ -87,7 +87,7 @@ export const questionDecision: z.ZodType<QuestionDecision> = z.union([
 ]);
 
 // A reply without notify is sent silently.
-export const commandReply: z.ZodType<CommandReply> = z.object({ sessionId: z.string(), id: z.string(), text: z.string(), notify: z.boolean().catch(false) });
+export const commandReply: z.ZodType<CommandReply> = z.object({ sessionId: z.string(), id: z.string(), text: z.string(), notify: z.boolean().catch(false), replaces: z.object({ id: z.string(), kind: z.enum(["success", "warning"]) }).optional(), awaitsResult: z.literal(true).optional() });
 
 export const terminateRequest: z.ZodType<TerminateRequest> = z.object({ sessionId: z.string(), id: z.string() });
 

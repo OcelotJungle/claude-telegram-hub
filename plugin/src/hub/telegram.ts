@@ -116,6 +116,7 @@ const PACED: Record<string, Priority> = {
   createForumTopic: "send",
   editMessageText: "edit",
   editMessageReplyMarkup: "edit",
+  deleteMessage: "edit",
   editForumTopic: "edit",
 };
 
