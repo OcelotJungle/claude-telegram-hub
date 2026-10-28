@@ -4,7 +4,7 @@ import type { Config } from "../src/shared/config.ts";
 import type { MessageKind } from "../src/shared/notification.ts";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
 import { cleanupSummary, Hub } from "../src/hub/hub.ts";
@@ -2626,7 +2626,7 @@ sys.exit(1)
       h.release();
     });
 
-    test("a Claude Code that does not exit says how many held messages were not delivered", async () => {
+    test("a Claude Code that does not exit routes held messages through the inactive-session flow", async () => {
       const { a, spawned } = await liveSession(SKILLS, { isAlive: () => true, cleanupExitMs: EXIT_MS });
       const { runner } = mod(SID);
       command("/cleanup");
@@ -2636,7 +2636,10 @@ sys.exit(1)
       await windowEnds(a);
       const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
       expect(warning.text).toBe("⚠️ Уборка не выполнена: Claude Code не завершился");
-      expect(spawned).toEqual([]);
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+      const w = await plugin(SID);
+      expect((await w.next("inbound")).content).toBe("meanwhile");
     });
 
     test("an exec result during /cleanup waits for the relaunched session", async () => {
@@ -2664,6 +2667,8 @@ sys.exit(1)
       const { runner } = mod(SID);
       command("/cleanup");
       const startedId = (await reply(runner, t => t.startsWith("🧹 Уборка на очереди")), fake.lastMessageId);
+      command("format held");
+      await heldForCleanup();
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
       const summary = await waitFor(() => sentText(t => t.startsWith("⚠️ Уборка не выполнена")));
@@ -2672,9 +2677,29 @@ sys.exit(1)
       expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
       expect(fake.callsOf("editMessageText")).toEqual([]);
       expect(summary.text).toBe(`⚠️ Уборка не выполнена: формат транскрипта изменился (Claude Code ${VERSION})`);
-      await Bun.sleep(SETTLE_MS);
-      expect(spawned).toEqual([]);
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+      const w = await plugin(SID);
+      expect((await w.next("inbound")).content).toBe("format held");
       expect(readFileSync(transcript, "utf8")).toBe(original);
+    });
+
+    test("a missing transcript still routes held messages through the normal flow", async () => {
+      const { a, spawned, transcript } = await liveSession(SKILLS);
+      const { runner } = mod(SID);
+      unlinkSync(transcript);
+      command("/cleanup");
+      command("missing transcript held");
+      await heldForCleanup();
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️ Уборка не выполнена")));
+      expect(warning.text).toBe("⚠️ Уборка не выполнена: транскрипт не найден");
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+      const w = await plugin(SID);
+      expect((await w.next("inbound")).content).toBe("missing transcript held");
+      expect(existsSync(transcript)).toBe(false);
     });
 
     test("nothing to remove reports completion and leaves the session ended", async () => {
@@ -2931,14 +2956,71 @@ sys.exit(1)
       });
       const { runner } = mod(SID);
       command("/cleanup");
+      command("edit failed held");
+      await heldForCleanup();
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
       const warning = await waitFor(() => sentText(t => t.startsWith("⚠️ Уборка не выполнена")));
       expect(warning.text).toBe("⚠️ Уборка не выполнена: disk");
       expect(warning.disable_notification).toBe(false);
-      await Bun.sleep(SETTLE_MS);
-      expect(spawned).toEqual([]);
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+      const w = await plugin(SID);
+      expect((await w.next("inbound")).content).toBe("edit failed held");
       expect(readFileSync(transcript, "utf8")).toBe(original);
+    });
+
+    test("a successful cleanup starts the session and hands it the held messages the standard way", async () => {
+      const { a, spawned, transcript } = await liveSession(SKILLS);
+      const { runner } = mod(SID);
+      command("/cleanup");
+      command("success held");
+      await heldForCleanup();
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹 Уборка выполнена")));
+      expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
+      await waitFor(() => spawned.length);
+      expect(spawned).toEqual([STARTED]);
+      const w = await plugin(SID);
+      expect((await w.next("inbound")).content).toBe("success held");
+      expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
+    });
+
+    test("a message sent before the window is ready arrives after the held ones", async () => {
+      const { a, spawned } = await liveSession(SKILLS);
+      const { runner } = mod(SID);
+      command("/cleanup");
+      command("older");
+      command("older too");
+      await heldForCleanup();
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      await waitFor(() => spawned.length);
+      // The hand-over starts after readyDelayMs; the batch of "newer" is
+      // flushed after BATCH_QUIET_MS, well before that.
+      const w = await plugin(SID);
+      command("newer");
+      await w.next("inbound", m => m.content.includes("newer"));
+      const text = w.messages.filter(m => m.type === "inbound").map(m => m.content).join(" | ");
+      expect(text.indexOf("older too")).toBeGreaterThan(text.indexOf("older"));
+      expect(text.indexOf("newer")).toBeGreaterThan(text.indexOf("older too"));
+    });
+
+    test("messages written during /cleanup are all delivered in order, however many", async () => {
+      const { a, spawned } = await liveSession(SKILLS);
+      const { runner } = mod(SID);
+      const COUNT = 60;
+      command("/cleanup");
+      for (let i = 1; i <= COUNT; i++) command(`m${i}`);
+      await waitFor(() => log.lines.filter(l => l.includes("held until /cleanup ends")).length >= COUNT);
+      await pollUntil(runner, () => terminated(a));
+      await windowEnds(a);
+      await waitFor(() => spawned.length);
+      const w = await plugin(SID);
+      let got = "";
+      while (!got.includes(`m${COUNT}`)) got += `${got ? "\n\n" : ""}${(await w.next("inbound")).content}`;
+      expect(got).toBe(Array.from({ length: COUNT }, (_, i) => `m${i + 1}`).join("\n\n"));
     });
   });
 });
