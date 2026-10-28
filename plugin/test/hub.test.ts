@@ -3388,6 +3388,21 @@ describe("questions", () => {
     expect(edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`)).toBe(true);
   });
 
+  test("a hub that stops while the poll is still being sent has moved it to the terminal when stop returns", async () => {
+    await startHub();
+    await enabled("a");
+    const release = fake.holdNext("sendMessage");
+    const answer = ask([Q1]);
+    await polled();
+    const stopping = hub.stop();
+    // Let stop() run up to the question send it has to wait for.
+    await Bun.sleep(SHOWN_MS);
+    release();
+    await stopping;
+    expect(edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`)).toBe(true);
+    expect(await answer).toEqual({ decision: "none" });
+  });
+
   test("a window that goes away moves its poll to the terminal", async () => {
     await startHub();
     const a = await enabled("a");

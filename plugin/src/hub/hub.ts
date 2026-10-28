@@ -321,6 +321,9 @@ export class Hub {
   // The earliest time the next card edit may go, hub-wide.
   private nextCardEdit = 0;
   private pumping = new Set<string>();
+  // Question sends in flight: a poll that ends meanwhile gets its outcome edit
+  // only once the send returns the message id, so stop() waits for them.
+  private questionSends = new Set<Promise<void>>();
   // The latest reaction change of a topic message, by message id.
   private reactions = new Map<number, Promise<void>>();
   // Topic messages handed to a session whose ✍ is not on yet, by message id.
@@ -472,6 +475,8 @@ export class Hub {
     this.batchIds.clear();
     // Open polls go back to the terminal, which the next hub cannot answer.
     await Promise.allSettled([...this.polls.values()].map(p => this.finishPoll(p, { decision: "none" }, TO_TERMINAL)));
+    // A question still being sent shows the outcome right after its send.
+    await Promise.allSettled([...this.questionSends]);
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.spoolTimer) clearInterval(this.spoolTimer);
     if (this.typingTimer) clearInterval(this.typingTimer);
@@ -1419,7 +1424,12 @@ ${msg.text}`);
     }
     // A notice that replaced a rejected question keeps its id but is plain text.
     const poll = item.notice ? null : POLL_ITEM.exec(item.id);
-    if (!queued && poll) return this.sendQuestion(api, groupId, sessionId, item, poll[1], Number(poll[2]));
+    if (!queued && poll) {
+      const send = this.sendQuestion(api, groupId, sessionId, item, poll[1], Number(poll[2]));
+      const tracked: Promise<void> = send.catch(() => undefined).finally(() => this.questionSends.delete(tracked));
+      this.questionSends.add(tracked);
+      return send;
+    }
     if (!queued) {
       const { text } = item;
       const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, text, item.silent, item.entities, item.buttons));

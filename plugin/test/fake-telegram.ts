@@ -33,6 +33,7 @@ export class FakeTelegram {
   private failures = new Map<string, Failure[]>();
   private hangs = new Map<string, number>();
   private delays = new Map<string, number>();
+  private holds = new Map<string, Promise<void>>();
   private deletedTopics = new Set<number>();
   files = new Map<string, { path: string; body: Uint8Array }>();
 
@@ -75,6 +76,14 @@ export class FakeTelegram {
   // The next call of `method` is answered only after `ms`, like a slow network.
   delayNext(method: string, ms: number): void {
     this.delays.set(method, ms);
+  }
+
+  // The next call of `method` is received (and recorded) but answered only
+  // once the returned function is called.
+  holdNext(method: string): () => void {
+    let release = () => {};
+    this.holds.set(method, new Promise<void>(resolve => { release = resolve; }));
+    return release;
   }
 
   clearHangs(): void {
@@ -130,6 +139,12 @@ export class FakeTelegram {
     if (delay !== undefined) {
       this.delays.delete(method);
       await Bun.sleep(delay);
+    }
+
+    const hold = this.holds.get(method);
+    if (hold) {
+      this.holds.delete(method);
+      await hold;
     }
 
     const fail = this.failures.get(method)?.shift();
