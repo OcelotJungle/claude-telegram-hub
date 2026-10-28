@@ -123,7 +123,7 @@ test("a window talks to Telegram through a hub it started itself", async () => {
     params: { request_id: "abcde", tool_name: "Bash", description: "rm build", input_preview: "{}" },
   });
   await waitFor(() => fake.texts().length === 2, 5000, "permission message");
-  expect(fake.texts()[1]).toMatchObject({ text: "🔐 Нужно подтверждение: Bash — rm build\n\n{}", disable_notification: false });
+  expect(fake.texts()[1]).toMatchObject({ text: "🔐 Нужно подтверждение: Bash", disable_notification: false });
   const allow = arr(arr(field(field(fake.callsOf("sendMessage")[1], "reply_markup"), "inline_keyboard"))[0])[0];
   fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data: String(field(allow, "callback_data")) }));
   await waitFor(() => permissionAnswers.length === 1, 5000, "permission answer");

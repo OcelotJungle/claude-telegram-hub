@@ -46,6 +46,7 @@ import { freshEnv } from "./exec-env.ts";
 import { isAlive, killTree, spawnRunner } from "./exec-runner.ts";
 import { DEFAULT_BASH, findPowershell } from "./exec-shell.ts";
 import { cleanTranscript } from "./skill-cleanup.ts";
+import { formatPermission } from "./format-permission.ts";
 
 const INACTIVE_TEXT = "сессия сейчас не активна";
 // The queue id prefix of the start notice, "starting the session".
@@ -948,12 +949,9 @@ ${msg.text}`);
 
   // --- permissions ----------------------------------------------------------
 
-  // A prompt with a request id gets buttons; the tool's input goes under the
-  // description as code.
+  // A prompt with a request id gets buttons; call details go below the head.
   private askPermission(sessionId: string, msg: Extract<PluginToHub, { type: "permission" }>): void {
-    const head = `🔐 Нужно подтверждение: ${msg.toolName} — ${msg.description}`;
-    const preview = msg.inputPreview && msg.inputPreview.length > MAX_PREVIEW_CHARS ? `${msg.inputPreview.slice(0, MAX_PREVIEW_CHARS)}…` : msg.inputPreview;
-    const f: Formatted = preview ? { text: `${head}\n\n${preview}`, entities: [{ type: "pre", offset: head.length + 2, length: preview.length }] } : { text: head, entities: [] };
+    const f: Formatted = formatPermission(msg.toolName, msg.inputPreview, MAX_PREVIEW_CHARS);
     if (!msg.requestId) return this.enqueue(sessionId, `perm-${randomUUID()}`, f.text, true, false);
     const key = randomUUID().replaceAll("-", "").slice(0, PERMISSION_KEY_CHARS);
     this.permissions.set(key, { sessionId, requestId: msg.requestId, ...f });

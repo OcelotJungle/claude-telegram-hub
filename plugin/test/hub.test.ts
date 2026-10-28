@@ -738,7 +738,7 @@ describe("send", () => {
     const a = await enabled("a");
     a.send({ type: "permission", toolName: "Bash", description: "rm -rf build" });
     await waitFor(() => fake.texts().length === 1);
-    expect(fake.texts()[0]).toMatchObject({ text: "🔐 Нужно подтверждение: Bash — rm -rf build", disable_notification: false });
+    expect(fake.texts()[0]).toMatchObject({ text: "🔐 Нужно подтверждение: Bash", disable_notification: false });
     await req(a, { op: "disable" });
     a.send({ type: "permission", toolName: "Bash", description: "again" });
     await Bun.sleep(100);
@@ -748,13 +748,13 @@ describe("send", () => {
   test("a deny button sends the answer to the session's window", async () => {
     await startHub();
     const a = await enabled("a");
-    a.send({ type: "permission", requestId: "r1", toolName: "Bash", description: "rm -rf build" });
+    a.send({ type: "permission", requestId: "r1", toolName: "Bash", description: "general tool description", inputPreview: '{"command":"rm -rf build","description":"Remove build output"}' });
     await waitFor(() => fake.texts().length === 1);
     const data = String(field(arr(arr(field(field(fake.callsOf("sendMessage")[0], "reply_markup"), "inline_keyboard"))[0])[1], "callback_data"));
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
     expect(await a.next("permissionReply")).toEqual({ type: "permissionReply", requestId: "r1", behavior: "deny" });
     await waitFor(() => fake.callsOf("editMessageText").length === 1);
-    expect(fake.callsOf("editMessageText")[0].text).toBe("🔐 Нужно подтверждение: Bash — rm -rf build\n\n❌ Отклонено");
+    expect(fake.callsOf("editMessageText")[0].text).toBe("🔐 Нужно подтверждение: Bash\nRemove build output\n\ncommand: rm -rf build\n\n❌ Отклонено");
   });
 
   test("a button pressed by a stranger or outside the group does nothing", async () => {
@@ -1006,9 +1006,9 @@ describe("formatting", () => {
   test("the hub's own texts are not parsed as markdown", async () => {
     await startHub();
     const a = await enabled("a");
-    a.send({ type: "permission", toolName: "Bash", description: "rm *.tmp and *.log" });
+    a.send({ type: "permission", toolName: "Bash", description: "Executes a given bash command", inputPreview: '{"description":"rm *.tmp and *.log"}' });
     await waitFor(() => fake.texts().length === 1);
-    expect(fake.texts()[0].text).toBe("🔐 Нужно подтверждение: Bash — rm *.tmp and *.log");
+    expect(fake.texts()[0].text).toBe("🔐 Нужно подтверждение: Bash\nrm *.tmp and *.log");
     expect(fake.texts()[0].entities).toBeUndefined();
   });
 });

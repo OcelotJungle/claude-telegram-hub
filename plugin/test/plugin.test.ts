@@ -553,18 +553,18 @@ describe("PluginCore", () => {
     const c = await enabledCore();
     c.permissionRequest({ request_id: "abcde", tool_name: "Bash", description: "git push" });
     await waitFor(() => sent().length === 1);
-    expect(sent()[0]).toEqual({ text: "🔐 Нужно подтверждение: Bash — git push", silent: false, topic: 100 });
+    expect(sent()[0]).toEqual({ text: "🔐 Нужно подтверждение: Bash", silent: false, topic: 100 });
   });
 
   test("a permission request answered in the topic reaches Claude Code", async () => {
     const c = await enabledCore();
-    c.permissionRequest({ request_id: "abcde", tool_name: "Bash", description: "Push the branch", input_preview: '{"command":"git push"}' });
+    c.permissionRequest({ request_id: "abcde", tool_name: "Bash", description: "Executes a given bash command", input_preview: '{"command":"git push","description":"Push the branch"}' });
     await waitFor(() => sent().length === 1);
     const msg = fake.callsOf("sendMessage")[0];
-    const head = "🔐 Нужно подтверждение: Bash — Push the branch";
+    const head = "🔐 Нужно подтверждение: Bash\nPush the branch";
     expect(msg).toMatchObject({
-      text: `${head}\n\n{"command":"git push"}`,
-      entities: [{ type: "pre", offset: head.length + 2, length: 22 }],
+      text: `${head}\n\ncommand: git push`,
+      entities: [{ type: "pre", offset: head.length + 2, length: 17 }],
       disable_notification: false,
     });
     const rows = arr(field(field(msg, "reply_markup"), "inline_keyboard"));
@@ -573,7 +573,7 @@ describe("PluginCore", () => {
     await waitFor(() => answers.length === 1, 3000, "answer");
     expect(answers).toEqual([{ requestId: "abcde", behavior: "allow" }]);
     await waitFor(() => fake.callsOf("editMessageText").length === 1, 3000, "edit");
-    expect(fake.callsOf("editMessageText")[0]).toMatchObject({ message_id: fake.lastMessageId, text: `${head}\n\n{"command":"git push"}\n\n✅ Разрешено` });
+    expect(fake.callsOf("editMessageText")[0]).toMatchObject({ message_id: fake.lastMessageId, text: `${head}\n\ncommand: git push\n\n✅ Разрешено` });
     expect(fake.callsOf("editMessageText")[0].reply_markup).toBeUndefined();
     expect(fake.callsOf("answerCallbackQuery")).toEqual([expect.objectContaining({ text: "✅ Разрешено" })]);
   });
