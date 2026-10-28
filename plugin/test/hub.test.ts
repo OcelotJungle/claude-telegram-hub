@@ -1,6 +1,7 @@
 import type { VideoTools } from "../src/hub/video.ts";
 import type { Compaction, Usage } from "../src/mod/commands.ts";
 import type { Config } from "../src/shared/config.ts";
+import type { MessageKind } from "../src/shared/notification.ts";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
@@ -14,6 +15,7 @@ import { TelegramApi } from "../src/hub/telegram.ts";
 import { Runner } from "../src/mod/commands.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
+import { notifies } from "../src/shared/notification.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { freePort, hasFfmpeg, makeVideo, memLogger, must, NO_PACE, tempDir, waitFor, wsClient } from "./helpers.ts";
 
@@ -626,6 +628,40 @@ describe("batching", () => {
 });
 
 describe("send", () => {
+  test("technical message kinds set Telegram notification through the send path", async () => {
+    await startHub();
+    await enabled("a");
+    const cases: { text: string; kind: MessageKind; loud: boolean }[] = [
+      { text: "/info reply", kind: "info", loud: false },
+      { text: "✅ /autocompact 80 выполнена.", kind: "info", loud: false },
+      { text: "🗜 Компакт запущен…", kind: "info", loud: false },
+      { text: "✅ Контекст сжат: 180k → 24k токенов", kind: "info", loud: false },
+      { text: "🧹 Очистка выполнена", kind: "info", loud: false },
+      { text: "✅ Сессия запущена", kind: "info", loud: false },
+      { text: "🚀 Запускаю сессию…", kind: "info", loud: false },
+      { text: "⏹ Сессия завершена", kind: "info", loud: false },
+      { text: "⏳ Сессия уже завершается", kind: "info", loud: false },
+      { text: "✅ код 0", kind: "info", loud: false },
+      { text: "⏹ остановлена", kind: "info", loud: false },
+      { text: "❌ код 2", kind: "error", loud: true },
+      { text: "⚠️ прервана: процесс исчез", kind: "warning", loud: true },
+      { text: "🔐 Нужно подтверждение", kind: "action", loud: true },
+      { text: "Выбери вариант ответа", kind: "action", loud: true },
+      { text: "⚠️ Компакт не выполнен", kind: "error", loud: true },
+    ];
+    for (const [index, item] of cases.entries()) {
+      const response = await fetch(`http://127.0.0.1:${port}/reply`, {
+        method: "POST",
+        body: JSON.stringify({ sessionId: "a", id: `kind-${index}`, text: item.text, notify: notifies(item.kind) }),
+      });
+      expect(response.status).toBe(200);
+    }
+    await waitFor(() => fake.texts().length === cases.length, WAIT_MS, "technical messages");
+    expect(fake.texts().map(message => [message.text, message.disable_notification])).toEqual(
+      cases.map(item => [item.text, !item.loud]),
+    );
+  });
+
   test("silent and notify map to disable_notification and every send is acked", async () => {
     await startHub();
     const a = await enabled("a");
@@ -1848,14 +1884,14 @@ describe("commands", () => {
       "command reply",
     );
 
-  test("/info is answered by the mod with sound, never reaches the agent and leaves the mode as it was", async () => {
+  test("/info is answered by the mod silently, never reaches the agent and leaves the mode as it was", async () => {
     await startHub();
     const a = await enabled("a");
     await req(a, { op: "disable" });
     const { runner } = mod("a");
     command("/info");
     const sent = await reply(runner, t => t.startsWith("Лимиты"));
-    expect(sent).toMatchObject({ message_thread_id: 100, disable_notification: false });
+    expect(sent).toMatchObject({ message_thread_id: 100, disable_notification: true });
     expect(sent.text).toContain("128/300k");
     expect(arr(field(arr(field(sent.rich_message, "blocks"))[0], "text"))[0]).toEqual({ type: "bold", text: "Лимиты Claude" });
     expect(a.messages.some(m => m.type === "inbound")).toBe(false);
@@ -1931,7 +1967,7 @@ describe("commands", () => {
     runner.turn(false);
     const done = await reply(runner, t => t.startsWith("✅"));
     expect(done.text).toBe("✅ Компакт выполнен.");
-    expect(done.disable_notification).toBe(false);
+    expect(done.disable_notification).toBe(true);
     expect(compacted).toStrictEqual(["keep the plan"]);
     expect(ran).toEqual([]);
   });
@@ -1986,7 +2022,7 @@ describe("commands", () => {
     command("/compact 333k");
     const sent = await reply(runner, t => t.startsWith("Auto-compact"));
     expect(ran).toEqual([["autocompact", "333000"]]);
-    expect(sent.disable_notification).toBe(false);
+    expect(sent.disable_notification).toBe(true);
   });
 
   test("a reply the mod could not deliver goes with the next poll, once", async () => {
@@ -2321,7 +2357,7 @@ sys.exit(1)
       await windowEnds(a);
       const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Уборка выполнена")));
       expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
-      expect(summary.disable_notification).toBe(false);
+      expect(summary.disable_notification).toBe(true);
       await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
       // The summary takes the place of the "will compact" message.
       await waitFor(() => fake.callsOf("deleteMessage").length);
@@ -2412,7 +2448,7 @@ sys.exit(1)
       const startedId = fake.lastMessageId;
       command("/stop");
       const cancelled = await waitFor(() => sentText(t => t === "⏹ Уборка отменена"));
-      expect(cancelled.disable_notification).toBe(false);
+      expect(cancelled.disable_notification).toBe(true);
       await waitFor(() => fake.callsOf("deleteMessage").length);
       expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
       await windowEnds(a);
@@ -3141,6 +3177,7 @@ describe("questions", () => {
     press(dataOf(msg, 2), fake.lastMessageId);
     const hint = await shown(2);
     expect(hint.text).toBe(CUSTOM_HINT);
+    expect(hint.disable_notification).toBe(true);
     say("Зелёный");
     expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Зелёный" } });
     await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n✅ Зелёный`));

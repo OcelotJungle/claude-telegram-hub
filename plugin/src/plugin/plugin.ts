@@ -12,6 +12,7 @@ import { playChime } from "../shared/chime.ts";
 import { isInside, loadConfig } from "../shared/config.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { BYTES_PER_MB, MAX_CAPTION, MAX_UPLOAD } from "../shared/media.ts";
+import { notifies } from "../shared/notification.ts";
 import { plural } from "../shared/plural.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { enableResult } from "../shared/protocol-schema.ts";
@@ -440,7 +441,7 @@ export class PluginCore {
     // The error text ended the turn: it goes before the note.
     this.flush(this.relay.endTurn());
     if (before >= MAX_AUTO_CONTINUES) {
-      if (before === MAX_AUTO_CONTINUES) this.client.enqueue(this.sessionId, CUT_LIMIT_NOTE, true);
+      if (before === MAX_AUTO_CONTINUES) this.client.enqueue(this.sessionId, CUT_LIMIT_NOTE, notifies("warning"));
       return;
     }
     this.opts.emitChannel(CONTINUE_PROMPT, { user: "tg-hub", reason: "response_cut" });

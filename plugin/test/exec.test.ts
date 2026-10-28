@@ -3,6 +3,7 @@ import type { ExecRecord } from "../src/hub/exec-store.ts";
 import type { RunnerSpec } from "../src/hub/exec-runner.ts";
 import type { Button } from "../src/hub/telegram.ts";
 import type { ChannelMeta } from "../src/shared/protocol.ts";
+import type { MessageKind } from "../src/shared/notification.ts";
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "fs";
@@ -10,6 +11,7 @@ import { join } from "path";
 import { Execs, execCardText, HEARTBEAT_STALE_MS, logTail, MAX_EXECS } from "../src/hub/exec.ts";
 import { loadExecs, saveExecs } from "../src/hub/exec-store.ts";
 import { HEARTBEAT_MS, runnerSpecSchema } from "../src/hub/exec-runner.ts";
+import { notifies } from "../src/shared/notification.ts";
 import { memLogger, must, tempDir, waitFor } from "./helpers.ts";
 
 const SID = "s1";
@@ -35,7 +37,7 @@ const SHORT_GRACE_MS = 100;
 // Long enough for any heartbeat to go stale.
 const LONG_AGO_MS = 10 * MIN_MS;
 
-type CardCall = { sessionId: string; cardId: string; markdown: string; final: boolean; buttons?: Button[][] };
+type CardCall = { sessionId: string; cardId: string; markdown: string; final: boolean; kind: MessageKind; buttons?: Button[][] };
 type ReportCall = { sessionId: string; content: string; meta: ChannelMeta; onSent: () => void };
 
 let dirs: string[] = [];
@@ -78,9 +80,9 @@ function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; aliv
     },
     alive: pid => alive.has(pid),
     kill: pid => void killed.push(pid),
-    card: (sessionId, cardId, markdown, final, buttons) => void cards.push({ sessionId, cardId, markdown, final, buttons }),
-    notice: (_sessionId, text, loud) => void notices.push({ text, loud }),
-    sendFile: (_sessionId, path, name, loud) => void files.push({ path, name, loud }),
+    card: (sessionId, cardId, markdown, final, kind, buttons) => void cards.push({ sessionId, cardId, markdown, final, kind, buttons }),
+    notice: (_sessionId, text, kind) => void notices.push({ text, loud: kind !== "info" }),
+    sendFile: (_sessionId, path, name, kind) => void files.push({ path, name, loud: notifies(kind) }),
     report: (sessionId, content, meta, onSent) => {
       reports.push({ sessionId, content, meta, onSent });
       if (o.sendOnSent !== false) onSent();
@@ -130,6 +132,7 @@ describe("Execs", () => {
     expect(t.spec().env.A).toBe("1");
     const first = t.lastCard();
     expect(first.markdown).toStartWith("▶ cmd");
+    expect(first.kind).toBe("info");
     expect(first.markdown).toContain("`npm run x`");
     expect(first.buttons).toEqual([[{ text: "⏹ Остановить", data: `x:${idOf(first.cardId)}:stop` }]]);
     expect(t.execs.running()).toBe(1);
@@ -139,6 +142,7 @@ describe("Execs", () => {
     t.finish(0, 0);
     const last = await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
     expect(last.markdown).toStartWith("✅ код 0 · 1 мин 05 с");
+    expect(last.kind).toBe("info");
     expect(last.buttons).toBeUndefined();
     await Bun.sleep(SETTLE_MS);
     expect(t.reports).toHaveLength(1);
@@ -156,6 +160,7 @@ describe("Execs", () => {
     t.finish(0, 2);
     const report = await waitFor(() => t.reports[0], WAIT_MS, "report");
     expect(t.lastCard().markdown).toStartWith("❌ код 2");
+    expect(t.lastCard().kind).toBe("error");
     expect(t.files).toEqual([{ path: t.spec().log, name: `${report.meta.exec_id}.log`, loud: true }]);
     expect(report.content).toStartWith("Команда из топика закончилась: ❌ код 2 за 0 с.");
     expect(report.content).toContain("Оболочка: PowerShell, папка: C:\\proj");

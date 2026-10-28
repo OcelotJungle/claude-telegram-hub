@@ -3,7 +3,9 @@
 // in as Deps (the engine's `$` calls), so this file imports only types and
 // plain helpers from shared/ that need nothing at run time.
 import type { CleanupReport, LimitsReading, RateLimit, TopicCommand, VolunteerLimitsResult } from "../shared/protocol.ts";
+import type { MessageKind } from "../shared/notification.ts";
 
+import { notifies } from "../shared/notification.ts";
 import { MILLION, THOUSAND, tokens } from "../shared/tokens.ts";
 
 function isVolunteerLimitsResult(v: unknown): v is VolunteerLimitsResult {
@@ -143,10 +145,10 @@ export class Runner {
         await this.reply(
           to,
           infoText(shared ? { ...usage, rateLimits: shared.rateLimits } : usage, this.deps.now(), shared?.at, codex, volunteer),
-          true
+          "info"
         );
       } catch (e) {
-        await this.reply(to, `⚠️ /info не выполнена: ${message(e)}`, true);
+        await this.reply(to, `⚠️ /info не выполнена: ${message(e)}`, "error");
       }
       return;
     }
@@ -156,9 +158,9 @@ export class Runner {
     if (window !== undefined) {
       try {
         const res = await this.deps.run("autocompact", window);
-        await this.reply(to, res.text?.trim() || `✅ /autocompact ${window} выполнена.`, true);
+        await this.reply(to, res.text?.trim() || `✅ /autocompact ${window} выполнена.`, "info");
       } catch (e) {
-        await this.reply(to, `⚠️ /autocompact ${window} не выполнена: ${message(e)}`, true);
+        await this.reply(to, `⚠️ /autocompact ${window} не выполнена: ${message(e)}`, "error");
       }
       return;
     }
@@ -168,8 +170,12 @@ export class Runner {
   // Resolves once the compaction is over and its result is handed to the hub.
   private async compact(to: Target, args: string, started: string): Promise<void> {
     const run = (async () => {
-      await this.reply(to, started, false);
-      const report = (o: Outcome) => this.reply(to, "ok" in o ? compactionText(o.ok) : `⚠️ Компакт не выполнен: ${o.error}`, true);
+      await this.reply(to, started, "info");
+      const report = (o: Outcome) => this.reply(
+        to,
+        "ok" in o ? compactionText(o.ok) : `⚠️ Компакт не выполнен: ${o.error}`,
+        "error" in o ? "error" : o.ok.skip !== undefined ? "warning" : "info",
+      );
       await new Promise<void>(done => this.compactions.push({ args, failed: 0, report, done }));
     })();
     this.running.add(run);
@@ -181,7 +187,7 @@ export class Runner {
   // the hub the sizes or the error. The hub ends the window and empties the
   // remembered skills.
   private async cleanup(to: Target, args: string): Promise<void> {
-    await this.reply(to, "🧹 Уборка на очереди.", false);
+    await this.reply(to, "🧹 Уборка на очереди.", "info");
     await Promise.all(this.running);
     const report = async (o: Outcome) => {
       const body: CleanupReport = { sessionId: to.sessionId, id: to.id };
@@ -223,7 +229,7 @@ export class Runner {
   // context, after one more. A second /stop in the topic does not wait.
   private async stop(to: { sessionId: string; id: string }): Promise<void> {
     if (this.running.size) {
-      await this.reply(to, "⏳ После компакта завершу сессию. Повторный /stop завершит сразу.", false);
+      await this.reply(to, "⏳ После компакта завершу сессию. Повторный /stop завершит сразу.", "info");
       await Promise.all(this.running);
     }
     const used = await this.contextTokens();
@@ -280,10 +286,10 @@ export class Runner {
     }
   }
 
-  private async reply(to: { sessionId: string; id: string }, text: string, notify: boolean): Promise<void> {
+  private async reply(to: { sessionId: string; id: string }, text: string, kind: MessageKind): Promise<void> {
     const n = this.replies.get(to.id) ?? 0;
     this.replies.set(to.id, n + 1);
-    this.unsent.push({ path: "/reply", body: JSON.stringify({ sessionId: to.sessionId, id: `${to.id}.${n}`, text, notify }) });
+    this.unsent.push({ path: "/reply", body: JSON.stringify({ sessionId: to.sessionId, id: `${to.id}.${n}`, text, notify: notifies(kind) }) });
     await this.flush();
   }
 

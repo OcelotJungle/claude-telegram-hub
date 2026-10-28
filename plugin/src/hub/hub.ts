@@ -13,6 +13,7 @@ import type { HubCommand } from "./router.ts";
 import type { VideoTools } from "./video.ts";
 import type { ExecShell } from "./exec-shell.ts";
 import type { CleanupResult } from "./skill-cleanup.ts";
+import type { MessageKind } from "../shared/notification.ts";
 
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
@@ -20,6 +21,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameS
 import { basename, dirname, join } from "path";
 import { z } from "zod";
 import { chunk } from "../shared/chunk.ts";
+import { notifies } from "../shared/notification.ts";
 import { isInside } from "../shared/config.ts";
 import { field } from "../shared/guards.ts";
 import { toTelegram } from "../shared/markdown.ts";
@@ -405,9 +407,9 @@ export class Hub {
         spawnRunner: opts.spawnRunner ?? spawnRunner,
         alive: isAlive,
         kill: killTree,
-        card: (sid, cardId, markdown, final, buttons) => this.upsertCard(sid, cardId, markdown, final, buttons),
-        notice: (sid, text, loud) => this.notice(sid, text, loud),
-        sendFile: (sid, path, name, loud) => this.sendExecFile(sid, path, name, loud),
+        card: (sid, cardId, markdown, final, kind, buttons) => this.upsertCard(sid, cardId, markdown, final, buttons, false, undefined, kind),
+        notice: (sid, text, kind) => this.notice(sid, text, kind),
+        sendFile: (sid, path, name, kind) => this.sendExecFile(sid, path, name, kind),
         report: (sid, content, meta, onSent) => this.reportExec(sid, { content, meta, onSent }),
         now: () => Date.now(),
         checkMs: opts.execCheckMs ?? EXEC_CHECK_MS,
@@ -585,7 +587,7 @@ export class Hub {
         return;
       }
       if (cmd.name === "cleanup" && this.cleanups.get(sessionId)?.id === cmd.id) this.dropCleanup(sessionId);
-      this.enqueue(sessionId, `cmd-${cmd.id}-lost`, `⚠️ /${cmd.name} не выполнена: окно не забрало её за ${ms / MS_PER_SECOND} с.`, true, false);
+      this.enqueue(sessionId, `cmd-${cmd.id}-lost`, `⚠️ /${cmd.name} не выполнена: окно не забрало её за ${ms / MS_PER_SECOND} с.`, notifies("error"), false);
     }, ms);
     this.commands.set(sessionId, [...(this.commands.get(sessionId) ?? []), { cmd, timer }]);
     this.log.info(`/${cmd.name} for session ${sessionId}`);
@@ -654,7 +656,7 @@ export class Hub {
         void this.finishCleanup(sid, cleanup, ws.data.exitingPid);
       } else {
         this.log.info(`window for session ${sid} closed while compacting for /cleanup; /cleanup dropped`);
-        this.cleanupOutcome(sid, cleanup, "⚠️ Уборка не выполнена: окно закрылось до конца компакта");
+        this.cleanupOutcome(sid, cleanup, "⚠️ Уборка не выполнена: окно закрылось до конца компакта", "warning");
         this.dropCleanup(sid);
       }
     }
@@ -662,7 +664,7 @@ export class Hub {
     if (sid && stop && !this.connOf(sid)) {
       clearTimeout(stop);
       this.stops.delete(sid);
-      this.notice(sid, "⏹ Сессия завершена", false);
+      this.notice(sid, "⏹ Сессия завершена", "info");
     }
     const dying = sid && !this.connOf(sid) ? this.dyingHeld.get(sid) : undefined;
     if (sid && dying) {
@@ -952,7 +954,7 @@ ${msg.text}`);
   // A prompt with a request id gets buttons; call details go below the head.
   private askPermission(sessionId: string, msg: Extract<PluginToHub, { type: "permission" }>): void {
     const f: Formatted = formatPermission(msg.toolName, msg.inputPreview, MAX_PREVIEW_CHARS);
-    if (!msg.requestId) return this.enqueue(sessionId, `perm-${randomUUID()}`, f.text, true, false);
+    if (!msg.requestId) return this.enqueue(sessionId, `perm-${randomUUID()}`, f.text, notifies("action"), false);
     const key = randomUUID().replaceAll("-", "").slice(0, PERMISSION_KEY_CHARS);
     this.permissions.set(key, { sessionId, requestId: msg.requestId, ...f });
     for (const old of this.permissions.keys()) {
@@ -965,7 +967,7 @@ ${msg.text}`);
         { text: "❌ Отклонить", data: `p:${key}:deny` },
       ],
     ];
-    if (this.outbox.add(`perm-${key}`, sessionId, [{ text: f.text, silent: false, buttons, ...(f.entities.length ? { entities: f.entities } : {}) }])) void this.pump(sessionId);
+    if (this.outbox.add(`perm-${key}`, sessionId, [{ text: f.text, silent: !notifies("action"), buttons, ...(f.entities.length ? { entities: f.entities } : {}) }])) void this.pump(sessionId);
   }
 
   // A button under a permission prompt: the answer goes to the session's
@@ -1035,7 +1037,7 @@ ${msg.text}`);
 
   private queueQuestion(p: Poll): void {
     const f = questionText(p.questions, p.index);
-    const piece = { text: f.text, silent: false, buttons: questionButtons(p), ...(f.entities.length ? { entities: f.entities } : {}) };
+    const piece = { text: f.text, silent: !notifies("action"), buttons: questionButtons(p), ...(f.entities.length ? { entities: f.entities } : {}) };
     if (this.outbox.add(`poll:${p.key}:${p.index}`, p.sessionId, [piece])) void this.pump(p.sessionId);
   }
 
@@ -1101,7 +1103,7 @@ ${msg.text}`);
       return;
     }
     if (action === "custom") {
-      this.enqueue(p.sessionId, `qhint-${p.key}-${p.index}-${randomUUID()}`, CUSTOM_HINT, false, false);
+      this.enqueue(p.sessionId, `qhint-${p.key}-${p.index}-${randomUUID()}`, CUSTOM_HINT, notifies("info"), false);
       await ack();
       return;
     }
@@ -1142,7 +1144,7 @@ ${msg.text}`);
     const { text } = item;
     const buttons = outcome === undefined ? questionButtons(p) : undefined;
     const body = outcome === undefined ? text : `${text}\n\n${outcome}`;
-    const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, body, false, item.entities, buttons));
+    const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, body, item.silent, item.entities, buttons));
     p.messageIds[i] = sent.message_id;
     if (outcome === undefined && p.outcomes[i] !== undefined) await this.showOutcome(p, i);
   }
@@ -1157,7 +1159,7 @@ ${msg.text}`);
   }
 
   // A subagent's card or a topic command's: buttons, when given, go under it.
-  private upsertCard(sessionId: string, cardId: string, markdown: string, final: boolean, buttons?: Button[][], reopen = false, replyTo?: string): void {
+  private upsertCard(sessionId: string, cardId: string, markdown: string, final: boolean, buttons?: Button[][], reopen = false, replyTo?: string, kind?: MessageKind): void {
     if (!this.store.get(sessionId)) return;
     const key = `${sessionId}:${cardId}`;
     const card = this.cards.get(key);
@@ -1181,7 +1183,7 @@ ${msg.text}`);
     this.saveCards();
     const [first] = textPieces(markdown, true);
     // The outbox remembers sent ids: a card sent anew needs a new one.
-    if (first && this.outbox.add(`card-${randomUUID()}`, sessionId, [{ ...first, card: key, ...(replyTo ? { cardReplyTo: `${sessionId}:${replyTo}` } : {}) }])) void this.pump(sessionId);
+    if (first && this.outbox.add(`card-${randomUUID()}`, sessionId, [{ ...first, ...(kind ? { silent: !notifies(kind) } : {}), card: key, ...(replyTo ? { cardReplyTo: `${sessionId}:${replyTo}` } : {}) }])) void this.pump(sessionId);
   }
 
   // On the card's creation, first send and end: its text in between is the
@@ -1945,15 +1947,15 @@ ${msg.text}`);
   private onHubCommand(sessionId: string, cmd: HubCommand, m: Message): void {
     if (cmd.name === "pwsh" || cmd.name === "cmd" || cmd.name === "bash") return this.onExecCommand(sessionId, cmd.name, cmd.args, m);
     if (cmd.name === "run") {
-      if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, false);
-      if (this.connOf(sessionId)) return this.notice(sessionId, "Сессия уже работает", false);
-      if (this.launches.has(sessionId)) return this.notice(sessionId, "Сессия уже запускается", false);
+      if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, "info");
+      if (this.connOf(sessionId)) return this.notice(sessionId, "Сессия уже работает", "info");
+      if (this.launches.has(sessionId)) return this.notice(sessionId, "Сессия уже запускается", "info");
       return this.launch(sessionId, cmd.args || undefined, []);
     }
     if (cmd.name === "cleanup") return this.startCleanup(sessionId, cmd.args);
     const cleanup = this.cleanups.get(sessionId);
     if (cleanup) return this.stopDuringCleanup(sessionId, cleanup);
-    if (!this.connOf(sessionId)) return this.notice(sessionId, "Сессия не запущена", false);
+    if (!this.connOf(sessionId)) return this.notice(sessionId, "Сессия не запущена", "info");
     if (this.stops.has(sessionId)) return;
     if (this.stopping.has(sessionId)) {
       this.log.info(`second /stop for session ${sessionId}: not waiting for the module`);
@@ -1988,7 +1990,7 @@ ${msg.text}`);
           this.log.warn(`session ${sessionId} did not end for /cleanup; /cleanup dropped`);
           this.dropCleanup(sessionId);
         }
-        this.notice(sessionId, `⚠️ Не удалось завершить сессию за ${ms / MS_PER_SECOND} с`, true);
+        this.notice(sessionId, `⚠️ Не удалось завершить сессию за ${ms / MS_PER_SECOND} с`, "warning");
       }, ms),
     );
   }
@@ -1998,15 +2000,15 @@ ${msg.text}`);
   // The module compacts the session, the window ends, the hub empties the
   // skills Claude Code remembers in the transcript; the session stays ended.
   private startCleanup(sessionId: string, args: string): void {
-    if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, false);
-    if (!this.connOf(sessionId)) return this.notice(sessionId, "Сессия не запущена", false);
-    if (this.stops.has(sessionId) || this.stopping.has(sessionId)) return this.notice(sessionId, "⏳ Сессия уже завершается", false);
+    if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, "info");
+    if (!this.connOf(sessionId)) return this.notice(sessionId, "Сессия не запущена", "info");
+    if (this.stops.has(sessionId) || this.stopping.has(sessionId)) return this.notice(sessionId, "⏳ Сессия уже завершается", "info");
     const c: Cleanup = { id: this.queueCommand(sessionId, { name: "cleanup", args }), phase: "compacting", held: [] };
     const ms = this.opts.cleanupCompactMs ?? CLEANUP_COMPACT_MS;
     c.compactTimer = setTimeout(() => {
       if (this.cleanups.get(sessionId) !== c || c.phase !== "compacting") return;
       this.log.warn(`/cleanup of session ${sessionId}: no compact report in ${ms} ms; /cleanup dropped`);
-      this.cleanupOutcome(sessionId, c, `⚠️ Уборка не выполнена: компакт не закончился за ${ms / MS_PER_MINUTE} мин`);
+      this.cleanupOutcome(sessionId, c, `⚠️ Уборка не выполнена: компакт не закончился за ${ms / MS_PER_MINUTE} мин`, "warning");
       this.dropCleanup(sessionId);
     }, ms);
     this.cleanups.set(sessionId, c);
@@ -2014,12 +2016,12 @@ ${msg.text}`);
   }
 
   // The outcome of a /cleanup takes the place of its "will compact" message:
-  // that one goes and the outcome comes loud, as a new message. One still
+  // that one goes and the outcome comes as a new message. One still
   // queued or being sent goes once it is in the topic.
-  private cleanupOutcome(sessionId: string, c: Cleanup, text: string): void {
+  private cleanupOutcome(sessionId: string, c: Cleanup, text: string, kind: MessageKind): void {
     c.ended = true;
     if (c.startMsg !== undefined) this.dropCleanupStart(cleanupStartKey(c), c);
-    this.notice(sessionId, text, true);
+    this.notice(sessionId, text, kind);
   }
 
   private dropCleanupStart(key: string, c: Cleanup): void {
@@ -2036,7 +2038,7 @@ ${msg.text}`);
   private stopDuringCleanup(sessionId: string, c: Cleanup): void {
     if (c.phase === "compacting") {
       this.log.info(`/stop during the /cleanup compact of session ${sessionId}: ending the window, the transcript untouched`);
-      this.cleanupOutcome(sessionId, c, "⏹ Уборка отменена");
+      this.cleanupOutcome(sessionId, c, "⏹ Уборка отменена", "info");
       this.dropCleanup(sessionId, true);
     }
     this.terminate(sessionId);
@@ -2079,7 +2081,7 @@ ${msg.text}`);
     clearTimeout(c.compactTimer);
     if (error !== undefined) {
       this.log.warn(`/cleanup of session ${sessionId}: the compact failed: ${error}`);
-      this.cleanupOutcome(sessionId, c, `⚠️ Уборка не выполнена: компакт не удался: ${error}`);
+      this.cleanupOutcome(sessionId, c, `⚠️ Уборка не выполнена: компакт не удался: ${error}`, "error");
       return this.dropCleanup(sessionId);
     }
     this.log.info(`/cleanup of session ${sessionId}: compacted${before === undefined ? "" : ` from ${before} tokens`}; ending the window`);
@@ -2105,27 +2107,31 @@ ${msg.text}`);
     if (this.connOf(sessionId)) {
       this.cleanups.delete(sessionId);
       this.log.warn(`/cleanup of session ${sessionId}: a window of the session connected again; the transcript untouched, ${c.held.length} held message(s) go to it`);
-      this.cleanupOutcome(sessionId, c, "⚠️ Уборка не выполнена: сессия снова открыта");
+      this.cleanupOutcome(sessionId, c, "⚠️ Уборка не выполнена: сессия снова открыта", "warning");
       return this.whenReady(() => this.sendHeld(sessionId, c.held));
     }
     if (pid !== undefined && alive(pid)) {
       this.cleanups.delete(sessionId);
       this.log.warn(`/cleanup of session ${sessionId}: Claude Code ${pid} did not exit; the transcript untouched, ${c.held.length} held message(s) dropped`);
-      return this.cleanupOutcome(sessionId, c, "⚠️ Уборка не выполнена: Claude Code не завершился");
+      return this.cleanupOutcome(sessionId, c, "⚠️ Уборка не выполнена: Claude Code не завершился", "error");
     }
     const path = this.transcriptOf(sessionId);
     let text: string;
+    let kind: MessageKind = "info";
     if (!path) {
       this.log.warn(`/cleanup of session ${sessionId}: no transcript found`);
+      kind = "warning";
       text = "⚠️ Уборка не выполнена: транскрипт не найден";
     } else {
       try {
         const result = await (this.opts.cleanTranscript ?? cleanTranscript)(path, Date.now());
         this.log.info(`/cleanup of session ${sessionId}: ${path}: ${result.kind}${result.kind === "cleaned" ? `, ${result.records} record(s), backup ${result.backup}` : ""}`);
+        if (result.kind === "format") kind = "warning";
         text = cleanupSummary(result);
       } catch (e) {
         const why = e instanceof Error ? e.message : String(e);
         this.log.warn(`/cleanup of session ${sessionId}: emptying the skills in ${path} failed: ${why}`);
+        kind = "error";
         text = `⚠️ Уборка не выполнена: ${why}`;
       }
     }
@@ -2134,16 +2140,16 @@ ${msg.text}`);
     // A window came back during the edit: it is not started a second time.
     if (this.connOf(sessionId)) {
       this.log.warn(`/cleanup of session ${sessionId}: a window of the session connected during the edit; not starting it, ${c.held.length} held message(s) go to it`);
-      this.cleanupOutcome(sessionId, c, text);
+      this.cleanupOutcome(sessionId, c, text, kind);
       return this.whenReady(() => this.sendHeld(sessionId, c.held));
     }
     // Messages that came meanwhile still reach the agent, as a message to a
     // stopped session starts it.
     const relaunch = c.held.length > 0;
-    this.cleanupOutcome(sessionId, c, text);
+    this.cleanupOutcome(sessionId, c, text, kind);
     if (relaunch) this.launch(sessionId, undefined, c.held);
     else {
-      this.notice(sessionId, "⏹ Сессия завершена", true);
+      this.notice(sessionId, "⏹ Сессия завершена", "info");
       this.log.info(`/cleanup of session ${sessionId}: done; the session stays ended`);
     }
   }
@@ -2172,12 +2178,12 @@ ${msg.text}`);
     }
     if (!cfg.launch) {
       const why = cfg.launchError ? `секция launch в config.json с ошибкой: ${cfg.launchError}` : "в config.json нет секции launch";
-      return this.notice(sessionId, `⚠️ Автозапуск не настроен: ${why}`, true);
+      return this.notice(sessionId, `⚠️ Автозапуск не настроен: ${why}`, "warning");
     }
     const acc = account ?? rec.account;
-    if (!acc) return this.notice(sessionId, "⚠️ Аккаунт сессии неизвестен, используй /run N.", true);
+    if (!acc) return this.notice(sessionId, "⚠️ Аккаунт сессии неизвестен, используй /run N.", "warning");
     const cwd = rec.cwd ?? (this.opts.projectsDir ? sessionCwd(sessionId, this.opts.projectsDir) : undefined);
-    if (!cwd) return this.notice(sessionId, "⚠️ Не знаю, в какой директории запустить сессию.", true);
+    if (!cwd) return this.notice(sessionId, "⚠️ Не знаю, в какой директории запустить сессию.", "warning");
     let command: string[];
     try {
       command = launchCommand(cfg.launch, { cwd, account: acc, session: sessionId });
@@ -2186,7 +2192,7 @@ ${msg.text}`);
     } catch (e) {
       const why = e instanceof LaunchError ? e.message : `команда не запустилась (${e instanceof Error ? e.message : e})`;
       this.log.warn(`starting session ${sessionId} failed: ${why}`);
-      return this.notice(sessionId, `⚠️ Не могу запустить сессию: ${why}`, true);
+      return this.notice(sessionId, `⚠️ Не могу запустить сессию: ${why}`, "error");
     }
     const sec = cfg.launch.timeoutSec;
     const timer = setTimeout(() => {
@@ -2194,7 +2200,7 @@ ${msg.text}`);
       this.launches.delete(sessionId);
       this.log.warn(`session ${sessionId} did not connect in ${sec} s; ${l?.held.length ?? 0} held message(s) dropped`);
       this.launchEnded(sessionId, "failed");
-      this.notice(sessionId, `⚠️ Сессия не запустилась за ${sec} с`, true);
+      this.notice(sessionId, `⚠️ Сессия не запустилась за ${sec} с`, "error");
     }, sec * MS_PER_SECOND);
     this.launches.set(sessionId, { account: acc, held, timer });
     this.launchEnds.delete(sessionId);
@@ -2294,15 +2300,15 @@ ${msg.text}`);
   // /pwsh, /cmd or /bash: the text runs in the session's folder, with or
   // without its window.
   private onExecCommand(sessionId: string, name: "pwsh" | "cmd" | "bash", text: string, m: Message): void {
-    if (!this.execs) return this.notice(sessionId, EXEC_NOT_SET, false);
-    if (!text) return this.enqueue(sessionId, `hub-${randomUUID()}`, "Напиши команду: `/pwsh npm run migrate`", false);
+    if (!this.execs) return this.notice(sessionId, EXEC_NOT_SET, "error");
+    if (!text) return this.enqueue(sessionId, `hub-${randomUUID()}`, "Напиши команду: `/pwsh npm run migrate`", notifies("info"));
     // cmd /c runs only up to the first line break.
-    if (name === "cmd" && /[\r\n]/.test(text)) return this.notice(sessionId, "/cmd выполняет одну строку. Для нескольких — /pwsh или /bash", false);
+    if (name === "cmd" && /[\r\n]/.test(text)) return this.notice(sessionId, "/cmd выполняет одну строку. Для нескольких — /pwsh или /bash", "error");
     const bash = this.bashPath();
-    if (name === "bash" && !existsSync(bash)) return this.notice(sessionId, `Git Bash не найден: ${bash}. Укажи exec.bash в config.json`, false);
+    if (name === "bash" && !existsSync(bash)) return this.notice(sessionId, `Git Bash не найден: ${bash}. Укажи exec.bash в config.json`, "error");
     const rec = this.store.get(sessionId);
     const cwd = rec?.cwd ?? (this.opts.projectsDir ? sessionCwd(sessionId, this.opts.projectsDir) : undefined);
-    if (!cwd) return this.notice(sessionId, "⚠️ Не знаю, в какой папке запускать команду: её нет ни в записи хаба, ни в транскрипте", true);
+    if (!cwd) return this.notice(sessionId, "⚠️ Не знаю, в какой папке запускать команду: её нет ни в записи хаба, ни в транскрипте", "warning");
     const shell: ExecShell = name === "pwsh" ? "powershell" : name;
     this.log.info(`/${name} for session ${sessionId}, message ${m.message_id}`);
     this.execs.command(sessionId, shell, text, cwd, { chatId: String(m.chat.id), messageId: m.message_id, date: m.date });
@@ -2327,7 +2333,7 @@ ${msg.text}`);
       // Goes once the session connects.
     } else if (this.opts.config().launch) this.launch(sessionId, undefined, [{ inbound }]);
     else {
-      this.notice(sessionId, "⚠️ Сессия не запущена: результат команды агенту не доставлен", true);
+      this.notice(sessionId, "⚠️ Сессия не запущена: результат команды агенту не доставлен", "warning");
       inbound.onSent();
     }
     // The last command ended: the hub may go idle again.
@@ -2347,13 +2353,13 @@ ${msg.text}`);
   }
 
   // The hub's own copy goes, as for files from a window.
-  private sendExecFile(sessionId: string, path: string, name: string, loud: boolean): void {
+  private sendExecFile(sessionId: string, path: string, name: string, kind: MessageKind): void {
     const id = randomUUID();
     const copy = join(this.opts.filesDir, id, name);
     mkdirSync(dirname(copy), { recursive: true });
     copyFileSync(path, copy);
     const file: OutFile = { path: copy, name, size: statSync(copy).size, kind: "document" };
-    if (this.outbox.add(`exec-${id}`, sessionId, [filesPiece([file], undefined, loud)])) void this.pump(sessionId);
+    if (this.outbox.add(`exec-${id}`, sessionId, [filesPiece([file], undefined, notifies(kind))])) void this.pump(sessionId);
   }
 
   // A window on the default login does not name its account in its config
@@ -2370,13 +2376,13 @@ ${msg.text}`);
   }
 
   // The hub's own word in a session's topic, in order with the rest.
-  private notice(sessionId: string, text: string, loud: boolean): void {
-    this.enqueue(sessionId, `hub-${randomUUID()}`, text, loud, false);
+  private notice(sessionId: string, text: string, kind: MessageKind): void {
+    this.enqueue(sessionId, `hub-${randomUUID()}`, text, notifies(kind), false);
   }
 
   // A silent notice needed only until the session's agent starts working.
   private launchNotice(sessionId: string, text: string): void {
-    this.enqueue(sessionId, `${LAUNCH_NOTICE}${randomUUID()}`, text, false, false);
+    this.enqueue(sessionId, `${LAUNCH_NOTICE}${randomUUID()}`, text, notifies("info"), false);
   }
 
   private launchNoticeSent(sessionId: string, messageId: number, text: string): void {

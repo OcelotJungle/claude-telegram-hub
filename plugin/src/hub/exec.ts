@@ -7,11 +7,13 @@ import type { RunnerSpec } from "./exec-runner.ts";
 import type { Button } from "./telegram.ts";
 import type { ChannelMeta } from "../shared/protocol.ts";
 import type { Logger } from "../shared/log.ts";
+import type { MessageKind } from "../shared/notification.ts";
 
 import { randomBytes } from "crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "fs";
 import { join } from "path";
 import { loadExecs, saveExecs } from "./exec-store.ts";
+import { notifies } from "../shared/notification.ts";
 import { SHELL_NAMES, shellRun, writeShellFiles } from "./exec-shell.ts";
 import { exitInfoSchema, HEARTBEAT_MS } from "./exec-runner.ts";
 
@@ -48,10 +50,10 @@ export type ExecDeps = {
   spawnRunner(specFile: string): number;
   alive(pid: number): boolean;
   kill(pid: number): void;
-  card(sessionId: string, cardId: string, markdown: string, final: boolean, buttons?: Button[][]): void;
-  notice(sessionId: string, text: string, loud: boolean): void;
+  card(sessionId: string, cardId: string, markdown: string, final: boolean, kind: MessageKind, buttons?: Button[][]): void;
+  notice(sessionId: string, text: string, kind: MessageKind): void;
   // Copies the file before it returns: the copy is what goes.
-  sendFile(sessionId: string, path: string, name: string, loud: boolean): void;
+  sendFile(sessionId: string, path: string, name: string, kind: MessageKind): void;
   report(sessionId: string, content: string, meta: ChannelMeta, onSent: () => void): void;
   now(): number;
   checkMs: number;
@@ -297,10 +299,10 @@ export class Execs {
     this.save();
     const log = this.path(rec.id, "log");
     this.showCard(rec);
-    const loud = !(end.kind === "exit" && end.code === 0);
+    const kind = end.kind === "lost" ? "warning" : end.kind === "exit" && end.code !== 0 ? "error" : "info";
     if (!fitsCard(log)) {
       try {
-        this.deps.sendFile(rec.sessionId, this.fileToSend(rec.id, log), `${rec.id}.log`, loud);
+        this.deps.sendFile(rec.sessionId, this.fileToSend(rec.id, log), `${rec.id}.log`, kind);
       } catch (e) {
         this.deps.log.warn(`exec ${rec.id}: sending the log failed: ${e}`);
       }
@@ -346,7 +348,10 @@ export class Execs {
         : rec.state === "pending"
           ? [[{ text: "▶ Запустить", data: `x:${rec.id}:run` }]]
           : undefined;
-    this.deps.card(rec.sessionId, `exec-${rec.id}`, execCardText(rec, tail, this.deps.now()), rec.state === "ended", buttons);
+    const kind = rec.state !== "ended" || rec.end?.kind === "stopped" || (rec.end?.kind === "exit" && rec.end.code === 0)
+      ? "info"
+      : rec.end?.kind === "exit" ? "error" : "warning";
+    this.deps.card(rec.sessionId, `exec-${rec.id}`, execCardText(rec, tail, this.deps.now()), rec.state === "ended", kind, buttons);
   }
 }
 
