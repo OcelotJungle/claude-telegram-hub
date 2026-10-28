@@ -384,6 +384,32 @@ describe("/cleanup", () => {
     ]);
   });
 
+  test("/stop during a running compaction marks its waiting notice as awaiting the result; /stop alone sends none", async () => {
+    let release = () => {};
+    const held = new Promise<void>(done => (release = done));
+    const s = runner(
+      [
+        { id: "c1", name: "compact", args: "first" },
+        { id: "c2", name: "stop", args: "" },
+      ],
+      async () => {
+        await held;
+        return { tokensBefore: 100_000, tokensAfter: 10_000 };
+      },
+    );
+    await s.polls(5);
+    expect(s.posted.filter(p => field(p.body, "id") === "c2.0")).toEqual([
+      { path: "/reply", body: { sessionId: "s", id: "c2.0", text: "⏳ После компакта завершу сессию. Повторный /stop завершит сразу.", notify: false, awaitsResult: true } },
+    ]);
+    release();
+    await s.polls(5);
+    expect(s.posted.at(-1)).toEqual({ path: "/terminate", body: { sessionId: "s", id: "c2" } });
+
+    const alone = runner([{ id: "c3", name: "stop", args: "" }], async () => ({}));
+    await alone.polls(5);
+    expect(alone.posted).toEqual([{ path: "/terminate", body: { sessionId: "s", id: "c3" } }]);
+  });
+
   test("the poll asks for cleanup", async () => {
     const s = runner([], async () => ({}));
     await s.polls(1);

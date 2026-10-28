@@ -2375,6 +2375,40 @@ sys.exit(1)
     expect(compacted).toStrictEqual([undefined]);
   });
 
+  test("the notice of a /stop waiting for a compact turns into the ended notice", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const h = held();
+    let usage = USAGE;
+    const { runner } = mod("a", undefined, () => usage, h.answer);
+    command("/compact");
+    await reply(runner, t => t.startsWith("🗜"));
+    command("/stop");
+    await reply(runner, t => t.startsWith("⏳"));
+    const waitingId = fake.lastMessageId;
+    usage = SMALL;
+    h.release();
+    await a.next("terminate");
+    a.close();
+    await waitFor(() => fake.callsOf("editMessageText").some(c => c.text === "⏹ Сессия завершена"));
+    expect(fake.callsOf("editMessageText").filter(c => c.message_id === waitingId)).toEqual([{ chat_id: GROUP, message_id: waitingId, text: "⏹ Сессия завершена" }]);
+    expect(fake.callsOf("sendMessage").filter(c => c.text === "⏹ Сессия завершена")).toEqual([]);
+  });
+
+  test("/stop with no compaction running sends the ended notice as a new message", async () => {
+    await startHub();
+    const a = await enabled("a");
+    const { runner } = mod("a", undefined, () => SMALL);
+    command("/stop");
+    await waitFor(async () => {
+      await runner.poll();
+      return terminated(a);
+    });
+    a.close();
+    await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
+    expect(fake.callsOf("editMessageText")).toEqual([]);
+  });
+
   test("a second /stop ends the window without waiting", async () => {
     await startHub();
     const a = await enabled("a");

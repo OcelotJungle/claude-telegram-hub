@@ -339,6 +339,9 @@ export class Hub {
   // Sessions whose /stop waits for the module's terminate request: the id of
   // the stop command.
   private stopping = new Map<string, string>();
+  // The /stop command that ended a session, until its window is gone: that
+  // command's "after the compact" notice turns into the ended notice.
+  private stopIds = new Map<string, string>();
   private cleanups = new Map<string, Cleanup>();
   // Messages of a /cleanup dropped by a second /stop, kept until the window
   // it ends is gone.
@@ -526,7 +529,7 @@ export class Hub {
     if (url.pathname === "/terminate" && req.method === "POST") {
       const r = terminateRequest.safeParse(await req.json().catch(() => undefined));
       if (!r.success) return new Response("bad terminate request", { status: 400 });
-      if (this.stopping.get(r.data.sessionId) === r.data.id) this.terminate(r.data.sessionId);
+      if (this.stopping.get(r.data.sessionId) === r.data.id) this.terminate(r.data.sessionId, r.data.id);
       return new Response("ok");
     }
     if (url.pathname === "/cleanup" && req.method === "POST") {
@@ -663,7 +666,10 @@ export class Hub {
     if (sid && stop && !this.connOf(sid)) {
       clearTimeout(stop);
       this.stops.delete(sid);
-      this.notice(sid, "⏹ Сессия завершена", "info");
+      const stopId = this.stopIds.get(sid);
+      this.stopIds.delete(sid);
+      if (stopId) this.enqueue(sid, `hub-${randomUUID()}`, "⏹ Сессия завершена", notifies("info"), false, { id: `${stopId}.0`, kind: "success" });
+      else this.notice(sid, "⏹ Сессия завершена", "info");
     }
     const dying = sid && !this.connOf(sid) ? this.dyingHeld.get(sid) : undefined;
     if (sid && dying) {
@@ -1991,7 +1997,7 @@ ${msg.text}`);
     this.stopping.set(sessionId, this.queueCommand(sessionId, { name: "stop", args: cmd.args }));
   }
 
-  private terminate(sessionId: string): void {
+  private terminate(sessionId: string, stopId?: string): void {
     this.stopping.delete(sessionId);
     const queued = this.commands.get(sessionId) ?? [];
     for (const e of queued.filter(e => e.cmd.name === "stop")) clearTimeout(e.timer);
@@ -2000,11 +2006,13 @@ ${msg.text}`);
     if (!ws || this.stops.has(sessionId)) return;
     this.log.info(`stopping session ${sessionId} from the topic`);
     this.send(ws, { type: "terminate" });
+    if (stopId) this.stopIds.set(sessionId, stopId);
     const ms = this.opts.stopTimeoutMs ?? STOP_TIMEOUT_MS;
     this.stops.set(
       sessionId,
       setTimeout(() => {
         this.stops.delete(sessionId);
+        this.stopIds.delete(sessionId);
         const dying = this.dyingHeld.get(sessionId);
         if (dying) {
           // The window stays: what a dropped /cleanup held goes to it.

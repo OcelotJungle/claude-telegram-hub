@@ -233,7 +233,7 @@ export class Runner {
   // context, after one more. A second /stop in the topic does not wait.
   private async stop(to: { sessionId: string; id: string }): Promise<void> {
     if (this.running.size) {
-      await this.reply(to, "⏳ После компакта завершу сессию. Повторный /stop завершит сразу.", "info");
+      await this.reply(to, "⏳ После компакта завершу сессию. Повторный /stop завершит сразу.", "info", undefined, true);
       await Promise.all(this.running);
     }
     const used = await this.contextTokens();
