@@ -93,6 +93,8 @@ class Agent {
   private baseCommands = 0;
   private handedOver = false;
   private displayed = false;
+  // Records of the history are being replayed: nothing is sent meanwhile.
+  private replaying = false;
   private reopenCard = false;
   private replyTo: string | undefined;
   private texts: Entry[] = [];
@@ -121,56 +123,60 @@ class Agent {
   constructor(
     readonly id: string,
     private dir: string,
-    fromStart: boolean,
+    // A dormant agent existed when the watcher started: it is read only once
+    // its file grows past the size it had then (see replay).
+    private dormant: boolean,
     private env: Env,
   ) {
     this.started = env.now();
     this.cardAgentId = id;
     this.tailer = new TranscriptTailer({
       path: join(dir, `agent-${id}.jsonl`),
-      fromStart,
-      onRecord: rec => {
-        this.idle = false;
-        const answered = recordModel(rec);
-        if (answered) {
-          this.model = answered;
-          env.versions.see(answered.model);
-        }
-        this.checkExecutor();
-        if (!this.executorJob) {
-          if (!this.executorMetaChecked && this.pendingDiscovery) {
-            const resolved = this.executorForJob(this.pendingDiscovery.id);
-            if (resolved) {
-              this.executor = resolved;
-              this.executorJob = new ExecutorJob(this.pendingDiscovery, this.executorJobsDir(resolved), this.env.now, this.env.log);
-              this.pendingDiscovery = undefined;
-            }
-          }
-        }
-        if (!this.executorJob) {
-          const result = this.executorMetaChecked
-            ? this.executor ? this.discoverForExecutor(rec, this.executor) : undefined
-            : this.executor ? this.discoverForExecutor(rec, this.executor) : this.discoverExecutor(rec);
-          if (result?.executor) {
-            this.executor = result.executor;
-            this.executorJob = new ExecutorJob(result.discovery, this.executorJobsDir(result.executor), this.env.now, this.env.log);
-          } else if (result) {
-            this.pendingDiscovery = result.discovery;
-          }
-        }
-        const at = recordTime(rec) ?? env.now();
-        const events = parseAgentRecord(rec);
-        // Split final messages carry their turn end alongside each text block.
-        for (const ev of events) if (ev.kind === "turn_end") this.finalMessages.add(ev.messageId);
-        for (const ev of events) this.feed(ev, at);
-        this.adoptJob();
-      },
+      fromStart: !dormant,
+      onRecord: rec => this.handle(rec, recordTime(rec) ?? env.now()),
       onIdle: () => {
         this.idle = true;
       },
       log: env.log,
     });
     this.tailer.open();
+  }
+
+  // One record of the agent's transcript, written at `at` (ms).
+  private handle(rec: unknown, at: number): void {
+    this.idle = false;
+    const answered = recordModel(rec);
+    if (answered) {
+      this.model = answered;
+      this.env.versions.see(answered.model);
+    }
+    this.checkExecutor();
+    if (!this.executorJob) {
+      if (!this.executorMetaChecked && this.pendingDiscovery) {
+        const resolved = this.executorForJob(this.pendingDiscovery.id);
+        if (resolved) {
+          this.executor = resolved;
+          this.executorJob = new ExecutorJob(this.pendingDiscovery, this.executorJobsDir(resolved), this.env.now, this.env.log);
+          this.pendingDiscovery = undefined;
+        }
+      }
+    }
+    if (!this.executorJob) {
+      const result = this.executorMetaChecked
+        ? this.executor ? this.discoverForExecutor(rec, this.executor) : undefined
+        : this.executor ? this.discoverForExecutor(rec, this.executor) : this.discoverExecutor(rec);
+      if (result?.executor) {
+        this.executor = result.executor;
+        this.executorJob = new ExecutorJob(result.discovery, this.executorJobsDir(result.executor), this.env.now, this.env.log);
+      } else if (result) {
+        this.pendingDiscovery = result.discovery;
+      }
+    }
+    const events = parseAgentRecord(rec);
+    // Split final messages carry their turn end alongside each text block.
+    for (const ev of events) if (ev.kind === "turn_end") this.finalMessages.add(ev.messageId);
+    for (const ev of events) this.feed(ev, at);
+    this.adoptJob();
   }
 
   private checkExecutor(): void {
@@ -218,43 +224,33 @@ class Agent {
     return this.env.executorJobsDirs.get(executor.agentType) ?? join(homedir(), executor.jobsDir);
   }
 
-  finish(status: Status, messageId?: string, certain = false): void {
+  finish(status: Status, messageId?: string, certain = false, at = this.env.now()): void {
     if (this.handedOver || !this.seen) return;
     if (certain) this.certain = true;
     if (this.status === status) return;
     this.status = status;
     this.endMessage = messageId;
-    this.ended = this.env.now();
+    this.ended = at;
     this.dirty = true;
   }
 
   tick(): void {
     if (this.handedOver) return;
+    if (this.dormant) {
+      if (!this.tailer.grew()) return;
+      this.dormant = false;
+      this.meta ??= this.readMeta();
+      this.replay();
+    }
     this.meta ??= this.readMeta();
     this.checkExecutor();
     this.tailer.pollNow();
     this.adoptJob();
     if (this.sealed) return;
-    if (this.executor && this.executorJob) {
-      const entries = this.executorJob.poll();
-      if (this.executorJob.state) {
-        this.seen = true;
-        if (this.workerSummaries.size) {
-          this.texts = this.texts.filter(entry => !this.workerSummaries.has(entry));
-          this.workerSummaries.clear();
-        }
-      }
-      const state = this.executorJob.state;
-      const status = state ? JSON.stringify([state.status, state.slug, state.effort, this.executorJob.commands, this.executorJob.currentCommand, this.executorJob.eventAt]) : undefined;
-      if (entries.length || status !== this.executorStatus) this.dirty = true;
-      this.executorStatus = status;
-      for (const entry of entries) {
-        this.addText(entry.text, entry.at);
-      }
-    }
+    this.pollExecutor();
     const waiting = this.isWaiting();
     const stopped = this.status !== "running" && !waiting;
-    const final = this.status !== "running" && (this.certain || this.env.now() - (this.ended ?? 0) >= (this.tasks.size ? WAIT_MAX_MS : SETTLE_MS));
+    const final = this.settled(this.env.now());
     // A running card's time goes on even while the agent writes nothing, as
     // when it thinks for long, so the card shows it is alive; a waiting
     // card's too.
@@ -270,6 +266,69 @@ class Agent {
     this.sealed = final;
     this.sentText = text;
     this.lastSent = this.env.now();
+  }
+
+  private pollExecutor(): void {
+    if (!this.executor || !this.executorJob) return;
+    const entries = this.executorJob.poll();
+    if (this.executorJob.state) {
+      this.seen = true;
+      if (this.workerSummaries.size) {
+        this.texts = this.texts.filter(entry => !this.workerSummaries.has(entry));
+        this.workerSummaries.clear();
+      }
+    }
+    const state = this.executorJob.state;
+    const status = state ? JSON.stringify([state.status, state.slug, state.effort, this.executorJob.commands, this.executorJob.currentCommand, this.executorJob.eventAt]) : undefined;
+    if (entries.length || status !== this.executorStatus) this.dirty = true;
+    this.executorStatus = status;
+    for (const entry of entries) {
+      this.addText(entry.text, entry.at);
+    }
+  }
+
+  // Rebuilds the card the agent had before the watcher started, from its
+  // history up to the size it had then. Nothing is sent: the card the hub
+  // already shows is the one this state describes. Afterwards the card goes on
+  // in place (reopen), and a run that ended is sealed as a live one would be.
+  private replay(): void {
+    const records = this.tailer.readHistory();
+    this.replaying = true;
+    try {
+      let at = recordTime(records[0]) ?? this.env.now();
+      this.started = at;
+      for (const rec of records) {
+        at = recordTime(rec) ?? at;
+        // A run that settled before this record is sealed, so the record wakes
+        // it into a new card state, as the live path does.
+        if (this.settled(at)) this.sealed = true;
+        try {
+          this.handle(rec, at);
+        } catch (e) {
+          this.env.log.error(`subagent ${this.id}: replay record failed: ${e}`);
+        }
+      }
+      this.pollExecutor();
+    } finally {
+      this.replaying = false;
+    }
+    this.sealed = this.settled(this.env.now());
+    this.shown = true;
+    this.displayed = true;
+    this.reopenCard = true;
+    this.dirty = false;
+    this.sentText = this.render(this.texts, this.statusLine());
+    this.registerJob();
+  }
+
+  // Whether the agent's run is over by `at` (ms): its end is certain, or it did
+  // not go on for the wait after its end.
+  private settled(at: number): boolean {
+    return this.status !== "running" && (this.certain || at - (this.ended ?? 0) >= (this.tasks.size ? WAIT_MAX_MS : SETTLE_MS));
+  }
+
+  private registerJob(): void {
+    if (this.executor && this.executorJob) this.env.jobs.set(`${this.executor.agentType}:${this.executorJob.discovery.id}`, this);
   }
 
   private adoptJob(): void {
@@ -296,13 +355,11 @@ class Agent {
   }
 
   private send(text: string, final: boolean): void {
+    if (this.replaying) return;
     this.env.send({ id: this.cardId(), text, final, ...(this.reopenCard ? { reopen: true } : {}), ...(this.replyTo ? { replyTo: this.replyTo } : {}) });
     this.replyTo = undefined;
     this.displayed = true;
-    if (this.executor && this.executorJob) {
-      const jobKey = `${this.executor.agentType}:${this.executorJob.discovery.id}`;
-      this.env.jobs.set(jobKey, this);
-    }
+    this.registerJob();
   }
 
   // The turn ended, but a background task of the agent's own will wake it.
@@ -315,11 +372,11 @@ class Agent {
     else if (ev.kind === "task_status" && this.tasks.delete(ev.taskId) && !this.tasks.size && this.status !== "running") {
       // The last task ended: the agent is about to be woken, and the card
       // must not close before its record is read.
-      this.ended = this.env.now();
+      this.ended = at;
     }
     if (ev.kind === "coordinator") {
       // The agent got a message (SendMessage): it goes on, in the same card.
-      this.wake();
+      this.wake(at);
       this.seen = true;
       this.dirty = true;
       const first = ev.text.split("\n").map(l => l.trim()).find(l => l !== "");
@@ -327,7 +384,7 @@ class Agent {
       return;
     }
     if (ev.kind !== "text" && ev.kind !== "tool_use" && ev.kind !== "turn_end" && ev.kind !== "api_error") return;
-    if (this.status !== "running" && ev.messageId !== this.endMessage) this.wake();
+    if (this.status !== "running" && ev.messageId !== this.endMessage) this.wake(at);
     this.seen = true;
     this.dirty = true;
     if (ev.kind === "text") {
@@ -340,8 +397,8 @@ class Agent {
       this.lastTool = ev.detail ? `${ev.name} ${ev.detail}` : ev.name;
       // A subagent that hands its report back stops there, with no turn end
       // in its transcript; a SendMessage later resumes it like any end.
-      if (ev.name === HANDBACK_TOOL) this.finish("done", ev.messageId);
-    } else this.finish("done", ev.messageId);
+      if (ev.name === HANDBACK_TOOL) this.finish("done", ev.messageId, false, at);
+    } else this.finish("done", ev.messageId, false, at);
   }
 
   private addText(t: string, at: number): Entry {
@@ -351,7 +408,8 @@ class Agent {
       const previousCardId = this.cardId();
       if (this.shown) this.send(this.render(this.texts, CONTINUED), true);
       this.part++;
-      this.replyTo = this.shown ? previousCardId : undefined;
+      // A replayed part was shown in the hub before the restart.
+      this.replyTo = this.shown || this.replaying ? previousCardId : undefined;
       this.reopenCard = false;
       this.texts = [];
       this.workerSummaries.clear();
@@ -371,12 +429,12 @@ class Agent {
 
   // A message woke the agent: its card is edited in place, whether it is
   // sealed or not (one agent, one card). The pause between runs is not counted.
-  private wake(): void {
-    if (this.sealed) this.continueCard();
+  private wake(at: number): void {
+    if (this.sealed) this.continueCard(at);
     else this.resume();
   }
 
-  private continueCard(): void {
+  private continueCard(at: number): void {
     this.baseWorkMs = this.workMs();
     this.baseCommands += this.executorJob?.commands ?? 0;
     this.reopenCard = true;
@@ -385,7 +443,7 @@ class Agent {
     this.certain = false;
     this.status = "running";
     this.endMessage = undefined;
-    this.started = this.env.now();
+    this.started = at;
     this.ended = undefined;
     this.executor = undefined;
     this.executorJob = undefined;
@@ -484,7 +542,8 @@ class Agent {
 
 // Follows the subagents of one session: Claude Code writes each into
 // <session>/subagents/agent-<id>.jsonl, next to the main transcript. Agents
-// already there at start are followed from their current end.
+// already there at start are dormant: nothing is read until their file grows,
+// then their history is replayed silently and the card goes on from it.
 export class SubagentWatcher {
   private agents = new Map<string, Agent>();
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -522,7 +581,7 @@ export class SubagentWatcher {
   }
 
   start(): void {
-    for (const id of this.ids()) this.agents.set(id, new Agent(id, this.opts.dir, false, this.env));
+    for (const id of this.ids()) this.agents.set(id, new Agent(id, this.opts.dir, true, this.env));
     this.timer = setInterval(() => this.tick(), this.opts.intervalMs ?? SCAN_MS);
   }
 
@@ -540,7 +599,7 @@ export class SubagentWatcher {
   }
 
   tick(): void {
-    for (const id of this.ids()) if (!this.agents.has(id)) this.agents.set(id, new Agent(id, this.opts.dir, true, this.env));
+    for (const id of this.ids()) if (!this.agents.has(id)) this.agents.set(id, new Agent(id, this.opts.dir, false, this.env));
     for (const a of this.agents.values()) a.tick();
   }
 

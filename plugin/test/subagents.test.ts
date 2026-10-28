@@ -18,6 +18,12 @@ const assistant = (id: string, stop: string, block: object) =>
   line({ type: "assistant", isSidechain: true, message: { id, role: "assistant", content: [block], stop_reason: stop } });
 const text = (t: string) => ({ type: "text", text: t });
 const tool = (name: string, input: object) => ({ type: "tool_use", id: "t", name, input });
+// Local wall-clock time of the tests' day, as an ISO timestamp of a record.
+const at = (h: number, m: number) => new Date(2026, 9, 21, h, m).toISOString();
+// An agent's record written at h:m, and the coordinator's message written at h:m.
+const stamped = (h: number, m: number, message: object) => line({ type: "assistant", isSidechain: true, timestamp: at(h, m), message });
+const coordinatorAt = (h: number, m: number, t: string) =>
+  line({ type: "user", isSidechain: true, isMeta: true, timestamp: at(h, m), origin: { kind: "coordinator" }, message: { role: "user", content: `The coordinator sent a message while you were working:\n${t}` } });
 
 describe("SubagentWatcher", () => {
   const watchers: SubagentWatcher[] = [];
@@ -297,6 +303,72 @@ describe("SubagentWatcher", () => {
     expect(s.cards).toEqual([]);
   });
 
+  describe("after a plugin restart", () => {
+    test("a continuation after the restart goes on in the same card", () => {
+      const s = setup();
+      const write = s.agent("a1");
+      write(stamped(18, 39, { id: "m1", role: "assistant", content: [tool("Read", { file_path: "a.ts" })], stop_reason: "tool_use" }));
+      write(stamped(18, 40, { id: "m2", role: "assistant", content: [text("first run")], stop_reason: "end_turn" }));
+      s.w.start();
+      s.advance(12 * MINUTE);
+      expect(s.cards).toEqual([]);
+      write(coordinatorAt(18, 45, "second run"));
+      s.advance(SEND_EVERY_MS);
+      expect(s.cards).toEqual([
+        {
+          id: "a1-0",
+          final: false,
+          reopen: true,
+          text: "🤖 **Субагент**\n⏳ 7 мин · 1 действие\n`Read a.ts`\n\n`[18:40]` first run\n\n`[18:45]` ↪ second run",
+        },
+      ]);
+    });
+
+    test("a long history before the restart keeps its parts, and a continuation goes on as the next part", () => {
+      const s = setup();
+      const write = s.agent("a1");
+      const long = "x".repeat(1400);
+      write(assistant("m1", "tool_use", text(long)));
+      write(assistant("m2", "tool_use", text(long)));
+      write(assistant("m3", "tool_use", text(long)));
+      s.w.start();
+      write(assistant("m4", "tool_use", text("after restart")));
+      s.advance(SEND_EVERY_MS);
+      expect(s.cards).toEqual([
+        { id: "a1-1", final: false, reopen: true, replyTo: "a1-0", text: expect.stringContaining("after restart") },
+      ]);
+    });
+
+    test("a dormant agent whose file never grows sends nothing", () => {
+      const s = setup();
+      const write = s.agent("a1");
+      write(stamped(18, 39, { id: "m1", role: "assistant", content: [tool("Read", { file_path: "a.ts" })], stop_reason: "tool_use" }));
+      write(stamped(18, 39, { id: "m2", role: "assistant", content: [text("working")], stop_reason: "tool_use" }));
+      s.w.start();
+      s.advance(WAIT_MAX_MS + MINUTE);
+      expect(s.cards).toEqual([]);
+    });
+
+    test("a run that was mid-way at the restart goes on in place", () => {
+      const s = setup();
+      const write = s.agent("a1");
+      write(stamped(18, 39, { id: "m1", role: "assistant", content: [tool("Read", { file_path: "a.ts" })], stop_reason: "tool_use" }));
+      write(stamped(18, 39, { id: "m2", role: "assistant", content: [text("working")], stop_reason: "tool_use" }));
+      s.w.start();
+      s.advance(12 * MINUTE);
+      write(assistant("m3", "tool_use", tool("Grep", { pattern: "x" })));
+      s.advance(SEND_EVERY_MS);
+      expect(s.cards).toEqual([
+        {
+          id: "a1-0",
+          final: false,
+          reopen: true,
+          text: "🤖 **Субагент**\n⏳ 12 мин · 2 действия\n`Grep x`\n\n`[18:39]` working",
+        },
+      ]);
+    });
+  });
+
   test("an agent that hands its report back is done", () => {
     const s = setup();
     s.w.start();
@@ -459,7 +531,6 @@ describe("SubagentWatcher", () => {
     const s = setup();
     s.w.start();
     const write = s.agent("a1");
-    const at = (h: number, m: number) => new Date(2026, 9, 21, h, m).toISOString();
     write(line({ type: "assistant", timestamp: at(17, 2), message: { id: "m1", role: "assistant", content: [text("Full run started")], stop_reason: "tool_use" } }));
     write(line({ type: "assistant", timestamp: at(18, 5), message: { id: "m2", role: "assistant", content: [text("## Results\n\n- ok")], stop_reason: "tool_use" } }));
     s.advance(SEND_EVERY_MS);

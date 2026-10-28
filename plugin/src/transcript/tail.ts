@@ -51,14 +51,7 @@ export class TranscriptTailer {
 
   pollNow(): void {
     const lines = this.readNewLines();
-    for (const l of lines) {
-      let rec: unknown;
-      try {
-        rec = JSON.parse(l);
-      } catch {
-        this.log.warn(`transcript: skipping unparsable line in ${this.opts.path}`);
-        continue;
-      }
+    for (const rec of this.parse(lines)) {
       try {
         this.opts.onRecord(rec);
       } catch (e) {
@@ -68,15 +61,44 @@ export class TranscriptTailer {
     if (lines.length === 0) this.opts.onIdle?.();
   }
 
-  private readNewLines(): string[] {
-    const size = fileSize(this.opts.path);
-    if (size === undefined) return [];
-    if (size < this.offset) {
+  // Whether the file has more bytes than this tailer has read.
+  grew(): boolean {
+    return (fileSize(this.opts.path) ?? 0) > this.offset;
+  }
+
+  // Reads everything from the start of the file up to the current offset (the
+  // history before open) and leaves the offset where it was, so pollNow goes on
+  // from there. Does not call onRecord.
+  readHistory(): unknown[] {
+    const end = this.offset;
+    this.offset = 0;
+    this.rest = Buffer.alloc(0);
+    return this.parse(this.readNewLines(end));
+  }
+
+  private parse(lines: string[]): unknown[] {
+    const recs: unknown[] = [];
+    for (const l of lines) {
+      try {
+        recs.push(JSON.parse(l));
+      } catch {
+        this.log.warn(`transcript: skipping unparsable line in ${this.opts.path}`);
+      }
+    }
+    return recs;
+  }
+
+  // Reads the new complete lines, up to byte `end` of the file when given.
+  private readNewLines(end = Infinity): string[] {
+    const fileLen = fileSize(this.opts.path);
+    if (fileLen === undefined) return [];
+    if (fileLen < this.offset) {
       this.log.warn(`transcript: ${this.opts.path} shrank, re-reading from the start`);
       this.offset = 0;
       this.rest = Buffer.alloc(0);
     }
-    if (size === this.offset) return [];
+    const size = Math.min(fileLen, end);
+    if (size <= this.offset) return [];
     const chunk = Buffer.alloc(size - this.offset);
     const fd = openSync(this.opts.path, "r");
     let read = 0;
