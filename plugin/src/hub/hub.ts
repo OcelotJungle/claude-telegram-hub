@@ -816,11 +816,6 @@ ${msg.text}`);
       case "title":
         if (sid) void this.chain(sid, () => this.retitle(sid, msg.title));
         return;
-      case "terminalInput":
-        if (!sid) return;
-        this.log.info(`terminal input in session ${sid}: Telegram mode off`);
-        this.setEnabled(sid, false);
-        return;
       case "card":
         this.onCard(msg);
         return;

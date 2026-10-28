@@ -6,7 +6,6 @@ import { z } from "zod";
 import { QUESTION_DEADLINE_MS } from "../src/hook/question-limits.ts";
 import { isAlive } from "../src/hub/exec-runner.ts";
 import { Hub } from "../src/hub/hub.ts";
-import { HOOK_NOTE_TOOL } from "../src/plugin/plugin.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { freePort, memLogger, must, tempDir, waitFor, wsClient } from "./helpers.ts";
 
@@ -368,17 +367,10 @@ describe("plugin packaging", () => {
     expect(existsSync(join(PLUGIN, "hooks", hooks.modules[0]))).toBe(true);
   });
 
-  // The note that the mode went off reaches the agent through our own server.
-  test("the PostToolBatch hook calls the note tool of the plugin server, main agent only", () => {
+  // The mode turns off only by request, so no hook notes a change of the mode to the agent.
+  test("no PostToolBatch or UserPromptSubmit hook", () => {
     const hooks = json(join(PLUGIN, "hooks", "hooks.json"), hooksJson);
-    const pluginName = json(join(PLUGIN, ".claude-plugin", "plugin.json"), manifest).name;
-    const serverKey = Object.keys(json(join(PLUGIN, ".mcp.json"), mcpConfig).mcpServers)[0];
-    expect(hooks.hooks.PostToolBatch[0].hooks[0]).toMatchObject({
-      type: "mcp_tool",
-      server: `plugin:${pluginName}:${serverKey}`,
-      tool: HOOK_NOTE_TOOL,
-      input: { agent_id: "${agent_id}" },
-    });
+    expect(hooks.hooks.PostToolBatch).toBeUndefined();
     expect(hooks.hooks.UserPromptSubmit).toBeUndefined();
   });
 });

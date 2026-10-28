@@ -11,7 +11,7 @@ import { createLogger } from "../shared/log.ts";
 import { findClaudePid, windowsProcessInfo } from "./claude-process.ts";
 import { spawnHubDetached } from "./hub-client.ts";
 import { sendInterrupt } from "./interrupt.ts";
-import { HOOK_NOTE_TOOL, PluginCore } from "./plugin.ts";
+import { PluginCore } from "./plugin.ts";
 
 // A closing window gives queued text this long to reach the hub, and the
 // process this long to exit in any case.
@@ -27,7 +27,7 @@ const BEFORE_QUESTION_REPLY = "Now call AskUserQuestion.";
 const INSTRUCTIONS = [
   "tg-hub connects this session to a Telegram topic, so the user can follow and answer from the phone.",
   "",
-  'Call tg_enable when the user asks to be written to in Telegram ("пиши мне в Телеграм", "переходи в телегу", etc.). Call tg_disable when they ask to stop. Typing in the terminal turns the mode off automatically; a message in the topic turns it on automatically.',
+  'Call tg_enable when the user asks to be written to in Telegram ("пиши мне в Телеграм", "переходи в телегу", etc.). The mode turns off only when the user asks: call tg_disable when they ask to stop; typing in the terminal does not turn it off. A message in the topic turns it on automatically.',
   "",
   "While the mode is on, your text output is relayed to the topic automatically — there is no reply tool, just write as usual. Text before a tool call reaches the topic too, only without a notification; the last text of a turn goes when the turn ends. Tool calls, tool output and hidden thinking are never relayed.",
   "",
@@ -151,11 +151,6 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: "Download a file sent in the Telegram topic (attachment_file_id from the <channel> tag, or a file_id named in the message text). Returns a local path to Read. Telegram caps bot downloads at 20MB.",
       inputSchema: { type: "object", properties: { file_id: { type: "string" } }, required: ["file_id"] },
     },
-    {
-      name: HOOK_NOTE_TOOL,
-      description: "Internal: called by the tg-hub plugin hook after tool calls. Never call it yourself.",
-      inputSchema: { type: "object", properties: { agent_id: { type: "string" } } },
-    },
   ],
 }));
 
@@ -179,8 +174,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       case "download_attachment":
         if (typeof args.file_id !== "string") throw new Error("file_id is required");
         return text(await core.download(args.file_id));
-      case HOOK_NOTE_TOOL:
-        return text(core.hookNote(typeof args.agent_id === "string" ? args.agent_id : ""));
       default:
         return text(`unknown tool: ${req.params.name}`, true);
     }

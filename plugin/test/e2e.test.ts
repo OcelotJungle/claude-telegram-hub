@@ -87,17 +87,14 @@ test("a window talks to Telegram through a hub it started itself", async () => {
   const instructions = client.getInstructions() ?? "";
   expect(instructions).toContain("tg_enable");
   expect(instructions).toContain("call tg_before_question, and call AskUserQuestion in the next step");
+  expect(instructions).toContain("typing in the terminal does not turn it off");
 
   const { tools } = await client.listTools();
-  expect(tools.map(t => t.name).sort()).toEqual(["download_attachment", "tg_before_question", "tg_disable", "tg_enable", "tg_hook_note", "tg_send_file"]);
+  expect(tools.map(t => t.name).sort()).toEqual(["download_attachment", "tg_before_question", "tg_disable", "tg_enable", "tg_send_file"]);
   // The separator before a question only answers.
   const separator = CallToolResultSchema.parse(await client.callTool({ name: "tg_before_question", arguments: {} }));
   expect(separator.isError).toBeFalsy();
   expect(separator.content).toEqual([{ type: "text", text: "Now call AskUserQuestion." }]);
-  // What the PostToolBatch hook gets when there is nothing to tell: no output.
-  const note = CallToolResultSchema.parse(await client.callTool({ name: "tg_hook_note", arguments: { agent_id: "" } }));
-  expect(note.isError).toBeFalsy();
-  expect(note.content).toEqual([{ type: "text", text: "" }]);
 
   const res = CallToolResultSchema.parse(await client.callTool({ name: "tg_enable", arguments: {} }));
   expect(res.isError).toBeFalsy();

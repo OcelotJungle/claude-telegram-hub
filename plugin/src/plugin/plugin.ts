@@ -24,14 +24,6 @@ import { SubagentWatcher } from "../transcript/subagents.ts";
 import { effectiveTitle, readSessionTitles, TranscriptTailer } from "../transcript/tail.ts";
 import { HubClient } from "./hub-client.ts";
 
-// Called by our PostToolBatch hook (hooks/hooks.json), not by the agent.
-export const HOOK_NOTE_TOOL = "tg_hook_note";
-
-const MODE_OFF_NOTE =
-  "tg-hub: Telegram mode is now OFF for this session, because the user typed a message in the terminal. " +
-  "Your text is no longer relayed to Telegram. " +
-  "If that message asks to continue in Telegram, call tg_enable.";
-
 // A turn ended by a failed connection to the API: the agent is told to go
 // on, as the person would, while the mode is on and the person is away.
 export const CONTINUE_PROMPT =
@@ -158,8 +150,6 @@ export class PluginCore {
   private titles: Titles = {};
   private log: Logger;
   private reportedKinds = new Set<string>();
-  // Terminal input turned the mode off and the agent has not been told yet.
-  private noteOwed = false;
   // Responses cut since a turn last ended normally.
   private cuts = 0;
   // The message of an API error record that may yet end the turn.
@@ -237,18 +227,6 @@ export class PluginCore {
 
   async download(fileId: string): Promise<string> {
     return String(await this.client.request({ op: "download", fileId }, HUB_TELEGRAM_TIMEOUT_MS));
-  }
-
-  // Hook output after a batch of tool calls. Only the transcript knows who
-  // wrote a prompt (origin.kind), and Claude Code writes the prompt record
-  // after UserPromptSubmit hooks run, so the agent hears of it here. Catch up
-  // on the transcript first: the hook may come before the tailer's next poll.
-  // A subagent's batch (agentId set) leaves the note for the main agent.
-  hookNote(agentId: string): string {
-    this.tailer?.pollNow();
-    if (agentId || !this.noteOwed) return "";
-    this.noteOwed = false;
-    return JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolBatch", additionalContext: MODE_OFF_NOTE } });
   }
 
   // Checks everything before sending anything, then hands the hub copies:
@@ -369,11 +347,7 @@ export class PluginCore {
     for (const ev of parseRecord(rec).flatMap(e => this.settleApiError(e))) {
       this.flush(this.relay.feed(ev));
       if (ev.kind === "terminal_input") this.lastInputAt = this.now();
-      if (ev.kind === "terminal_input" && this.enabled) {
-        this.client.send({ type: "terminalInput" });
-        this.setEnabled(false);
-        this.noteOwed = true;
-      } else if (ev.kind === "unknown_thinking" && !this.reportedKinds.has(ev.blockKind)) {
+      if (ev.kind === "unknown_thinking" && !this.reportedKinds.has(ev.blockKind)) {
         this.reportedKinds.add(ev.blockKind);
         this.log.warn(`transcript: thinking block of unknown kind "${ev.blockKind}" with text — not relayed; the transcript format may have changed`);
       } else if (ev.kind === "title") {
@@ -454,7 +428,6 @@ export class PluginCore {
   // Turning off still sends what was written while the mode was on.
   private setEnabled(on: boolean): void {
     this.enabled = on;
-    if (on) this.noteOwed = false;
     this.flush(this.relay.setEnabled(on));
   }
 

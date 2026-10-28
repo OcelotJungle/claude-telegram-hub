@@ -34,19 +34,6 @@
           }
         ]
       }
-    ],
-    "PostToolBatch": [
-      {
-        "hooks": [
-          {
-            "type": "mcp_tool",
-            "server": "plugin:tg-hub:tg-hub",
-            "tool": "tg_hook_note",
-            "input": { "agent_id": "${agent_id}" },
-            "timeout": 5
-          }
-        ]
-      }
     ]
   },
   "modules": [

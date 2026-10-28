@@ -62,7 +62,6 @@ export type PluginToHub =
   // lets the topic answer it.
   | { type: "permission"; requestId?: string; toolName: string; description: string; inputPreview?: string }
   | { type: "title"; title: string }
-  | { type: "terminalInput" }
   // A subagent's card as Markdown: one Telegram message, sent once and then
   // edited in place. final: the card closes; reopen explicitly allows a
   // continuation to update a closed card.

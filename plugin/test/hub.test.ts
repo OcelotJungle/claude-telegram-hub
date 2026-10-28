@@ -729,23 +729,15 @@ describe("send", () => {
     expect(fake.texts()[0]).toMatchObject({ message_thread_id: 100, text: "old session text" });
   });
 
-  test("text queued while enabled is delivered even if terminal input follows while an earlier send is retrying", async () => {
+  test("text queued while enabled is delivered even if the mode goes off while an earlier send is retrying", async () => {
     await startHub();
     const a = await enabled("a");
     fake.failNext("sendMessage", { code: 429, description: "Too Many Requests", retry_after: 1 });
     a.send({ type: "send", id: "x1", text: "first", notify: false });
     a.send({ type: "send", id: "x2", text: "final", notify: false });
-    a.send({ type: "terminalInput" });
+    a.send({ type: "req", id: "d1", op: "disable" });
     await waitFor(() => fake.texts().length === 3, 5000, "both delivered");
     expect(fake.texts().map(p => p.text)).toEqual(["first", "first", "final"]);
-  });
-
-  test("terminal input disables the session", async () => {
-    await startHub();
-    const a = await enabled("a");
-    a.send({ type: "terminalInput" });
-    await waitFor(() => a.messages.filter(m => m.type === "state").at(-1)?.enabled === false, 3000, "disabled state");
-    expect(new SessionStore(join(dir, "sessions.json")).get("a")?.enabled).toBe(false);
   });
 
   test("a deleted topic is recreated and the message still delivered", async () => {
@@ -3672,16 +3664,6 @@ describe("questions", () => {
     const answer = ask([Q1]);
     await polled();
     await req(a, { op: "disable" });
-    expect(await answer).toEqual({ decision: "none" });
-    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`));
-  });
-
-  test("typing in the terminal moves the poll to the terminal", async () => {
-    await startHub();
-    const a = await enabled("a");
-    const answer = ask([Q1]);
-    await polled();
-    a.send({ type: "terminalInput" });
     expect(await answer).toEqual({ decision: "none" });
     await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`));
   });

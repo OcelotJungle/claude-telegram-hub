@@ -4,7 +4,6 @@ import type { Config } from "../src/shared/config.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, truncateSync, writeFileSync } from "fs";
 import { join } from "path";
-import { z } from "zod";
 import { Hub } from "../src/hub/hub.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
 import { CHIME_MIN_TURN_MS, CONTINUE_PROMPT, CUT_LIMIT_NOTE, cutLimitNote, filesRejectedPrompt, interruptPrompt, MAX_AUTO_CONTINUES, playConfiguredChime, PluginCore } from "../src/plugin/plugin.ts";
@@ -248,14 +247,15 @@ describe("PluginCore", () => {
   });
 
   describe("the terminal chime", () => {
-    // The user types in the terminal: the mode goes off, and the turn that
-    // follows ends and is closed.
+    // The mode is off (it was never on here), the user types in the terminal,
+    // and the turn that follows ends and is closed.
     async function terminalTurn() {
-      const c = await enabledCore();
+      makeCore();
+      await waitFor(() => hub.isConnected(SID), 3000, "plugin connected");
       append(humanTyped("сам продолжу"));
-      await waitFor(() => !c.enabled, 3000, "disabled");
+      // The tailer reads the transcript every 30 ms: the typing is read before the turn closes.
+      await Bun.sleep(200);
       append(assistantText("Сделал", "end_turn", "e1"), closed);
-      return c;
     }
 
     test("ask always chimes", async () => {
@@ -268,7 +268,7 @@ describe("PluginCore", () => {
     test("done soon after the user typed is silent", async () => {
       await terminalTurn();
       await stopHook(true, "done");
-      await verdictHandled();
+      await Bun.sleep(200);
       expect(chimes).toEqual([]);
     });
 
@@ -293,7 +293,7 @@ describe("PluginCore", () => {
       await terminalTurn();
       clockSkew = CHIME_MIN_TURN_MS;
       await stopHook(false);
-      await verdictHandled();
+      await Bun.sleep(200);
       expect(chimes).toEqual([]);
     });
 
@@ -308,13 +308,14 @@ describe("PluginCore", () => {
     });
   });
 
-  test("typing in the terminal turns the mode off", async () => {
+  // Typing in the terminal never changes the mode: the text written after it still goes.
+  test("typing in the terminal leaves the mode on", async () => {
     const c = await enabledCore();
     append(humanTyped("сам продолжу"));
-    await waitFor(() => !c.enabled, 3000, "disabled");
-    append(assistantText("ответ в терминал", "end_turn"));
-    await Bun.sleep(200);
-    expect(sent()).toEqual([]);
+    append(assistantText("ответ в телегу", "tool_use", "t1"), assistantTool("Bash", "t1"));
+    await waitFor(() => sent().length === 1, 3000, "relayed text");
+    expect(c.enabled).toBe(true);
+    expect(sent()).toEqual([{ text: "ответ в телегу", silent: true, topic: 100 }]);
   });
 
   test("narration is relayed like text", async () => {
@@ -330,15 +331,17 @@ describe("PluginCore", () => {
     await waitFor(() => pluginLog.lines.some(l => l.startsWith("WARN") && l.includes("thinking")), 3000, "warning");
   });
 
-  // The text written before the message was typed was written in Telegram mode.
-  test("a message typed mid-turn turns the mode off; text written before it still goes", async () => {
+  // A message typed mid-turn does not change the mode either.
+  test("a message typed mid-turn leaves the mode on", async () => {
     const c = await enabledCore();
-    append(assistantText("Проверяю", "tool_use", "q1"), typedMidTurn("Как успехи?"));
-    await waitFor(() => !c.enabled, 3000, "disabled");
-    append(assistantTool("Bash", "q1"), assistantText("ответ в терминал", "end_turn", "q2"));
-    await waitFor(() => sent().length === 1, 3000, "pending text");
-    await Bun.sleep(200);
-    expect(sent()).toEqual([{ text: "Проверяю", silent: true, topic: 100 }]);
+    append(assistantText("Проверяю", "tool_use", "q1"), typedMidTurn("Как успехи?"), assistantTool("Bash", "q1"));
+    append(assistantText("Вот ответ", "tool_use", "q2"), assistantTool("Bash", "q2"));
+    await waitFor(() => sent().length === 2, 3000, "both texts");
+    expect(c.enabled).toBe(true);
+    expect(sent()).toEqual([
+      { text: "Проверяю", silent: true, topic: 100 },
+      { text: "Вот ответ", silent: true, topic: 100 },
+    ]);
   });
 
   // Background tasks, Monitor events and subagent reports start turns too.
@@ -354,15 +357,14 @@ describe("PluginCore", () => {
     await stopHook(false);
     await waitFor(() => sent().length === 1, 3000, "turn text");
     expect(c.enabled).toBe(true);
-    expect(c.hookNote("")).toBe("");
   });
 
   test("the final text of a turn ended right before terminal input is still sent", async () => {
     const c = await enabledCore();
     append(assistantText("итог", "end_turn", "d1"), humanTyped("next"));
-    await waitFor(() => !c.enabled, 3000, "disabled");
     await waitFor(() => sent().length === 1, 3000, "final text");
     expect(sent()[0].text).toBe("итог");
+    expect(c.enabled).toBe(true);
   });
 
   test("a topic message reaches the session and turns the mode back on", async () => {
@@ -639,55 +641,6 @@ describe("PluginCore", () => {
     config = { allowFrom: [ME], turnEndChime: "" };
     const c = makeCore();
     await expect(c.enable()).rejects.toThrow(/config\.json/);
-  });
-});
-
-// The PostToolBatch hook asks hookNote after every batch of tool calls.
-describe("note to the agent that the mode went off", () => {
-  const hookOutput = z.object({ hookSpecificOutput: z.object({ hookEventName: z.string(), additionalContext: z.string() }) });
-  const noteOf = (out: string) => hookOutput.parse(JSON.parse(out)).hookSpecificOutput;
-  const toolBatch = (id: string) => [assistantTool("Bash", id), { type: "user", isSidechain: false, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "ok" }] } }];
-
-  test("the first tool batch after terminal input tells the agent, once", async () => {
-    const c = await enabledCore();
-    // No wait for the tailer: the hook may come before its next poll.
-    append(humanTyped("Как успехи?"), ...toolBatch("k1"));
-    const note = noteOf(c.hookNote(""));
-    expect(note.hookEventName).toBe("PostToolBatch");
-    expect(note.additionalContext).toContain("OFF");
-    expect(note.additionalContext).toContain("tg_enable");
-    expect(c.enabled).toBe(false);
-    expect(c.hookNote("")).toBe("");
-  });
-
-  test("a message typed mid-turn is noted too", async () => {
-    const c = await enabledCore();
-    append(typedMidTurn("стоп"), ...toolBatch("k2"));
-    expect(noteOf(c.hookNote("")).additionalContext).toContain("OFF");
-  });
-
-  test("a subagent batch leaves the note for the main agent", async () => {
-    const c = await enabledCore();
-    append(humanTyped("сам"));
-    expect(c.hookNote("a3f559a955ec4c710")).toBe("");
-    expect(c.hookNote("")).not.toBe("");
-  });
-
-  test("nothing to say when the agent turned the mode off itself", async () => {
-    const c = await enabledCore();
-    await c.disable();
-    await waitFor(() => !c.enabled);
-    append(humanTyped("ок"));
-    expect(c.hookNote("")).toBe("");
-  });
-
-  test("turning the mode back on drops an undelivered note", async () => {
-    const c = await enabledCore();
-    append(humanTyped("сам"));
-    await waitFor(() => !c.enabled, 3000, "disabled");
-    await c.enable();
-    await waitFor(() => c.enabled);
-    expect(c.hookNote("")).toBe("");
   });
 });
 
