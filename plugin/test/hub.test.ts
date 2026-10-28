@@ -979,7 +979,7 @@ describe("formatting", () => {
   test("short formatted text goes as an ordinary message with entities", async () => {
     await startHub();
     const a = await enabled("a");
-    a.send({ type: "send", id: "x1", text: "## Итог\n\n**готово**", notify: false });
+    a.send({ type: "send", id: "x1", text: "**Итог**\n\n**готово**", notify: false });
     await waitFor(() => fake.texts().length === 1);
     expect(fake.callsOf("sendRichMessage")).toEqual([]);
     expect(fake.callsOf("sendMessage")[0]).toMatchObject({
@@ -1021,7 +1021,7 @@ describe("formatting", () => {
   test("a block too big for a rich message goes as plain text with entities, cut in pieces", async () => {
     await startHub();
     const a = await enabled("a");
-    a.send({ type: "send", id: "x1", text: "до\n\n```\n" + "z".repeat(31000) + "\n```", notify: true });
+    a.send({ type: "send", id: "x1", text: "## до\n\n```\n" + "z".repeat(31000) + "\n```", notify: true });
     await waitFor(() => fake.texts().length === 9);
     const [first, ...rest] = fake.texts();
     expect(first).toMatchObject({ text: "до", disable_notification: false });
@@ -1034,7 +1034,7 @@ describe("formatting", () => {
     const a = await enabled("a");
     fake.failNext("sendRichMessage", { code: 400, description: "Bad Request: RICH_MESSAGE_INVALID" });
     fake.failNext("sendMessage", { code: 400, description: "Bad Request: can't parse entities" });
-    a.send({ type: "send", id: "x1", text: "**bold**\n\n1\n\n2\n\n3", notify: true });
+    a.send({ type: "send", id: "x1", text: "## bold\n\n1\n\n2\n\n3", notify: true });
     await waitFor(() => fake.texts().length === 3);
     const [rich, formatted, plain] = fake.texts();
     expect(rich).toMatchObject({ text: "bold\n\n1\n\n2\n\n3", disable_notification: false });
@@ -1900,7 +1900,7 @@ describe("commands", () => {
     const sent = await reply(runner, t => t.startsWith("Лимиты"));
     expect(sent).toMatchObject({ message_thread_id: 100, disable_notification: true });
     expect(sent.text).toContain("128/300k");
-    expect(arr(field(arr(field(sent.rich_message, "blocks"))[0], "text"))[0]).toEqual({ type: "bold", text: "Лимиты Claude" });
+    expect(arr(sent.entities)[0]).toEqual({ type: "bold", offset: 0, length: "Лимиты Claude".length });
     expect(a.messages.some(m => m.type === "inbound")).toBe(false);
     expect(new SessionStore(join(dir, "sessions.json")).get("a")?.enabled).toBe(false);
   });
