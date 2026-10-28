@@ -651,7 +651,7 @@ describe("Executor cards", () => {
     expect(s.last()).toContain("After shrink");
   });
 
-  test("a worker run after a sealed card captures a new reply boundary and command count", () => {
+  test("a worker run after a sealed card goes on in the same card, adding to its command count and capturing a new reply boundary", () => {
     const s = setup();
     s.state();
     s.start();
@@ -664,11 +664,11 @@ describe("Executor cards", () => {
     s.write(assistant("second", "Replying"));
     s.attach();
     s.tick();
-    expect(s.cards.at(-1)).toMatchObject({ id: "a1-1", final: false });
-    expect(s.last()).toContain("0 действий");
+    expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: false, reopen: true });
+    expect(s.last()).toContain("1 действие");
     s.events(command("new", "new command"));
     s.tick();
-    expect(s.last()).toContain("1 действие");
+    expect(s.last()).toContain("2 действия");
   });
 
   test.each([

@@ -43,6 +43,8 @@ const CONTINUED = "⬇️ продолжение ниже";
 const STARTS_WITH_BLOCK = /^(#{1,6} |[-*+] |\d+[.)] |>|```)/;
 const CLOCK_PAD = 2;
 const MAX_COMMAND_CHARS = 60;
+// The coordinator's message in a card is cut to this.
+export const MAX_COORDINATOR_TEXT = 200;
 
 // A subagent's card as Markdown. final: its last version (the agent stopped,
 // or the card is full and continues in the next one).
@@ -315,13 +317,17 @@ class Agent {
       // must not close before its record is read.
       this.ended = this.env.now();
     }
-    if (ev.kind !== "text" && ev.kind !== "tool_use" && ev.kind !== "turn_end" && ev.kind !== "api_error") return;
-    if (this.status !== "running" && ev.messageId !== this.endMessage) {
-      // A closed card stays as it is: the agent got a new message
-      // (SendMessage), a new run goes into a new card.
-      if (this.sealed) this.reopen();
-      else this.resume();
+    if (ev.kind === "coordinator") {
+      // The agent got a message (SendMessage): it goes on, in the same card.
+      this.wake();
+      this.seen = true;
+      this.dirty = true;
+      const first = ev.text.split("\n").map(l => l.trim()).find(l => l !== "");
+      if (first !== undefined) this.addText(`↪ ${escapeMd(first.length > MAX_COORDINATOR_TEXT ? `${first.slice(0, MAX_COORDINATOR_TEXT)}…` : first)}`, at);
+      return;
     }
+    if (ev.kind !== "text" && ev.kind !== "tool_use" && ev.kind !== "turn_end" && ev.kind !== "api_error") return;
+    if (this.status !== "running" && ev.messageId !== this.endMessage) this.wake();
     this.seen = true;
     this.dirty = true;
     if (ev.kind === "text") {
@@ -363,26 +369,24 @@ class Agent {
     this.certain = false;
   }
 
-  private reopen(): void {
-    const previousCardId = this.cardId();
-    const previousWasShown = this.shown;
-    this.part++;
-    this.replyTo = previousWasShown ? previousCardId : undefined;
-    this.cardAgentId = this.id;
-    this.baseWorkMs = 0;
-    this.baseCommands = 0;
-    this.displayed = false;
-    this.reopenCard = false;
-    this.texts = [];
-    this.shown = false;
+  // A message woke the agent: its card is edited in place, whether it is
+  // sealed or not (one agent, one card). The pause between runs is not counted.
+  private wake(): void {
+    if (this.sealed) this.continueCard();
+    else this.resume();
+  }
+
+  private continueCard(): void {
+    this.baseWorkMs = this.workMs();
+    this.baseCommands += this.executorJob?.commands ?? 0;
+    this.reopenCard = true;
+    this.replyTo = undefined;
     this.sealed = false;
     this.certain = false;
     this.status = "running";
     this.endMessage = undefined;
     this.started = this.env.now();
     this.ended = undefined;
-    this.tools = 0;
-    this.lastTool = undefined;
     this.executor = undefined;
     this.executorJob = undefined;
     this.executorMetaChecked = false;

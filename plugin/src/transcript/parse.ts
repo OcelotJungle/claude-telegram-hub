@@ -20,6 +20,8 @@ const TASK_STOPPED = "Successfully stopped task";
 const AGENT_WAITING = /<note>[^<]*background work of its own still running/;
 // The model name of messages Claude Code writes itself.
 const SYNTHETIC_MODEL = "<synthetic>";
+// How Claude Code opens a coordinator's message to an idle subagent.
+const COORDINATOR_PREFIX = "The coordinator sent a message while you were working:\n";
 
 export type TranscriptEvent =
   | { kind: "text"; text: string; messageId: string }
@@ -50,7 +52,9 @@ export type TranscriptEvent =
   // Topic messages that reached the agent's context: Telegram message ids.
   | { kind: "channel_seen"; messageIds: number[] }
   // The user stopped the turn (Esc).
-  | { kind: "interrupted" };
+  | { kind: "interrupted" }
+  // A subagent's coordinator sent it a message (SendMessage): its whole text.
+  | { kind: "coordinator"; text: string };
 
 type Rec = Record<string, unknown>;
 
@@ -92,13 +96,26 @@ export function parseRecord(r: unknown): TranscriptEvent[] {
 export function parseAgentRecord(r: unknown): TranscriptEvent[] {
   if (!isObject(r)) return [];
   if (r.type === "assistant") return parseAssistant(r);
+  if (r.type === "attachment") return parseAgentAttachment(r);
   return r.type === "user" ? parseAgentUser(r) : [];
+}
+
+// A message sent to a subagent that works is absorbed into its running turn.
+function parseAgentAttachment(r: Rec): TranscriptEvent[] {
+  const a = r.attachment;
+  const prompt = field(a, "prompt");
+  const fromCoordinator = field(a, "type") === "queued_command" && field(field(a, "origin"), "kind") === "coordinator";
+  return fromCoordinator && typeof prompt === "string" ? [{ kind: "coordinator", text: prompt }] : [];
 }
 
 // A tool result or a task notification in a subagent's transcript: the
 // subagent's own background tasks start and end there. A Monitor's event
 // notification has no <status>: the Monitor goes on.
 function parseAgentUser(r: Rec): TranscriptEvent[] {
+  if (field(r.origin, "kind") === "coordinator") {
+    const text = contentText(r);
+    return [{ kind: "coordinator", text: text.startsWith(COORDINATOR_PREFIX) ? text.slice(COORDINATOR_PREFIX.length) : text }];
+  }
   const res = r.toolUseResult;
   // A background agent's notification has its agent id as the task id.
   const agent = field(res, "isAsync") === true ? field(res, "agentId") : undefined;

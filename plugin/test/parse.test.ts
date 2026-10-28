@@ -295,6 +295,26 @@ describe("subagent records", () => {
     ]);
     expect(parseAgentRecord({ ...userBase, isSidechain: true, message: { role: "user", content: "go" } })).toEqual([]);
   });
+
+  test("a coordinator's message to an idle agent gives an event without the prefix", () => {
+    const rec = { ...userBase, isSidechain: true, isMeta: true, origin: { kind: "coordinator" }, message: { role: "user", content: "The coordinator sent a message while you were working:\nLook at B too" } };
+    expect(parseAgentRecord(rec)).toEqual([{ kind: "coordinator", text: "Look at B too" }]);
+  });
+
+  test("a coordinator's message to a working agent gives an event", () => {
+    const rec = { type: "attachment", isSidechain: true, attachment: { type: "queued_command", prompt: "Stop after A", origin: { kind: "coordinator" }, isMeta: true } };
+    expect(parseAgentRecord(rec)).toEqual([{ kind: "coordinator", text: "Stop after A" }]);
+  });
+
+  test("the agent's initial prompt and other queued commands are no coordinator message", () => {
+    expect(parseAgentRecord({ ...userBase, isSidechain: true, promptId: "p", message: { role: "user", content: "Do the task" } })).toEqual([]);
+    expect(parseAgentRecord({ type: "attachment", attachment: { type: "queued_command", prompt: "x", origin: { kind: "human" } } })).toEqual([]);
+  });
+
+  test("the main-session parser ignores coordinator records", () => {
+    const rec = { ...userBase, isMeta: true, origin: { kind: "coordinator" }, message: { role: "user", content: "The coordinator sent a message while you were working:\nhi" } };
+    expect(parseRecord(rec)).toEqual([]);
+  });
 });
 
 describe("title records", () => {

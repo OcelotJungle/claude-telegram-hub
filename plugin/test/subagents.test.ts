@@ -4,7 +4,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { ModelVersions } from "../src/transcript/model-versions.ts";
-import { MAX_CARD, SETTLE_MS, SubagentWatcher, WAIT_MAX_MS } from "../src/transcript/subagents.ts";
+import { MAX_CARD, MAX_COORDINATOR_TEXT, SETTLE_MS, SubagentWatcher, WAIT_MAX_MS } from "../src/transcript/subagents.ts";
 import { tempDir } from "./helpers.ts";
 
 const SEND_EVERY_MS = 3000;
@@ -234,7 +234,7 @@ describe("SubagentWatcher", () => {
       expect(s.cards.at(-1)).toMatchObject({ final: true, text: expect.stringMatching(/✅ \d+ (?:с|мин) · \d+ действи(?:е|я|й)/) });
     });
 
-    test("it waits for WAIT_MAX_MS, then the card closes and a later wake opens a new one", () => {
+    test("it waits for WAIT_MAX_MS, then the card closes and a later wake goes on in the same card", () => {
       const { s, write } = waiting();
       s.advance(WAIT_MAX_MS - SECOND);
       expect(s.cards.at(-1)?.final).toBe(false);
@@ -242,7 +242,7 @@ describe("SubagentWatcher", () => {
       expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true, text: expect.stringMatching(/✅ \d+ (?:с|мин) · \d+ действи(?:е|я|й)/) });
       write(assistant("m3", "tool_use", text("Woken")));
       s.advance(SEND_EVERY_MS);
-      expect(s.cards.at(-1)).toMatchObject({ id: "a1-1", final: false });
+      expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: false, reopen: true });
     });
 
     test("the parent's notification closes the card at once", () => {
@@ -358,17 +358,101 @@ describe("SubagentWatcher", () => {
     expect(s.cards.every(c => c.text.length <= MAX_CARD)).toBe(true);
   });
 
-  test("a stopped agent that gets a new message starts a new card", () => {
-    const s = setup();
+  // The agent works 3 s, ends, its card is closed; 10 minutes later it is sent on.
+  function sealedAgent(s: ReturnType<typeof setup>) {
     s.w.start();
     const write = s.agent("a1");
-    write(assistant("m1", "end_turn", text("first run")));
+    write(assistant("m1", "tool_use", tool("Read", { file_path: "a.ts" })));
+    s.advance(SEND_EVERY_MS);
+    write(assistant("m2", "end_turn", text("first run")));
     s.advance(SEND_EVERY_MS);
     s.advance(SETTLE_MS);
     expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true });
-    write(assistant("m2", "tool_use", text("second run")));
+    s.advance(10 * MINUTE);
+    return write;
+  }
+  const idleMessage = (t: string) =>
+    line({ type: "user", isSidechain: true, isMeta: true, origin: { kind: "coordinator" }, message: { role: "user", content: `The coordinator sent a message while you were working:\n${t}` } });
+  const queuedMessage = (t: string) => line({ type: "attachment", isSidechain: true, attachment: { type: "queued_command", prompt: t, origin: { kind: "coordinator" }, isMeta: true } });
+
+  test("a stopped agent that gets a new message goes on in the same card", () => {
+    const s = setup();
+    const write = sealedAgent(s);
+    write(assistant("m3", "tool_use", text("second run")));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)).toEqual({ id: "a1-1", final: false, replyTo: "a1-0", text: "🤖 **Субагент**\n⏳ 0 с · 0 действий\n\n`[18:41]` second run" });
+    const card = s.cards.at(-1);
+    expect(card).toMatchObject({ id: "a1-0", final: false, reopen: true });
+    expect(card?.replyTo).toBeUndefined();
+    // The 10 minutes of idleness are not work; the earlier action is counted.
+    expect(card?.text).toBe("🤖 **Субагент**\n⏳ 3 с · 1 действие\n`Read a.ts`\n\n`[18:39]` first run\n\n`[18:51]` second run");
+  });
+
+  test("the coordinator's message shows in the card and reopens it at once", () => {
+    const s = setup();
+    const write = sealedAgent(s);
+    write(idleMessage("Look at B too"));
+    s.advance(SEND_EVERY_MS);
+    expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: false, reopen: true });
+    expect(s.cards.at(-1)?.text).toEndWith("`[18:39]` first run\n\n`[18:51]` ↪ Look at B too");
+    expect(s.cards.at(-1)?.text).toContain("⏳");
+  });
+
+  test("a coordinator's message to a working agent shows too", () => {
+    const s = setup();
+    s.w.start();
+    const write = s.agent("a1");
+    write(assistant("m1", "tool_use", text("working")));
+    s.advance(SEND_EVERY_MS);
+    write(queuedMessage("Stop after A"));
+    s.advance(SEND_EVERY_MS);
+    expect(s.cards.at(-1)?.text).toEndWith("`[18:39]` working\n\n`[18:39]` ↪ Stop after A");
+    expect(s.cards.at(-1)?.reopen).toBeUndefined();
+  });
+
+  test("the coordinator's message is its first line, cut, with Markdown escaped", () => {
+    const s = setup();
+    s.w.start();
+    const write = s.agent("a1");
+    write(assistant("m1", "tool_use", text("working")));
+    write(idleMessage("\n  *bold* [x](y) _z_\nsecond line"));
+    write(queuedMessage(`${"w".repeat(MAX_COORDINATOR_TEXT + 50)}`));
+    s.advance(SEND_EVERY_MS);
+    const out = s.cards.at(-1)?.text ?? "";
+    expect(out).toContain("↪ \\*bold\\* \\[x\\]\\(y\\) \\_z\\_\n");
+    expect(out).not.toContain("second line");
+    expect(out).toContain(`↪ ${"w".repeat(MAX_COORDINATOR_TEXT)}…`);
+    expect(out).not.toContain("w".repeat(MAX_COORDINATOR_TEXT + 1));
+  });
+
+  test("the agent's initial prompt is no entry", () => {
+    const s = setup();
+    s.w.start();
+    const write = s.agent("a1");
+    write(line({ type: "user", isSidechain: true, promptId: "p", message: { role: "user", content: "Do the task" } }));
+    write(assistant("m1", "tool_use", text("working")));
+    s.advance(SEND_EVERY_MS);
+    expect(s.cards.at(-1)?.text).not.toContain("↪");
+    expect(s.cards.at(-1)?.text).not.toContain("Do the task");
+  });
+
+  test("a continued card that overflows splits as before", () => {
+    const s = setup();
+    s.w.start();
+    const write = s.agent("a1");
+    const chunk = "x".repeat(1400);
+    write(assistant("m1", "tool_use", text(chunk)));
+    write(assistant("m2", "end_turn", text(chunk)));
+    s.advance(SEND_EVERY_MS);
+    s.advance(SETTLE_MS);
+    expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true });
+    write(assistant("m3", "tool_use", text(chunk)));
+    s.advance(SECOND);
+    expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: true, reopen: true });
+    expect(s.cards.at(-1)?.text).toContain("⬇️ продолжение ниже");
+    s.advance(SEND_EVERY_MS);
+    expect(s.cards.at(-1)).toMatchObject({ id: "a1-1", final: false, replyTo: "a1-0" });
+    expect(s.cards.at(-1)?.reopen).toBeUndefined();
+    expect(s.cards.every(c => c.text.length <= MAX_CARD)).toBe(true);
   });
 
   test("each text shows when the agent wrote it, by its record's time", () => {
