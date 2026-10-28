@@ -752,10 +752,13 @@ describe("send", () => {
     await startHub();
     const a = await enabled("a", "T");
     fake.deleteTopic(100);
+    // The ack comes when the message is queued, before Telegram rejects the old topic.
+    const release = fake.holdNext("sendMessage");
     a.send({ type: "send", id: "x1", text: "still here", notify: false });
     await a.next("ack", m => m.id === "x1");
-    expect(fake.callsOf("createForumTopic").length).toBe(2);
+    release();
     await waitFor(() => fake.texts().at(-1)?.message_thread_id === 101, 3000, "the message in the new topic");
+    expect(fake.callsOf("createForumTopic").length).toBe(2);
     expect(fake.texts().at(-1)).toMatchObject({ message_thread_id: 101, text: "still here" });
     expect(new SessionStore(join(dir, "sessions.json")).get("a")?.topicId).toBe(101);
   });
