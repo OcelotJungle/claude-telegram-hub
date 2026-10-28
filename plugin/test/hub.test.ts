@@ -1735,6 +1735,38 @@ describe("starting and stopping sessions", () => {
     expect(spawned.length).toBe(1);
   });
 
+  test("a module command to a closed session starts it and waits for the window", async () => {
+    const spawned = await closedSession();
+    fake.pushUpdate(msg("/info"));
+    await waitFor(() => spawned.length === 1);
+    const beforeConnect = await (await fetch(`http://127.0.0.1:${port}/commands?session=${SID}`)).text();
+    expect(beforeConnect).toBe("[]");
+    const w = await plugin(SID);
+    await waitFor(async () => (await (await fetch(`http://127.0.0.1:${port}/commands?session=${SID}`)).text()).includes("info"));
+    expect(w.messages.filter(m => m.type === "inbound")).toEqual([]);
+    expect(spawned.length).toBe(1);
+    expect(texts()).toContain("🚀 Запускаю сессию (аккаунт 2)…");
+  });
+
+  test("a module command without launch keeps the inactive-session answer", async () => {
+    await startHub();
+    const a = await enabled(SID);
+    a.close();
+    await waitFor(() => !hub.isConnected(SID));
+    fake.pushUpdate(msg("/info"));
+    await waitFor(() => texts().includes("сессия сейчас не активна"));
+  });
+
+  test("/cleanup to a closed session launches it and queues cleanup after connect", async () => {
+    const spawned = await closedSession();
+    fake.pushUpdate(msg("/cleanup"));
+    await waitFor(() => spawned.length === 1);
+    const w = await plugin(SID);
+    await waitFor(async () => (await (await fetch(`http://127.0.0.1:${port}/commands?session=${SID}&cleanup=1`)).text()).includes("cleanup"));
+    expect(w.messages.filter(m => m.type === "inbound")).toEqual([]);
+    expect(texts()).toContain("🚀 Запускаю сессию (аккаунт 2)…");
+  });
+
   test("the start notice is one message: edited once the session starts, gone once the agent works", async () => {
     await closedSession();
     fake.pushUpdate(msg("first"));
@@ -1916,9 +1948,10 @@ describe("starting and stopping sessions", () => {
   });
 
   test("/stop of a closed session says so", async () => {
-    await closedSession();
+    const spawned = await closedSession();
     fake.pushUpdate(msg("/stop"));
     await waitFor(() => texts().includes("Сессия не запущена"));
+    expect(spawned).toEqual([]);
   });
 });
 

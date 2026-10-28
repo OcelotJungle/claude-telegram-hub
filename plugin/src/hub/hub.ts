@@ -1718,6 +1718,9 @@ ${msg.text}`);
     if (hubCmd) {
       // The messages before the command reach the agent first.
       await this.flushBatch(route.sessionId);
+      if (route.action === "inactive" && hubCmd.name === "cleanup" && this.opts.config().launch) {
+        return this.toInactive(api, route.sessionId, [m]);
+      }
       return this.onHubCommand(route.sessionId, hubCmd, m);
     }
     const rest = await this.toPoll(api, route.sessionId, m);
@@ -2324,6 +2327,13 @@ ${msg.text}`);
           continue;
         }
         const m = h.message;
+        const hubCmd = m.text !== undefined ? hubCommandOf(m.text, this.botUsername) : undefined;
+        if (hubCmd) {
+          await flush();
+          if (this.connOf(sessionId)) this.onHubCommand(sessionId, hubCmd, m);
+          else this.log.warn(`session ${sessionId} has no window, message ${m.message_id} not delivered`);
+          continue;
+        }
         const cmd = m.text !== undefined ? commandOf(m.text, this.botUsername) : undefined;
         if (cmd) {
           await flush();
