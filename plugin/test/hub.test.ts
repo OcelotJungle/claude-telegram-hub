@@ -5,7 +5,7 @@ import type { MessageKind } from "../src/shared/notification.ts";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
-import { join } from "path";
+import { basename, join } from "path";
 import { z } from "zod";
 import { cleanupSummary, Hub } from "../src/hub/hub.ts";
 import { CANCEL_REASON, CANCELLED, CUSTOM_HINT, PICK_ONE, STALE_POLL, TO_TERMINAL } from "../src/hub/questions.ts";
@@ -253,6 +253,127 @@ describe("enable", () => {
     const res = await req(c, { op: "enable", title: "T" });
     expect(res.ok).toBe(false);
     expect(res.error).toContain("not enough rights");
+  });
+});
+
+// A window started from the terminal CLI (CLAUDE_CODE_ENTRYPOINT "cli") says so in hello.
+const cliHello = (sessionId: string, extra: object = {}, windowKey = `win-${sessionId}`) => ({ ...hello(sessionId, windowKey), entrypoint: "cli", ...extra });
+const STORE_FILE = () => join(dir, "sessions.json");
+
+async function connect(body: object) {
+  const c = await wsClient(port, body);
+  clients.push(c);
+  await c.next("state");
+  return c;
+}
+
+describe("interactive windows", () => {
+  test("an interactive window is on at once and gets no topic before it writes", async () => {
+    await startHub();
+    const c = await connect(cliHello("s1", { title: "Фикс входа" }));
+    expect(c.messages.filter(m => m.type === "state").at(-1)?.enabled).toBe(true);
+    expect(fake.callsOf("createForumTopic")).toEqual([]);
+    const rec = new SessionStore(STORE_FILE()).get("s1");
+    expect(rec).toMatchObject({ enabled: true, project: basename(CWD) });
+    expect(rec?.topicId).toBeUndefined();
+  });
+
+  test("the first text of an interactive window creates its topic from the title, later text reuses it", async () => {
+    await startHub();
+    const c = await connect(cliHello("s1", { title: "Фикс входа" }));
+    c.send({ type: "send", id: "x1", text: "первый", notify: false });
+    await waitFor(() => fake.texts().length === 1, 3000, "the first message");
+    expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: `${basename(CWD)} · Фикс входа` }]);
+    expect(fake.texts()[0]).toMatchObject({ message_thread_id: 100 });
+    c.send({ type: "send", id: "x2", text: "второй", notify: false });
+    await waitFor(() => fake.texts().length === 2, 3000, "the second message");
+    expect(fake.callsOf("createForumTopic").length).toBe(1);
+    expect(new SessionStore(STORE_FILE()).get("s1")?.topicId).toBe(100);
+  });
+
+  test("a window started by an SDK or another entrypoint, or without one, stays off", async () => {
+    await startHub();
+    const sdk = await connect({ ...hello("s1"), entrypoint: "sdk-cli" });
+    const plain = await connect(hello("s2"));
+    expect(sdk.messages.filter(m => m.type === "state").at(-1)?.enabled).toBe(false);
+    expect(plain.messages.filter(m => m.type === "state").at(-1)?.enabled).toBe(false);
+    expect(new SessionStore(STORE_FILE()).get("s1")).toBeUndefined();
+    expect(new SessionStore(STORE_FILE()).get("s2")).toBeUndefined();
+    expect(fake.callsOf("createForumTopic")).toEqual([]);
+  });
+
+  test("tg_disable survives a restart of the window: it stays off and is remembered", async () => {
+    await startHub();
+    const first = await connect(cliHello("s1"));
+    await req(first, { op: "disable" });
+    first.close();
+    const again = await connect(cliHello("s1", {}, "win-again"));
+    expect(again.messages.filter(m => m.type === "state").at(-1)?.enabled).toBe(false);
+    expect(new SessionStore(STORE_FILE()).get("s1")).toMatchObject({ enabled: false, disabledByUser: true });
+  });
+
+  test("a topic message turns a disabled window back on and clears the flag", async () => {
+    await startHub();
+    const c = await enabled("s1", "T");
+    await req(c, { op: "disable" });
+    expect(new SessionStore(STORE_FILE()).get("s1")).toMatchObject({ enabled: false, disabledByUser: true });
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "вернись" }));
+    await c.next("inbound");
+    expect(new SessionStore(STORE_FILE()).get("s1")?.enabled).toBe(true);
+    expect(new SessionStore(STORE_FILE()).get("s1")?.disabledByUser).toBeUndefined();
+  });
+
+  test("tg_enable clears the explicit off", async () => {
+    await startHub();
+    const c = await enabled("s1", "T");
+    await req(c, { op: "disable" });
+    expect(new SessionStore(STORE_FILE()).get("s1")).toMatchObject({ disabledByUser: true });
+    await req(c, { op: "enable", title: "T" });
+    expect(new SessionStore(STORE_FILE()).get("s1")?.disabledByUser).toBeUndefined();
+  });
+
+  test("an old record the terminal turned off is turned on by an interactive window", async () => {
+    new SessionStore(STORE_FILE()).set("s1", { topicId: 100, title: "T", project: "p", enabled: false });
+    await startHub();
+    const c = await connect(cliHello("s1"));
+    expect(c.messages.filter(m => m.type === "state").at(-1)?.enabled).toBe(true);
+    expect(new SessionStore(STORE_FILE()).get("s1")?.enabled).toBe(true);
+  });
+
+  test("an old record the user turned off stays off for an interactive window", async () => {
+    new SessionStore(STORE_FILE()).set("s1", { topicId: 100, title: "T", project: "p", enabled: false, disabledByUser: true });
+    await startHub();
+    const c = await connect(cliHello("s1"));
+    expect(c.messages.filter(m => m.type === "state").at(-1)?.enabled).toBe(false);
+  });
+
+  test("a title sent before the topic exists only changes the stored title; the topic gets it at creation", async () => {
+    await startHub();
+    const c = await connect(cliHello("s1", { title: "A" }));
+    c.send({ type: "title", title: "B" });
+    await waitFor(() => new SessionStore(STORE_FILE()).get("s1")?.title === "B", 3000, "the stored title");
+    expect(fake.callsOf("editForumTopic")).toEqual([]);
+    expect(fake.callsOf("createForumTopic")).toEqual([]);
+    c.send({ type: "send", id: "x1", text: "текст", notify: false });
+    await waitFor(() => fake.texts().length === 1, 3000, "the message");
+    expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: `${basename(CWD)} · B` }]);
+  });
+
+  test("tg_enable on an interactive window without a topic creates the topic at once", async () => {
+    await startHub();
+    const c = await connect(cliHello("s1", { title: "T" }));
+    const res = await req(c, { op: "enable", title: "T" });
+    expect(res.result).toMatchObject({ created: true, topicTitle: `${basename(CWD)} · T` });
+    expect(new SessionStore(STORE_FILE()).get("s1")?.topicId).toBe(100);
+  });
+
+  test("a busy interactive window with no topic yet shows no typing and does not break", async () => {
+    await startHub();
+    const c = await connect({ ...cliHello("s1"), busy: true });
+    await Bun.sleep(150);
+    expect(fake.callsOf("sendChatAction")).toEqual([]);
+    c.send({ type: "send", id: "x1", text: "готово", notify: false });
+    await waitFor(() => fake.texts().length === 1, 3000, "the message");
   });
 });
 

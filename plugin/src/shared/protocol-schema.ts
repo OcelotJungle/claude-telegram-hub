@@ -20,7 +20,7 @@ export const sendFilesMessage = z.object({
 export const sendMessage = z.object({ type: z.literal("send"), id: z.string(), sessionId: z.string().optional(), text: z.string(), notify: z.boolean() });
 
 export const pluginToHub: z.ZodType<PluginToHub> = z.union([
-  z.object({ type: z.literal("hello"), v: z.number(), windowKey: z.string(), sessionId: z.string(), cwd: z.string(), configDir: z.string().optional(), busy: z.boolean().optional(), reportsSeen: z.boolean().optional() }),
+  z.object({ type: z.literal("hello"), v: z.number(), windowKey: z.string(), sessionId: z.string(), cwd: z.string(), configDir: z.string().optional(), busy: z.boolean().optional(), reportsSeen: z.boolean().optional(), entrypoint: z.string().optional(), title: z.string().optional() }),
   z.object({ type: z.literal("session"), sessionId: z.string(), cwd: z.string(), configDir: z.string().optional() }),
   z.object({ type: z.literal("req"), id: z.string(), op: z.literal("enable"), title: z.string() }),
   z.object({ type: z.literal("req"), id: z.string(), op: z.literal("disable") }),

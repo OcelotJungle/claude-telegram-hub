@@ -91,11 +91,12 @@ function sent() {
   return fake.texts().map(p => ({ text: p.text, silent: p.disable_notification, topic: p.message_thread_id }));
 }
 
-function makeCore(sessionId = SID) {
+function makeCore(sessionId = SID, entrypoint?: string) {
   core = new PluginCore({
     sessionId,
     cwd: CWD,
     configDir,
+    ...(entrypoint ? { entrypoint } : {}),
     windowKey: "pipe-1",
     port,
     spoolDir,
@@ -186,6 +187,27 @@ async function enabledCore() {
 }
 
 describe("PluginCore", () => {
+  test("an interactive session is on from the start and gets its topic at its first text", async () => {
+    const c = makeCore(SID, "cli");
+    await waitFor(() => hub.isConnected(SID), 3000, "plugin connected");
+    await waitFor(() => c.enabled, 3000, "mode on");
+    await Bun.sleep(100);
+    expect(fake.callsOf("createForumTopic")).toEqual([]);
+    append(assistantText("Готово", "end_turn", "a1"), closed);
+    await stopHook(true, "done");
+    await waitFor(() => sent().length === 1, 5000, "the text");
+    expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: "demo-app · Старое имя" }]);
+    expect(sent()).toEqual([{ text: "Готово", silent: false, topic: 100 }]);
+  });
+
+  test("a session started by an SDK entrypoint stays off and gets no topic", async () => {
+    const c = makeCore(SID, "sdk-cli");
+    await waitFor(() => hub.isConnected(SID), 3000, "plugin connected");
+    await Bun.sleep(150);
+    expect(c.enabled).toBe(false);
+    expect(fake.callsOf("createForumTopic")).toEqual([]);
+  });
+
   test("enable creates a topic named from the session title, history is not sent", async () => {
     const c = makeCore();
     const answer = await c.enable();

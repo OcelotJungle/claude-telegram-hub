@@ -7,17 +7,29 @@ const SEP = " · ";
 // A cswap profile folder: <number>-<email>.
 const CSWAP_PROFILE = /^(\d+)-/;
 
+// topicId: absent until the session first writes to Telegram (the topic is made then);
+// disabledByUser: the user turned the mode off (tg_disable), so an interactive window does not turn it back on.
 // cwd and account: where and on which cswap account the session last ran;
 // transcript: its transcript file, as Claude Code's hook named it.
-export type SessionRecord = { topicId: number; title: string; project: string; enabled: boolean; cwd?: string; account?: string; transcript?: string };
+export type SessionRecord = {
+  topicId?: number;
+  title: string;
+  project: string;
+  enabled: boolean;
+  disabledByUser?: boolean;
+  cwd?: string;
+  account?: string;
+  transcript?: string;
+};
 
 const dataSchema: z.ZodType<Record<string, SessionRecord>> = z.record(
   z.string(),
   z.object({
-    topicId: z.number(),
+    topicId: z.number().optional(),
     title: z.string(),
     project: z.string(),
     enabled: z.boolean(),
+    disabledByUser: z.boolean().optional(),
     cwd: z.string().optional(),
     account: z.string().optional(),
     transcript: z.string().optional(),
@@ -63,6 +75,20 @@ export class SessionStore {
     this.save();
   }
 
+  setTopicId(sessionId: string, topicId: number): void {
+    const rec = this.data[sessionId];
+    if (!rec) return;
+    this.data[sessionId] = { ...rec, topicId };
+    this.save();
+  }
+
+  setTitle(sessionId: string, title: string): void {
+    const rec = this.data[sessionId];
+    if (!rec || rec.title === title) return;
+    this.data[sessionId] = { ...rec, title };
+    this.save();
+  }
+
   // Remembers where the session runs now; unknown values keep the old ones.
   setWhere(sessionId: string, cwd: string | undefined, account: string | undefined): void {
     const rec = this.data[sessionId];
@@ -80,10 +106,15 @@ export class SessionStore {
     this.save();
   }
 
-  setEnabled(sessionId: string, on: boolean): void {
+  // byUser: the user's own tg_disable. It is kept until the mode is turned on again.
+  setEnabled(sessionId: string, on: boolean, byUser = false): void {
     const rec = this.data[sessionId];
-    if (!rec || rec.enabled === on) return;
-    rec.enabled = on;
+    if (!rec) return;
+    const next: SessionRecord = { ...rec, enabled: on };
+    if (on) delete next.disabledByUser;
+    else if (byUser) next.disabledByUser = true;
+    if (next.enabled === rec.enabled && next.disabledByUser === rec.disabledByUser) return;
+    this.data[sessionId] = next;
     this.save();
   }
 

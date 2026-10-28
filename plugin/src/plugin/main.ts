@@ -72,6 +72,8 @@ const core = sessionId
       sessionId,
       cwd,
       configDir,
+      // "cli" when the window runs in the terminal; the hub turns the mode on for it.
+      entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT,
       windowKey,
       port: hubPort(),
       spoolDir: paths().spoolDir,

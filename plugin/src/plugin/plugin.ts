@@ -72,6 +72,8 @@ export type PluginOptions = {
   sessionId: string;
   cwd: string;
   configDir: string;
+  // CLAUDE_CODE_ENTRYPOINT: "cli" for a terminal window (sent in hello).
+  entrypoint?: string;
   windowKey: string;
   port: number;
   // Where text the hub never acked goes when the window closes.
@@ -173,7 +175,7 @@ export class PluginCore {
     this.transcriptPath = transcriptPathFor(opts.sessionId, opts.cwd, opts.configDir);
     this.client = new HubClient({
       port: opts.port,
-      hello: () => ({ type: "hello", v: PROTOCOL_VERSION, windowKey: opts.windowKey, sessionId: this.sessionId, cwd: this.cwd, configDir: opts.configDir, busy: this.busy, reportsSeen: true }),
+      hello: () => ({ type: "hello", v: PROTOCOL_VERSION, windowKey: opts.windowKey, sessionId: this.sessionId, cwd: this.cwd, configDir: opts.configDir, busy: this.busy, reportsSeen: true, entrypoint: opts.entrypoint, title: effectiveTitle(this.titles) }),
       spawnHub: opts.spawnHub,
       onMessage: m => this.onHubMessage(m),
       log: opts.log,

@@ -59,6 +59,51 @@ describe("SessionStore", () => {
     expect(a.get("nope")).toBeUndefined();
   });
 
+  test("an explicit off is persisted as disabledByUser", () => {
+    const file = join(tempDir(), "sessions.json");
+    const a = new SessionStore(file);
+    a.set("s1", rec);
+    a.setEnabled("s1", false, true);
+    expect(new SessionStore(file).get("s1")).toEqual({ ...rec, enabled: false, disabledByUser: true });
+  });
+
+  test("an off that is not explicit keeps an earlier explicit off", () => {
+    const file = join(tempDir(), "sessions.json");
+    const a = new SessionStore(file);
+    a.set("s1", rec);
+    a.setEnabled("s1", false, true);
+    a.setEnabled("s1", false);
+    expect(new SessionStore(file).get("s1")).toMatchObject({ enabled: false, disabledByUser: true });
+  });
+
+  test("turning on clears disabledByUser", () => {
+    const file = join(tempDir(), "sessions.json");
+    const a = new SessionStore(file);
+    a.set("s1", rec);
+    a.setEnabled("s1", false, true);
+    expect(a.get("s1")).toMatchObject({ disabledByUser: true });
+    a.setEnabled("s1", true);
+    const got = new SessionStore(file).get("s1");
+    expect(got?.enabled).toBe(true);
+    expect(got && "disabledByUser" in got).toBe(false);
+  });
+
+  test("a record without a topic loads and keeps working", () => {
+    const file = join(tempDir(), "sessions.json");
+    const noTopic = { title: "Fix login", project: "app", enabled: true, cwd: "C:\\app" };
+    writeFileSync(file, JSON.stringify({ s1: noTopic }));
+    expect(new SessionStore(file).get("s1")).toEqual(noTopic);
+  });
+
+  test("setTopicId and setTitle are persisted without touching the other fields", () => {
+    const file = join(tempDir(), "sessions.json");
+    const a = new SessionStore(file);
+    a.set("s1", { title: "Fix login", project: "app", enabled: true });
+    a.setTitle("s1", "Other");
+    a.setTopicId("s1", 300);
+    expect(new SessionStore(file).get("s1")).toEqual({ topicId: 300, title: "Other", project: "app", enabled: true });
+  });
+
   test("a corrupt file is moved aside and the store starts empty", () => {
     const dir = tempDir();
     const file = join(dir, "sessions.json");

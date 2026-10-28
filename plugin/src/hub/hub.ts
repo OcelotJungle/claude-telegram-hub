@@ -54,6 +54,8 @@ const INACTIVE_TEXT = "сессия сейчас не активна";
 // The queue id prefix of the start notice, "starting the session".
 const LAUNCH_NOTICE = "launch-";
 const LAUNCHED_TEXT = "✅ Сессия запущена";
+// CLAUDE_CODE_ENTRYPOINT of a window started in the terminal; such a window is on by default.
+const CLI_ENTRYPOINT = "cli";
 // After a launched session says hello, Claude Code still registers the
 // channel; messages sent sooner are lost.
 const READY_DELAY_MS = 1500;
@@ -772,8 +774,11 @@ export class Hub {
       case "hello": {
         if (msg.v !== PROTOCOL_VERSION) this.log.warn(`plugin protocol v${msg.v}, hub v${PROTOCOL_VERSION}`);
         ws.data = { windowKey: msg.windowKey, sessionId: msg.sessionId, cwd: msg.cwd, account: accountOf(msg.configDir), busy: msg.busy, reportsSeen: msg.reportsSeen };
+        this.autoOn(msg);
         this.store.setWhere(msg.sessionId, msg.cwd, ws.data.account);
-        this.log.info(`window ${msg.windowKey} connected, session ${msg.sessionId}, account ${ws.data.account ?? "not named"}`);
+        const title = msg.title;
+        if (title) void this.chain(msg.sessionId, () => this.retitle(msg.sessionId, title));
+        this.log.info(`window ${msg.windowKey} connected, session ${msg.sessionId}, entrypoint ${msg.entrypoint ?? "not given"}, account ${ws.data.account ?? "not named"}`);
         this.askDefaultAccount(ws, msg.configDir);
         this.pushState(msg.sessionId);
         this.giveHeldResults(ws, msg.sessionId);
@@ -843,13 +848,15 @@ ${msg.text}`);
   private showTyping(ws: WS): void {
     const sid = ws.data.sessionId;
     const rec = sid ? this.store.get(sid) : undefined;
+    const topicId = rec?.topicId;
     const api = this.opts.api;
     const groupId = this.opts.config().groupId;
-    if (!sid || !rec?.enabled || !api || !groupId || this.typingQueued.has(sid)) return;
+    // A session with no topic yet has nothing to show typing in.
+    if (!sid || !rec?.enabled || topicId === undefined || !api || !groupId || this.typingQueued.has(sid)) return;
     this.typingQueued.add(sid);
     this.typingQueue = this.typingQueue.then(() => {
       this.typingQueued.delete(sid);
-      return api.sendTyping(groupId, rec.topicId).then(
+      return api.sendTyping(groupId, topicId).then(
         () => {
           const failures = this.typingFailed.get(sid);
           if (!failures) return;
@@ -871,7 +878,7 @@ ${msg.text}`);
       let result: unknown;
       if (!sid) throw new Error("window has not said hello");
       if (msg.op === "enable") result = await this.chain(sid, () => this.enable(sid, ws.data.cwd ?? "", ws.data.account, msg.title));
-      else if (msg.op === "disable") result = this.setEnabled(sid, false);
+      else if (msg.op === "disable") result = this.setEnabled(sid, false, true);
       else result = await this.requireApi().downloadFile(msg.fileId, this.opts.inboxDir);
       this.send(ws, { type: "res", id: msg.id, ok: true, result });
     } catch (e) {
@@ -906,8 +913,11 @@ ${msg.text}`);
     const existing = this.store.get(sessionId);
     if (existing) {
       if (title && existing.title !== title) await this.renameTopic(api, groupId, sessionId, existing, title);
+      // A session that has no topic yet gets its topic now, not at its first message.
+      const created = existing.topicId === undefined;
+      if (created) await this.createTopic(api, groupId, sessionId);
       this.setEnabled(sessionId, true);
-      return { topicTitle: topicName(existing.project, existing.title), created: false };
+      return { topicTitle: topicName(existing.project, title || existing.title), created };
     }
     const project = projectName(cwd);
     const topic = await api.createForumTopic(groupId, topicName(project, title));
@@ -919,7 +929,13 @@ ${msg.text}`);
 
   private async retitle(sessionId: string, title: string): Promise<void> {
     const rec = this.store.get(sessionId);
-    if (!rec || !title || rec.title === title || !this.opts.api) return;
+    if (!rec || !title || rec.title === title) return;
+    // No topic yet: the title is only stored, and the topic is named with it when it is made.
+    if (rec.topicId === undefined) {
+      this.store.setTitle(sessionId, title);
+      return;
+    }
+    if (!this.opts.api) return;
     const groupId = this.opts.config().groupId;
     if (!groupId) return;
     try {
@@ -930,12 +946,35 @@ ${msg.text}`);
   }
 
   private async renameTopic(api: TelegramApi, groupId: string, sessionId: string, rec: SessionRecord, title: string): Promise<void> {
-    await api.editForumTopic(groupId, rec.topicId, topicName(rec.project, title));
-    this.store.set(sessionId, { ...rec, title });
+    if (rec.topicId !== undefined) await api.editForumTopic(groupId, rec.topicId, topicName(rec.project, title));
+    this.store.setTitle(sessionId, title);
   }
 
-  private setEnabled(sessionId: string, on: boolean): boolean {
-    this.store.setEnabled(sessionId, on);
+  // Makes the topic of a session that has none, named with the stored title.
+  private async createTopic(api: TelegramApi, groupId: string, sessionId: string): Promise<number> {
+    const rec = this.store.get(sessionId);
+    if (!rec) throw new Error(`session ${sessionId} is not known`);
+    const topic = await api.createForumTopic(groupId, topicName(rec.project, rec.title));
+    this.store.setTopicId(sessionId, topic.message_thread_id);
+    this.log.info(`created topic ${topic.message_thread_id} "${topic.name}" for session ${sessionId}`);
+    return topic.message_thread_id;
+  }
+
+  // A window that starts in the terminal (entrypoint cli) is on by default; it gets no topic until it first writes.
+  // A record the user turned off with tg_disable stays off.
+  private autoOn(msg: { sessionId: string; cwd: string; entrypoint?: string; title?: string }): void {
+    if (msg.entrypoint !== CLI_ENTRYPOINT) return;
+    const rec = this.store.get(msg.sessionId);
+    if (!rec) {
+      this.store.set(msg.sessionId, { title: msg.title ?? "", project: projectName(msg.cwd), enabled: true });
+      return;
+    }
+    if (!rec.enabled && !rec.disabledByUser) this.store.setEnabled(msg.sessionId, true);
+  }
+
+  // byUser: the user's own tg_disable, which keeps the mode off across window restarts.
+  private setEnabled(sessionId: string, on: boolean, byUser = false): boolean {
+    this.store.setEnabled(sessionId, on, byUser);
     this.pushState(sessionId);
     // With the mode off the user answers in the terminal, as on a timeout.
     if (!on) for (const p of this.polls.values()) if (p.sessionId === sessionId) void this.finishPoll(p, { decision: "none" }, TO_TERMINAL);
@@ -1572,15 +1611,16 @@ ${msg.text}`);
   private async sendToTopic<T>(api: TelegramApi, groupId: string, sessionId: string, send: (threadId: number) => Promise<T>): Promise<T> {
     const rec = this.store.get(sessionId);
     if (!rec) throw new Error(`session ${sessionId} has no topic`);
+    // A session with no topic yet gets one at its first message. The chain makes concurrent first messages share it.
+    const threadId = rec.topicId ?? (await this.chain(sessionId, async () => this.store.get(sessionId)?.topicId ?? (await this.createTopic(api, groupId, sessionId))));
     try {
-      return await send(rec.topicId);
+      return await send(threadId);
     } catch (e) {
       if (!isThreadNotFound(e)) throw e;
       // The topic was deleted by hand: give the session a new one.
-      const topic = await api.createForumTopic(groupId, topicName(rec.project, rec.title));
-      this.store.set(sessionId, { ...rec, topicId: topic.message_thread_id });
-      this.log.warn(`topic ${rec.topicId} of session ${sessionId} is gone, created ${topic.message_thread_id}`);
-      return await send(topic.message_thread_id);
+      const newId = await this.createTopic(api, groupId, sessionId);
+      this.log.warn(`topic ${threadId} of session ${sessionId} is gone, created ${newId}`);
+      return await send(newId);
     }
   }
 
