@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, truncateSync, writeFileSync } from "fs";
 import { join } from "path";
 import { Hub } from "../src/hub/hub.ts";
+import { SessionStore } from "../src/hub/sessions.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
 import { CHIME_MIN_TURN_MS, CONTINUE_PROMPT, CUT_LIMIT_NOTE, cutLimitNote, filesRejectedPrompt, interruptPrompt, MAX_AUTO_CONTINUES, playConfiguredChime, PluginCore } from "../src/plugin/plugin.ts";
 import { defaultTurnEndChime } from "../src/shared/chime.ts";
@@ -623,6 +624,16 @@ describe("PluginCore", () => {
     await waitFor(() => sent().length === 1, 3000, "message");
     await Bun.sleep(150);
     expect(sent()).toEqual([{ text: "в новой сессии", silent: true, topic: 101 }]);
+  });
+
+  test("switching a CLI window sends the new title and follows the hub mode", async () => {
+    const c = makeCore(SID, "cli");
+    await waitFor(() => hub.isConnected(SID), 3000, "plugin connected");
+    const next = join(configDir, "projects", "C--code-demo-app", "sess-2.jsonl");
+    writeFileSync(next, line({ type: "ai-title", aiTitle: "После clear" }));
+    c.switchSession("sess-2", next, CWD);
+    await waitFor(() => hub.isConnected("sess-2") && c.enabled && new SessionStore(join(state, "sessions.json")).get("sess-2")?.title === "После clear", 3000, "hub mode applied after switch");
+    expect(new SessionStore(join(state, "sessions.json")).get("sess-2")).toMatchObject({ enabled: true, title: "После clear" });
   });
 
   test("shutdown sends text written just before the window closed", async () => {

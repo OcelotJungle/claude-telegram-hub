@@ -51,7 +51,7 @@ export type EnableResult = { topicTitle: string; created: boolean };
 export type PluginToHub =
   // entrypoint: CLAUDE_CODE_ENTRYPOINT ("cli" for the terminal, absent or other for SDK runs); title: the session's title now.
   | { type: "hello"; v: number; windowKey: string; sessionId: string; cwd: string; configDir?: string; busy?: boolean; reportsSeen?: boolean; entrypoint?: string; title?: string }
-  | { type: "session"; sessionId: string; cwd: string; configDir?: string }
+  | { type: "session"; sessionId: string; cwd: string; configDir?: string; entrypoint?: string; title?: string }
   | ({ type: "req"; id: string } & HubRequest)
   // sessionId: the session the text was written in (older plugins omit it;
   // then the window's current session is meant).

@@ -143,7 +143,7 @@ const BOT_COMMANDS = [
 const EXEC_NOT_SET = "⚠️ Команды оболочки в этом хабе не настроены";
 
 // exitingPid: the Claude Code process the plugin said it is ending.
-type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; busy?: boolean; reportsSeen?: boolean; exitingPid?: number };
+type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; entrypoint?: string; busy?: boolean; reportsSeen?: boolean; exitingPid?: number };
 type WS = ServerWebSocket<Conn>;
 type Card = {
   text: string;
@@ -773,14 +773,10 @@ export class Hub {
     switch (msg.type) {
       case "hello": {
         if (msg.v !== PROTOCOL_VERSION) this.log.warn(`plugin protocol v${msg.v}, hub v${PROTOCOL_VERSION}`);
-        ws.data = { windowKey: msg.windowKey, sessionId: msg.sessionId, cwd: msg.cwd, account: accountOf(msg.configDir), busy: msg.busy, reportsSeen: msg.reportsSeen };
-        this.autoOn(msg);
-        this.store.setWhere(msg.sessionId, msg.cwd, ws.data.account);
-        const title = msg.title;
-        if (title) void this.chain(msg.sessionId, () => this.retitle(msg.sessionId, title));
+        ws.data = { ...ws.data, windowKey: msg.windowKey, busy: msg.busy, reportsSeen: msg.reportsSeen };
+        this.attachSession(ws, msg);
         this.log.info(`window ${msg.windowKey} connected, session ${msg.sessionId}, entrypoint ${msg.entrypoint ?? "not given"}, account ${ws.data.account ?? "not named"}`);
         this.askDefaultAccount(ws, msg.configDir);
-        this.pushState(msg.sessionId);
         this.giveHeldResults(ws, msg.sessionId);
         const pending = this.pendingHooks.get(msg.windowKey);
         this.pendingHooks.delete(msg.windowKey);
@@ -789,15 +785,12 @@ export class Hub {
         if (msg.busy) this.showTyping(ws);
         return;
       }
-      case "session":
-        ws.data.sessionId = msg.sessionId;
-        ws.data.cwd = msg.cwd;
-        ws.data.account = accountOf(msg.configDir) ?? ws.data.account;
-        this.store.setWhere(msg.sessionId, msg.cwd, ws.data.account);
+      case "session": {
+        this.attachSession(ws, msg);
         this.log.info(`window ${ws.data.windowKey} switched to session ${msg.sessionId}`);
-        this.pushState(msg.sessionId);
         this.launched(ws, msg.sessionId);
         return;
+      }
       case "req":
         void this.handleRequest(ws, msg);
         return;
@@ -960,9 +953,20 @@ ${msg.text}`);
     return topic.message_thread_id;
   }
 
-  // A window that starts in the terminal (entrypoint cli) is on by default; it gets no topic until it first writes.
-  // A record the user turned off with tg_disable stays off.
-  private autoOn(msg: { sessionId: string; cwd: string; entrypoint?: string; title?: string }): void {
+  // Every attachment applies the same window default to its session; topics remain lazy until the first text.
+  private attachSession(ws: WS, msg: { sessionId: string; cwd: string; configDir?: string; entrypoint?: string; title?: string }): void {
+    const account = accountOf(msg.configDir) ?? ws.data.account;
+    const entrypoint = msg.entrypoint ?? ws.data.entrypoint;
+    ws.data = { ...ws.data, sessionId: msg.sessionId, cwd: msg.cwd, account, entrypoint };
+    this.applyDefaultMode({ sessionId: msg.sessionId, cwd: msg.cwd, entrypoint, title: msg.title });
+    this.store.setWhere(msg.sessionId, msg.cwd, account);
+    const title = msg.title;
+    if (title) void this.chain(msg.sessionId, () => this.retitle(msg.sessionId, title));
+    this.pushState(msg.sessionId);
+  }
+
+  // A terminal window is on by default; a record the user turned off stays off.
+  private applyDefaultMode(msg: { sessionId: string; cwd: string; entrypoint?: string; title?: string }): void {
     if (msg.entrypoint !== CLI_ENTRYPOINT) return;
     const rec = this.store.get(msg.sessionId);
     if (!rec) {

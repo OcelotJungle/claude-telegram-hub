@@ -306,12 +306,11 @@ export class PluginCore {
     }
     this.log.info(`session ${this.sessionId} → ${sessionId}`);
     this.flush(this.relay.endTurn());
-    this.setEnabled(false);
     this.setBusy(false);
     this.sessionId = sessionId;
     this.cwd = cwd || this.cwd;
     this.follow(transcriptPath);
-    this.client.send({ type: "session", sessionId, cwd: this.cwd, configDir: this.opts.configDir });
+    this.client.send({ type: "session", sessionId, cwd: this.cwd, configDir: this.opts.configDir, entrypoint: this.opts.entrypoint, title: effectiveTitle(this.titles) });
   }
 
   private follow(path: string): void {

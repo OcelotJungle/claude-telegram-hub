@@ -312,6 +312,56 @@ describe("interactive windows", () => {
     expect(new SessionStore(STORE_FILE()).get("s1")).toMatchObject({ enabled: false, disabledByUser: true });
   });
 
+  test("switching a CLI window to a new session turns it on without creating a topic", async () => {
+    await startHub();
+    const c = await connect(cliHello("old", { title: "Old title" }));
+    // The state the switch causes, not the hello state of the old session that is already in c.messages.
+    const sent = c.messages.length;
+    c.send({ type: "session", sessionId: "new", cwd: CWD, entrypoint: "cli", title: "After clear" });
+    await waitFor(() => c.messages.slice(sent).some(m => m.type === "state" && m.enabled), 3000, "the new session turned on");
+    expect(new SessionStore(STORE_FILE()).get("new")).toMatchObject({ enabled: true, title: "After clear" });
+    expect(new SessionStore(STORE_FILE()).get("old")?.enabled).toBe(true);
+    expect(fake.callsOf("createForumTopic")).toEqual([]);
+    c.send({ type: "send", id: "new-text", text: "first text", notify: false });
+    await waitFor(() => fake.texts().length === 1, 3000, "the first text in the new session");
+    expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: `${basename(CWD)} · After clear` }]);
+  });
+
+  test("switching to a session disabled by the user keeps it off", async () => {
+    await startHub();
+    const window = await connect(cliHello("window"));
+    const disabled = await connect(cliHello("disabled", { title: "Before switch" }));
+    await req(disabled, { op: "disable" });
+    disabled.close();
+    await waitFor(() => !hub.isConnected("disabled"), 3000, "disabled session window closed");
+    window.send({ type: "session", sessionId: "disabled", cwd: CWD, entrypoint: "cli", title: "Disabled" });
+    await window.next("state", m => !m.enabled);
+    await waitFor(() => new SessionStore(STORE_FILE()).get("disabled")?.title === "Disabled", 3000, "the new title");
+    expect(new SessionStore(STORE_FILE()).get("disabled")).toMatchObject({ enabled: false, disabledByUser: true });
+  });
+
+  test("switching in an SDK window stays off and preserves the old session mode", async () => {
+    await startHub();
+    const old = await connect(cliHello("old"));
+    const disabled = await connect(cliHello("sdk-disabled", { title: "Before SDK switch" }));
+    await req(disabled, { op: "disable" });
+    disabled.close();
+    await waitFor(() => !hub.isConnected("sdk-disabled"), 3000, "disabled session window closed");
+    const c = await connect({ ...hello("old", "sdk-window"), entrypoint: "sdk-cli" });
+    expect(new SessionStore(STORE_FILE()).get("old")?.enabled).toBe(true);
+    // Each wait takes the state that its own switch causes; the hello state (off for an SDK window) is already in c.messages.
+    const sentNext = c.messages.length;
+    c.send({ type: "session", sessionId: "sdk-next", cwd: CWD, entrypoint: "sdk-cli", title: "SDK" });
+    await waitFor(() => c.messages.slice(sentNext).some(m => m.type === "state" && !m.enabled), 3000, "the state after the SDK switch");
+    expect(new SessionStore(STORE_FILE()).get("sdk-next")).toBeUndefined();
+    expect(new SessionStore(STORE_FILE()).get("old")?.enabled).toBe(true);
+    const sentDisabled = c.messages.length;
+    c.send({ type: "session", sessionId: "sdk-disabled", cwd: CWD, entrypoint: "sdk-cli", title: "SDK title" });
+    await waitFor(() => c.messages.slice(sentDisabled).some(m => m.type === "state" && !m.enabled), 3000, "the state after the second SDK switch");
+    await waitFor(() => new SessionStore(STORE_FILE()).get("sdk-disabled")?.title === "SDK title", 3000, "the SDK switch title");
+    expect(new SessionStore(STORE_FILE()).get("sdk-disabled")).toMatchObject({ enabled: false, disabledByUser: true });
+  });
+
   test("a topic message turns a disabled window back on and clears the flag", async () => {
     await startHub();
     const c = await enabled("s1", "T");
