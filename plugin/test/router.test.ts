@@ -112,14 +112,21 @@ describe("commandOf", () => {
     expect(commandOf("/compact  keep the plan\nand the tests ", "test_bot")).toEqual({ name: "compact", args: "keep the plan\nand the tests" });
   });
 
+  test("/rename with the new name, bare /rename with none", () => {
+    expect(commandOf("/rename new name", "test_bot")).toEqual({ name: "rename", args: "new name" });
+    expect(commandOf("/rename  Спринт 3 ", "test_bot")).toEqual({ name: "rename", args: "Спринт 3" });
+    expect(commandOf("/rename", "test_bot")).toEqual({ name: "rename", args: "" });
+  });
+
   test("addressed to this bot, in any case", () => {
     expect(commandOf("/info@test_bot", "test_bot")).toEqual({ name: "info", args: "" });
     expect(commandOf("/compact@Test_Bot 200k", "test_bot")).toEqual({ name: "compact", args: "200k" });
     expect(commandOf("/INFO", "test_bot")).toEqual({ name: "info", args: "" });
+    expect(commandOf("/rename@test_bot new name", "test_bot")).toEqual({ name: "rename", args: "new name" });
   });
 
   test("another bot, another command or text around it is a plain message", () => {
-    for (const text of ["/info@other_bot", "/start", "/compactor", "see /info", " /info", "/", "", "/run"]) expect(commandOf(text, "test_bot")).toBeUndefined();
+    for (const text of ["/info@other_bot", "/rename@other_bot new name", "/start", "/compactor", "/renamed x", "see /info", " /info", "/", "", "/run"]) expect(commandOf(text, "test_bot")).toBeUndefined();
   });
 });
 

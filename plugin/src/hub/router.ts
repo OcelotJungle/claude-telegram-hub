@@ -58,11 +58,11 @@ export function routeCallback(u: Update, cfg: Config): CallbackRoute | undefined
 }
 
 // A command the plugin's function hooks module runs instead of the agent:
-// `/info` or `/compact`, maybe `@<this bot>`, then arguments. Anything else,
-// a command for another bot included, is a plain message.
+// `/info`, `/compact` or `/rename`, maybe `@<this bot>`, then arguments.
+// Anything else, a command for another bot included, is a plain message.
 export function commandOf(text: string, botUsername: string | undefined): Omit<TopicCommand, "id"> | undefined {
   const c = parseCommand(text, botUsername);
-  return c && (c.name === "info" || c.name === "compact") ? { name: c.name, args: c.args } : undefined;
+  return c && (c.name === "info" || c.name === "compact" || c.name === "rename") ? { name: c.name, args: c.args } : undefined;
 }
 
 // A command the hub runs itself: `/run [account]` starts the topic's session,

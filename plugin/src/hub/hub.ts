@@ -130,6 +130,7 @@ const TYPING_EVERY_MS = 4000;
 const BOT_COMMANDS = [
   { command: "info", description: "Лимиты и контекст сессии" },
   { command: "compact", description: "Сжать контекст; /compact <указания> — с указаниями; /compact N — окно автокомпакта" },
+  { command: "rename", description: "Переименовать сессию и её тему; /rename <имя> — новое имя" },
   { command: "run", description: "Запустить сессию; /run N — на аккаунте N" },
   { command: "stop", description: "Завершить сессию" },
   { command: "cleanup", description: "Сжать контекст, убрать накопившиеся скиллы и завершить сессию" },

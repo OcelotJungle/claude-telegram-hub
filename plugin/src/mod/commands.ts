@@ -43,6 +43,9 @@ const STALE_LIMITS_MS = 300_000;
 // Polls in a row on which the compaction failed with no turn running before
 // the failure is reported: a turn may start just as it is tried.
 const COMPACT_TRIES = 3;
+// The answer to /rename without a name, and the notice queued while a rename waits.
+const RENAME_HINT = "Напиши имя: /rename новое имя";
+const RENAME_STARTED = "🏷 Переименование на очереди.";
 
 // The part of the engine's SessionUsage that /info shows.
 export type Usage = {
@@ -154,6 +157,7 @@ export class Runner {
     }
     if (cmd.name === "stop") return this.stop(to);
     if (cmd.name === "cleanup") return this.cleanup(to, cmd.args);
+    if (cmd.name === "rename") return this.rename(to, cmd.args);
     const window = autocompactArg(cmd.args);
     if (window !== undefined) {
       try {
@@ -205,6 +209,22 @@ export class Runner {
       await this.flush();
     };
     await new Promise<void>(done => this.compactions.push({ args, failed: 0, report, done }));
+  }
+
+  // /rename <name> runs the session's own /rename once the session is idle;
+  // the topic follows the new title through the hub's retitle, not here.
+  private async rename(to: Target, name: string): Promise<void> {
+    if (!name) {
+      await this.reply(to, RENAME_HINT, "info");
+      return;
+    }
+    const startedId = await this.reply(to, RENAME_STARTED, "info", undefined, true);
+    try {
+      await this.deps.run("rename", name);
+      await this.reply(to, `✅ /rename ${name} выполнена.`, "info", { id: startedId, kind: "success" });
+    } catch (e) {
+      await this.reply(to, `⚠️ /rename ${name} не выполнена: ${message(e)}`, "warning", { id: startedId, kind: "warning" });
+    }
   }
 
   // The engine's own result, not the session.compact hook: the compact
@@ -431,5 +451,5 @@ function isRateLimit(v: unknown): v is RateLimit {
 function isTopicCommand(v: unknown): v is TopicCommand {
   if (typeof v !== "object" || v === null) return false;
   const name = "name" in v ? v.name : undefined;
-  return "id" in v && typeof v.id === "string" && (name === "info" || name === "compact" || name === "stop" || name === "cleanup") && "args" in v && typeof v.args === "string";
+  return "id" in v && typeof v.id === "string" && (name === "info" || name === "compact" || name === "stop" || name === "cleanup" || name === "rename") && "args" in v && typeof v.args === "string";
 }

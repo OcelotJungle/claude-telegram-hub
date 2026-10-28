@@ -295,6 +295,72 @@ describe("limits shared through the hub", () => {
   });
 });
 
+describe("/rename", () => {
+  const STARTED = "🏷 Переименование на очереди.";
+  const HINT = "Напиши имя: /rename новое имя";
+
+  function runner(commands: { id: string; name: string; args: string }[], run: (command: string, args: string) => Promise<{ text?: string }>) {
+    const posted: { path: string; body: unknown }[] = [];
+    const ran: [string, string][] = [];
+    let queue = commands;
+    const r = new Runner("http://hub", {
+      sessionId: async () => "s",
+      usage: async () => usage({ tokens: 1 }),
+      run: (command, args) => {
+        ran.push([command, args]);
+        return run(command, args);
+      },
+      compact: async () => ({}),
+      http: async (url, init) => {
+        if (init?.method === "POST") {
+          posted.push({ path: new URL(url).pathname, body: JSON.parse(init.body ?? "null") });
+          return { status: 200, text: "ok" };
+        }
+        const list = queue;
+        queue = [];
+        return { status: 200, text: JSON.stringify(list) };
+      },
+      now: () => NOW,
+    });
+    const polls = async (n: number) => {
+      for (let i = 0; i < n; i++) {
+        await r.poll();
+        await Bun.sleep(10);
+      }
+    };
+    return { posted, ran, polls };
+  }
+
+  test("/rename runs the session's rename with the name; the queued notice becomes the result", async () => {
+    const s = runner([{ id: "c1", name: "rename", args: "Спринт 3" }], async () => ({}));
+    await s.polls(5);
+    expect(s.ran).toEqual([["rename", "Спринт 3"]]);
+    expect(s.posted).toEqual([
+      { path: "/reply", body: { sessionId: "s", id: "c1.0", text: STARTED, notify: false, awaitsResult: true } },
+      { path: "/reply", body: { sessionId: "s", id: "c1.1", text: "✅ /rename Спринт 3 выполнена.", notify: false, replaces: { id: "c1.0", kind: "success" } } },
+    ]);
+  });
+
+  test("a rejected rename is a warning that replaces the queued notice", async () => {
+    const s = runner([{ id: "c1", name: "rename", args: "x" }], async () => {
+      throw new Error("command not available");
+    });
+    await s.polls(5);
+    expect(s.ran).toEqual([["rename", "x"]]);
+    expect(s.posted).toEqual([
+      { path: "/reply", body: { sessionId: "s", id: "c1.0", text: STARTED, notify: false, awaitsResult: true } },
+      { path: "/reply", body: { sessionId: "s", id: "c1.1", text: "⚠️ /rename x не выполнена: command not available", notify: true, replaces: { id: "c1.0", kind: "warning" } } },
+    ]);
+  });
+
+  test("bare /rename answers with the hint and runs nothing", async () => {
+    const s = runner([{ id: "c1", name: "rename", args: "" }], async () => ({}));
+    await s.polls(3);
+    expect(s.ran).toEqual([]);
+    expect(s.posted).toEqual([{ path: "/reply", body: { sessionId: "s", id: "c1.0", text: HINT, notify: false } }]);
+  });
+});
+
 describe("/cleanup", () => {
   const STARTED = "🧹 Уборка на очереди.";
 

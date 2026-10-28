@@ -2119,6 +2119,21 @@ describe("commands", () => {
     expect(sent.disable_notification).toBe(true);
   });
 
+  test("/rename goes to the mod, which runs the session's rename and edits its queued notice into the result", async () => {
+    await startHub();
+    await enabled("a");
+    const { runner, ran } = mod("a");
+    command("/rename Спринт 3");
+    const started = await reply(runner, t => t.startsWith("🏷"));
+    expect(started.text).toBe("🏷 Переименование на очереди.");
+    const edited = await waitFor(async () => {
+      await runner.poll();
+      return editedText(t => t.startsWith("✅ /rename"));
+    });
+    expect(edited.text).toBe("✅ /rename Спринт 3 выполнена.");
+    expect(ran).toEqual([["rename", "Спринт 3"]]);
+  });
+
   test("a reply the mod could not deliver goes with the next poll, once", async () => {
     await startHub();
     await enabled("a");
@@ -2437,8 +2452,9 @@ sys.exit(1)
   test("the hub puts the commands into the bot menu", async () => {
     await startHub();
     const call = await waitFor(() => fake.callsOf("setMyCommands")[0]);
-    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "run", "stop", "cleanup", "pwsh", "cmd", "bash"]);
+    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "rename", "run", "stop", "cleanup", "pwsh", "cmd", "bash"]);
     expect(field(arr(call.commands).find(c => field(c, "command") === "compact"), "description")).toBe("Сжать контекст; /compact <указания> — с указаниями; /compact N — окно автокомпакта");
+    expect(field(arr(call.commands).find(c => field(c, "command") === "rename"), "description")).toBe("Переименовать сессию и её тему; /rename <имя> — новое имя");
     expect(field(arr(call.commands).find(c => field(c, "command") === "pwsh"), "description")).toBe("Команда в PowerShell в папке сессии");
   });
 
