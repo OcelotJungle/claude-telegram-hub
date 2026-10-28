@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { z } from "zod";
-import { cleanupSummary, Hub } from "../src/hub/hub.ts";
+import { cleanupSummary, Hub, projectName } from "../src/hub/hub.ts";
 import { CANCEL_REASON, CANCELLED, CUSTOM_HINT, PICK_ONE, STALE_POLL, TO_TERMINAL } from "../src/hub/questions.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
 import { cleanTranscript } from "../src/hub/skill-cleanup.ts";
@@ -186,10 +186,10 @@ describe("enable", () => {
     await startHub();
     const c = await plugin("s1");
     const res = await req(c, { op: "enable", title: "Реализация хаба" });
-    expect(res).toMatchObject({ ok: true, result: { topicTitle: "claude-telegram-hub · Реализация хаба", created: true } });
-    expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: "claude-telegram-hub · Реализация хаба" }]);
+    expect(res).toMatchObject({ ok: true, result: { topicTitle: `${projectName(CWD)} · Реализация хаба`, created: true } });
+    expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: `${projectName(CWD)} · Реализация хаба` }]);
     await c.next("state", m => m.enabled === true);
-    expect(new SessionStore(join(dir, "sessions.json")).get("s1")).toEqual({ topicId: 100, title: "Реализация хаба", project: "claude-telegram-hub", enabled: true, cwd: CWD, account: "2" });
+    expect(new SessionStore(join(dir, "sessions.json")).get("s1")).toEqual({ topicId: 100, title: "Реализация хаба", project: projectName(CWD), enabled: true, cwd: CWD, account: "2" });
   });
 
   test("the session record follows the window's cwd and account", async () => {
@@ -225,7 +225,7 @@ describe("enable", () => {
     const c = await plugin("s1");
     await req(c, { op: "enable", title: "Old" });
     await req(c, { op: "enable", title: "New" });
-    expect(fake.callsOf("editForumTopic")).toEqual([{ chat_id: GROUP, message_thread_id: 100, name: "claude-telegram-hub · New" }]);
+    expect(fake.callsOf("editForumTopic")).toEqual([{ chat_id: GROUP, message_thread_id: 100, name: `${projectName(CWD)} · New` }]);
   });
 
   test("without groupId the error explains what to configure", async () => {
@@ -881,7 +881,7 @@ describe("send", () => {
     const a = await enabled("a", "Old");
     a.send({ type: "title", title: "New" });
     await waitFor(() => fake.callsOf("editForumTopic").length === 1);
-    expect(fake.callsOf("editForumTopic")[0]).toMatchObject({ name: "claude-telegram-hub · New" });
+    expect(fake.callsOf("editForumTopic")[0]).toMatchObject({ name: `${projectName(CWD)} · New` });
     a.send({ type: "title", title: "New" });
     await Bun.sleep(100);
     expect(fake.callsOf("editForumTopic").length).toBe(1);

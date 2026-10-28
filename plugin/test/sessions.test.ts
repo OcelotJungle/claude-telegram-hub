@@ -118,7 +118,7 @@ describe("SessionStore", () => {
 
 describe("topicName", () => {
   test('is "<project> · <title>"', () => {
-    expect(topicName("claude-telegram-hub", "Реализация хаба")).toBe("claude-telegram-hub · Реализация хаба");
+    expect(topicName("project", "Реализация хаба")).toBe("project · Реализация хаба");
   });
 
   test("empty title falls back to a placeholder", () => {

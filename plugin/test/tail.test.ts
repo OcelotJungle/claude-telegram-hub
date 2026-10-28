@@ -148,7 +148,7 @@ describe("readSessionTitle", () => {
 
 describe("locate", () => {
   test("sanitizeCwd replaces every non-alphanumeric char", () => {
-    expect(sanitizeCwd("C:\\code\\claude-telegram-hub")).toBe("C--code-claude-telegram-hub");
+    expect(sanitizeCwd("C:\\code\\project")).toBe("C--code-project");
   });
 
   test("uses the sanitized path when it exists", () => {
