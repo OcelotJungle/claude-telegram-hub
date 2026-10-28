@@ -12,6 +12,7 @@ import { playChime } from "../shared/chime.ts";
 import { isInside, loadConfig } from "../shared/config.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { BYTES_PER_MB, MAX_CAPTION, MAX_UPLOAD } from "../shared/media.ts";
+import { plural } from "../shared/plural.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { enableResult } from "../shared/protocol-schema.ts";
 import { transcriptPathFor } from "../transcript/locate.ts";
@@ -35,11 +36,13 @@ const MODE_OFF_NOTE =
 export const CONTINUE_PROMPT =
   "tg-hub: your last turn ended with an API connection error (the API Error message above), " +
   "so your last response may be missing or incomplete. Continue from where you stopped.";
-export const CUT_NOTE = "🔁 Сбой связи с API — агент продолжает сам.";
 // Cuts in a row, with no turn ending normally in between, before it stops
 // and calls the person: the network may be down for good.
 export const MAX_AUTO_CONTINUES = 10;
-export const CUT_LIMIT_NOTE = `⚠️ Сбой связи с API ${MAX_AUTO_CONTINUES} раз подряд — сам больше не продолжаю, жду тебя.`;
+export function cutLimitNote(n: number): string {
+  return `⚠️ Сбой связи с API ${n} ${plural(n, "раз", "раза", "раз")} подряд, агент остановился.`;
+}
+export const CUT_LIMIT_NOTE = cutLimitNote(MAX_AUTO_CONTINUES);
 // Telegram refused files after tg_send_file returned: the agent fixes it, the
 // topic is not told.
 export function filesRejectedPrompt(error: string): string {
@@ -440,7 +443,6 @@ export class PluginCore {
       if (before === MAX_AUTO_CONTINUES) this.client.enqueue(this.sessionId, CUT_LIMIT_NOTE, true);
       return;
     }
-    this.client.enqueue(this.sessionId, CUT_NOTE, false);
     this.opts.emitChannel(CONTINUE_PROMPT, { user: "tg-hub", reason: "response_cut" });
   }
 

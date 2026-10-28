@@ -7,7 +7,7 @@ import { join } from "path";
 import { z } from "zod";
 import { Hub } from "../src/hub/hub.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
-import { CHIME_MIN_TURN_MS, CONTINUE_PROMPT, CUT_LIMIT_NOTE, CUT_NOTE, filesRejectedPrompt, interruptPrompt, MAX_AUTO_CONTINUES, playConfiguredChime, PluginCore } from "../src/plugin/plugin.ts";
+import { CHIME_MIN_TURN_MS, CONTINUE_PROMPT, CUT_LIMIT_NOTE, cutLimitNote, filesRejectedPrompt, interruptPrompt, MAX_AUTO_CONTINUES, playConfiguredChime, PluginCore } from "../src/plugin/plugin.ts";
 import { defaultTurnEndChime } from "../src/shared/chime.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { TURN_DECISION_MS } from "../src/transcript/relay.ts";
@@ -698,15 +698,14 @@ describe("a turn ended by a failed connection to the API", () => {
   const cut = (): object[] => [apiError(), closed];
   const UNREACHABLE = "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)";
 
-  test("the agent is told to continue, and the topic is told it does", async () => {
+  test("the agent is told to continue without a topic notice", async () => {
     await enabledCore();
     append(assistantText("Правлю тест", "tool_use", "r1"), assistantTool("Edit", "r1"), ...cut());
     await waitFor(() => channel.length === 1, 3000, "continue prompt");
     expect(channel[0]).toEqual({ content: CONTINUE_PROMPT, meta: { user: "tg-hub", reason: "response_cut" } });
-    await waitFor(() => sent().length === 2, 3000, "two messages");
+    await waitFor(() => sent().length === 1, 3000, "relayed answer");
     expect(sent()).toEqual([
       { text: "Правлю тест", silent: true, topic: 100 },
-      { text: CUT_NOTE, silent: true, topic: 100 },
     ]);
   });
 
@@ -748,6 +747,13 @@ describe("a turn ended by a failed connection to the API", () => {
     expect(channel.length).toBe(MAX_AUTO_CONTINUES);
     append(assistantText("дальше сам", "end_turn"), closed, ...cut());
     await waitFor(() => channel.length === MAX_AUTO_CONTINUES + 1, 3000, "continue after a normal turn");
+  });
+
+  test("the stopped notice uses the right Russian form of раз", () => {
+    expect(cutLimitNote(1)).toBe("⚠️ Сбой связи с API 1 раз подряд, агент остановился.");
+    expect(cutLimitNote(2)).toBe("⚠️ Сбой связи с API 2 раза подряд, агент остановился.");
+    expect(cutLimitNote(5)).toBe("⚠️ Сбой связи с API 5 раз подряд, агент остановился.");
+    expect(CUT_LIMIT_NOTE).toBe(cutLimitNote(MAX_AUTO_CONTINUES));
   });
 
   test("a cut written before the window started is history", async () => {

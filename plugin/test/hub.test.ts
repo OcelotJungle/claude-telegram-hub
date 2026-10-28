@@ -1682,7 +1682,7 @@ describe("starting and stopping sessions", () => {
     store.set(SID, { topicId: rec.topicId, title: rec.title, project: rec.project, enabled: rec.enabled, cwd: CWD });
     await startHub({ spawn: c => void spawned.push(c) });
     fake.pushUpdate(msg("hi"));
-    await waitFor(() => texts().includes("⚠️ Аккаунт сессии неизвестен, не запускаю. Напиши /run N"));
+    await waitFor(() => texts().includes("⚠️ Аккаунт сессии неизвестен, используй /run N."));
     expect(spawned).toEqual([]);
     fake.pushUpdate(msg("/run 2"));
     await waitFor(() => spawned.length === 1);
@@ -1856,7 +1856,7 @@ describe("commands", () => {
     command("/info");
     const sent = await reply(runner, t => t.startsWith("Лимиты"));
     expect(sent).toMatchObject({ message_thread_id: 100, disable_notification: false });
-    expect(sent.text).toContain("Сейчас: 128k токенов");
+    expect(sent.text).toContain("128/300k");
     expect(arr(field(arr(field(sent.rich_message, "blocks"))[0], "text"))[0]).toEqual({ type: "bold", text: "Лимиты Claude" });
     expect(a.messages.some(m => m.type === "inbound")).toBe(false);
     expect(new SessionStore(join(dir, "sessions.json")).get("a")?.enabled).toBe(false);
@@ -1908,7 +1908,7 @@ describe("commands", () => {
     await enabled("a");
     command("/info");
     const sent = await waitFor(() => sentText(t => t.startsWith("⚠️")));
-    expect(sent.text).toBe("⚠️ /info не выполнена: окно не забрало её за 0.15 с. Команды выполняет модуль плагина — перезапусти окно.");
+    expect(sent.text).toBe("⚠️ /info не выполнена: окно не забрало её за 0.15 с.");
     expect(sent.disable_notification).toBe(false);
     // Picked up too late, it is not run.
     const { runner, ran } = mod("a");
@@ -1923,13 +1923,14 @@ describe("commands", () => {
     runner.turn(true);
     command("/compact keep the plan");
     const started = await reply(runner, t => t.startsWith("🗜"));
+    expect(started.text).toBe("🗜 Компакт на очереди.");
     expect(started.disable_notification).toBe(true);
     await runner.poll();
     await Bun.sleep(50);
     expect(compacted).toStrictEqual([]);
     runner.turn(false);
     const done = await reply(runner, t => t.startsWith("✅"));
-    expect(done.text).toBe("✅ Контекст сжат: 180k → 24k токенов.");
+    expect(done.text).toBe("✅ Компакт выполнен.");
     expect(done.disable_notification).toBe(false);
     expect(compacted).toStrictEqual(["keep the plan"]);
     expect(ran).toEqual([]);
@@ -2189,7 +2190,7 @@ sys.exit(1)
     const { runner, compacted } = mod("a", undefined, undefined, h.answer);
     command("/stop");
     const started = await reply(runner, t => t.startsWith("🗜"));
-    expect(started.text).toBe("🗜 В контексте 128k токенов: сожму его, когда агент закончит ход, и завершу сессию. Повторный /stop завершит сразу.");
+    expect(started.text).toBe("🗜 Сожму контекст и завершу сессию. Повторный /stop завершит сразу.");
     expect(started.disable_notification).toBe(true);
     await waitFor(async () => {
       await runner.poll();
@@ -2200,7 +2201,7 @@ sys.exit(1)
     expect(terminated(a)).toBe(false);
     h.release();
     await a.next("terminate");
-    await waitFor(() => sentText(t => t === "✅ Контекст сжат: 128k → 20k токенов."));
+    await waitFor(() => sentText(t => t === "✅ Компакт выполнен."));
   });
 
   test("/stop waits for a /compact from the topic", async () => {
@@ -2212,7 +2213,8 @@ sys.exit(1)
     command("/compact");
     await reply(runner, t => t.startsWith("🗜"));
     command("/stop");
-    await reply(runner, t => t.startsWith("⏳"));
+    const waiting = await reply(runner, t => t.startsWith("⏳"));
+    expect(waiting.text).toBe("⏳ После компакта завершу сессию. Повторный /stop завершит сразу.");
     await Bun.sleep(100);
     expect(terminated(a)).toBe(false);
     usage = SMALL;
@@ -2246,7 +2248,9 @@ sys.exit(1)
   test("the hub puts the commands into the bot menu", async () => {
     await startHub();
     const call = await waitFor(() => fake.callsOf("setMyCommands")[0]);
-    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "run", "stop", "cleanup", "exec", "cmd", "bash"]);
+    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "run", "stop", "cleanup", "pwsh", "cmd", "bash"]);
+    expect(field(arr(call.commands).find(c => field(c, "command") === "compact"), "description")).toBe("Сжать контекст; /compact <указания> — с указаниями; /compact N — окно автокомпакта");
+    expect(field(arr(call.commands).find(c => field(c, "command") === "pwsh"), "description")).toBe("Команда в PowerShell в папке сессии");
   });
 
   describe("/cleanup", () => {
@@ -2308,16 +2312,17 @@ sys.exit(1)
       const { a, spawned, transcript, folder } = await liveSession(SKILLS);
       const { runner, compacted } = mod(SID);
       command("/cleanup keep the plan");
-      const started = await reply(runner, t => t.startsWith("🧹 Сожму"));
-      expect(started.text).toBe("🧹 Сожму контекст, когда агент закончит ход, уберу накопившиеся скиллы и завершу сессию.");
+      const started = await reply(runner, t => t.startsWith("🧹 Уборка"));
+      expect(started.text).toBe("🧹 Уборка на очереди.");
       expect(started.disable_notification).toBe(true);
       const startedId = fake.lastMessageId;
       await pollUntil(runner, () => terminated(a));
       expect(compacted).toStrictEqual(["keep the plan"]);
       await windowEnds(a);
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Сожму")));
-      expect(summary.text).toBe("🧹 Убраны скиллы: a, b\nСессия завершена.");
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Уборка выполнена")));
+      expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
       expect(summary.disable_notification).toBe(false);
+      await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
       // The summary takes the place of the "will compact" message.
       await waitFor(() => fake.callsOf("deleteMessage").length);
       expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
@@ -2326,7 +2331,6 @@ sys.exit(1)
       expect(fake.callsOf("editMessageText")).toEqual([]);
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
       expect(backups(folder).length).toBe(1);
-      expect(sentText(t => t === "⏹ Сессия завершена")).toBeUndefined();
     });
 
     test("a message during /cleanup waits and reaches the session started again", async () => {
@@ -2340,15 +2344,14 @@ sys.exit(1)
       command("meanwhile");
       await Bun.sleep(SETTLE_MS);
       alive = false;
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Сожму")));
-      expect(summary.text).toBe("🧹 Убраны скиллы: a, b\nСессия снова запущена: пришли сообщения из темы.");
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Уборка выполнена")));
+      expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
       await waitFor(() => spawned.length);
       expect(spawned).toEqual([STARTED]);
       const w = await plugin(SID);
       expect((await w.next("inbound")).content).toBe("meanwhile");
-      // The summary stands for the start notice.
       await Bun.sleep(SETTLE_MS);
-      expect(sentText(t => t.startsWith("🚀"))).toBeUndefined();
+      expect(sentText(t => t.startsWith("🚀"))).toBeDefined();
     });
 
     test("a failed compact leaves the window and the transcript alone", async () => {
@@ -2361,7 +2364,7 @@ sys.exit(1)
       command("/cleanup");
       const startedId = fake.nextMessageId;
       const failed = await reply(runner, t => t.startsWith("⚠️"));
-      expect(failed.text).toBe("⚠️ /cleanup не выполнена: компакт не удался: boom. Сессию не трогаю");
+      expect(failed.text).toBe("⚠️ Уборка не выполнена: компакт не удался: boom");
       expect(failed.disable_notification).toBe(false);
       await waitFor(() => fake.callsOf("deleteMessage").length);
       expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
@@ -2379,7 +2382,7 @@ sys.exit(1)
         answers.add(await (await fetch(`http://127.0.0.1:${port}/commands?session=${SID}&stop=1`)).text());
         return sentText(t => t.startsWith("⚠️"));
       }, 3000);
-      expect(lost.text).toBe("⚠️ /cleanup не выполнена: окно не забрало её за 0.15 с. Команды выполняет модуль плагина — перезапусти окно.");
+      expect(lost.text).toBe("⚠️ /cleanup не выполнена: окно не забрало её за 0.15 с.");
       expect([...answers]).toEqual(["[]"]);
       expect(terminated(a)).toBe(false);
       // The cleanup is over: /run answers for a working session.
@@ -2394,7 +2397,7 @@ sys.exit(1)
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
       const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
-      expect(warning.text).toBe("⚠️ Claude Code не завершился, скиллы не убраны, сессию не запускаю");
+      expect(warning.text).toBe("⚠️ Уборка не выполнена: Claude Code не завершился");
       expect(warning.disable_notification).toBe(false);
       expect(readFileSync(transcript, "utf8")).toBe(original);
       expect(spawned).toEqual([]);
@@ -2405,10 +2408,10 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      await reply(runner, t => t.startsWith("🧹 Уборка"));
       const startedId = fake.lastMessageId;
       command("/stop");
-      const cancelled = await waitFor(() => sentText(t => t === "⏹ /cleanup отменена, скиллы не убраны"));
+      const cancelled = await waitFor(() => sentText(t => t === "⏹ Уборка отменена"));
       expect(cancelled.disable_notification).toBe(false);
       await waitFor(() => fake.callsOf("deleteMessage").length);
       expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
@@ -2426,7 +2429,7 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      await reply(runner, t => t.startsWith("🧹 Уборка"));
       command("meanwhile");
       await heldForCleanup();
       command("/stop");
@@ -2448,7 +2451,7 @@ sys.exit(1)
       await heldForCleanup();
       await windowEnds(a);
       const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
-      expect(warning.text).toBe("⚠️ Claude Code не завершился, скиллы не убраны, сессию не запускаю Не доставлено сообщений из темы: 1.");
+      expect(warning.text).toBe("⚠️ Уборка не выполнена: Claude Code не завершился");
       expect(spawned).toEqual([]);
     });
 
@@ -2457,7 +2460,7 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      await reply(runner, t => t.startsWith("🧹 Уборка"));
       command("/cmd echo hi");
       await waitFor(() => log.lines.some(l => l.includes("a command result for session") && l.includes("held until /cleanup ends")), RUN_MS);
       expect(a.messages.some(m => m.type === "inbound")).toBe(false);
@@ -2478,8 +2481,8 @@ sys.exit(1)
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Сожму")));
-      expect(summary.text).toBe(`🧹 ⚠️ Формат транскрипта изменился, скиллы не убраны (Claude Code ${VERSION})\nСессия завершена.`);
+      const summary = await waitFor(() => sentText(t => t.startsWith("⚠️ Уборка не выполнена")));
+      expect(summary.text).toBe(`⚠️ Уборка не выполнена: формат транскрипта изменился (Claude Code ${VERSION})`);
       await Bun.sleep(SETTLE_MS);
       expect(spawned).toEqual([]);
       expect(readFileSync(transcript, "utf8")).toBe(original);
@@ -2491,8 +2494,9 @@ sys.exit(1)
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Сожму")));
-      expect(summary.text).toBe("🧹 Очистка выполнена\nСессия завершена.");
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Уборка выполнена")));
+      expect(summary.text).toBe("🧹 Уборка выполнена.");
+      await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
       await Bun.sleep(SETTLE_MS);
       expect(spawned).toEqual([]);
     });
@@ -2502,10 +2506,10 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      await reply(runner, t => t.startsWith("🧹 Уборка"));
       command("/cleanup");
       command("/run");
-      await waitFor(() => fake.texts().filter(p => p.text === "⏳ /cleanup уже идёт").length === 2);
+      await waitFor(() => fake.texts().filter(p => p.text === "⏳ Уборка уже идёт").length === 2);
       expect(terminated(a)).toBe(false);
       h.release();
     });
@@ -2522,7 +2526,7 @@ sys.exit(1)
       const w = await plugin(SID);
       expect((await w.next("inbound")).content).toBe("meanwhile");
       const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
-      expect(warning.text).toBe("⚠️ Сессия снова открыта, скиллы не убраны");
+      expect(warning.text).toBe("⚠️ Уборка не выполнена: сессия снова открыта");
       expect(readFileSync(transcript, "utf8")).toBe(original);
       expect(backups(folder)).toEqual([]);
       expect(spawned).toEqual([]);
@@ -2546,8 +2550,8 @@ sys.exit(1)
       command("meanwhile");
       await Bun.sleep(SETTLE_MS);
       alive = false;
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Сожму")));
-      expect(summary.text).toBe("🧹 Убраны скиллы: a, b");
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Уборка выполнена")));
+      expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
       const window = must(w, "window");
       expect((await window.next("inbound")).content).toBe("meanwhile");
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
@@ -2563,7 +2567,7 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      await reply(runner, t => t.startsWith("🧹 Уборка"));
       command("meanwhile");
       await heldForCleanup();
       await Bun.sleep(SETTLE_MS);
@@ -2583,7 +2587,7 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      await reply(runner, t => t.startsWith("🧹 Уборка"));
       command(" !stop now");
       const stop = await a.next("inbound");
       expect(stop.content).toBe("stop now");
@@ -2600,12 +2604,12 @@ sys.exit(1)
         throw new Error("boom");
       });
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      await reply(runner, t => t.startsWith("🧹 Уборка"));
       command("meanwhile");
       await heldForCleanup();
       expect(inbound(a)).toBe(false);
       release();
-      await reply(runner, t => t.startsWith("⚠️ /cleanup не выполнена"));
+      await reply(runner, t => t.startsWith("⚠️ Уборка не выполнена"));
       expect((await a.next("inbound")).content).toBe("meanwhile");
       expect(terminated(a)).toBe(false);
       expect(spawned).toEqual([]);
@@ -2623,7 +2627,7 @@ sys.exit(1)
       const contents = () => inbounds(a);
       const heldCount = () => log.lines.filter(l => l.includes("held until /cleanup ends")).length;
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      await reply(runner, t => t.startsWith("🧹 Уборка"));
       command("before");
       await waitFor(() => heldCount() === 1);
       // Goes live, and waits in its batch for the quiet window.
@@ -2633,7 +2637,7 @@ sys.exit(1)
       await waitFor(() => heldCount() === 2);
       expect(inbound(a)).toBe(false);
       release();
-      await reply(runner, t => t.startsWith("⚠️ /cleanup не выполнена"));
+      await reply(runner, t => t.startsWith("⚠️ Уборка не выполнена"));
       await waitFor(() => contents().length === 2, 1000, "both batches before the quiet window ends");
       expect(contents()).toEqual(["before", "stop\n\nafter"]);
     });
@@ -2643,11 +2647,11 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      await reply(runner, t => t.startsWith("🧹 Уборка"));
       command("meanwhile");
       await heldForCleanup();
       const late = await waitFor(() => sentText(t => t.startsWith("⚠️")), COMPACT_MS * 3);
-      expect(late.text).toBe("⚠️ /cleanup не дождалась компакта за 0.02 мин, отменена. Сессию не трогаю");
+      expect(late.text).toBe("⚠️ Уборка не выполнена: компакт не закончился за 0.02 мин");
       expect(late.disable_notification).toBe(false);
       expect((await a.next("inbound")).content).toBe("meanwhile");
       h.release();
@@ -2663,12 +2667,12 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Сожму"));
+      await reply(runner, t => t.startsWith("🧹 Уборка"));
       command("meanwhile");
       await heldForCleanup();
       a.close();
-      const closed = await waitFor(() => sentText(t => t.startsWith("⚠️ Окно")));
-      expect(closed.text).toBe("⚠️ Окно закрылось до конца компакта, /cleanup отменена");
+      const closed = await waitFor(() => sentText(t => t.startsWith("⚠️ Уборка не выполнена")));
+      expect(closed.text).toBe("⚠️ Уборка не выполнена: окно закрылось до конца компакта");
       expect(closed.disable_notification).toBe(false);
       await waitFor(() => spawned.length);
       expect(spawned).toEqual([STARTED]);
@@ -2687,8 +2691,9 @@ sys.exit(1)
       await Bun.sleep(SETTLE_MS);
       expect(a.messages.filter(m => m.type === "terminate").length).toBe(1);
       await windowEnds(a);
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Сожму")));
-      expect(summary.text).toBe("🧹 Убраны скиллы: a, b\nСессия завершена.");
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Уборка выполнена")));
+      expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
+      await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
       await Bun.sleep(SETTLE_MS);
       expect(spawned).toEqual([]);
@@ -2720,8 +2725,9 @@ sys.exit(1)
       await pollUntil(runner, () => terminated(a));
       await a.next("terminate");
       a.close();
-      const summary = await waitFor(() => sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Сожму")));
-      expect(summary.text).toBe("🧹 Убраны скиллы: a, b\nСессия завершена.");
+      const summary = await waitFor(() => sentText(t => t.startsWith("🧹 Уборка выполнена")));
+      expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
+      await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
       expect(log.lines.some(l => l.includes("the Claude Code process is unknown"))).toBe(true);
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
       await Bun.sleep(SETTLE_MS);
@@ -2738,8 +2744,8 @@ sys.exit(1)
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
-      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️ Скиллы")));
-      expect(warning.text).toBe("⚠️ Скиллы не убраны: disk\nСессия завершена.");
+      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️ Уборка не выполнена")));
+      expect(warning.text).toBe("⚠️ Уборка не выполнена: disk");
       expect(warning.disable_notification).toBe(false);
       await Bun.sleep(SETTLE_MS);
       expect(spawned).toEqual([]);
@@ -2753,17 +2759,17 @@ describe("cleanupSummary", () => {
 
   test("removed skills are listed without sizes", () => {
     const r = { kind: "cleaned" as const, skills: [{ name: "a", chars: 4000 }, { name: "b", chars: 72_000 }], records: 2, backup: BACKUP };
-    expect(cleanupSummary(r)).toBe("🧹 Убраны скиллы: a, b");
+    expect(cleanupSummary(r)).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
   });
 
   test("nothing to remove and empty skills both report completion", () => {
-    expect(cleanupSummary({ kind: "nothing" })).toBe("🧹 Очистка выполнена");
-    expect(cleanupSummary({ kind: "cleaned", skills: [], records: 1, backup: BACKUP })).toBe("🧹 Очистка выполнена");
+    expect(cleanupSummary({ kind: "nothing" })).toBe("🧹 Уборка выполнена.");
+    expect(cleanupSummary({ kind: "cleaned", skills: [], records: 1, backup: BACKUP })).toBe("🧹 Уборка выполнена.");
   });
 
   test("an unknown format names the Claude Code version when it is known", () => {
-    expect(cleanupSummary({ kind: "format", version: "1.0.0" })).toBe("🧹 ⚠️ Формат транскрипта изменился, скиллы не убраны (Claude Code)");
-    expect(cleanupSummary({ kind: "format" })).toBe("🧹 ⚠️ Формат транскрипта изменился, скиллы не убраны");
+    expect(cleanupSummary({ kind: "format", version: "1.0.0" })).toBe("⚠️ Уборка не выполнена: формат транскрипта изменился (Claude Code)");
+    expect(cleanupSummary({ kind: "format" })).toBe("⚠️ Уборка не выполнена: формат транскрипта изменился");
   });
 });
 
@@ -2808,7 +2814,7 @@ describe("topic commands", () => {
     await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Команда уже закончилась"), WAIT_MS, "second answer");
   }, RUN_MS);
 
-  test("an old /exec waits for the run button", async () => {
+  test("an old /pwsh waits for the run button", async () => {
     let spawned = 0;
     await startHub({
       spawnRunner: () => {
@@ -2817,7 +2823,7 @@ describe("topic commands", () => {
       },
     });
     await enabled(SID);
-    fake.pushUpdate(msg("/exec npm run migrate", { date: Math.floor(Date.now() / MS_PER_S) - OLD_COMMAND_S }));
+    fake.pushUpdate(msg("/pwsh npm run migrate", { date: Math.floor(Date.now() / MS_PER_S) - OLD_COMMAND_S }));
     const card = await waitFor(() => fake.callsOf("sendMessage").find(c => String(c.text).startsWith("⏸ Команда пришла 5 мин назад, пока хаб был выключен")), WAIT_MS, "pending card");
     expect(buttonsOf(card).some(d => d.endsWith(":run"))).toBe(true);
     expect(spawned).toBe(0);
@@ -2832,7 +2838,7 @@ describe("topic commands", () => {
       },
     });
     await enabled(SID);
-    fake.pushUpdate(msg("/exec npm run migrate", { date: Math.floor(Date.now() / MS_PER_S) - OLD_COMMAND_S }));
+    fake.pushUpdate(msg("/pwsh npm run migrate", { date: Math.floor(Date.now() / MS_PER_S) - OLD_COMMAND_S }));
     const card = await waitFor(() => fake.callsOf("sendMessage").find(c => buttonsOf(c).some(d => d.endsWith(":run"))), WAIT_MS, "pending card");
     const data = must(buttonsOf(card).find(d => d.endsWith(":run")), "run button");
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
@@ -2846,14 +2852,14 @@ describe("topic commands", () => {
     await startHub();
     await enabled(SID);
     fake.pushUpdate(msg("/cmd echo a\necho b"));
-    await waitFor(() => texts().includes("/cmd выполняет одну строку. Для нескольких — /exec или /bash"), WAIT_MS, "refusal");
+    await waitFor(() => texts().includes("/cmd выполняет одну строку. Для нескольких — /pwsh или /bash"), WAIT_MS, "refusal");
   });
 
-  test("empty /exec asks for a command", async () => {
+  test("empty /pwsh asks for a command", async () => {
     await startHub();
     await enabled(SID);
-    fake.pushUpdate(msg("/exec"));
-    await waitFor(() => texts().includes("Напиши команду: /exec npm run migrate"), WAIT_MS, "hint");
+    fake.pushUpdate(msg("/pwsh"));
+    await waitFor(() => texts().includes("Напиши команду: /pwsh npm run migrate"), WAIT_MS, "hint");
   });
 
   test("/bash without Git Bash says where it looked", async () => {

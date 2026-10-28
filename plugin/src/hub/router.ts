@@ -67,11 +67,11 @@ export function commandOf(text: string, botUsername: string | undefined): Omit<T
 
 // A command the hub runs itself: `/run [account]` starts the topic's session,
 // `/stop` ends it, `/cleanup` compacts it and starts it again without its
-// remembered skills, `/exec`, `/cmd` and `/bash` run their text in a shell in
+// remembered skills, `/pwsh`, `/cmd` and `/bash` run their text in a shell in
 // the session's folder.
-export type HubCommand = { name: "run" | "stop" | "cleanup" | "exec" | "cmd" | "bash"; args: string };
+export type HubCommand = { name: "run" | "stop" | "cleanup" | "pwsh" | "cmd" | "bash"; args: string };
 
-const HUB_COMMANDS: readonly HubCommand["name"][] = ["run", "stop", "cleanup", "exec", "cmd", "bash"];
+const HUB_COMMANDS: readonly HubCommand["name"][] = ["run", "stop", "cleanup", "pwsh", "cmd", "bash"];
 
 function isHubCommandName(name: string): name is HubCommand["name"] {
   return HUB_COMMANDS.some(n => n === name);

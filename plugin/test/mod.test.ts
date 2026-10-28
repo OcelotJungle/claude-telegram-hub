@@ -52,7 +52,7 @@ describe("/info text", () => {
     expect(infoText(usage(), NOW)).not.toContain("Codex");
   });
 
-  test("limits with time to reset, context, the autocompact window and how much of its threshold is used", () => {
+  test("limits with time to reset and the current context against the autocompact threshold", () => {
     expect(infoText(usage({ tokens: 128_400 }), NOW)).toBe(
       [
         "**Лимиты Claude**",
@@ -60,9 +60,7 @@ describe("/info text", () => {
         "Неделя: 36% (сброс через 4 д 6 ч)",
         "",
         "**Контекст**",
-        "Сейчас: 128k токенов",
-        "Автокомпакт: окно 333k, срабатывает на 300k",
-        "Использовано 43% до автокомпакта",
+        "128/300k",
       ].join("\n"),
     );
   });
@@ -70,20 +68,17 @@ describe("/info text", () => {
   test("before the first model response there are no limits and the context is an estimate", () => {
     const text = infoText(usage({ limits: [] }), NOW);
     expect(text).toContain("Лимиты Claude: нет данных — появятся после первого ответа модели");
-    expect(text).toContain("Сейчас: ≈36k токенов (оценка)");
-    expect(text).toContain("Использовано 12% до автокомпакта");
+    expect(text).toContain("≈36/300k");
   });
 
   test("autocompact off", () => {
     const text = infoText(usage({ tokens: 50_000, breakdown: { isAutoCompactEnabled: false, autoCompactThreshold: undefined } }), NOW);
-    expect(text).toContain("Автокомпакт: выключен");
-    expect(text).not.toContain("до автокомпакта");
+    expect(text.endsWith("**Контекст**\n50k")).toBe(true);
   });
 
-  test("without a threshold the window is the boundary", () => {
+  test("without a threshold only the context size is shown", () => {
     const text = infoText(usage({ tokens: 100_000, breakdown: { autoCompactThreshold: undefined } }), NOW);
-    expect(text).toContain("Автокомпакт: окно 333k\n");
-    expect(text).toContain("Использовано 30% до автокомпакта");
+    expect(text.endsWith("**Контекст**\n100k")).toBe(true);
   });
 
   test("short and past resets, an unknown window kind, no reset time", () => {
@@ -110,7 +105,12 @@ describe("/info text", () => {
 
   test("without a breakdown only the status line figure is shown", () => {
     const text = infoText(usage({ tokens: 20_000, breakdown: null }), NOW);
-    expect(text.endsWith("**Контекст**\nСейчас: 20k токенов")).toBe(true);
+    expect(text.endsWith("**Контекст**\n20k")).toBe(true);
+  });
+
+  test("without any context size shows no data", () => {
+    const text = infoText(usage({ breakdown: null }), NOW);
+    expect(text.endsWith("**Контекст**\nнет данных")).toBe(true);
   });
 
   test("volunteer limits ok block after Codex", () => {
@@ -296,7 +296,7 @@ describe("limits shared through the hub", () => {
 });
 
 describe("/cleanup", () => {
-  const STARTED = "🧹 Сожму контекст, когда агент закончит ход, уберу накопившиеся скиллы и завершу сессию.";
+  const STARTED = "🧹 Уборка на очереди.";
 
   function runner(commands: { id: string; name: string; args: string }[], compact: (args: string | undefined) => Promise<{ tokensBefore?: number; tokensAfter?: number; skip?: string }>) {
     const posted: { path: string; body: unknown }[] = [];

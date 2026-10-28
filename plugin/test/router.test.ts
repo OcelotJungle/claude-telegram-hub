@@ -137,11 +137,12 @@ describe("hubCommandOf", () => {
     expect(hubCommandOf("/cleanup@other_bot", "test_bot")).toBeUndefined();
   });
 
-  test("/exec, /cmd and /bash with their text", () => {
-    expect(hubCommandOf("/exec npm run x", "test_bot")).toEqual({ name: "exec", args: "npm run x" });
+  test("/pwsh, /cmd and /bash with their text", () => {
+    expect(hubCommandOf("/pwsh npm run x", "test_bot")).toEqual({ name: "pwsh", args: "npm run x" });
     expect(hubCommandOf("/cmd dir /b", "test_bot")).toEqual({ name: "cmd", args: "dir /b" });
     expect(hubCommandOf("/bash@test_bot ls\nmake", "test_bot")).toEqual({ name: "bash", args: "ls\nmake" });
-    expect(hubCommandOf("/exec", "test_bot")).toEqual({ name: "exec", args: "" });
+    expect(hubCommandOf("/pwsh", "test_bot")).toEqual({ name: "pwsh", args: "" });
+    expect(hubCommandOf("/exec npm run x", "test_bot")).toBeUndefined();
   });
 
   test("other commands, other bots and text are not hub commands", () => {

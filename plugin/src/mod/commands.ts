@@ -36,7 +36,6 @@ const LIMIT_ORDER = ["five_hour", "seven_day"];
 const MS_PER_MINUTE = 60_000;
 const MINUTES_PER_HOUR = 60;
 const HOURS_PER_DAY = 24;
-const PERCENT = 100;
 // Limits read longer ago than this say how old they are.
 const STALE_LIMITS_MS = 300_000;
 // Polls in a row on which the compaction failed with no turn running before
@@ -163,7 +162,7 @@ export class Runner {
       }
       return;
     }
-    await this.compact(to, cmd.args, "🗜 Компакт запущен: начнётся, как только агент закончит текущий ход.");
+    await this.compact(to, cmd.args, "🗜 Компакт на очереди.");
   }
 
   // Resolves once the compaction is over and its result is handed to the hub.
@@ -182,7 +181,7 @@ export class Runner {
   // the hub the sizes or the error. The hub ends the window and empties the
   // remembered skills.
   private async cleanup(to: Target, args: string): Promise<void> {
-    await this.reply(to, "🧹 Сожму контекст, когда агент закончит ход, уберу накопившиеся скиллы и завершу сессию.", false);
+    await this.reply(to, "🧹 Уборка на очереди.", false);
     await Promise.all(this.running);
     const report = async (o: Outcome) => {
       const body: CleanupReport = { sessionId: to.sessionId, id: to.id };
@@ -224,12 +223,12 @@ export class Runner {
   // context, after one more. A second /stop in the topic does not wait.
   private async stop(to: { sessionId: string; id: string }): Promise<void> {
     if (this.running.size) {
-      await this.reply(to, "⏳ Завершу сессию, когда закончится компакт. Повторный /stop завершит сразу.", false);
+      await this.reply(to, "⏳ После компакта завершу сессию. Повторный /stop завершит сразу.", false);
       await Promise.all(this.running);
     }
     const used = await this.contextTokens();
     if (used !== undefined && used > STOP_COMPACT_TOKENS) {
-      await this.compact(to, "", `🗜 В контексте ${tokens(used)} токенов: сожму его, когда агент закончит ход, и завершу сессию. Повторный /stop завершит сразу.`);
+      await this.compact(to, "", "🗜 Сожму контекст и завершу сессию. Повторный /stop завершит сразу.");
     }
     this.unsent.push({ path: "/terminate", body: JSON.stringify({ sessionId: to.sessionId, id: to.id }) });
     await this.flush();
@@ -360,23 +359,19 @@ export function infoText(
   // The status line's figure; after a compaction it is gone until the next
   // model response, and the local estimate stands in.
   const used = u.context.tokens ?? b?.totalTokens;
-  if (used === undefined) lines.push("Сейчас: нет данных");
-  else lines.push(u.context.tokens !== undefined ? `Сейчас: ${tokens(used)} токенов` : `Сейчас: ≈${tokens(used)} токенов (оценка)`);
-  if (!b) return lines.join("\n");
-  if (!b.isAutoCompactEnabled) {
-    lines.push("Автокомпакт: выключен");
-    return lines.join("\n");
-  }
-  const limit = b.autoCompactThreshold ?? b.rawMaxTokens;
-  lines.push(`Автокомпакт: окно ${tokens(b.rawMaxTokens)}${b.autoCompactThreshold !== undefined ? `, срабатывает на ${tokens(b.autoCompactThreshold)}` : ""}`);
-  if (used !== undefined) lines.push(`Использовано ${Math.round((used / limit) * PERCENT)}% до автокомпакта`);
+  const estimate = u.context.tokens === undefined && used !== undefined;
+  if (used === undefined) lines.push("нет данных");
+  else if (b?.isAutoCompactEnabled && b.autoCompactThreshold !== undefined) {
+    const current = Math.round(used / THOUSAND);
+    const threshold = Math.round(b.autoCompactThreshold / THOUSAND);
+    lines.push(`${estimate ? "≈" : ""}${current}/${threshold}k`);
+  } else lines.push(`${estimate ? "≈" : ""}${tokens(used)}`);
   return lines.join("\n");
 }
 
 export function compactionText(c: Compaction): string {
   if (c.skip !== undefined) return `⚠️ Компакт пропущен: ${c.skip}`;
-  const sizes = c.tokensBefore !== undefined && c.tokensAfter !== undefined ? `: ${tokens(c.tokensBefore)} → ${tokens(c.tokensAfter)} токенов` : "";
-  return `✅ Контекст сжат${sizes}.`;
+  return "✅ Компакт выполнен.";
 }
 
 // `/compact <N>` with a token count (333000, 333k, 1.5m) or `auto` sets the

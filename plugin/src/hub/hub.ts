@@ -74,9 +74,7 @@ const INTERRUPT_PREFIX = "!";
 const INTERRUPT_MARK = /^\s*!\s*/;
 // The outbox id of a poll's question: poll:<key>:<index>#<piece>.
 const POLL_ITEM = /^poll:([0-9a-f]+):(\d+)#/;
-const CLEANUP_BUSY = "⏳ /cleanup уже идёт";
-const CLEANUP_STOPPED = "\nСессия завершена.";
-const CLEANUP_RELAUNCHED = "\nСессия снова запущена: пришли сообщения из темы.";
+const CLEANUP_BUSY = "⏳ Уборка уже идёт";
 // Messages a starting session holds; more are dropped.
 const MAX_HELD = 50;
 const MS_PER_SECOND = 1000;
@@ -130,11 +128,11 @@ const MAX_BATCH_IDS = 200;
 const TYPING_EVERY_MS = 4000;
 const BOT_COMMANDS = [
   { command: "info", description: "Лимиты и контекст сессии" },
-  { command: "compact", description: "Сжать контекст; /compact N — окно автокомпакта" },
+  { command: "compact", description: "Сжать контекст; /compact <указания> — с указаниями; /compact N — окно автокомпакта" },
   { command: "run", description: "Запустить сессию; /run N — на аккаунте N" },
   { command: "stop", description: "Завершить сессию" },
   { command: "cleanup", description: "Сжать контекст, убрать накопившиеся скиллы и завершить сессию" },
-  { command: "exec", description: "Команда в PowerShell в папке сессии" },
+  { command: "pwsh", description: "Команда в PowerShell в папке сессии" },
   { command: "cmd", description: "Команда в cmd в папке сессии" },
   { command: "bash", description: "Команда в Git Bash в папке сессии" },
 ];
@@ -586,7 +584,7 @@ export class Hub {
         return;
       }
       if (cmd.name === "cleanup" && this.cleanups.get(sessionId)?.id === cmd.id) this.dropCleanup(sessionId);
-      this.enqueue(sessionId, `cmd-${cmd.id}-lost`, `⚠️ /${cmd.name} не выполнена: окно не забрало её за ${ms / MS_PER_SECOND} с. Команды выполняет модуль плагина — перезапусти окно.`, true, false);
+      this.enqueue(sessionId, `cmd-${cmd.id}-lost`, `⚠️ /${cmd.name} не выполнена: окно не забрало её за ${ms / MS_PER_SECOND} с.`, true, false);
     }, ms);
     this.commands.set(sessionId, [...(this.commands.get(sessionId) ?? []), { cmd, timer }]);
     this.log.info(`/${cmd.name} for session ${sessionId}`);
@@ -655,7 +653,7 @@ export class Hub {
         void this.finishCleanup(sid, cleanup, ws.data.exitingPid);
       } else {
         this.log.info(`window for session ${sid} closed while compacting for /cleanup; /cleanup dropped`);
-        this.cleanupOutcome(sid, cleanup, "⚠️ Окно закрылось до конца компакта, /cleanup отменена");
+        this.cleanupOutcome(sid, cleanup, "⚠️ Уборка не выполнена: окно закрылось до конца компакта");
         this.dropCleanup(sid);
       }
     }
@@ -1947,7 +1945,7 @@ ${msg.text}`);
   }
 
   private onHubCommand(sessionId: string, cmd: HubCommand, m: Message): void {
-    if (cmd.name === "exec" || cmd.name === "cmd" || cmd.name === "bash") return this.onExecCommand(sessionId, cmd.name, cmd.args, m);
+    if (cmd.name === "pwsh" || cmd.name === "cmd" || cmd.name === "bash") return this.onExecCommand(sessionId, cmd.name, cmd.args, m);
     if (cmd.name === "run") {
       if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, false);
       if (this.connOf(sessionId)) return this.notice(sessionId, "Сессия уже работает", false);
@@ -2010,7 +2008,7 @@ ${msg.text}`);
     c.compactTimer = setTimeout(() => {
       if (this.cleanups.get(sessionId) !== c || c.phase !== "compacting") return;
       this.log.warn(`/cleanup of session ${sessionId}: no compact report in ${ms} ms; /cleanup dropped`);
-      this.cleanupOutcome(sessionId, c, `⚠️ /cleanup не дождалась компакта за ${ms / MS_PER_MINUTE} мин, отменена. Сессию не трогаю`);
+      this.cleanupOutcome(sessionId, c, `⚠️ Уборка не выполнена: компакт не закончился за ${ms / MS_PER_MINUTE} мин`);
       this.dropCleanup(sessionId);
     }, ms);
     this.cleanups.set(sessionId, c);
@@ -2040,7 +2038,7 @@ ${msg.text}`);
   private stopDuringCleanup(sessionId: string, c: Cleanup): void {
     if (c.phase === "compacting") {
       this.log.info(`/stop during the /cleanup compact of session ${sessionId}: ending the window, the transcript untouched`);
-      this.cleanupOutcome(sessionId, c, "⏹ /cleanup отменена, скиллы не убраны");
+      this.cleanupOutcome(sessionId, c, "⏹ Уборка отменена");
       this.dropCleanup(sessionId, true);
     }
     this.terminate(sessionId);
@@ -2083,7 +2081,7 @@ ${msg.text}`);
     clearTimeout(c.compactTimer);
     if (error !== undefined) {
       this.log.warn(`/cleanup of session ${sessionId}: the compact failed: ${error}`);
-      this.cleanupOutcome(sessionId, c, `⚠️ /cleanup не выполнена: компакт не удался: ${error}. Сессию не трогаю`);
+      this.cleanupOutcome(sessionId, c, `⚠️ Уборка не выполнена: компакт не удался: ${error}`);
       return this.dropCleanup(sessionId);
     }
     this.log.info(`/cleanup of session ${sessionId}: compacted${before === undefined ? "" : ` from ${before} tokens`}; ending the window`);
@@ -2109,20 +2107,19 @@ ${msg.text}`);
     if (this.connOf(sessionId)) {
       this.cleanups.delete(sessionId);
       this.log.warn(`/cleanup of session ${sessionId}: a window of the session connected again; the transcript untouched, ${c.held.length} held message(s) go to it`);
-      this.cleanupOutcome(sessionId, c, "⚠️ Сессия снова открыта, скиллы не убраны");
+      this.cleanupOutcome(sessionId, c, "⚠️ Уборка не выполнена: сессия снова открыта");
       return this.whenReady(() => this.sendHeld(sessionId, c.held));
     }
     if (pid !== undefined && alive(pid)) {
       this.cleanups.delete(sessionId);
       this.log.warn(`/cleanup of session ${sessionId}: Claude Code ${pid} did not exit; the transcript untouched, ${c.held.length} held message(s) dropped`);
-      const lost = c.held.length ? ` Не доставлено сообщений из темы: ${c.held.length}.` : "";
-      return this.cleanupOutcome(sessionId, c, `⚠️ Claude Code не завершился, скиллы не убраны, сессию не запускаю${lost}`);
+      return this.cleanupOutcome(sessionId, c, "⚠️ Уборка не выполнена: Claude Code не завершился");
     }
     const path = this.transcriptOf(sessionId);
     let text: string;
     if (!path) {
       this.log.warn(`/cleanup of session ${sessionId}: no transcript found`);
-      text = "⚠️ Транскрипт сессии не найден, скиллы не убраны";
+      text = "⚠️ Уборка не выполнена: транскрипт не найден";
     } else {
       try {
         const result = await (this.opts.cleanTranscript ?? cleanTranscript)(path, Date.now());
@@ -2131,7 +2128,7 @@ ${msg.text}`);
       } catch (e) {
         const why = e instanceof Error ? e.message : String(e);
         this.log.warn(`/cleanup of session ${sessionId}: emptying the skills in ${path} failed: ${why}`);
-        text = `⚠️ Скиллы не убраны: ${why}`;
+        text = `⚠️ Уборка не выполнена: ${why}`;
       }
     }
     if (!current()) return;
@@ -2143,11 +2140,14 @@ ${msg.text}`);
       return this.whenReady(() => this.sendHeld(sessionId, c.held));
     }
     // Messages that came meanwhile still reach the agent, as a message to a
-    // stopped session starts it. The summary stands for the start notice.
+    // stopped session starts it.
     const relaunch = c.held.length > 0;
-    this.cleanupOutcome(sessionId, c, text + (relaunch ? CLEANUP_RELAUNCHED : CLEANUP_STOPPED));
-    if (relaunch) this.launch(sessionId, undefined, c.held, false);
-    else this.log.info(`/cleanup of session ${sessionId}: done; the session stays ended`);
+    this.cleanupOutcome(sessionId, c, text);
+    if (relaunch) this.launch(sessionId, undefined, c.held);
+    else {
+      this.notice(sessionId, "⏹ Сессия завершена", true);
+      this.log.info(`/cleanup of session ${sessionId}: done; the session stays ended`);
+    }
   }
 
   // The transcript the hook named, else the one found by the session id.
@@ -2177,9 +2177,9 @@ ${msg.text}`);
       return this.notice(sessionId, `⚠️ Автозапуск не настроен: ${why}`, true);
     }
     const acc = account ?? rec.account;
-    if (!acc) return this.notice(sessionId, "⚠️ Аккаунт сессии неизвестен, не запускаю. Напиши /run N", true);
+    if (!acc) return this.notice(sessionId, "⚠️ Аккаунт сессии неизвестен, используй /run N.", true);
     const cwd = rec.cwd ?? (this.opts.projectsDir ? sessionCwd(sessionId, this.opts.projectsDir) : undefined);
-    if (!cwd) return this.notice(sessionId, "⚠️ Не знаю, в какой папке запускать сессию: её нет ни в записи хаба, ни в транскрипте", true);
+    if (!cwd) return this.notice(sessionId, "⚠️ Не знаю, в какой директории запустить сессию.", true);
     let command: string[];
     try {
       command = launchCommand(cfg.launch, { cwd, account: acc, session: sessionId });
@@ -2293,19 +2293,19 @@ ${msg.text}`);
     return this.opts.config().exec?.bash ?? DEFAULT_BASH;
   }
 
-  // /exec, /cmd or /bash: the text runs in the session's folder, with or
+  // /pwsh, /cmd or /bash: the text runs in the session's folder, with or
   // without its window.
-  private onExecCommand(sessionId: string, name: "exec" | "cmd" | "bash", text: string, m: Message): void {
+  private onExecCommand(sessionId: string, name: "pwsh" | "cmd" | "bash", text: string, m: Message): void {
     if (!this.execs) return this.notice(sessionId, EXEC_NOT_SET, false);
-    if (!text) return this.enqueue(sessionId, `hub-${randomUUID()}`, "Напиши команду: `/exec npm run migrate`", false);
+    if (!text) return this.enqueue(sessionId, `hub-${randomUUID()}`, "Напиши команду: `/pwsh npm run migrate`", false);
     // cmd /c runs only up to the first line break.
-    if (name === "cmd" && /[\r\n]/.test(text)) return this.notice(sessionId, "/cmd выполняет одну строку. Для нескольких — /exec или /bash", false);
+    if (name === "cmd" && /[\r\n]/.test(text)) return this.notice(sessionId, "/cmd выполняет одну строку. Для нескольких — /pwsh или /bash", false);
     const bash = this.bashPath();
     if (name === "bash" && !existsSync(bash)) return this.notice(sessionId, `Git Bash не найден: ${bash}. Укажи exec.bash в config.json`, false);
     const rec = this.store.get(sessionId);
     const cwd = rec?.cwd ?? (this.opts.projectsDir ? sessionCwd(sessionId, this.opts.projectsDir) : undefined);
     if (!cwd) return this.notice(sessionId, "⚠️ Не знаю, в какой папке запускать команду: её нет ни в записи хаба, ни в транскрипте", true);
-    const shell: ExecShell = name === "exec" ? "powershell" : name;
+    const shell: ExecShell = name === "pwsh" ? "powershell" : name;
     this.log.info(`/${name} for session ${sessionId}, message ${m.message_id}`);
     this.execs.command(sessionId, shell, text, cwd, { chatId: String(m.chat.id), messageId: m.message_id, date: m.date });
   }
@@ -2489,10 +2489,10 @@ function spawnDetached(command: string[]): void {
 export function cleanupSummary(r: CleanupResult): string {
   if (r.kind === "format") {
     const version = r.version ? ` (Claude Code ${r.version})` : "";
-    return `🧹 ⚠️ Формат транскрипта изменился, скиллы не убраны${version}`;
+    return `⚠️ Уборка не выполнена: формат транскрипта изменился${version}`;
   }
-  if (r.kind === "nothing" || !r.skills.length) return "🧹 Очистка выполнена";
-  return `🧹 Убраны скиллы: ${r.skills.map(s => s.name).join(", ")}`;
+  if (r.kind === "nothing" || !r.skills.length) return "🧹 Уборка выполнена.";
+  return `🧹 Уборка выполнена, убраны скиллы: ${r.skills.map(s => s.name).join(", ")}.`;
 }
 
 // Queue item ids are `<plugin message id>#<n>`, replacements add `.<m>`.
