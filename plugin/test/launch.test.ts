@@ -1,16 +1,19 @@
-import { describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { launchCommand, LaunchError, sessionCwd, transcriptMode } from "../src/hub/launch.ts";
-import { tempDir } from "./helpers.ts";
+import { tempDir as makeTempDir } from "./helpers.ts";
 
-// Same as the tail read in launch.ts (TAIL_BYTES): a transcript's mode is read from its last megabyte.
+// launch.ts reads backwards in MiB blocks; fixtures cross that boundary.
 const TAIL_READ_BYTES = 1024 * 1024;
 const SID = "11111111-2222-3333-4444-555555555555";
 const LAUNCH = {
   command: ["wt.exe", "-d", "{cwd}", "cmd.exe", "/c", "cswap.exe run {account} -- --resume {session} & exit /b 0"],
   timeoutSec: 90,
 };
+const dirs: string[] = [];
+const tempDir = () => { const dir = makeTempDir(); dirs.push(dir); return dir; };
+afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 describe("launchCommand", () => {
   test("puts the values into every part", () => {
@@ -43,11 +46,16 @@ describe("launchCommand", () => {
       "acceptEdits",
     ]);
     expect(launchCommand({ ...launch, command: ["{mode}"] }, { cwd, account: "2", session: SID })).toEqual([]);
+    expect(launchCommand({ ...launch, command: ["{mode}{mode}"] }, { cwd, account: "2", session: SID })).toEqual([]);
     expect(launchCommand({ ...launch, command: ["run {mode}"] }, { cwd, account: "2", session: SID })).toEqual(["run "]);
   });
 
   test("rejects modes outside the strict allowlist", () => {
     expect(() => launchCommand(LAUNCH, { cwd: tempDir(), account: "2", session: SID, mode: "bypassPermissions" })).toThrow(LaunchError);
+  });
+
+  test("refuses a mode when the launch config lost its placeholder", () => {
+    expect(() => launchCommand(LAUNCH, { cwd: tempDir(), account: "2", session: SID, mode: "plan" })).toThrow("{mode}");
   });
 });
 
@@ -76,7 +84,15 @@ describe("transcriptMode", () => {
     writeFileSync(path, `${plan}${filler.repeat(8)}${accept}${filler.repeat(3)}`);
     expect(transcriptMode(path)).toBe("acceptEdits");
     writeFileSync(path, `${plan}${filler.repeat(8)}`);
-    expect(transcriptMode(path)).toBeUndefined();
+    expect(transcriptMode(path)).toBe("plan");
+  });
+
+  test("reads a record split across a byte block boundary and guards a shrunken offset", () => {
+    const path = join(tempDir(), "split.jsonl");
+    const record = `${JSON.stringify({ type: "permission-mode", permissionMode: "plan", note: "я".repeat(TAIL_READ_BYTES) })}\n`;
+    writeFileSync(path, record);
+    expect(transcriptMode(path)).toBe("plan");
+    expect(transcriptMode(path, Buffer.byteLength(record) + 1)).toBeUndefined();
   });
 });
 

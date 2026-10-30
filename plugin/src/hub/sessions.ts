@@ -112,7 +112,7 @@ export class SessionStore {
   }
 
   // A start without a mode forgets the last one: the window no longer runs it.
-  setLaunchedMode(sessionId: string, mode: string | undefined, offset: number): void {
+  setLaunchedMode(sessionId: string, mode: string | undefined, offset: number | undefined): void {
     const rec = this.data[sessionId];
     if (!rec) return;
     const { launchedMode: _mode, launchedModeOffset: _offset, ...rest } = rec;

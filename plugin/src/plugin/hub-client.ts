@@ -5,15 +5,12 @@ import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { homedir } from "os";
 import { hubToPlugin } from "../shared/protocol-schema.ts";
+import { MAX_RECONNECT_DELAY_MS, RECONNECT_JITTER } from "../shared/reconnect.ts";
 
 const SPAWN_COOLDOWN_MS = 2000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const DRAIN_POLL_MS = 25;
 const MIN_RECONNECT_DELAY_MS = 100;
-const MAX_RECONNECT_DELAY_MS = 5000;
-// A reconnect delay varies by this share either way, so windows that lost the
-// hub together do not knock at the same moment.
-const RECONNECT_JITTER = 0.25;
 // How much of a message the plugin cannot read goes into the log.
 const LOGGED_MESSAGE_CHARS = 200;
 

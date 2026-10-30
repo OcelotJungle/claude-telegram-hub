@@ -4,7 +4,7 @@ import type { Config } from "../src/shared/config.ts";
 import type { MessageKind } from "../src/shared/notification.ts";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { z } from "zod";
 import { cleanupSummary, Hub, projectName } from "../src/hub/hub.ts";
@@ -19,6 +19,7 @@ import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { notifies } from "../src/shared/notification.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { freePort, hasFfmpeg, makeVideo, memLogger, must, NO_PACE, tempDir, waitFor, wsClient } from "./helpers.ts";
+import { manualClock } from "./manual-clock.ts";
 
 const GROUP = "-1001";
 const ME = "123456789";
@@ -79,6 +80,9 @@ type HubExtras = {
   cleanupCompactMs?: number;
   cleanupExitMs?: number;
   cleanupSettleMs?: number;
+  exitPollMs?: number;
+  now?(): number;
+  sleep?(ms: number): Promise<void>;
   cleanTranscript?: typeof cleanTranscript;
   catchUpMs?: number;
   volunteerLimitsScript?: string;
@@ -122,6 +126,9 @@ async function startHub(o: { port?: number; idleMs?: number; token?: boolean | s
     ...(o.cleanupCompactMs ? { cleanupCompactMs: o.cleanupCompactMs } : {}),
     ...(o.cleanupExitMs ? { cleanupExitMs: o.cleanupExitMs } : {}),
     ...(o.cleanupSettleMs ? { cleanupSettleMs: o.cleanupSettleMs } : {}),
+    ...(o.exitPollMs ? { exitPollMs: o.exitPollMs } : {}),
+    ...(o.now ? { now: o.now } : {}),
+    ...(o.sleep ? { sleep: o.sleep } : {}),
     ...(o.cleanTranscript ? { cleanTranscript: o.cleanTranscript } : {}),
     ...(o.volunteerLimitsScript ? { volunteerLimitsScript: o.volunteerLimitsScript } : {}),
     ...(o.volunteerLimitsCommand ? { volunteerLimitsCommand: o.volunteerLimitsCommand } : {}),
@@ -179,6 +186,7 @@ afterEach(async () => {
   for (const c of clients.splice(0)) c.close();
   await hub?.stop();
   fake.stop();
+  rmSync(dir, { recursive: true, force: true });
 });
 
 describe("enable", () => {
@@ -2072,16 +2080,28 @@ describe("starting and stopping sessions", () => {
 
   test("a mode restart gives up when Claude Code does not exit", async () => {
     const spawned: string[][] = [];
+    const clock = manualClock();
+    let alive = true;
     config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c), isAlive: () => true, cleanupExitMs: MODE_SETTLE_MS });
+    await startHub({ spawn: c => void spawned.push(c), isAlive: () => alive, cleanupExitMs: MODE_SETTLE_MS, exitPollMs: MODE_SETTLE_MS, now: clock.now, sleep: clock.sleep });
     const a = await enabled(SID);
     fake.pushUpdate(msg("/mode plan"));
     await a.next("terminate");
+    fake.pushUpdate(msg("held past the deadline"));
     a.send({ type: "exiting", pid: MODE_PID });
     await waitFor(() => fake.texts().some(t => t.text.includes("🔁")));
     a.close();
+    await waitFor(() => !hub.isConnected(SID));
+    await clock.advance(MODE_SETTLE_MS);
     await waitFor(() => fake.texts().some(t => t.text.includes("Режим не сменён: Claude Code не завершился")));
     expect(spawned).toEqual([]);
+    alive = false;
+    await clock.advance(MODE_SETTLE_MS);
+    await waitFor(() => spawned.length === 1);
+    expect(spawned[0]).not.toContain("--permission-mode");
+    const next = await plugin(SID);
+    expect((await next.next("inbound")).content).toBe("held past the deadline");
+    clock.dispose();
   });
 
   test("/stop while a mode restart waits for the exit cancels it and keeps the held message", async () => {
@@ -2098,7 +2118,7 @@ describe("starting and stopping sessions", () => {
     await waitFor(() => !hub.isConnected(SID));
     fake.pushUpdate(msg("not lost"));
     fake.pushUpdate(msg("/stop"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Сессия не запущена")));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Запуск отменён")));
     expect(spawned).toEqual([]);
     alive = false;
     await waitFor(() => spawned.length === 1);
@@ -2133,14 +2153,14 @@ describe("starting and stopping sessions", () => {
   test("messages during a mode restart wait for the new window, never reaching the window that is ending", async () => {
     const spawned: string[][] = [];
     config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c), cleanupSettleMs: MODE_SETTLE_MS });
+    await startHub({ spawn: c => void spawned.push(c), cleanupSettleMs: MODE_SETTLE_MS, batchQuietMs: LONG_CATCH_UP_MS });
     const a = await enabled(SID);
-    fake.pushUpdate(msg("/mode plan"));
-    await a.next("terminate");
     fake.pushUpdate(msg("held during restart"));
-    // A hub command flushes the waiting batch first, so a leak would show up before its notice.
+    fake.pushUpdate(buttonPress({ chatId: Number(GROUP), fromId: Number(ME), messageId: 1, data: `m:${SID}:plan` }));
+    await a.next("terminate");
+    // The message preceded the button and was still in the batch when restart began.
     fake.pushUpdate(msg("/run"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Сессия уже работает")));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Сессия уже запускается")));
     expect(a.messages.some(m => m.type === "inbound")).toBe(false);
     a.close();
     await waitFor(() => spawned.length === 1);
@@ -2197,8 +2217,10 @@ describe("starting and stopping sessions", () => {
     const a = await enabled(SID);
     fake.pushUpdate(msg("/mode plan"));
     await a.next("terminate");
+    fake.pushUpdate(msg("held for the window that stays"));
     await waitFor(() => fake.texts().some(t => t.text.includes("Не удалось завершить сессию")));
     expect(fake.callsOf("sendMessage").some(c => String(c.text).includes("🚀 Запускаю сессию"))).toBe(false);
+    expect((await a.next("inbound")).content).toBe("held for the window that stays");
     a.close();
   });
 
@@ -2223,17 +2245,19 @@ describe("starting and stopping sessions", () => {
   test("/stop cancels a pending mode restart and releases held messages normally", async () => {
     const spawned: string[][] = [];
     config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c) });
+    await startHub({ spawn: c => void spawned.push(c), cleanupSettleMs: MODE_SETTLE_MS });
     const a = await enabled(SID);
     fake.pushUpdate(msg("/mode plan"));
     await a.next("terminate");
     fake.pushUpdate(msg("held for stopped session"));
     fake.pushUpdate(msg("/stop"));
     fake.pushUpdate(msg("/run"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Сессия уже работает")));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Сессия уже запускается")));
     a.close();
     await waitFor(() => spawned.length === 1);
     expect(spawned[0]).not.toContain("--permission-mode");
+    const next = await plugin(SID);
+    expect((await next.next("inbound")).content).toBe("held for stopped session");
   });
 
   test("a button press uses the same mode checks and removes its keyboard", async () => {
@@ -2248,19 +2272,20 @@ describe("starting and stopping sessions", () => {
     expect(prompt?.reply_markup).toBeDefined();
     fake.pushUpdate(buttonPress({ chatId: Number(GROUP), fromId: Number(ME), messageId, data: `m:${SID}:plan` }));
     await a.next("terminate");
-    expect(fake.callsOf("editMessageReplyMarkup").some(c => c.message_id === messageId)).toBe(true);
+    await waitFor(() => fake.callsOf("editMessageReplyMarkup").some(c => c.message_id === messageId));
     expect(spawned).toEqual([]);
     a.close();
   });
 
   test("a stale button uses the current-mode check and does not restart an already-current mode", async () => {
-    const projects = join(tempDir(), "projects");
+    const projects = join(dir, "projects");
     const transcriptDir = join(projects, "project");
     mkdirSync(transcriptDir, { recursive: true });
-    writeFileSync(join(transcriptDir, `${SID}.jsonl`), `${JSON.stringify({ type: "permission-mode", permissionMode: "plan" })}\n`);
+    writeFileSync(join(transcriptDir, `${SID}.jsonl`), "");
     config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
     await startHub({ projectsDir: projects });
     const a = await enabled(SID);
+    appendFileSync(join(transcriptDir, `${SID}.jsonl`), `${JSON.stringify({ type: "permission-mode", permissionMode: "plan" })}\n`);
     fake.pushUpdate(msg("/mode"));
     await waitFor(() => fake.callsOf("sendMessage").some(c => String(c.text).includes("Текущий режим")));
     fake.pushUpdate(buttonPress({ chatId: Number(GROUP), fromId: Number(ME), messageId: fake.lastMessageId, data: `m:${SID}:plan` }));
@@ -2270,10 +2295,22 @@ describe("starting and stopping sessions", () => {
   });
 
   test("a malformed and stale mode button does not start or terminate a window", async () => {
-    await startHub();
-    fake.pushUpdate(buttonPress({ chatId: Number(GROUP), fromId: Number(ME), messageId: 1, data: "m:not-a-session:plan" }));
-    await waitFor(() => fake.callsOf("answerCallbackQuery").length > 0);
-    expect(fake.callsOf("editMessageReplyMarkup").length).toBeGreaterThan(0);
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c) });
+    const a = await enabled(SID);
+    const presses = [
+      { data: "m:not-a-session:plan", fromId: Number(ME) },
+      { data: "m:22222222-2222-3333-4444-555555555555:plan", fromId: Number(ME) },
+      { data: `m:${SID}:plan`, fromId: Number(ME) + 1 },
+    ];
+    for (const [index, press] of presses.entries()) {
+      fake.pushUpdate(buttonPress({ chatId: Number(GROUP), messageId: 1, ...press }));
+      await waitFor(() => fake.callsOf("answerCallbackQuery").length > index);
+      expect(a.messages.some(m => m.type === "terminate")).toBe(false);
+      expect(spawned).toEqual([]);
+    }
+    expect(fake.callsOf("editMessageReplyMarkup")).toHaveLength(0);
   });
 });
 
@@ -3160,20 +3197,28 @@ sys.exit(1)
       h.release();
     });
 
-    test("a Claude Code that does not exit routes held messages through the inactive-session flow", async () => {
-      const { a, spawned } = await liveSession(SKILLS, { isAlive: () => true, cleanupExitMs: EXIT_MS });
+    test("a Claude Code that does not exit keeps held messages gated until it dies", async () => {
+      const clock = manualClock();
+      let alive = true;
+      const { a, spawned } = await liveSession(SKILLS, { isAlive: () => alive, cleanupExitMs: EXIT_MS, exitPollMs: EXIT_MS, now: clock.now, sleep: clock.sleep });
       const { runner } = mod(SID);
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
       command("meanwhile");
       await heldForCleanup();
       await windowEnds(a);
+      await waitFor(() => !hub.isConnected(SID));
+      await clock.advance(EXIT_MS);
       const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
       expect(warning.text).toBe("⚠️ Уборка не выполнена: Claude Code не завершился");
+      expect(spawned).toEqual([]);
+      alive = false;
+      await clock.advance(EXIT_MS);
       await waitFor(() => spawned.length);
       expect(spawned).toEqual([STARTED]);
       const w = await plugin(SID);
       expect((await w.next("inbound")).content).toBe("meanwhile");
+      clock.dispose();
     });
 
     test("an exec result during /cleanup waits for the relaunched session", async () => {

@@ -15,6 +15,7 @@ import type { VideoTools } from "./video.ts";
 import type { ExecShell } from "./exec-shell.ts";
 import type { CleanupResult } from "./skill-cleanup.ts";
 import type { MessageKind } from "../shared/notification.ts";
+import type { ExitGate } from "./exit-gate.ts";
 
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
@@ -50,6 +51,8 @@ import { isAlive, killTree, spawnRunner } from "./exec-runner.ts";
 import { DEFAULT_BASH, findPowershell } from "./exec-shell.ts";
 import { cleanTranscript } from "./skill-cleanup.ts";
 import { formatPermission } from "./format-permission.ts";
+import { exitGate } from "./exit-gate.ts";
+import { MAX_RECONNECT_PAUSE_MS } from "../shared/reconnect.ts";
 
 const INACTIVE_TEXT = "сессия сейчас не активна";
 // The queue id prefix of the start notice, "starting the session".
@@ -70,7 +73,8 @@ const STOP_TIMEOUT_MS = 15_000;
 // it gives the window this long to go.
 const CLEANUP_EXIT_MS = 30_000;
 const EXIT_POLL_MS = 200;
-const CLEANUP_SETTLE_MS = 3000;
+// Leave one polling interval beyond the plugin's longest reconnect pause.
+export const CLEANUP_SETTLE_MS = MAX_RECONNECT_PAUSE_MS + EXIT_POLL_MS;
 // How long /cleanup waits for the module to report its compact.
 const CLEANUP_COMPACT_MS = 600_000;
 // A topic message starting with it interrupts a working agent; it reaches a
@@ -145,9 +149,9 @@ const BOT_COMMANDS = [
 const EXEC_NOT_SET = "⚠️ Команды оболочки в этом хабе не настроены";
 
 // exitingPid: the Claude Code process the plugin said it is ending.
-type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; entrypoint?: string; busy?: boolean; reportsSeen?: boolean; exitingPid?: number };
+type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; entrypoint?: string; busy?: boolean; reportsSeen?: boolean; exitingPid?: number; attachedOffset?: number; launchedMode?: PermissionMode };
 type WS = ServerWebSocket<Conn>;
-// cancelled: /stop came after the window ended; what is held still waits for the exit.
+// cancelled: /stop won; held items still wait for the ending process.
 type ModeRestart = { mode: PermissionMode; held: Held[]; cancelled?: boolean };
 type Card = {
   text: string;
@@ -166,6 +170,9 @@ type Inbound = { content: string; meta: ChannelMeta; onSent(): void };
 // What a starting session gets once it connects: topic messages and the
 // results of topic commands.
 type Held = { message: Message } | { inbound: Inbound };
+type GatedLaunch = { account: string | undefined; held: Held[]; announce: boolean; mode?: PermissionMode };
+type QueuedBatch = { messages: Message[]; captured: boolean };
+type Replay = { held: Held[]; inFlight: Held[]; after: (() => void)[] };
 // Topic messages of a session waiting to go to its window together.
 type AnswerGroup = { api: TelegramApi; poll: Poll; index: number; messages: Message[]; parts: string[]; timer: ReturnType<typeof setTimeout> };
 type Batch = { api: TelegramApi; messages: Message[]; quietTimer: ReturnType<typeof setTimeout>; maxTimer: ReturnType<typeof setTimeout> };
@@ -228,7 +235,9 @@ export type HubOptions = {
   // has not recorded one for.
   projectsDir?: string;
   // Runs a launch command; by default a detached process.
-  spawn?(command: string[]): void;
+  spawn?(command: string[]): void | Promise<void>;
+  setTimer?(fn: () => void, ms: number): ReturnType<typeof setTimeout>;
+  clearTimer?(timer: ReturnType<typeof setTimeout>): void;
   readyDelayMs?: number;
   stopTimeoutMs?: number;
   // /cleanup: how long it waits for the compact, for Claude Code to exit,
@@ -237,6 +246,9 @@ export type HubOptions = {
   cleanupCompactMs?: number;
   cleanupExitMs?: number;
   cleanupSettleMs?: number;
+  exitPollMs?: number;
+  now?(): number;
+  sleep?(ms: number): Promise<void>;
   isAlive?(pid: number): boolean;
   cleanTranscript?: typeof cleanTranscript;
   // A window in this config dir runs on the default login, whose account is
@@ -288,6 +300,8 @@ function classify(e: unknown): Failure {
 // The single Telegram poller on the machine. Plugins (one per Claude Code
 // window) connect over a localhost WebSocket; whoever binds the port is the hub.
 export class Hub {
+  private deliveryOrders = new WeakMap<object, number>();
+  private nextDeliveryOrder = 0;
   private server: Server<Conn> | undefined;
   private conns = new Set<WS>();
   private store: SessionStore;
@@ -336,8 +350,13 @@ export class Hub {
   private batches = new Map<string, Batch>();
   private batchIds = new Map<number, number[]>();
   private batchSends = new Map<string, Promise<void>>();
+  private batchItems = new Map<string, Set<QueuedBatch>>();
+  private deliveredItems = new WeakSet<object>();
   // Sessions being started from the topic, with the messages they will get.
-  private launches = new Map<string, { account: string; held: Held[]; timer: ReturnType<typeof setTimeout> }>();
+  private launches = new Map<string, { account: string; held: Held[]; timer: ReturnType<typeof setTimeout>; mode?: PermissionMode; cancelled?: boolean }>();
+  private exitGates = new Map<string, ExitGate>();
+  private gatedLaunches = new Map<string, GatedLaunch>();
+  private retained = new Map<string, Held[]>();
   private execs: Execs | undefined;
   // Sessions told to end, until their window goes.
   private stops = new Map<string, ReturnType<typeof setTimeout>>();
@@ -349,9 +368,8 @@ export class Hub {
   private stopIds = new Map<string, string>();
   private cleanups = new Map<string, Cleanup>();
   // Held messages being handed to a window; later topic messages join them.
-  private replays = new Map<string, { held: Held[]; after: (() => void)[] }>();
-  // Messages of a /cleanup dropped by a second /stop, kept until the window
-  // it ends is gone.
+  private replays = new Map<string, Replay>();
+  // Messages kept for a stopped window, including a cancelled launch or cleanup.
   private dyingHeld = new Map<string, Held[]>();
   // A mode restart keeps inbound traffic until the replacement window connects.
   private modeRestarts = new Map<string, ModeRestart>();
@@ -469,6 +487,7 @@ export class Hub {
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
+    for (const gate of this.exitGates.values()) gate.cancel();
     // Polling stops first, so no batch starts after the flush.
     this.abort.abort();
     // Waiting answers answer at once, before the polls go to the terminal.
@@ -483,16 +502,16 @@ export class Hub {
     await Promise.allSettled([...this.polls.values()].map(p => this.finishPoll(p, { decision: "none" }, TO_TERMINAL)));
     // A question still being sent shows the outcome right after its send.
     await Promise.allSettled([...this.questionSends]);
-    if (this.idleTimer) clearTimeout(this.idleTimer);
+    if (this.idleTimer) this.clearTimer(this.idleTimer);
     if (this.spoolTimer) clearInterval(this.spoolTimer);
     if (this.typingTimer) clearInterval(this.typingTimer);
-    for (const queued of this.commands.values()) for (const e of queued) clearTimeout(e.timer);
-    for (const card of this.cards.values()) clearTimeout(card.timer);
-    for (const l of this.launches.values()) clearTimeout(l.timer);
-    for (const t of this.stops.values()) clearTimeout(t);
-    for (const c of this.cleanups.values()) clearTimeout(c.compactTimer);
-    for (const t of this.readyTimers) clearTimeout(t);
-    for (const t of this.reactionTimers.values()) clearTimeout(t);
+    for (const queued of this.commands.values()) for (const e of queued) this.clearTimer(e.timer);
+    for (const card of this.cards.values()) this.clearTimer(card.timer);
+    for (const l of this.launches.values()) this.clearTimer(l.timer);
+    for (const t of this.stops.values()) this.clearTimer(t);
+    for (const c of this.cleanups.values()) this.clearTimer(c.compactTimer);
+    for (const t of this.readyTimers) this.clearTimer(t);
+    for (const t of this.reactionTimers.values()) this.clearTimer(t);
     // The commands go on; the next hub picks them up.
     this.execs?.stop();
     this.server?.stop(true);
@@ -590,7 +609,7 @@ export class Hub {
   private queueCommand(sessionId: string, c: Omit<TopicCommand, "id">): string {
     const cmd = { id: randomUUID(), ...c };
     const ms = this.opts.commandPickupMs ?? COMMAND_PICKUP_MS;
-    const timer = setTimeout(() => {
+    const timer = this.setTimer(() => {
       this.commands.set(sessionId, (this.commands.get(sessionId) ?? []).filter(e => e.cmd !== cmd));
       this.log.warn(`/${cmd.name} for session ${sessionId} was not taken in ${ms} ms`);
       if (cmd.name === "stop") {
@@ -629,7 +648,7 @@ export class Hub {
     const left = queued.filter(e => !taken.includes(e));
     if (left.length) this.commands.set(sessionId, left);
     else this.commands.delete(sessionId);
-    for (const e of taken) clearTimeout(e.timer);
+    for (const e of taken) this.clearTimer(e.timer);
     return taken.map(e => e.cmd);
   }
 
@@ -643,7 +662,7 @@ export class Hub {
 
   private onOpen(ws: WS): void {
     this.conns.add(ws);
-    if (this.idleTimer) clearTimeout(this.idleTimer);
+    if (this.idleTimer) this.clearTimer(this.idleTimer);
     this.idleTimer = undefined;
     this.idleExpired = false;
   }
@@ -654,6 +673,7 @@ export class Hub {
     if (!this.running) return;
     if (sid) this.log.info(`window for session ${sid} disconnected`);
     if (sid && !this.connOf(sid)) {
+      if (ws.data.exitingPid !== undefined || this.stops.has(sid) || this.modeRestarts.has(sid) || this.dyingHeld.has(sid)) this.gateExit(sid, ws.data.exitingPid);
       this.stopping.delete(sid);
       // Without its window the session cannot take an answer any more.
       for (const p of this.polls.values()) if (p.sessionId === sid) void this.finishPoll(p, { decision: "none" }, TO_TERMINAL);
@@ -663,7 +683,7 @@ export class Hub {
       if (cleanup.phase === "exiting") {
         // The cleanup's summary tells the topic instead of "session ended".
         const t = this.stops.get(sid);
-        if (t) clearTimeout(t);
+        if (t) this.clearTimer(t);
         this.stops.delete(sid);
         void this.finishCleanup(sid, cleanup, ws.data.exitingPid);
       } else {
@@ -674,15 +694,21 @@ export class Hub {
     }
     const stop = sid ? this.stops.get(sid) : undefined;
     if (sid && stop && !this.connOf(sid)) {
-      clearTimeout(stop);
+      this.clearTimer(stop);
       this.stops.delete(sid);
       const stopId = this.stopIds.get(sid);
       this.stopIds.delete(sid);
-      if (stopId) this.enqueue(sid, `hub-${randomUUID()}`, "⏹ Сессия завершена", notifies("info"), false, { id: `${stopId}.0`, kind: "success" });
-      else this.notice(sid, "⏹ Сессия завершена", "info");
+      if (!this.modeRestarts.has(sid) || this.modeRestarts.get(sid)?.cancelled) {
+        if (stopId) this.enqueue(sid, `hub-${randomUUID()}`, "⏹ Сессия завершена", notifies("info"), false, { id: `${stopId}.0`, kind: "success" });
+        else this.notice(sid, "⏹ Сессия завершена", "info");
+      }
     }
     const restart = sid && !this.connOf(sid) ? this.modeRestarts.get(sid) : undefined;
-    if (sid && restart) void this.finishModeRestart(sid, restart, ws.data.account, ws.data.exitingPid);
+    if (sid && restart) {
+      this.modeRestarts.delete(sid);
+      if (restart.cancelled) this.releaseHeld(sid, restart.held);
+      else this.launch(sid, ws.data.account, restart.held, true, restart.mode);
+    }
     const dying = sid && !this.connOf(sid) ? this.dyingHeld.get(sid) : undefined;
     if (sid && dying) {
       this.dyingHeld.delete(sid);
@@ -701,8 +727,8 @@ export class Hub {
 
   private armIdle(): void {
     if (this.conns.size > 0 || !this.running || this.alwaysOn()) return;
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => {
+    if (this.idleTimer) this.clearTimer(this.idleTimer);
+    this.idleTimer = this.setTimer(() => {
       if (this.conns.size > 0 || this.alwaysOn()) return;
       this.idleExpired = true;
       if (this.deliverable() > 0) this.log.info(`no plugins connected — exiting once ${this.deliverable()} queued piece(s) reach Telegram`);
@@ -965,7 +991,10 @@ ${msg.text}`);
   private attachSession(ws: WS, msg: { sessionId: string; cwd: string; configDir?: string; entrypoint?: string; title?: string }): void {
     const account = accountOf(msg.configDir) ?? ws.data.account;
     const entrypoint = msg.entrypoint ?? ws.data.entrypoint;
-    ws.data = { ...ws.data, sessionId: msg.sessionId, cwd: msg.cwd, account, entrypoint };
+    const transcript = this.transcriptOf(msg.sessionId);
+    const attachedOffset = transcript ? statSync(transcript).size : undefined;
+    ws.data = { ...ws.data, sessionId: msg.sessionId, cwd: msg.cwd, account, entrypoint, attachedOffset, launchedMode: undefined };
+    this.exitGates.get(msg.sessionId)?.reconnect();
     this.applyDefaultMode({ sessionId: msg.sessionId, cwd: msg.cwd, entrypoint, title: msg.title });
     this.store.setWhere(msg.sessionId, msg.cwd, account);
     const title = msg.title;
@@ -1050,6 +1079,7 @@ ${msg.text}`);
   // with "none" when the call goes back to the terminal (the hook gave up,
   // the window left, the hub stops). A newer poll of the session ends the old one.
   private askQuestion(sessionId: string, questions: AskQuestion[], signal: AbortSignal): Promise<QuestionDecision> {
+    if (this.isStarting(sessionId) || this.dyingHeld.has(sessionId)) return Promise.resolve({ decision: "none" });
     for (const old of this.polls.values()) if (old.sessionId === sessionId) void this.finishPoll(old, { decision: "none" }, TO_TERMINAL);
     const key = randomUUID().replaceAll("-", "").slice(0, PERMISSION_KEY_CHARS);
     return new Promise(resolve => {
@@ -1075,9 +1105,9 @@ ${msg.text}`);
     const ws = this.connOf(sessionId);
     if (!ws) return Promise.resolve();
     return new Promise(resolve => {
-      const timer = setTimeout(() => done(), this.opts.catchUpMs ?? CATCH_UP_MS);
+      const timer = this.setTimer(() => done(), this.opts.catchUpMs ?? CATCH_UP_MS);
       const done = () => {
-        clearTimeout(timer);
+        this.clearTimer(timer);
         this.catchUps.delete(key);
         resolve();
       };
@@ -1268,7 +1298,7 @@ ${msg.text}`);
   private cardTimer(key: string, card: Card, earliest: number): void {
     const at = Math.max(earliest, this.nextCardEdit, this.opts.api?.floodEndsAt() ?? 0);
     this.nextCardEdit = at + (this.opts.cardGapMs ?? CARD_GAP_MS);
-    card.timer = setTimeout(
+    card.timer = this.setTimer(
       () => {
         card.timer = undefined;
         void this.editCard(key, card);
@@ -1580,12 +1610,13 @@ ${msg.text}`);
   }
 
   private sleep(ms: number): Promise<void> {
+    if (this.opts.sleep) return this.opts.sleep(ms);
     return new Promise(resolve => {
       const onAbort = () => {
-        clearTimeout(timer);
+        this.clearTimer(timer);
         resolve();
       };
-      const timer = setTimeout(() => {
+      const timer = this.setTimer(() => {
         this.abort.signal.removeEventListener("abort", onAbort);
         resolve();
       }, ms);
@@ -1719,6 +1750,7 @@ ${msg.text}`);
     if (press && cfg.groupId) return this.onPermissionPress(api, cfg.groupId, press);
     const route = routeUpdate(u, cfg, this.store, id => this.isConnected(id));
     const m = u.message;
+    if (m) this.deliveryOrder(m);
     if (route.action === "ignore") {
       if (m) this.log.info(`ignored update from chat ${m.chat.id} (${m.chat.type}${m.chat.title ? ` "${m.chat.title}"` : ""}), sender ${m.from?.id}: ${route.reason}`);
       return;
@@ -1733,7 +1765,7 @@ ${msg.text}`);
     const hubCmd = m.text !== undefined ? hubCommandOf(m.text, this.botUsername) : undefined;
     if (hubCmd) {
       // The messages before the command reach the agent first.
-      await this.flushBatch(route.sessionId);
+      if (hubCmd.name !== "mode" && hubCmd.name !== "stop") await this.flushBatch(route.sessionId);
       if (route.action === "inactive" && hubCmd.name === "cleanup" && this.opts.config().launch) {
         return this.toInactive(api, route.sessionId, [m]);
       }
@@ -1769,6 +1801,7 @@ ${msg.text}`);
     const text = m.text ?? m.caption ?? (m.rich_message ? await this.richContent(api, m.rich_message) : undefined);
     const part = [text, await this.fileMark(api, m)].filter(s => s !== undefined && s !== "").join(" ");
     if (!part) return m;
+    if (p.done) return m;
     this.addAnswer(api, p, m, part);
     return undefined;
   }
@@ -1780,12 +1813,12 @@ ${msg.text}`);
     if (g && g.index === p.index) {
       g.messages.push(m);
       g.parts.push(part);
-      clearTimeout(g.timer);
-      g.timer = setTimeout(() => void this.takeAnswer(p.key), quietMs);
+      this.clearTimer(g.timer);
+      g.timer = this.setTimer(() => void this.takeAnswer(p.key), quietMs);
       return;
     }
     if (g) void this.takeAnswer(p.key);
-    const timer = setTimeout(() => void this.takeAnswer(p.key), quietMs);
+    const timer = this.setTimer(() => void this.takeAnswer(p.key), quietMs);
     this.answerGroups.set(p.key, { api, poll: p, index: p.index, messages: [m], parts: [part], timer });
   }
 
@@ -1796,7 +1829,7 @@ ${msg.text}`);
     const g = this.answerGroups.get(key);
     if (!g) return;
     this.answerGroups.delete(key);
-    clearTimeout(g.timer);
+    this.clearTimer(g.timer);
     const p = g.poll;
     if (p.done || p.index !== g.index) {
       for (const m of g.messages) if (!this.holdForCleanup(p.sessionId, m)) await this.deliver(g.api, p.sessionId, m);
@@ -1842,7 +1875,7 @@ ${msg.text}`);
     const c = this.cleanups.get(sessionId);
     if (!c) return false;
     const what = "message" in h ? `message ${h.message.message_id}` : "a command result";
-    keepInOrder(c.held, h);
+    this.keepInOrder(c.held, h);
     this.log.info(`${what} for session ${sessionId} held until /cleanup ends`);
     return true;
   }
@@ -1850,18 +1883,16 @@ ${msg.text}`);
   // A topic message joins the session's waiting batch. A module command goes
   // after the batch; a "!" message sends it and starts its own.
   private async deliver(api: TelegramApi, sessionId: string, m: Message): Promise<void> {
+    if (this.hold(sessionId, { message: m })) return;
     if (!this.connOf(sessionId)) return this.toInactive(api, sessionId, [m]);
-    if (this.modeRestarts.has(sessionId)) {
-      this.keepInModeRestart(sessionId, { message: m });
-      return;
-    }
     // Held messages are still being handed over: this one goes after the
     // older ones.
     const open = this.replays.get(sessionId);
-    if (open) return void keepInOrder(open.held, { message: m });
+    if (open) return void this.keepInOrder(open.held, { message: m });
     const cmd = m.text !== undefined ? commandOf(m.text, this.botUsername) : undefined;
     if (cmd) {
       await this.flushBatch(sessionId);
+      if (this.hold(sessionId, { message: m })) return;
       this.queueCommand(sessionId, cmd);
       return;
     }
@@ -1870,15 +1901,15 @@ ${msg.text}`);
     const b = this.batches.get(sessionId);
     if (b) {
       b.messages.push(m);
-      clearTimeout(b.quietTimer);
-      b.quietTimer = setTimeout(() => void this.flushBatch(sessionId), quietMs);
+      this.clearTimer(b.quietTimer);
+      b.quietTimer = this.setTimer(() => void this.flushBatch(sessionId), quietMs);
       return;
     }
     this.batches.set(sessionId, {
       api,
       messages: [m],
-      quietTimer: setTimeout(() => void this.flushBatch(sessionId), quietMs),
-      maxTimer: setTimeout(() => void this.flushBatch(sessionId), this.opts.batchMaxMs ?? BATCH_MAX_MS),
+      quietTimer: this.setTimer(() => void this.flushBatch(sessionId), quietMs),
+      maxTimer: this.setTimer(() => void this.flushBatch(sessionId), this.opts.batchMaxMs ?? BATCH_MAX_MS),
     });
   }
 
@@ -1888,20 +1919,27 @@ ${msg.text}`);
     const b = this.batches.get(sessionId);
     if (b) {
       this.batches.delete(sessionId);
-      clearTimeout(b.quietTimer);
-      clearTimeout(b.maxTimer);
+      this.clearTimer(b.quietTimer);
+      this.clearTimer(b.maxTimer);
       this.queueBatch(sessionId, b.api, b.messages);
     }
     return this.batchSends.get(sessionId) ?? Promise.resolve();
   }
 
   private queueBatch(sessionId: string, api: TelegramApi, messages: Message[]): Promise<void> {
+    for (const message of messages) this.deliveryOrder(message);
+    const entry = { messages, captured: false };
+    const items = this.batchItems.get(sessionId) ?? new Set<QueuedBatch>();
+    items.add(entry);
+    this.batchItems.set(sessionId, items);
     const prev = this.batchSends.get(sessionId) ?? Promise.resolve();
     const next = prev
-      .then(() => this.sendBatch(api, sessionId, messages))
+      .then(() => entry.captured ? undefined : this.sendBatch(api, sessionId, messages, entry))
       .catch(e => this.log.error(`delivering messages ${messages.map(m => m.message_id).join(", ")} to session ${sessionId} failed: ${e}`));
     this.batchSends.set(sessionId, next);
     void next.then(() => {
+      items.delete(entry);
+      if (!items.size && this.batchItems.get(sessionId) === items) this.batchItems.delete(sessionId);
       if (this.batchSends.get(sessionId) === next) this.batchSends.delete(sessionId);
     });
     return next;
@@ -1910,7 +1948,10 @@ ${msg.text}`);
   // One message goes as before, with its attachment in the meta; several go
   // as one notification, their texts after blank lines and their files named
   // in the text.
-  private async sendBatch(api: TelegramApi, sessionId: string, messages: Message[]): Promise<void> {
+  private async sendBatch(api: TelegramApi, sessionId: string, messages: Message[], entry: QueuedBatch): Promise<void> {
+    const remaining = messages.filter(message => !this.hold(sessionId, { message }));
+    if (!remaining.length) return;
+    messages = remaining;
     const [first, ...rest] = messages;
     if (!first) return;
     const ws = this.connOf(sessionId);
@@ -1932,8 +1973,11 @@ ${msg.text}`);
     const head = interrupt ? withoutInterrupt(first) : first;
     if (!rest.length) {
       const { content, meta } = await this.inboundOf(api, head);
+      if (entry.captured) return;
+      if (this.rerouteBatch(sessionId, ws, messages)) return;
       if (ws.data.reportsSeen) this.reactLater(first.message_id);
       this.send(ws, { type: "inbound", content, meta, ...flag });
+      for (const message of messages) this.deliveredItems.add(message);
       this.log.info(`message ${first.message_id} in topic ${first.message_thread_id} → session ${sessionId}: ${shapeOf(first, content)}`);
       return;
     }
@@ -1941,6 +1985,8 @@ ${msg.text}`);
     for (const m of [head, ...rest]) parts.push(await this.itemContent(api, m));
     // A lone "!" leaves an empty first part.
     const content = parts.filter(p => p !== "").join("\n\n");
+    if (entry.captured) return;
+    if (this.rerouteBatch(sessionId, ws, messages)) return;
     if (ws.data.reportsSeen) {
       for (const id of ids) this.reactLater(id);
       this.batchIds.set(first.message_id, rest.map(m => m.message_id));
@@ -1948,6 +1994,7 @@ ${msg.text}`);
       if (this.batchIds.size > MAX_BATCH_IDS && !oldest.done) this.batchIds.delete(oldest.value);
     }
     this.send(ws, { type: "inbound", content, meta: baseMeta(first), ...flag });
+    for (const message of messages) this.deliveredItems.add(message);
     this.log.info(`messages ${ids.join(", ")} in topic ${first.message_thread_id} → session ${sessionId}: ${messages.map(kindOfMessage).join(", ")}, ${content.length} chars`);
   }
 
@@ -1978,7 +2025,7 @@ ${msg.text}`);
   }
 
   private reactLater(messageId: number): void {
-    const timer = setTimeout(() => {
+    const timer = this.setTimer(() => {
       this.reactionTimers.delete(messageId);
       this.react(messageId, TAKEN_REACTION);
     }, this.opts.reactionDelayMs ?? REACTION_DELAY_MS);
@@ -1997,7 +2044,7 @@ ${msg.text}`);
   private clearTaken(messageId: number): void {
     const timer = this.reactionTimers.get(messageId);
     if (timer === undefined) return this.react(messageId, undefined);
-    clearTimeout(timer);
+    this.clearTimer(timer);
     this.reactionTimers.delete(messageId);
   }
 
@@ -2026,25 +2073,23 @@ ${msg.text}`);
   // A starting session keeps what comes for it until it connects; false when
   // the session is not starting.
   private hold(sessionId: string, h: Held): boolean {
+    if (this.deliveredItems.has("message" in h ? h.message : h.inbound)) return true;
     const cleanup = this.cleanups.get(sessionId);
     const restart = this.modeRestarts.get(sessionId);
-    const pending = this.launches.get(sessionId) ?? (cleanup && !this.connOf(sessionId) ? cleanup : undefined) ?? restart;
+    const dying = this.dyingHeld.get(sessionId);
+    if (dying) { this.keepInOrder(dying, h); return true; }
+    const pending = restart ?? this.gatedLaunches.get(sessionId) ?? this.launches.get(sessionId) ?? (cleanup && (cleanup.phase === "exiting" || !this.connOf(sessionId)) ? cleanup : undefined);
     if (!pending) return false;
-    keepInOrder(pending.held, h);
+    this.keepInOrder(pending.held, h);
     return true;
-  }
-
-  private keepInModeRestart(sessionId: string, h: Held): void {
-    const restart = this.modeRestarts.get(sessionId);
-    if (restart) keepInOrder(restart.held, h);
   }
 
   private onHubCommand(sessionId: string, cmd: HubCommand, m: Message): void {
     if (cmd.name === "pwsh" || cmd.name === "cmd" || cmd.name === "bash") return this.onExecCommand(sessionId, cmd.name, cmd.args, m);
     if (cmd.name === "run") {
       if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, "info");
+      if (this.isStarting(sessionId)) return this.notice(sessionId, "Сессия уже запускается", "info");
       if (this.connOf(sessionId)) return this.notice(sessionId, "Сессия уже работает", "info");
-      if (this.launches.has(sessionId) || this.modeRestarts.has(sessionId)) return this.notice(sessionId, "Сессия уже запускается", "info");
       return this.launch(sessionId, cmd.args || undefined, []);
     }
     if (cmd.name === "cleanup") return this.startCleanup(sessionId, cmd.args);
@@ -2052,14 +2097,22 @@ ${msg.text}`);
     const cleanup = this.cleanups.get(sessionId);
     if (cleanup) return this.stopDuringCleanup(sessionId, cleanup);
     const restart = this.modeRestarts.get(sessionId);
-    if (restart) {
-      if (this.connOf(sessionId)) {
-        this.modeRestarts.delete(sessionId);
-        this.dyingHeld.set(sessionId, restart.held);
-      } else restart.cancelled = true;
+    if (restart) restart.cancelled = true;
+    const gated = this.gatedLaunches.get(sessionId);
+    if (gated) {
+      gated.mode = undefined;
+      if (!gated.held.length) this.gatedLaunches.delete(sessionId);
     }
-    if (!this.connOf(sessionId)) return this.notice(sessionId, "Сессия не запущена", "info");
-    if (this.stops.has(sessionId)) return;
+    const launching = this.launches.get(sessionId);
+    if (launching) {
+      launching.cancelled = true;
+      this.clearTimer(launching.timer);
+      return this.notice(sessionId, "⏹ Запуск отменён; подключившееся окно будет завершено", "info");
+    }
+    if (!this.connOf(sessionId)) return this.notice(sessionId, gated ? "⏹ Запуск отменён; ожидаю завершения Claude Code" : this.exitGates.has(sessionId) ? "⏳ Сессия уже завершается" : "Сессия не запущена", "info");
+    if (this.stops.has(sessionId)) return this.notice(sessionId, "⏳ Сессия уже завершается", "info");
+    this.dyingHeld.set(sessionId, this.dyingHeld.get(sessionId) ?? []);
+    this.capturePending(sessionId);
     if (this.stopping.has(sessionId)) {
       this.log.info(`second /stop for session ${sessionId}: not waiting for the module`);
       return this.terminate(sessionId);
@@ -2069,10 +2122,11 @@ ${msg.text}`);
   }
 
   private onModeCommand(sessionId: string, args: string): void {
+    if (this.isStarting(sessionId)) return this.notice(sessionId, "Сессия уже запускается", "info");
     const requested = PERMISSION_MODES.find(mode => mode.toLowerCase() === args.toLowerCase());
     if (args && !requested) return this.notice(sessionId, `Режимы: ${PERMISSION_MODES.join(", ")}`, "info");
     if (!requested) return void this.showModes(sessionId);
-    const current = this.currentMode(sessionId);
+    const current = this.knownMode(sessionId);
     if (current === requested) return this.notice(sessionId, `Режим уже ${requested}`, "info");
     const cfg = this.opts.config();
     if (!cfg.launch) {
@@ -2099,36 +2153,24 @@ ${msg.text}`);
     this.terminate(sessionId);
   }
 
-  // The window is gone: the new one starts once Claude Code has exited, as two
-  // on the same transcript would break it.
-  private async finishModeRestart(sessionId: string, r: ModeRestart, account: string | undefined, pid: number | undefined): Promise<void> {
-    const current = () => this.running && this.modeRestarts.get(sessionId) === r;
-    await this.awaitExit(sessionId, pid, current);
-    if (!current()) return;
-    this.modeRestarts.delete(sessionId);
-    if (r.cancelled) return this.releaseHeld(sessionId, r.held);
-    if (this.connOf(sessionId)) {
-      this.log.warn(`mode restart of session ${sessionId}: a window of the session connected again; ${r.held.length} held message(s) go to it`);
-      this.notice(sessionId, "⚠️ Режим не сменён: сессия снова открыта", "warning");
-      return this.releaseHeld(sessionId, r.held);
-    }
-    if (pid !== undefined && (this.opts.isAlive ?? isAlive)(pid)) {
-      this.log.warn(`mode restart of session ${sessionId}: Claude Code ${pid} did not exit; ${r.held.length} held message(s) go the way of new topic messages`);
-      this.notice(sessionId, "⚠️ Режим не сменён: Claude Code не завершился", "warning");
-      return this.releaseHeld(sessionId, r.held);
-    }
-    this.launch(sessionId, account, r.held, true, r.mode);
-  }
-
   private currentMode(sessionId: string): string | undefined {
     const rec = this.store.get(sessionId);
     const path = this.transcriptOf(sessionId);
-    if (path) {
-      const later = transcriptMode(path, rec?.launchedModeOffset);
+    if (path && rec?.launchedMode && rec.launchedModeOffset !== undefined) {
+      const later = transcriptMode(path, rec.launchedModeOffset);
       if (later) return later;
     }
     if (rec?.launchedMode) return rec.launchedMode;
     return path ? transcriptMode(path) : undefined;
+  }
+
+  private knownMode(sessionId: string): string | undefined {
+    const ws = this.connOf(sessionId);
+    if (!ws) return undefined;
+    const path = this.transcriptOf(sessionId);
+    const rec = this.store.get(sessionId);
+    const offset = ws.data.launchedMode ? rec?.launchedModeOffset ?? ws.data.attachedOffset : ws.data.attachedOffset;
+    return (path && offset !== undefined ? transcriptMode(path, offset) : undefined) ?? ws.data.launchedMode;
   }
 
   private launchLocation(sessionId: string, account: string | undefined): { account: string; cwd: string } | { error: "account" | "cwd" | "record" } {
@@ -2146,26 +2188,30 @@ ${msg.text}`);
     const cfg = this.opts.config();
     const rec = this.store.get(sessionId);
     if (!api || !cfg.groupId || rec?.topicId === undefined) return;
-    const current = this.currentMode(sessionId);
+    const known = this.knownMode(sessionId);
+    const current = known ?? this.currentMode(sessionId);
     const label = current === undefined ? "режим неизвестен" : current;
     const buttons = PERMISSION_MODES.map(mode => [{ text: `${current === mode ? "✅ " : ""}${mode}`, data: `m:${sessionId}:${mode}` }]);
-    await api.sendMessage(cfg.groupId, rec.topicId, `Текущий режим: ${label}`, true, undefined, buttons).catch(e => this.log.warn(`sending mode buttons failed: ${e}`));
+    const text = `${known === undefined && current !== undefined ? "Последний известный режим" : "Текущий режим"}: ${label}`;
+    if (this.outbox.add(`modes-${randomUUID()}`, sessionId, [{ text, silent: true, buttons }])) void this.pump(sessionId);
   }
 
   private terminate(sessionId: string, stopId?: string): void {
     this.stopping.delete(sessionId);
     const queued = this.commands.get(sessionId) ?? [];
-    for (const e of queued.filter(e => e.cmd.name === "stop")) clearTimeout(e.timer);
+    for (const e of queued.filter(e => e.cmd.name === "stop")) this.clearTimer(e.timer);
     this.commands.set(sessionId, queued.filter(e => e.cmd.name !== "stop"));
     const ws = this.connOf(sessionId);
     if (!ws || this.stops.has(sessionId)) return;
+    if (!this.modeRestarts.has(sessionId) && !this.cleanups.has(sessionId) && !this.dyingHeld.has(sessionId)) this.dyingHeld.set(sessionId, []);
+    this.capturePending(sessionId);
     this.log.info(`stopping session ${sessionId} from the topic`);
     this.send(ws, { type: "terminate" });
     if (stopId) this.stopIds.set(sessionId, stopId);
     const ms = this.opts.stopTimeoutMs ?? STOP_TIMEOUT_MS;
     this.stops.set(
       sessionId,
-      setTimeout(() => {
+      this.setTimer(() => {
         this.stops.delete(sessionId);
         this.stopIds.delete(sessionId);
         const restart = this.modeRestarts.get(sessionId);
@@ -2200,7 +2246,7 @@ ${msg.text}`);
     if (this.stops.has(sessionId) || this.stopping.has(sessionId)) return this.notice(sessionId, "⏳ Сессия уже завершается", "info");
     const c: Cleanup = { id: this.queueCommand(sessionId, { name: "cleanup", args }), phase: "compacting", held: [] };
     const ms = this.opts.cleanupCompactMs ?? CLEANUP_COMPACT_MS;
-    c.compactTimer = setTimeout(() => {
+    c.compactTimer = this.setTimer(() => {
       if (this.cleanups.get(sessionId) !== c || c.phase !== "compacting") return;
       this.log.warn(`/cleanup of session ${sessionId}: no compact report in ${ms} ms; /cleanup dropped`);
       this.cleanupOutcome(sessionId, c, `⚠️ Уборка не выполнена: компакт не закончился за ${ms / MS_PER_MINUTE} мин`, "warning", "warning");
@@ -2228,9 +2274,11 @@ ${msg.text}`);
   // transcript untouched; an exiting one is ending already.
   private stopDuringCleanup(sessionId: string, c: Cleanup): void {
     if (c.phase === "compacting") {
+      this.dyingHeld.set(sessionId, this.dyingHeld.get(sessionId) ?? []);
       this.log.info(`/stop during the /cleanup compact of session ${sessionId}: ending the window, the transcript untouched`);
       this.cleanupOutcome(sessionId, c, "⏹ Уборка отменена", "info", "warning");
       this.dropCleanup(sessionId, true);
+      this.capturePending(sessionId);
     }
     this.terminate(sessionId);
   }
@@ -2241,11 +2289,11 @@ ${msg.text}`);
   // session, as a message to a stopped session does.
   private dropCleanup(sessionId: string, windowDies = false): void {
     const c = this.cleanups.get(sessionId);
-    if (c) clearTimeout(c.compactTimer);
+    if (c) this.clearTimer(c.compactTimer);
     // An ended one keeps its entry until its "will compact" message is there.
     this.cleanups.delete(sessionId);
     const queued = this.commands.get(sessionId) ?? [];
-    for (const e of queued.filter(e => e.cmd.name === "cleanup")) clearTimeout(e.timer);
+    for (const e of queued.filter(e => e.cmd.name === "cleanup")) this.clearTimer(e.timer);
     const left = queued.filter(e => e.cmd.name !== "cleanup");
     if (left.length) this.commands.set(sessionId, left);
     else this.commands.delete(sessionId);
@@ -2265,7 +2313,7 @@ ${msg.text}`);
       this.log.info(`/cleanup report ${id} for session ${sessionId} ignored: that /cleanup was dropped or is unknown`);
       return;
     }
-    clearTimeout(c.compactTimer);
+    this.clearTimer(c.compactTimer);
     if (error !== undefined) {
       this.log.warn(`/cleanup of session ${sessionId}: the compact failed: ${error}`);
       this.cleanupOutcome(sessionId, c, `⚠️ Уборка не выполнена: компакт не удался: ${error}`, "error", "warning");
@@ -2276,25 +2324,12 @@ ${msg.text}`);
     this.terminate(sessionId);
   }
 
-  // Waits for the Claude Code of an ended window to exit, while `wanted` holds
-  // and no window of the session is back.
-  private async awaitExit(sessionId: string, pid: number | undefined, wanted: () => boolean): Promise<void> {
-    if (pid === undefined) {
-      this.log.info(`session ${sessionId}: the Claude Code process is unknown; waiting for it to go`);
-      await this.sleep(this.opts.cleanupSettleMs ?? CLEANUP_SETTLE_MS);
-      return;
-    }
-    const alive = this.opts.isAlive ?? isAlive;
-    const deadline = Date.now() + (this.opts.cleanupExitMs ?? CLEANUP_EXIT_MS);
-    while (wanted() && alive(pid) && !this.connOf(sessionId) && Date.now() < deadline) await this.sleep(EXIT_POLL_MS);
-  }
-
   // The window is gone: once Claude Code has exited, the skills go from the
   // transcript.
   private async finishCleanup(sessionId: string, c: Cleanup, pid: number | undefined): Promise<void> {
     const current = () => this.running && this.cleanups.get(sessionId) === c;
-    const alive = this.opts.isAlive ?? isAlive;
-    await this.awaitExit(sessionId, pid, current);
+    const gate = this.exitGates.get(sessionId) ?? this.gateExit(sessionId, pid);
+    const outcome = await gate.settled;
     if (!current()) return;
     // A window of the session connected again: the edit would race it, and
     // what came meanwhile goes to it.
@@ -2304,7 +2339,7 @@ ${msg.text}`);
       this.cleanupOutcome(sessionId, c, "⚠️ Уборка не выполнена: сессия снова открыта", "warning", "warning");
       return this.releaseHeld(sessionId, c.held);
     }
-    if (pid !== undefined && alive(pid)) {
+    if (outcome === "deadline") {
       this.cleanups.delete(sessionId);
       this.log.warn(`/cleanup of session ${sessionId}: Claude Code ${pid} did not exit; the transcript untouched, ${c.held.length} held message(s) go the way of new topic messages`);
       this.cleanupOutcome(sessionId, c, "⚠️ Уборка не выполнена: Claude Code не завершился", "error", "warning");
@@ -2365,9 +2400,27 @@ ${msg.text}`);
   // messages wait until the session connects; one start at a time. announce:
   // false leaves out the start notice; a failure is told all the same.
   private launch(sessionId: string, account: string | undefined, held: Held[], announce = true, mode?: PermissionMode): void {
+    const saved = this.retained.get(sessionId) ?? [];
+    this.retained.delete(sessionId);
+    for (const h of held) this.keepInOrder(saved, h);
+    held = saved;
+    const existing = this.launches.get(sessionId) ?? this.gatedLaunches.get(sessionId);
+    if (existing) {
+      for (const h of held) this.keepInOrder(existing.held, h);
+      return;
+    }
+    const gate = this.exitGates.get(sessionId);
+    if (gate) {
+      if (gate.expired && mode) {
+        mode = undefined;
+        if (!held.length) return this.notice(sessionId, "Смена режима отменена: Claude Code ещё завершается", "info");
+      }
+      this.gatedLaunches.set(sessionId, { account, held, announce, mode });
+      return;
+    }
     const cfg = this.opts.config();
     const rec = this.store.get(sessionId);
-    if (!rec) return;
+    if (!rec) return this.retainHeld(sessionId, held);
     // A window of the session is open: a second Claude Code on the same
     // transcript would break it.
     if (this.connOf(sessionId)) {
@@ -2376,37 +2429,56 @@ ${msg.text}`);
       return;
     }
     if (!cfg.launch) {
+      this.retainHeld(sessionId, held);
       const why = cfg.launchError ? `секция launch в config.json с ошибкой: ${cfg.launchError}` : "в config.json нет секции launch";
       return this.notice(sessionId, `⚠️ Автозапуск не настроен: ${why}`, "warning");
     }
     const location = this.launchLocation(sessionId, account);
-    if ("error" in location) return this.notice(sessionId, location.error === "account" ? "⚠️ Аккаунт сессии неизвестен, используй /run N." : "⚠️ Не знаю, в какой директории запустить сессию.", "warning");
+    if ("error" in location) {
+      this.retainHeld(sessionId, held);
+      return this.notice(sessionId, location.error === "account" ? "⚠️ Аккаунт сессии неизвестен, используй /run N." : "⚠️ Не знаю, в какой директории запустить сессию.", "warning");
+    }
     const { account: acc, cwd } = location;
     let command: string[];
-    let modeOffset = 0;
+    let modeOffset: number | undefined;
+    let spawned: void | Promise<void>;
     try {
       command = launchCommand(cfg.launch, { cwd, account: acc, session: sessionId, ...(mode ? { mode } : {}) });
       const transcript = mode ? this.transcriptOf(sessionId) : undefined;
       if (transcript) modeOffset = statSync(transcript).size;
       this.log.info(`starting session ${sessionId} on account ${acc}: ${JSON.stringify(command)}`);
-      (this.opts.spawn ?? spawnDetached)(command);
+      spawned = (this.opts.spawn ?? spawnDetached)(command);
     } catch (e) {
       const why = e instanceof LaunchError ? e.message : `команда не запустилась (${e instanceof Error ? e.message : e})`;
       this.log.warn(`starting session ${sessionId} failed: ${why}`);
+      this.retainHeld(sessionId, held);
       return this.notice(sessionId, `⚠️ Не могу запустить сессию: ${why}`, "error");
     }
-    this.store.setLaunchedMode(sessionId, mode, modeOffset);
     const sec = cfg.launch.timeoutSec;
-    const timer = setTimeout(() => {
+    const timer = this.setTimer(() => {
       const l = this.launches.get(sessionId);
       this.launches.delete(sessionId);
-      this.log.warn(`session ${sessionId} did not connect in ${sec} s; ${l?.held.length ?? 0} held message(s) dropped`);
+      this.log.warn(`session ${sessionId} did not connect in ${sec} s; ${l?.held.length ?? 0} held item(s) retained`);
+      this.retainHeld(sessionId, l?.held ?? []);
       this.launchEnded(sessionId, "failed");
       this.notice(sessionId, `⚠️ Сессия не запустилась за ${sec} с`, "error");
     }, sec * MS_PER_SECOND);
-    this.launches.set(sessionId, { account: acc, held, timer });
+    this.launches.set(sessionId, { account: acc, held, timer, mode });
     this.launchEnds.delete(sessionId);
-    if (announce) this.launchNotice(sessionId, `🚀 Запускаю сессию (аккаунт ${acc})…`);
+    const started = () => {
+      this.store.setLaunchedMode(sessionId, mode, modeOffset);
+      if (announce) this.launchNotice(sessionId, `🚀 Запускаю сессию (аккаунт ${acc})…`);
+    };
+    if (spawned) void spawned.then(started, e => {
+      const l = this.launches.get(sessionId);
+      if (!l || l.timer !== timer) return;
+      this.clearTimer(timer);
+      this.launches.delete(sessionId);
+      this.retainHeld(sessionId, l.held);
+      this.launchEnded(sessionId, "failed");
+      this.notice(sessionId, `⚠️ Не могу запустить сессию: ${e instanceof Error ? e.message : String(e)}`, "error");
+    });
+    else started();
   }
 
   // A window of the session connected: a start it waited for is done, and
@@ -2417,11 +2489,26 @@ ${msg.text}`);
   private launched(ws: WS, sessionId: string): void {
     const l = this.launches.get(sessionId);
     if (!l) {
+      const saved = this.retained.get(sessionId);
+      if (saved) {
+        this.retained.delete(sessionId);
+        this.replay(sessionId, saved, () => this.execs?.connected(sessionId));
+        return;
+      }
       if (this.execs) this.whenReady(() => this.execs?.connected(sessionId));
       return;
     }
-    clearTimeout(l.timer);
+    this.clearTimer(l.timer);
     this.launches.delete(sessionId);
+    if (l.cancelled) {
+      this.dyingHeld.set(sessionId, l.held);
+      this.terminate(sessionId);
+      return;
+    }
+    ws.data.launchedMode = l.mode;
+    if (l.mode && this.store.get(sessionId)?.launchedModeOffset === undefined && ws.data.attachedOffset !== undefined) {
+      this.store.setLaunchedMode(sessionId, l.mode, ws.data.attachedOffset);
+    }
     if (!ws.data.account) {
       ws.data.account = l.account;
       this.store.setWhere(sessionId, undefined, l.account);
@@ -2437,14 +2524,14 @@ ${msg.text}`);
   // a command, a command result or a "!" message comes. A batch waiting in the
   // window meanwhile joins them in the order of arrival, so neither the held
   // messages nor the newer ones jump the queue.
-  private async sendHeld(sessionId: string, kept: Held[]): Promise<void> {
+  private async sendHeld(sessionId: string, kept: Held[], wanted: () => boolean): Promise<void> {
     const held = [...kept];
     const waiting = this.batches.get(sessionId);
     if (waiting) {
       this.batches.delete(sessionId);
-      clearTimeout(waiting.quietTimer);
-      clearTimeout(waiting.maxTimer);
-      for (const m of waiting.messages) keepInOrder(held, { message: m });
+      this.clearTimer(waiting.quietTimer);
+      this.clearTimer(waiting.maxTimer);
+      for (const m of waiting.messages) this.keepInOrder(held, { message: m });
     }
     let run: Message[] = [];
     const flush = async () => {
@@ -2455,8 +2542,12 @@ ${msg.text}`);
     };
     for (const h of held) {
       try {
+        if (!wanted()) return;
+        if (this.hold(sessionId, h)) continue;
+        if (!this.connOf(sessionId)) { this.releaseHeld(sessionId, [h]); continue; }
         if (!("message" in h)) {
           await flush();
+          if (!wanted()) return;
           this.deliverInbound(sessionId, h.inbound);
           continue;
         }
@@ -2464,6 +2555,8 @@ ${msg.text}`);
         const hubCmd = m.text !== undefined ? hubCommandOf(m.text, this.botUsername) : undefined;
         if (hubCmd) {
           await flush();
+          if (!wanted()) return;
+          if (this.hold(sessionId, h)) continue;
           if (this.connOf(sessionId)) this.onHubCommand(sessionId, hubCmd, m);
           else this.log.warn(`session ${sessionId} has no window, message ${m.message_id} not delivered`);
           continue;
@@ -2471,11 +2564,16 @@ ${msg.text}`);
         const cmd = m.text !== undefined ? commandOf(m.text, this.botUsername) : undefined;
         if (cmd) {
           await flush();
+          if (!wanted()) return;
+          if (this.hold(sessionId, h)) continue;
           if (this.connOf(sessionId)) this.queueCommand(sessionId, cmd);
           else this.log.warn(`session ${sessionId} has no window, message ${m.message_id} not delivered`);
           continue;
         }
-        if (isInterrupt(m)) await flush();
+        if (isInterrupt(m)) {
+          await flush();
+          if (!wanted()) return;
+        }
         run.push(m);
       } catch (e) {
         this.log.error(`delivering held ${"message" in h ? `message ${h.message.message_id}` : "command result"} to session ${sessionId} failed: ${e}`);
@@ -2489,19 +2587,26 @@ ${msg.text}`);
   }
 
   // Hands held messages to a window once Claude Code is ready. Topic messages
-  // that come meanwhile join them in the order of message ids, so none jumps
+  // that come meanwhile join them in arrival order, so none jumps
   // ahead of an older held one; the window gets the next round if any came.
   private replay(sessionId: string, held: Held[], after?: () => void): void {
+    for (const h of held) this.deliveryOrder("message" in h ? h.message : h.inbound);
     const open = this.replays.get(sessionId);
     if (open) {
-      for (const h of held) keepInOrder(open.held, h);
+      for (const h of held) this.keepInOrder(open.held, h);
       if (after) open.after.push(after);
       return;
     }
-    const entry = { held: [...held], after: after ? [after] : [] };
+    const entry: Replay = { held: [...held], inFlight: [], after: after ? [after] : [] };
     this.replays.set(sessionId, entry);
     this.whenReady(async () => {
-      while (entry.held.length) await this.sendHeld(sessionId, entry.held.splice(0));
+      if (this.replays.get(sessionId) !== entry) return;
+      while (entry.held.length && this.replays.get(sessionId) === entry) {
+        entry.inFlight = entry.held.splice(0);
+        await this.sendHeld(sessionId, entry.inFlight, () => this.replays.get(sessionId) === entry);
+        entry.inFlight = [];
+      }
+      if (this.replays.get(sessionId) !== entry) return;
       this.replays.delete(sessionId);
       for (const fn of entry.after) fn();
     });
@@ -2511,19 +2616,20 @@ ${msg.text}`);
   // moment: into the open window, else into a start under way, else it starts
   // the session, else the user is told the session is not active.
   private releaseHeld(sessionId: string, held: Held[]): void {
-    if (!held.length) return;
-    if (this.connOf(sessionId)) return this.replay(sessionId, held);
+    if (!held.length) {
+      if (this.connOf(sessionId) && this.execs) this.whenReady(() => this.execs?.connected(sessionId));
+      return;
+    }
     const rest = held.filter(h => !this.hold(sessionId, h));
     if (!rest.length) return;
+    if (this.connOf(sessionId)) return this.replay(sessionId, rest, () => this.execs?.connected(sessionId));
     if (this.opts.config().launch) return this.launch(sessionId, undefined, rest);
-    const api = this.opts.api;
-    const messages = rest.flatMap(h => "message" in h ? [h.message] : []);
-    if (api && messages.length) void this.toInactive(api, sessionId, messages);
+    this.retainHeld(sessionId, rest);
   }
 
   // Runs once Claude Code is ready for channel messages.
   private whenReady(fn: () => void | Promise<void>): void {
-    const t = setTimeout(() => {
+    const t = this.setTimer(() => {
       this.readyTimers.delete(t);
       void fn();
     }, this.opts.readyDelayMs ?? READY_DELAY_MS);
@@ -2566,45 +2672,142 @@ ${msg.text}`);
     const sessionId = match?.[1];
     const mode = match?.[2] ? PERMISSION_MODES.find(value => value.toLowerCase() === match[2]?.toLowerCase()) : undefined;
     const cfg = this.opts.config();
-    if (cfg.groupId) await api.removeKeyboard(cfg.groupId, press.messageId).catch(e => this.log.warn(`removing mode buttons failed: ${e}`));
-    await api.answerCallbackQuery(press.id).catch(e => this.log.warn(`answering a mode button failed: ${e}`));
     if (!sessionId || !mode || !this.store.get(sessionId)) {
       this.log.info(`malformed or stale mode button pressed by ${press.fromId}`);
+      await api.answerCallbackQuery(press.id).catch(e => this.log.warn(`answering a mode button failed: ${e}`));
       return;
     }
+    const wasStarting = this.isStarting(sessionId);
     this.onModeCommand(sessionId, mode);
+    if (!wasStarting && this.isStarting(sessionId) && cfg.groupId) void api.removeKeyboard(cfg.groupId, press.messageId).catch(e => this.log.warn(`removing mode buttons failed: ${e}`));
+    await api.answerCallbackQuery(press.id).catch(e => this.log.warn(`answering a mode button failed: ${e}`));
   }
 
   // A command's result reaches the agent as a topic message would: at once
   // with a window, after the start with a session starting or startable.
   private reportExec(sessionId: string, inbound: Inbound): void {
-    if (this.modeRestarts.has(sessionId)) {
-      this.keepInModeRestart(sessionId, { inbound });
+    this.deliveryOrder(inbound);
+    const replay = this.replays.get(sessionId);
+    if (this.hold(sessionId, { inbound })) {
+      // The ending or starting window must not receive this result yet.
+    } else if (replay) {
+      this.keepInOrder(replay.held, { inbound });
     } else if (this.connOf(sessionId)) {
       // A /cleanup under way holds it like a topic message: a turn it starts
       // would be cut by the kill.
       if (!this.keepForCleanup(sessionId, { inbound })) this.deliverInbound(sessionId, inbound);
-    } else if (this.hold(sessionId, { inbound })) {
-      // Goes once the session connects.
     } else if (this.opts.config().launch) this.launch(sessionId, undefined, [{ inbound }]);
     else {
       this.notice(sessionId, "⚠️ Сессия не запущена: результат команды агенту не доставлен", "warning");
-      inbound.onSent();
+      this.retainHeld(sessionId, [{ inbound }]);
     }
     // The last command ended: the hub may go idle again.
     if (!this.execs?.running()) this.armIdle();
   }
 
   private deliverInbound(sessionId: string, inbound: Inbound): void {
+    if (this.hold(sessionId, { inbound })) return;
     const ws = this.connOf(sessionId);
     if (!ws) {
-      this.log.warn(`session ${sessionId} has no window, command result not delivered`);
+      this.releaseHeld(sessionId, [{ inbound }]);
       return;
     }
     this.setEnabled(sessionId, true);
     this.send(ws, { type: "inbound", content: inbound.content, meta: inbound.meta });
+    this.deliveredItems.add(inbound);
     inbound.onSent();
     this.log.info(`command result ${inbound.meta.exec_id ?? "?"} → session ${sessionId}`);
+  }
+
+  private isStarting(sessionId: string): boolean {
+    return this.launches.has(sessionId) || this.modeRestarts.has(sessionId) || this.gatedLaunches.has(sessionId);
+  }
+
+  private setTimer(fn: () => void, ms: number): ReturnType<typeof setTimeout> {
+    if (this.opts.setTimer) return this.opts.setTimer(fn, ms);
+    return setTimeout(fn, ms);
+  }
+
+  private clearTimer(timer: ReturnType<typeof setTimeout> | undefined): void {
+    if (timer === undefined) return;
+    if (this.opts.clearTimer) this.opts.clearTimer(timer);
+    else clearTimeout(timer);
+  }
+
+  private retainHeld(sessionId: string, held: Held[]): void {
+    const saved = this.retained.get(sessionId) ?? [];
+    for (const h of held) this.keepInOrder(saved, h);
+    if (!saved.length) return;
+    this.retained.set(sessionId, saved);
+    this.notice(sessionId, `⏳ Ожидают доставки: ${saved.length}. Сообщения сохранены до следующего запуска`, "warning");
+  }
+
+  private capturePending(sessionId: string): void {
+    for (const p of this.polls.values()) if (p.sessionId === sessionId) {
+      void this.finishPoll(p, { decision: "none" }, TO_TERMINAL);
+      void this.takeAnswer(p.key);
+    }
+    for (const entry of this.batchItems.get(sessionId) ?? []) {
+      entry.captured = true;
+      for (const message of entry.messages) this.hold(sessionId, { message });
+    }
+    const batch = this.batches.get(sessionId);
+    if (batch) {
+      this.batches.delete(sessionId);
+      this.clearTimer(batch.quietTimer);
+      this.clearTimer(batch.maxTimer);
+      for (const message of batch.messages) this.hold(sessionId, { message });
+    }
+    const replay = this.replays.get(sessionId);
+    if (replay) {
+      this.replays.delete(sessionId);
+      for (const h of replay.inFlight) this.hold(sessionId, h);
+      for (const h of replay.held.splice(0)) this.hold(sessionId, h);
+    }
+  }
+
+  private rerouteBatch(sessionId: string, ws: WS, messages: Message[]): boolean {
+    if (this.connOf(sessionId) === ws && !messages.some(message => this.hold(sessionId, { message }))) return false;
+    this.releaseHeld(sessionId, messages.map(message => ({ message })));
+    return true;
+  }
+
+  private gateExit(sessionId: string, pid: number | undefined): ExitGate {
+    const existing = this.exitGates.get(sessionId);
+    if (existing) return existing;
+    if (pid === undefined) this.log.info(`session ${sessionId}: the Claude Code process is unknown; waiting for it to go`);
+    const gate = exitGate(pid, {
+      now: this.opts.now ?? Date.now,
+      sleep: ms => this.sleep(ms),
+      isAlive: this.opts.isAlive ?? isAlive,
+      pollMs: this.opts.exitPollMs ?? EXIT_POLL_MS,
+      deadlineMs: this.opts.cleanupExitMs ?? CLEANUP_EXIT_MS,
+      settleMs: this.opts.cleanupSettleMs ?? CLEANUP_SETTLE_MS,
+    });
+    this.exitGates.set(sessionId, gate);
+    void gate.settled.then(outcome => {
+      const pending = this.gatedLaunches.get(sessionId);
+      if (outcome === "deadline" && pending?.mode) {
+        pending.mode = undefined;
+        if (!pending.held.length) this.gatedLaunches.delete(sessionId);
+        this.notice(sessionId, "⚠️ Режим не сменён: Claude Code не завершился", "warning");
+      } else if (outcome === "deadline" && !this.cleanups.has(sessionId)) {
+        this.notice(sessionId, "⚠️ Claude Code не завершился; запуск ждёт выхода процесса", "warning");
+      }
+    });
+    void gate.done.then(outcome => {
+      if (this.exitGates.get(sessionId) !== gate) return;
+      this.exitGates.delete(sessionId);
+      if (!this.running || outcome === "cancelled") return;
+      const pending = this.gatedLaunches.get(sessionId);
+      this.gatedLaunches.delete(sessionId);
+      if (!pending) return;
+      if (outcome === "reconnected") {
+        if (pending.mode) this.notice(sessionId, "⚠️ Режим не сменён: сессия снова открыта", "warning");
+        this.releaseHeld(sessionId, pending.held);
+      } else this.launch(sessionId, pending.account, pending.held, pending.announce, pending.mode);
+    });
+    return gate;
   }
 
   // The hub's own copy goes, as for files from a window.
@@ -2734,14 +2937,36 @@ ${msg.text}`);
     }
     return { content: withContext(m, content ?? "", this.botId), meta };
   }
+
+  // Puts a held message before the held ones that came after it: a batch
+  // rerouted when its window closed is older than what was held meanwhile.
+  // Arrival order also covers results and attachment preparation in flight.
+  private keepInOrder(held: Held[], h: Held): void {
+    if (held.some(x => "message" in h ? "message" in x && x.message === h.message : "inbound" in x && x.inbound === h.inbound)) return;
+    const order = this.deliveryOrder("message" in h ? h.message : h.inbound);
+    const at = held.findIndex(x => this.deliveryOrder("message" in x ? x.message : x.inbound) > order);
+    if (at < 0) held.push(h);
+    else held.splice(at, 0, h);
+  }
+
+  private deliveryOrder(item: object): number {
+    const existing = this.deliveryOrders.get(item);
+    if (existing !== undefined) return existing;
+    const order = this.nextDeliveryOrder++;
+    this.deliveryOrders.set(item, order);
+    return order;
+  }
 }
 
-function spawnDetached(command: string[]): void {
+function spawnDetached(command: string[]): Promise<void> {
   const [exe, ...args] = command;
   if (!exe) throw new LaunchError("пустая команда запуска");
   const child = spawn(exe, args, { detached: true, stdio: "ignore" });
-  child.on("error", () => {});
   child.unref();
+  return new Promise((resolve, reject) => {
+    child.once("spawn", resolve);
+    child.once("error", reject);
+  });
 }
 
 // The /cleanup summary in the topic: what came of the skills.
@@ -2797,15 +3022,6 @@ function shapeOf(m: Message, content: string): string {
 
 function kindOfMessage(m: Message): string {
   return (["rich_message", "photo", "document", "voice", "audio", "video", "video_note", "sticker"] as const).find(k => m[k]) ?? "text";
-}
-
-// Puts a held message before the held ones that came after it: a batch
-// rerouted when its window closed is older than what was held meanwhile.
-// message_id grows within a chat; a command result goes last.
-function keepInOrder(held: Held[], h: Held): void {
-  const at = "message" in h ? held.findIndex(x => "message" in x && x.message.message_id > h.message.message_id) : -1;
-  if (at < 0) held.push(h);
-  else held.splice(at, 0, h);
 }
 
 // A message that interrupts the agent: its own text starts with "!". A
