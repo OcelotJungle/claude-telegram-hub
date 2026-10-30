@@ -4,6 +4,7 @@ import type { Logger } from "../shared/log.ts";
 import type { Entity, Formatted } from "../shared/markdown.ts";
 import type { OutFile } from "../shared/media.ts";
 import type { AskQuestion, ChannelMeta, EnableResult, HookBody, HubToPlugin, LimitsReading, PermissionBehavior, PluginToHub, QuestionDecision, ResolutionKind, TopicCommand } from "../shared/protocol.ts";
+import type { PermissionMode } from "./launch.ts";
 import type { OutItem, Piece } from "./outbox.ts";
 import type { Poll } from "./questions.ts";
 import type { SessionRecord } from "./sessions.ts";
@@ -34,7 +35,7 @@ import { VolunteerLimits } from "./volunteer-limits.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
-import { launchCommand, LaunchError, sessionCwd, sessionTranscript } from "./launch.ts";
+import { hasModePlaceholder, launchCommand, LaunchError, PERMISSION_MODES, sessionCwd, sessionTranscript, transcriptMode } from "./launch.ts";
 import { commandOf, hubCommandOf, routeCallback, routeUpdate } from "./router.ts";
 import { accountOf, SessionStore, topicName } from "./sessions.ts";
 import { isThreadNotFound, TelegramError } from "./telegram.ts";
@@ -136,6 +137,7 @@ const BOT_COMMANDS = [
   { command: "run", description: "Запустить сессию; /run N — на аккаунте N" },
   { command: "stop", description: "Завершить сессию" },
   { command: "cleanup", description: "Сжать контекст, убрать накопившиеся скиллы и завершить сессию" },
+  { command: "mode", description: "Показать или сменить режим разрешений" },
   { command: "pwsh", description: "Команда в PowerShell в папке сессии" },
   { command: "cmd", description: "Команда в cmd в папке сессии" },
   { command: "bash", description: "Команда в Git Bash в папке сессии" },
@@ -145,6 +147,8 @@ const EXEC_NOT_SET = "⚠️ Команды оболочки в этом хаб�
 // exitingPid: the Claude Code process the plugin said it is ending.
 type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; entrypoint?: string; busy?: boolean; reportsSeen?: boolean; exitingPid?: number };
 type WS = ServerWebSocket<Conn>;
+// cancelled: /stop came after the window ended; what is held still waits for the exit.
+type ModeRestart = { mode: PermissionMode; held: Held[]; cancelled?: boolean };
 type Card = {
   text: string;
   final: boolean;
@@ -349,6 +353,8 @@ export class Hub {
   // Messages of a /cleanup dropped by a second /stop, kept until the window
   // it ends is gone.
   private dyingHeld = new Map<string, Held[]>();
+  // A mode restart keeps inbound traffic until the replacement window connects.
+  private modeRestarts = new Map<string, ModeRestart>();
   // The start notices sent to a session's topic: Telegram message id and the
   // text it shows. They go once its agent starts working.
   private launchNotices = new Map<string, { id: number; text: string }[]>();
@@ -675,6 +681,8 @@ export class Hub {
       if (stopId) this.enqueue(sid, `hub-${randomUUID()}`, "⏹ Сессия завершена", notifies("info"), false, { id: `${stopId}.0`, kind: "success" });
       else this.notice(sid, "⏹ Сессия завершена", "info");
     }
+    const restart = sid && !this.connOf(sid) ? this.modeRestarts.get(sid) : undefined;
+    if (sid && restart) void this.finishModeRestart(sid, restart, ws.data.account, ws.data.exitingPid);
     const dying = sid && !this.connOf(sid) ? this.dyingHeld.get(sid) : undefined;
     if (sid && dying) {
       this.dyingHeld.delete(sid);
@@ -1706,6 +1714,7 @@ ${msg.text}`);
       return;
     }
     if (press?.data.startsWith("x:")) return this.onExecPress(api, press);
+    if (press?.data.startsWith("m:")) return this.onModePress(api, press);
     if (press?.data.startsWith(POLL_PREFIX) && cfg.groupId) return this.onPollPress(api, cfg.groupId, press);
     if (press && cfg.groupId) return this.onPermissionPress(api, cfg.groupId, press);
     const route = routeUpdate(u, cfg, this.store, id => this.isConnected(id));
@@ -1842,6 +1851,10 @@ ${msg.text}`);
   // after the batch; a "!" message sends it and starts its own.
   private async deliver(api: TelegramApi, sessionId: string, m: Message): Promise<void> {
     if (!this.connOf(sessionId)) return this.toInactive(api, sessionId, [m]);
+    if (this.modeRestarts.has(sessionId)) {
+      this.keepInModeRestart(sessionId, { message: m });
+      return;
+    }
     // Held messages are still being handed over: this one goes after the
     // older ones.
     const open = this.replays.get(sessionId);
@@ -2014,10 +2027,16 @@ ${msg.text}`);
   // the session is not starting.
   private hold(sessionId: string, h: Held): boolean {
     const cleanup = this.cleanups.get(sessionId);
-    const pending = this.launches.get(sessionId) ?? (cleanup && !this.connOf(sessionId) ? cleanup : undefined);
+    const restart = this.modeRestarts.get(sessionId);
+    const pending = this.launches.get(sessionId) ?? (cleanup && !this.connOf(sessionId) ? cleanup : undefined) ?? restart;
     if (!pending) return false;
     keepInOrder(pending.held, h);
     return true;
+  }
+
+  private keepInModeRestart(sessionId: string, h: Held): void {
+    const restart = this.modeRestarts.get(sessionId);
+    if (restart) keepInOrder(restart.held, h);
   }
 
   private onHubCommand(sessionId: string, cmd: HubCommand, m: Message): void {
@@ -2025,12 +2044,20 @@ ${msg.text}`);
     if (cmd.name === "run") {
       if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, "info");
       if (this.connOf(sessionId)) return this.notice(sessionId, "Сессия уже работает", "info");
-      if (this.launches.has(sessionId)) return this.notice(sessionId, "Сессия уже запускается", "info");
+      if (this.launches.has(sessionId) || this.modeRestarts.has(sessionId)) return this.notice(sessionId, "Сессия уже запускается", "info");
       return this.launch(sessionId, cmd.args || undefined, []);
     }
     if (cmd.name === "cleanup") return this.startCleanup(sessionId, cmd.args);
+    if (cmd.name === "mode") return this.onModeCommand(sessionId, cmd.args);
     const cleanup = this.cleanups.get(sessionId);
     if (cleanup) return this.stopDuringCleanup(sessionId, cleanup);
+    const restart = this.modeRestarts.get(sessionId);
+    if (restart) {
+      if (this.connOf(sessionId)) {
+        this.modeRestarts.delete(sessionId);
+        this.dyingHeld.set(sessionId, restart.held);
+      } else restart.cancelled = true;
+    }
     if (!this.connOf(sessionId)) return this.notice(sessionId, "Сессия не запущена", "info");
     if (this.stops.has(sessionId)) return;
     if (this.stopping.has(sessionId)) {
@@ -2039,6 +2066,90 @@ ${msg.text}`);
     }
     // The module compacts the session first if it has to.
     this.stopping.set(sessionId, this.queueCommand(sessionId, { name: "stop", args: cmd.args }));
+  }
+
+  private onModeCommand(sessionId: string, args: string): void {
+    const requested = PERMISSION_MODES.find(mode => mode.toLowerCase() === args.toLowerCase());
+    if (args && !requested) return this.notice(sessionId, `Режимы: ${PERMISSION_MODES.join(", ")}`, "info");
+    if (!requested) return void this.showModes(sessionId);
+    const current = this.currentMode(sessionId);
+    if (current === requested) return this.notice(sessionId, `Режим уже ${requested}`, "info");
+    const cfg = this.opts.config();
+    if (!cfg.launch) {
+      const why = cfg.launchError ? `секция launch в config.json с ошибкой: ${cfg.launchError}` : "в config.json нет секции launch";
+      return this.notice(sessionId, `⚠️ Автозапуск не настроен: ${why}`, "warning");
+    }
+    if (!hasModePlaceholder(cfg.launch)) return this.notice(sessionId, "⚠️ Добавь {mode} в launch.command в config.json; окно оставлено открытым", "warning");
+    const location = this.launchLocation(sessionId, this.connOf(sessionId)?.data.account);
+    if ("error" in location) return this.notice(sessionId, location.error === "account" ? "⚠️ Аккаунт сессии неизвестен, используй /run N." : "⚠️ Не знаю, в какой директории запустить сессию.", "warning");
+    const { account, cwd } = location;
+    try {
+      launchCommand(cfg.launch, { cwd, account, session: sessionId, mode: requested });
+    } catch (e) {
+      const why = e instanceof LaunchError ? e.message : String(e);
+      return this.notice(sessionId, `⚠️ Не могу подготовить перезапуск: ${why}`, "warning");
+    }
+    if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, "info");
+    if (this.stops.has(sessionId) || this.stopping.has(sessionId)) return this.notice(sessionId, "⏳ Сессия уже завершается", "info");
+    if (this.launches.has(sessionId) || this.modeRestarts.has(sessionId)) return this.notice(sessionId, "Сессия уже запускается", "info");
+    const ws = this.connOf(sessionId);
+    if (!ws) return this.launch(sessionId, account, [], true, requested);
+    this.modeRestarts.set(sessionId, { mode: requested, held: [] });
+    this.notice(sessionId, `🔁 Перезапускаю сессию в режиме ${requested}…`, "info");
+    this.terminate(sessionId);
+  }
+
+  // The window is gone: the new one starts once Claude Code has exited, as two
+  // on the same transcript would break it.
+  private async finishModeRestart(sessionId: string, r: ModeRestart, account: string | undefined, pid: number | undefined): Promise<void> {
+    const current = () => this.running && this.modeRestarts.get(sessionId) === r;
+    await this.awaitExit(sessionId, pid, current);
+    if (!current()) return;
+    this.modeRestarts.delete(sessionId);
+    if (r.cancelled) return this.releaseHeld(sessionId, r.held);
+    if (this.connOf(sessionId)) {
+      this.log.warn(`mode restart of session ${sessionId}: a window of the session connected again; ${r.held.length} held message(s) go to it`);
+      this.notice(sessionId, "⚠️ Режим не сменён: сессия снова открыта", "warning");
+      return this.releaseHeld(sessionId, r.held);
+    }
+    if (pid !== undefined && (this.opts.isAlive ?? isAlive)(pid)) {
+      this.log.warn(`mode restart of session ${sessionId}: Claude Code ${pid} did not exit; ${r.held.length} held message(s) go the way of new topic messages`);
+      this.notice(sessionId, "⚠️ Режим не сменён: Claude Code не завершился", "warning");
+      return this.releaseHeld(sessionId, r.held);
+    }
+    this.launch(sessionId, account, r.held, true, r.mode);
+  }
+
+  private currentMode(sessionId: string): string | undefined {
+    const rec = this.store.get(sessionId);
+    const path = this.transcriptOf(sessionId);
+    if (path) {
+      const later = transcriptMode(path, rec?.launchedModeOffset);
+      if (later) return later;
+    }
+    if (rec?.launchedMode) return rec.launchedMode;
+    return path ? transcriptMode(path) : undefined;
+  }
+
+  private launchLocation(sessionId: string, account: string | undefined): { account: string; cwd: string } | { error: "account" | "cwd" | "record" } {
+    const rec = this.store.get(sessionId);
+    if (!rec) return { error: "record" };
+    const resolvedAccount = account ?? rec.account;
+    if (!resolvedAccount) return { error: "account" };
+    const cwd = rec.cwd ?? (this.opts.projectsDir ? sessionCwd(sessionId, this.opts.projectsDir) : undefined);
+    if (!cwd) return { error: "cwd" };
+    return { account: resolvedAccount, cwd };
+  }
+
+  private async showModes(sessionId: string): Promise<void> {
+    const api = this.opts.api;
+    const cfg = this.opts.config();
+    const rec = this.store.get(sessionId);
+    if (!api || !cfg.groupId || rec?.topicId === undefined) return;
+    const current = this.currentMode(sessionId);
+    const label = current === undefined ? "режим неизвестен" : current;
+    const buttons = PERMISSION_MODES.map(mode => [{ text: `${current === mode ? "✅ " : ""}${mode}`, data: `m:${sessionId}:${mode}` }]);
+    await api.sendMessage(cfg.groupId, rec.topicId, `Текущий режим: ${label}`, true, undefined, buttons).catch(e => this.log.warn(`sending mode buttons failed: ${e}`));
   }
 
   private terminate(sessionId: string, stopId?: string): void {
@@ -2057,6 +2168,12 @@ ${msg.text}`);
       setTimeout(() => {
         this.stops.delete(sessionId);
         this.stopIds.delete(sessionId);
+        const restart = this.modeRestarts.get(sessionId);
+        if (restart) {
+          this.modeRestarts.delete(sessionId);
+          this.log.warn(`session ${sessionId} did not end for a mode restart; ${restart.held.length} held message(s) go to its window`);
+          this.releaseHeld(sessionId, restart.held);
+        }
         const dying = this.dyingHeld.get(sessionId);
         if (dying) {
           // The window stays: what a dropped /cleanup held goes to it.
@@ -2159,18 +2276,25 @@ ${msg.text}`);
     this.terminate(sessionId);
   }
 
+  // Waits for the Claude Code of an ended window to exit, while `wanted` holds
+  // and no window of the session is back.
+  private async awaitExit(sessionId: string, pid: number | undefined, wanted: () => boolean): Promise<void> {
+    if (pid === undefined) {
+      this.log.info(`session ${sessionId}: the Claude Code process is unknown; waiting for it to go`);
+      await this.sleep(this.opts.cleanupSettleMs ?? CLEANUP_SETTLE_MS);
+      return;
+    }
+    const alive = this.opts.isAlive ?? isAlive;
+    const deadline = Date.now() + (this.opts.cleanupExitMs ?? CLEANUP_EXIT_MS);
+    while (wanted() && alive(pid) && !this.connOf(sessionId) && Date.now() < deadline) await this.sleep(EXIT_POLL_MS);
+  }
+
   // The window is gone: once Claude Code has exited, the skills go from the
   // transcript.
   private async finishCleanup(sessionId: string, c: Cleanup, pid: number | undefined): Promise<void> {
     const current = () => this.running && this.cleanups.get(sessionId) === c;
     const alive = this.opts.isAlive ?? isAlive;
-    if (pid === undefined) {
-      this.log.info(`/cleanup of session ${sessionId}: the Claude Code process is unknown; waiting for it to go`);
-      await this.sleep(this.opts.cleanupSettleMs ?? CLEANUP_SETTLE_MS);
-    } else {
-      const deadline = Date.now() + (this.opts.cleanupExitMs ?? CLEANUP_EXIT_MS);
-      while (current() && alive(pid) && !this.connOf(sessionId) && Date.now() < deadline) await this.sleep(EXIT_POLL_MS);
-    }
+    await this.awaitExit(sessionId, pid, current);
     if (!current()) return;
     // A window of the session connected again: the edit would race it, and
     // what came meanwhile goes to it.
@@ -2240,7 +2364,7 @@ ${msg.text}`);
   // given, else the one it ran on last; with neither it does not start. The
   // messages wait until the session connects; one start at a time. announce:
   // false leaves out the start notice; a failure is told all the same.
-  private launch(sessionId: string, account: string | undefined, held: Held[], announce = true): void {
+  private launch(sessionId: string, account: string | undefined, held: Held[], announce = true, mode?: PermissionMode): void {
     const cfg = this.opts.config();
     const rec = this.store.get(sessionId);
     if (!rec) return;
@@ -2255,13 +2379,15 @@ ${msg.text}`);
       const why = cfg.launchError ? `секция launch в config.json с ошибкой: ${cfg.launchError}` : "в config.json нет секции launch";
       return this.notice(sessionId, `⚠️ Автозапуск не настроен: ${why}`, "warning");
     }
-    const acc = account ?? rec.account;
-    if (!acc) return this.notice(sessionId, "⚠️ Аккаунт сессии неизвестен, используй /run N.", "warning");
-    const cwd = rec.cwd ?? (this.opts.projectsDir ? sessionCwd(sessionId, this.opts.projectsDir) : undefined);
-    if (!cwd) return this.notice(sessionId, "⚠️ Не знаю, в какой директории запустить сессию.", "warning");
+    const location = this.launchLocation(sessionId, account);
+    if ("error" in location) return this.notice(sessionId, location.error === "account" ? "⚠️ Аккаунт сессии неизвестен, используй /run N." : "⚠️ Не знаю, в какой директории запустить сессию.", "warning");
+    const { account: acc, cwd } = location;
     let command: string[];
+    let modeOffset = 0;
     try {
-      command = launchCommand(cfg.launch, { cwd, account: acc, session: sessionId });
+      command = launchCommand(cfg.launch, { cwd, account: acc, session: sessionId, ...(mode ? { mode } : {}) });
+      const transcript = mode ? this.transcriptOf(sessionId) : undefined;
+      if (transcript) modeOffset = statSync(transcript).size;
       this.log.info(`starting session ${sessionId} on account ${acc}: ${JSON.stringify(command)}`);
       (this.opts.spawn ?? spawnDetached)(command);
     } catch (e) {
@@ -2269,6 +2395,7 @@ ${msg.text}`);
       this.log.warn(`starting session ${sessionId} failed: ${why}`);
       return this.notice(sessionId, `⚠️ Не могу запустить сессию: ${why}`, "error");
     }
+    this.store.setLaunchedMode(sessionId, mode, modeOffset);
     const sec = cfg.launch.timeoutSec;
     const timer = setTimeout(() => {
       const l = this.launches.get(sessionId);
@@ -2434,10 +2561,26 @@ ${msg.text}`);
     await api.answerCallbackQuery(press.id, answer).catch(e => this.log.warn(`answering a button press failed: ${e}`));
   }
 
+  private async onModePress(api: TelegramApi, press: { id: string; data: string; messageId: number; fromId: string }): Promise<void> {
+    const match = /^m:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):(manual|auto|acceptEdits|plan|dontAsk)$/i.exec(press.data);
+    const sessionId = match?.[1];
+    const mode = match?.[2] ? PERMISSION_MODES.find(value => value.toLowerCase() === match[2]?.toLowerCase()) : undefined;
+    const cfg = this.opts.config();
+    if (cfg.groupId) await api.removeKeyboard(cfg.groupId, press.messageId).catch(e => this.log.warn(`removing mode buttons failed: ${e}`));
+    await api.answerCallbackQuery(press.id).catch(e => this.log.warn(`answering a mode button failed: ${e}`));
+    if (!sessionId || !mode || !this.store.get(sessionId)) {
+      this.log.info(`malformed or stale mode button pressed by ${press.fromId}`);
+      return;
+    }
+    this.onModeCommand(sessionId, mode);
+  }
+
   // A command's result reaches the agent as a topic message would: at once
   // with a window, after the start with a session starting or startable.
   private reportExec(sessionId: string, inbound: Inbound): void {
-    if (this.connOf(sessionId)) {
+    if (this.modeRestarts.has(sessionId)) {
+      this.keepInModeRestart(sessionId, { inbound });
+    } else if (this.connOf(sessionId)) {
       // A /cleanup under way holds it like a topic message: a turn it starts
       // would be cut by the kill.
       if (!this.keepForCleanup(sessionId, { inbound })) this.deliverInbound(sessionId, inbound);

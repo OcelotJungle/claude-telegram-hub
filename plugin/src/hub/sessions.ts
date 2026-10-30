@@ -11,6 +11,7 @@ const CSWAP_PROFILE = /^(\d+)-/;
 // disabledByUser: the user turned the mode off (tg_disable), so an interactive window does not turn it back on.
 // cwd and account: where and on which cswap account the session last ran;
 // transcript: its transcript file, as Claude Code's hook named it.
+// launchedMode and launchedModeOffset: the mode and transcript size at the last mode-specific launch.
 export type SessionRecord = {
   topicId?: number;
   title: string;
@@ -20,6 +21,8 @@ export type SessionRecord = {
   cwd?: string;
   account?: string;
   transcript?: string;
+  launchedMode?: string;
+  launchedModeOffset?: number;
 };
 
 const dataSchema: z.ZodType<Record<string, SessionRecord>> = z.record(
@@ -33,6 +36,8 @@ const dataSchema: z.ZodType<Record<string, SessionRecord>> = z.record(
     cwd: z.string().optional(),
     account: z.string().optional(),
     transcript: z.string().optional(),
+    launchedMode: z.string().optional(),
+    launchedModeOffset: z.number().optional(),
   }),
 );
 
@@ -103,6 +108,15 @@ export class SessionStore {
     const rec = this.data[sessionId];
     if (!rec || rec.transcript === path) return;
     this.data[sessionId] = { ...rec, transcript: path };
+    this.save();
+  }
+
+  // A start without a mode forgets the last one: the window no longer runs it.
+  setLaunchedMode(sessionId: string, mode: string | undefined, offset: number): void {
+    const rec = this.data[sessionId];
+    if (!rec) return;
+    const { launchedMode: _mode, launchedModeOffset: _offset, ...rest } = rec;
+    this.data[sessionId] = mode ? { ...rest, launchedMode: mode, launchedModeOffset: offset } : rest;
     this.save();
   }
 

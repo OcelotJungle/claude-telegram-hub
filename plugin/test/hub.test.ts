@@ -1753,6 +1753,9 @@ describe("subagent cards", () => {
 describe("starting and stopping sessions", () => {
   const SID = "11111111-2222-3333-4444-555555555555";
   const COMMAND = ["wt.exe", "-d", "{cwd}", "cswap.exe", "run", "{account}", "--", "--resume", "{session}"];
+  const MODE_COMMAND = ["wt.exe", "-d", "{cwd}", "cswap.exe", "run", "{account}", "--", "--resume", "{session}", "{mode}"];
+  const MODE_PID = 4242;
+  const MODE_SETTLE_MS = 1;
   const msg = (text: string) => topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text });
   const texts = () => fake.texts().map(t => t.text);
 
@@ -1998,6 +2001,279 @@ describe("starting and stopping sessions", () => {
     fake.pushUpdate(msg("/stop"));
     await waitFor(() => texts().includes("Сессия не запущена"));
     expect(spawned).toEqual([]);
+  });
+
+  test("/mode without an argument shows the current mode and buttons without starting", async () => {
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c) });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("/mode"));
+    await waitFor(() => fake.texts().some(t => t.text.includes("режим неизвестен")));
+    const sent = fake.callsOf("sendMessage").find(c => String(c.text).includes("режим неизвестен"));
+    expect(sent?.reply_markup).toBeDefined();
+    expect(spawned).toEqual([]);
+    a.close();
+  });
+
+  test("/mode without an argument also works after the window closes and does not spawn", async () => {
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c) });
+    const a = await enabled(SID);
+    a.close();
+    await waitFor(() => !hub.isConnected(SID));
+    fake.pushUpdate(msg("/mode"));
+    await waitFor(() => fake.texts().some(t => t.text.includes("режим неизвестен")));
+    expect(spawned).toEqual([]);
+  });
+
+  test("a connected /mode terminates then launches with the allowlisted flag and replays messages", async () => {
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c), cleanupSettleMs: MODE_SETTLE_MS });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("/mode acceptedits"));
+    await a.next("terminate");
+    fake.pushUpdate(msg("held during restart"));
+    expect((await fetch(`http://127.0.0.1:${port}/commands?session=${SID}`)).status).toBe(200);
+    a.close();
+    await waitFor(() => spawned.length === 1);
+    expect(spawned[0]).toEqual(["wt.exe", "-d", CWD, "cswap.exe", "run", "2", "--", "--resume", SID, "--permission-mode", "acceptEdits"]);
+    const next = await plugin(SID);
+    expect((await next.next("inbound")).content).toBe("held during restart");
+  });
+
+  test("a mode restart starts the new window only after Claude Code has exited", async () => {
+    const spawned: string[][] = [];
+    let alive = true;
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c), isAlive: () => alive });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("/mode plan"));
+    await a.next("terminate");
+    a.send({ type: "exiting", pid: MODE_PID });
+    await waitFor(() => fake.texts().some(t => t.text.includes("🔁")));
+    a.close();
+    await waitFor(() => !hub.isConnected(SID));
+    // While the old process lives nothing may start a second one on the transcript.
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Сессия уже запускается")));
+    fake.pushUpdate(msg("/mode auto"));
+    await waitFor(() => fake.texts().filter(t => t.text.includes("Сессия уже запускается")).length === 2);
+    fake.pushUpdate(msg("held until the exit"));
+    expect(spawned).toEqual([]);
+    alive = false;
+    await waitFor(() => spawned.length === 1);
+    expect(spawned[0]).toContain("plan");
+    const next = await plugin(SID);
+    expect((await next.next("inbound")).content).toBe("held until the exit");
+  });
+
+  test("a mode restart gives up when Claude Code does not exit", async () => {
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c), isAlive: () => true, cleanupExitMs: MODE_SETTLE_MS });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("/mode plan"));
+    await a.next("terminate");
+    a.send({ type: "exiting", pid: MODE_PID });
+    await waitFor(() => fake.texts().some(t => t.text.includes("🔁")));
+    a.close();
+    await waitFor(() => fake.texts().some(t => t.text.includes("Режим не сменён: Claude Code не завершился")));
+    expect(spawned).toEqual([]);
+  });
+
+  test("/stop while a mode restart waits for the exit cancels it and keeps the held message", async () => {
+    const spawned: string[][] = [];
+    let alive = true;
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c), isAlive: () => alive });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("/mode plan"));
+    await a.next("terminate");
+    a.send({ type: "exiting", pid: MODE_PID });
+    await waitFor(() => fake.texts().some(t => t.text.includes("🔁")));
+    a.close();
+    await waitFor(() => !hub.isConnected(SID));
+    fake.pushUpdate(msg("not lost"));
+    fake.pushUpdate(msg("/stop"));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Сессия не запущена")));
+    expect(spawned).toEqual([]);
+    alive = false;
+    await waitFor(() => spawned.length === 1);
+    expect(spawned[0]).not.toContain("--permission-mode");
+    const next = await plugin(SID);
+    expect((await next.next("inbound")).content).toBe("not lost");
+  });
+
+  test("a start without a mode forgets the launched one", async () => {
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c) });
+    const a = await enabled(SID);
+    a.close();
+    await waitFor(() => !hub.isConnected(SID));
+    fake.pushUpdate(msg("/mode plan"));
+    await waitFor(() => spawned.length === 1);
+    const started = await plugin(SID);
+    started.close();
+    await waitFor(() => !hub.isConnected(SID));
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => spawned.length === 2);
+    const again = await plugin(SID);
+    again.close();
+    await waitFor(() => !hub.isConnected(SID));
+    // Still "plan" here would answer «Режим уже plan» and refuse the switch.
+    fake.pushUpdate(msg("/mode plan"));
+    await waitFor(() => spawned.length === 3);
+    expect(spawned[2]).toContain("plan");
+  });
+
+  test("messages during a mode restart wait for the new window, never reaching the window that is ending", async () => {
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c), cleanupSettleMs: MODE_SETTLE_MS });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("/mode plan"));
+    await a.next("terminate");
+    fake.pushUpdate(msg("held during restart"));
+    // A hub command flushes the waiting batch first, so a leak would show up before its notice.
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Сессия уже работает")));
+    expect(a.messages.some(m => m.type === "inbound")).toBe(false);
+    a.close();
+    await waitFor(() => spawned.length === 1);
+    const next = await plugin(SID);
+    expect((await next.next("inbound")).content).toBe("held during restart");
+  });
+
+  test("a mode switch whose command cannot be built is refused before the window closes", async () => {
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c) });
+    // A folder name with "&" is refused by launchCommand, so the restart cannot be built.
+    const c = await wsClient(port, { ...hello(SID), cwd: join(dir, "bad&dir") });
+    clients.push(c);
+    await c.next("state");
+    expect((await req(c, { op: "enable", title: "Title" })).ok).toBe(true);
+    fake.pushUpdate(msg("/mode plan"));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Не могу подготовить перезапуск")));
+    expect(c.messages.some(m => m.type === "terminate")).toBe(false);
+    expect(spawned).toEqual([]);
+  });
+
+  test("unknown and bypass modes are refused, and missing placeholder leaves the window open", async () => {
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: COMMAND, timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c) });
+    const a = await enabled(SID);
+    for (const mode of ["other", "bypassPermissions"]) {
+      const previous = fake.texts().filter(t => t.text.includes("Режимы:")).length;
+      fake.pushUpdate(msg(`/mode ${mode}`));
+      await waitFor(() => fake.texts().filter(t => t.text.includes("Режимы:")).length > previous);
+    }
+    fake.pushUpdate(msg("/mode plan"));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Добавь {mode}")));
+    expect(a.messages.some(m => m.type === "terminate")).toBe(false);
+    expect(spawned).toEqual([]);
+    a.close();
+  });
+
+  test("a missing launch section warns without closing the connected window", async () => {
+    const spawned: string[][] = [];
+    await startHub({ spawn: c => void spawned.push(c) });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("/mode auto"));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Автозапуск не настроен")));
+    expect(a.messages.some(m => m.type === "terminate")).toBe(false);
+    expect(spawned).toEqual([]);
+    a.close();
+  });
+
+  test("a mode restart that times out drops its restart and leaves the window open", async () => {
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ stopTimeoutMs: 100 });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("/mode plan"));
+    await a.next("terminate");
+    await waitFor(() => fake.texts().some(t => t.text.includes("Не удалось завершить сессию")));
+    expect(fake.callsOf("sendMessage").some(c => String(c.text).includes("🚀 Запускаю сессию"))).toBe(false);
+    a.close();
+  });
+
+  test("a plain /run after a mode launch omits the mode flag", async () => {
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c) });
+    const a = await enabled(SID);
+    a.close();
+    await waitFor(() => !hub.isConnected(SID));
+    fake.pushUpdate(msg("/mode plan"));
+    await waitFor(() => spawned.length === 1);
+    expect(spawned[0]).toContain("plan");
+    const started = await plugin(SID);
+    started.close();
+    await waitFor(() => !hub.isConnected(SID));
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => spawned.length === 2);
+    expect(spawned[1]).not.toContain("--permission-mode");
+  });
+
+  test("/stop cancels a pending mode restart and releases held messages normally", async () => {
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c) });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("/mode plan"));
+    await a.next("terminate");
+    fake.pushUpdate(msg("held for stopped session"));
+    fake.pushUpdate(msg("/stop"));
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Сессия уже работает")));
+    a.close();
+    await waitFor(() => spawned.length === 1);
+    expect(spawned[0]).not.toContain("--permission-mode");
+  });
+
+  test("a button press uses the same mode checks and removes its keyboard", async () => {
+    const spawned: string[][] = [];
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ spawn: c => void spawned.push(c) });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("/mode"));
+    await waitFor(() => fake.callsOf("sendMessage").some(c => String(c.text).includes("Текущий режим")));
+    const prompt = fake.callsOf("sendMessage").find(c => String(c.text).includes("Текущий режим"));
+    const messageId = fake.lastMessageId;
+    expect(prompt?.reply_markup).toBeDefined();
+    fake.pushUpdate(buttonPress({ chatId: Number(GROUP), fromId: Number(ME), messageId, data: `m:${SID}:plan` }));
+    await a.next("terminate");
+    expect(fake.callsOf("editMessageReplyMarkup").some(c => c.message_id === messageId)).toBe(true);
+    expect(spawned).toEqual([]);
+    a.close();
+  });
+
+  test("a stale button uses the current-mode check and does not restart an already-current mode", async () => {
+    const projects = join(tempDir(), "projects");
+    const transcriptDir = join(projects, "project");
+    mkdirSync(transcriptDir, { recursive: true });
+    writeFileSync(join(transcriptDir, `${SID}.jsonl`), `${JSON.stringify({ type: "permission-mode", permissionMode: "plan" })}\n`);
+    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
+    await startHub({ projectsDir: projects });
+    const a = await enabled(SID);
+    fake.pushUpdate(msg("/mode"));
+    await waitFor(() => fake.callsOf("sendMessage").some(c => String(c.text).includes("Текущий режим")));
+    fake.pushUpdate(buttonPress({ chatId: Number(GROUP), fromId: Number(ME), messageId: fake.lastMessageId, data: `m:${SID}:plan` }));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Режим уже plan")));
+    expect(a.messages.some(m => m.type === "terminate")).toBe(false);
+    a.close();
+  });
+
+  test("a malformed and stale mode button does not start or terminate a window", async () => {
+    await startHub();
+    fake.pushUpdate(buttonPress({ chatId: Number(GROUP), fromId: Number(ME), messageId: 1, data: "m:not-a-session:plan" }));
+    await waitFor(() => fake.callsOf("answerCallbackQuery").length > 0);
+    expect(fake.callsOf("editMessageReplyMarkup").length).toBeGreaterThan(0);
   });
 });
 
@@ -2685,7 +2961,7 @@ sys.exit(1)
   test("the hub puts the commands into the bot menu", async () => {
     await startHub();
     const call = await waitFor(() => fake.callsOf("setMyCommands")[0]);
-    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "rename", "run", "stop", "cleanup", "pwsh", "cmd", "bash"]);
+    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "rename", "run", "stop", "cleanup", "mode", "pwsh", "cmd", "bash"]);
     expect(field(arr(call.commands).find(c => field(c, "command") === "compact"), "description")).toBe("Сжать контекст; /compact <указания> — с указаниями; /compact N — окно автокомпакта");
     expect(field(arr(call.commands).find(c => field(c, "command") === "rename"), "description")).toBe("Переименовать сессию и её тему; /rename <имя> — новое имя");
     expect(field(arr(call.commands).find(c => field(c, "command") === "pwsh"), "description")).toBe("Команда в PowerShell в папке сессии");

@@ -155,4 +155,10 @@ describe("hubCommandOf", () => {
   test("other commands, other bots and text are not hub commands", () => {
     for (const text of ["/info", "/stop@other_bot", "/runner", "please /run", ""]) expect(hubCommandOf(text, "test_bot")).toBeUndefined();
   });
+
+  test("/mode is a hub command and never a module command", () => {
+    expect(hubCommandOf("/mode acceptedits", "test_bot")).toEqual({ name: "mode", args: "acceptedits" });
+    expect(hubCommandOf("/mode", "test_bot")).toEqual({ name: "mode", args: "" });
+    expect(commandOf("/mode plan", "test_bot")).toBeUndefined();
+  });
 });
