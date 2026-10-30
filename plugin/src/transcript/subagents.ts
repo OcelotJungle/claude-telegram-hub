@@ -516,8 +516,8 @@ class Agent {
           return `⏹ ${took} · ${acts}`;
       }
     }
-    if (this.isWaiting()) return `⏸ ждёт фоновую задачу · ${duration(this.env.now() - (this.ended ?? this.env.now()))}`;
     const acts = `${this.tools} ${plural(this.tools, "действие", "действия", "действий")}`;
+    if (this.isWaiting()) return `⏸ ${took} · ${acts} · ждёт фоновую задачу ${duration(this.env.now() - (this.ended ?? this.env.now()))}`;
     switch (this.status) {
       case "running":
         return `⏳ ${took} · ${acts}${this.lastTool ? `\n\`${this.lastTool.replaceAll("`", "'")}\`` : ""}`;

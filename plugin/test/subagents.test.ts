@@ -161,10 +161,10 @@ describe("SubagentWatcher", () => {
 
     test("a turn end keeps the card open with a waiting status", () => {
       const { s } = waiting();
-      expect(s.cards.at(-1)?.text).toContain("⏸ ждёт фоновую задачу · 0 с");
+      expect(s.cards.at(-1)?.text).toContain("⏸ 0 с · 1 действие · ждёт фоновую задачу 0 с");
       expect(s.cards.at(-1)?.text).not.toContain("✅");
       s.advance(SETTLE_MS + MINUTE);
-      expect(s.cards.at(-1)).toMatchObject({ final: false, text: expect.stringContaining("⏸ ждёт фоновую задачу · 3 мин") });
+      expect(s.cards.at(-1)).toMatchObject({ final: false, text: expect.stringContaining("⏸ 0 с · 1 действие · ждёт фоновую задачу 3 мин") });
       expect(s.cards.some(c => c.final)).toBe(false);
     });
 
@@ -176,7 +176,7 @@ describe("SubagentWatcher", () => {
       write(line({ type: "user", isSidechain: true, message: { role: "user", content: [{ type: "tool_result", content: [{ type: "text", text: "Async agent launched successfully." }] }] }, toolUseResult: { isAsync: true, status: "async_launched", agentId: "ag7", description: "Review" } }));
       write(assistant("m2", "end_turn", text("Waiting for the review")));
       s.advance(SETTLE_MS + MINUTE);
-      expect(s.cards.at(-1)).toMatchObject({ final: false, text: expect.stringContaining("⏸ ждёт фоновую задачу") });
+      expect(s.cards.at(-1)).toMatchObject({ final: false, text: expect.stringContaining("⏸ 0 с · 1 действие · ждёт фоновую задачу") });
     });
 
     test("the waiting time goes on like a running card's", () => {
@@ -184,7 +184,7 @@ describe("SubagentWatcher", () => {
       const sent = s.cards.length;
       s.advance(SEND_EVERY_MS);
       expect(s.cards.length).toBe(sent + 1);
-      expect(s.cards.at(-1)?.text).toContain("⏸ ждёт фоновую задачу · 3 с");
+      expect(s.cards.at(-1)?.text).toContain("⏸ 0 с · 1 действие · ждёт фоновую задачу 3 с");
     });
 
     test("a record wakes it: the same card goes on", () => {
@@ -217,7 +217,7 @@ describe("SubagentWatcher", () => {
       write(notice("mon1", "<summary>Monitor event: haiku done</summary>"));
       s.advance(SEND_EVERY_MS);
       s.advance(SETTLE_MS * 2);
-      expect(s.cards.at(-1)).toMatchObject({ final: false, text: expect.stringContaining("⏸ ждёт фоновую задачу") });
+      expect(s.cards.at(-1)).toMatchObject({ final: false, text: expect.stringContaining("⏸ 0 с · 0 действий · ждёт фоновую задачу") });
     });
 
     test("a notification with any status ends the task", () => {
