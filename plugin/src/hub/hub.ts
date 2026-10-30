@@ -3,7 +3,7 @@ import type { Config } from "../shared/config.ts";
 import type { Logger } from "../shared/log.ts";
 import type { Entity, Formatted } from "../shared/markdown.ts";
 import type { OutFile } from "../shared/media.ts";
-import type { AskQuestion, ChannelMeta, EnableResult, HookBody, HubToPlugin, LimitsReading, PermissionBehavior, PluginToHub, QuestionDecision, TopicCommand } from "../shared/protocol.ts";
+import type { AskQuestion, ChannelMeta, EnableResult, HookBody, HubToPlugin, LimitsReading, PermissionBehavior, PluginToHub, QuestionDecision, ResolutionKind, TopicCommand } from "../shared/protocol.ts";
 import type { OutItem, Piece } from "./outbox.ts";
 import type { Poll } from "./questions.ts";
 import type { SessionRecord } from "./sessions.ts";
@@ -1304,7 +1304,7 @@ ${msg.text}`);
   // no ack and sends the text again. Agent text is Markdown: long formatted
   // text and tables go as rich messages, the rest as ordinary ones with
   // entities. The hub's own texts go as they are.
-  private enqueue(sessionId: string, sourceId: string, text: string, notify: boolean, markdown = true, replaces?: { id: string; kind: "success" | "warning" }, awaitsResult?: true): void {
+  private enqueue(sessionId: string, sourceId: string, text: string, notify: boolean, markdown = true, replaces?: { id: string; kind: ResolutionKind }, awaitsResult?: true): void {
     if (!this.store.get(sessionId)) {
       this.log.warn(`session ${sessionId} has no topic, text not sent:\n${text}`);
       return;
@@ -1442,20 +1442,23 @@ ${msg.text}`);
     const groupId = this.requireGroup();
     const { rich, files: queued } = item;
     if (item.resolution) {
-      const messageId = this.outbox.takeMessageId(item.resolution.id);
+      const isProgress = item.resolution.kind === "progress";
+      const messageId = isProgress ? this.outbox.peekMessageId(item.resolution.id) : this.outbox.takeMessageId(item.resolution.id);
       if (messageId !== undefined) {
-        if (item.resolution.kind === "success") {
+        if (item.resolution.kind === "success" || isProgress) {
           try {
             await api.editMessageText(groupId, messageId, item.text, item.entities);
             return;
           } catch (e) {
             if (e instanceof TelegramError && e.code === 400 && /message is not modified/i.test(e.description)) return;
-            this.log.warn(`editing queued result message ${messageId} failed: ${e}`);
+            this.log.warn(`editing queued ${isProgress ? "progress" : "result"} message ${messageId} failed: ${e}`);
+            if (isProgress) return;
           }
         } else {
           await api.deleteMessage(groupId, messageId).catch(e => this.log.warn(`deleting queued notice ${messageId} failed: ${e}`));
         }
       }
+      if (isProgress) return;
       const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, item.text, item.silent, item.entities, item.buttons));
       if (item.keepId) this.outbox.recordMessageId(item.id, sent.message_id);
       return;

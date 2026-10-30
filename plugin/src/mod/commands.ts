@@ -2,7 +2,7 @@
 // The module runs inside Claude Code with no Node: everything outside comes
 // in as Deps (the engine's `$` calls), so this file imports only types and
 // plain helpers from shared/ that need nothing at run time.
-import type { CleanupReport, LimitsReading, RateLimit, TopicCommand, VolunteerLimitsResult } from "../shared/protocol.ts";
+import type { CleanupReport, LimitsReading, RateLimit, ResolutionKind, TopicCommand, VolunteerLimitsResult } from "../shared/protocol.ts";
 import type { MessageKind } from "../shared/notification.ts";
 
 import { notifies } from "../shared/notification.ts";
@@ -46,6 +46,8 @@ const COMPACT_TRIES = 3;
 // The answer to /rename without a name, and the notice queued while a rename waits.
 const RENAME_HINT = "Напиши имя: /rename новое имя";
 const RENAME_STARTED = "🏷 Переименование на очереди.";
+const COMPACT_RUNNING = "🗜 Компакт выполняется…";
+const CLEANUP_RUNNING = "🧹 Уборка выполняется…";
 
 // The part of the engine's SessionUsage that /info shows.
 export type Usage = {
@@ -86,7 +88,7 @@ export class Runner {
   // turn runs; `failed` counts the tries that failed with none running.
   // `report` hands the outcome on: a reply to /compact, a report to the hub
   // for /cleanup.
-  private compactions: { args: string; failed: number; report: (o: Outcome) => Promise<void>; done: () => void }[] = [];
+  private compactions: { args: string; failed: number; report: (o: Outcome) => Promise<void>; done: () => void; show?: (running: boolean) => void; shown: boolean }[] = [];
   private compacting = false;
   // Whether a main-loop turn runs, from the module's turn hooks.
   private turnRuns = false;
@@ -168,13 +170,16 @@ export class Runner {
       }
       return;
     }
-    await this.compact(to, cmd.args, "🗜 Компакт на очереди.");
+    await this.compact(to, cmd.args, "🗜 Компакт на очереди.", COMPACT_RUNNING);
   }
 
   // Resolves once the compaction is over and its result is handed to the hub.
-  private async compact(to: Target, args: string, started: string): Promise<void> {
+  private async compact(to: Target, args: string, started: string, running: string): Promise<void> {
     const run = (async () => {
       const startedId = await this.reply(to, started, "info", undefined, true);
+      const show = (isRunning: boolean) => {
+        void this.reply(to, isRunning ? running : started, "info", { id: startedId, kind: "progress" });
+      };
       const report = async (o: Outcome): Promise<void> => {
         const success = "ok" in o && o.ok.skip === undefined;
         await this.reply(
@@ -184,7 +189,7 @@ export class Runner {
           { id: startedId, kind: success ? "success" : "warning" },
         );
       };
-      await new Promise<void>(done => this.compactions.push({ args, failed: 0, report, done }));
+      await new Promise<void>(done => this.compactions.push({ args, failed: 0, report, done, show, shown: false }));
     })();
     this.running.add(run);
     await run;
@@ -195,7 +200,11 @@ export class Runner {
   // the hub the sizes or the error. The hub ends the window and empties the
   // remembered skills.
   private async cleanup(to: Target, args: string): Promise<void> {
-    await this.reply(to, "🧹 Уборка на очереди.", "info", undefined, true);
+    const started = "🧹 Уборка на очереди.";
+    const startedId = await this.reply(to, started, "info", undefined, true);
+    const show = (isRunning: boolean) => {
+      void this.reply(to, isRunning ? CLEANUP_RUNNING : started, "info", { id: startedId, kind: "progress" });
+    };
     await Promise.all(this.running);
     const report = async (o: Outcome) => {
       const body: CleanupReport = { sessionId: to.sessionId, id: to.id };
@@ -208,7 +217,7 @@ export class Runner {
       this.unsent.push({ path: "/cleanup", body: JSON.stringify(body) });
       await this.flush();
     };
-    await new Promise<void>(done => this.compactions.push({ args, failed: 0, report, done }));
+    await new Promise<void>(done => this.compactions.push({ args, failed: 0, report, done, show, shown: false }));
   }
 
   // /rename <name> runs the session's own /rename once the session is idle;
@@ -233,8 +242,20 @@ export class Runner {
   // between turns.
   private async compactNext(): Promise<void> {
     const head = this.compactions[0];
-    if (!head || this.compacting || this.turnRuns) return;
+    if (!head || this.compacting) return;
+    if (this.turnRuns) {
+      // A try that lost to a starting turn waits again, and says so.
+      if (head.shown) {
+        head.shown = false;
+        head.show?.(false);
+      }
+      return;
+    }
     this.compacting = true;
+    if (!head.shown) {
+      head.shown = true;
+      head.show?.(true);
+    }
     let outcome: Outcome | undefined;
     try {
       outcome = { ok: await this.deps.compact(head.args || undefined) };
@@ -259,7 +280,7 @@ export class Runner {
     }
     const used = await this.contextTokens();
     if (used !== undefined && used > STOP_COMPACT_TOKENS) {
-      await this.compact(to, "", "🗜 Сожму контекст и завершу сессию. Повторный /stop завершит сразу.");
+      await this.compact(to, "", "🗜 Сожму контекст и завершу сессию. Повторный /stop завершит сразу.", "🗜 Сжимаю контекст и завершу сессию. Повторный /stop завершит сразу.");
     }
     this.unsent.push({ path: "/terminate", body: JSON.stringify({ sessionId: to.sessionId, id: to.id }) });
     await this.flush();
@@ -311,7 +332,7 @@ export class Runner {
     }
   }
 
-  private async reply(to: { sessionId: string; id: string }, text: string, kind: MessageKind, replaces?: { id: string; kind: "success" | "warning" }, awaitsResult?: true): Promise<string> {
+  private async reply(to: { sessionId: string; id: string }, text: string, kind: MessageKind, replaces?: { id: string; kind: ResolutionKind }, awaitsResult?: true): Promise<string> {
     const n = this.replies.get(to.id) ?? 0;
     this.replies.set(to.id, n + 1);
     const id = `${to.id}.${n}`;

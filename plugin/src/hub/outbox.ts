@@ -1,6 +1,7 @@
 import type { Logger } from "../shared/log.ts";
 import type { Entity } from "../shared/markdown.ts";
 import type { OutFile } from "../shared/media.ts";
+import type { ResolutionKind } from "../shared/protocol.ts";
 import type { Block } from "./rich-out.ts";
 import type { Button } from "./telegram.ts";
 
@@ -21,7 +22,7 @@ const MAX_SEEN = 5000;
 // notice: it replaced a piece Telegram rejected. buttons: an inline keyboard
 // under a text piece. card: the piece is the first version of this subagent
 // card; the hub sends the card's latest version in its place.
-export type Piece = { text: string; silent: boolean; entities?: Entity[]; rich?: Block[]; files?: OutFile[]; notice?: boolean; buttons?: Button[][]; card?: string; cardReplyTo?: string; resolution?: { id: string; kind: "success" | "warning" }; keepId?: true };
+export type Piece = { text: string; silent: boolean; entities?: Entity[]; rich?: Block[]; files?: OutFile[]; notice?: boolean; buttons?: Button[][]; card?: string; cardReplyTo?: string; resolution?: { id: string; kind: ResolutionKind }; keepId?: true };
 export type OutItem = Piece & { id: string; sessionId: string };
 
 type Data = { items: OutItem[]; seen: string[]; messageIds: Record<string, number> };
@@ -40,7 +41,7 @@ const dataSchema: z.ZodType<Data> = z.object({
       buttons: z.array(z.array(z.object({ text: z.string(), data: z.string() }))).optional(),
       card: z.string().optional(),
       cardReplyTo: z.string().optional(),
-      resolution: z.object({ id: z.string(), kind: z.enum(["success", "warning"]) }).optional(),
+      resolution: z.object({ id: z.string(), kind: z.enum(["success", "warning", "progress"]) }).optional(),
       keepId: z.literal(true).optional(),
     }),
   ),
@@ -146,6 +147,12 @@ export class Outbox {
   }
 
   messageId(id: string): number | undefined {
+    return this.data.messageIds[id];
+  }
+
+  // Reads the notice id without consuming it, so progress edits can be
+  // followed by the final result's edit or delete.
+  peekMessageId(id: string): number | undefined {
     return this.data.messageIds[id];
   }
 

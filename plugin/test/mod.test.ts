@@ -201,7 +201,8 @@ describe("replies", () => {
     await runner.poll();
     await Bun.sleep(150);
     await runner.poll();
-    expect(posted).toEqual(["c1.0", "c1.1"]);
+    // Started, running (the compaction's own status), then its result.
+    expect(posted).toEqual(["c1.0", "c1.1", "c1.2"]);
   });
 });
 
@@ -418,6 +419,7 @@ describe("/cleanup", () => {
     expect(s.compacted).toEqual(["keep the plan"]);
     expect(s.posted).toEqual([
       { path: "/reply", body: { sessionId: "s", id: "c1.0", text: STARTED, notify: false, awaitsResult: true } },
+      { path: "/reply", body: { sessionId: "s", id: "c1.1", text: "🧹 Уборка выполняется…", notify: false, replaces: { id: "c1.0", kind: "progress" } } },
       { path: "/cleanup", body: { sessionId: "s", id: "c1", before: 210_000, after: 24_000 } },
     ]);
   });
@@ -428,13 +430,18 @@ describe("/cleanup", () => {
     });
     await failing.polls(8);
     expect(failing.compacted).toEqual([undefined, undefined, undefined]);
-    expect(failing.posted.map(p => p.path)).toEqual(["/reply", "/cleanup"]);
-    expect(failing.posted[1]?.body).toEqual({ sessionId: "s", id: "c1", error: "boom" });
+    // Tries that fail with no turn in the way stay running; the third one's failure is reported.
+    expect(failing.posted.filter(p => p.path === "/reply").map(p => field(p.body, "text"))).toEqual([
+      "🧹 Уборка на очереди.",
+      "🧹 Уборка выполняется…",
+    ]);
+    expect(failing.posted.at(-1)?.path).toBe("/cleanup");
+    expect(failing.posted.at(-1)?.body).toEqual({ sessionId: "s", id: "c1", error: "boom" });
 
     const skipped = runner([{ id: "c2", name: "cleanup", args: "" }], async () => ({ skip: "nothing to compact" }));
     await skipped.polls(5);
-    expect(skipped.posted.map(p => p.path)).toEqual(["/reply", "/cleanup"]);
-    expect(skipped.posted[1]?.body).toEqual({ sessionId: "s", id: "c2", error: "nothing to compact" });
+    expect(skipped.posted.map(p => p.path)).toEqual(["/reply", "/reply", "/cleanup"]);
+    expect(skipped.posted[2]?.body).toEqual({ sessionId: "s", id: "c2", error: "nothing to compact" });
   });
 
   test("cleanup waits for a running compaction first", async () => {
@@ -452,7 +459,12 @@ describe("/cleanup", () => {
     );
     await s.polls(5);
     expect(s.compacted).toEqual(["first"]);
-    expect(s.posted.map(p => p.path)).toEqual(["/reply", "/reply"]);
+    // The first compaction's started notice and its running status; the cleanup waits its turn.
+    expect(s.posted.map(p => [p.path, field(p.body, "id")])).toEqual([
+      ["/reply", "c1.0"],
+      ["/reply", "c2.0"],
+      ["/reply", "c1.1"],
+    ]);
     release();
     await s.polls(5);
     expect(s.compacted).toEqual(["first", "second"]);
@@ -460,6 +472,8 @@ describe("/cleanup", () => {
       ["/reply", "c1.0"],
       ["/reply", "c2.0"],
       ["/reply", "c1.1"],
+      ["/reply", "c1.2"],
+      ["/reply", "c2.1"],
       ["/cleanup", "c2"],
     ]);
   });

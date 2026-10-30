@@ -2165,11 +2165,15 @@ describe("commands", () => {
     await Bun.sleep(50);
     expect(compacted).toStrictEqual([]);
     runner.turn(false);
+    expect(fake.callsOf("editMessageText")).toEqual([]);
     await waitFor(async () => {
       await runner.poll();
-      return fake.callsOf("editMessageText").length === 1;
+      return fake.callsOf("editMessageText").length === 2;
     });
-    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "✅ Компакт выполнен." }]);
+    expect(fake.callsOf("editMessageText")).toEqual([
+      { chat_id: GROUP, message_id: startedId, text: "🗜 Компакт выполняется…" },
+      { chat_id: GROUP, message_id: startedId, text: "✅ Компакт выполнен." },
+    ]);
     expect(fake.texts().filter(t => t.message_thread_id === 100)).toHaveLength(1);
     expect(compacted).toStrictEqual(["keep the plan"]);
     expect(ran).toEqual([]);
@@ -2190,6 +2194,31 @@ describe("commands", () => {
     expect(await storedIds()).toEqual([]);
   });
 
+  test("a progress resolution without an id sends nothing and leaves later items deliverable", async () => {
+    await startHub();
+    await enabled("a");
+    const post = (body: unknown) => fetch(`http://127.0.0.1:${port}/reply`, { method: "POST", body: JSON.stringify(body) });
+    expect((await post({ sessionId: "a", id: "progress.1", text: "🗜 Компакт выполняется…", notify: false, replaces: { id: "missing.0", kind: "progress" } })).status).toBe(200);
+    expect((await post({ sessionId: "a", id: "later.0", text: "after progress", notify: false })).status).toBe(200);
+    await waitFor(() => sentText(t => t === "after progress"));
+    expect(sentText(t => t === "🗜 Компакт выполняется…")).toBeUndefined();
+  });
+
+  test("a failed progress edit leaves its id for the result and does not stop delivery", async () => {
+    await startHub();
+    await enabled("a");
+    const post = (body: unknown) => fetch(`http://127.0.0.1:${port}/reply`, { method: "POST", body: JSON.stringify(body) });
+    await post({ sessionId: "a", id: "compact.0", text: "🗜 Компакт на очереди.", notify: false, awaitsResult: true });
+    await waitFor(() => sentText(t => t === "🗜 Компакт на очереди."));
+    const messageId = fake.lastMessageId;
+    fake.failNext("editMessageText", { code: 400, description: "Bad Request: message to edit not found" });
+    await post({ sessionId: "a", id: "compact.1", text: "🗜 Компакт выполняется…", notify: false, replaces: { id: "compact.0", kind: "progress" } });
+    await post({ sessionId: "a", id: "compact.2", text: "✅ Компакт выполнен.", notify: false, replaces: { id: "compact.0", kind: "success" } });
+    await waitFor(() => fake.callsOf("editMessageText").some(c => c.text === "✅ Компакт выполнен."));
+    expect(fake.callsOf("editMessageText").map(c => c.message_id)).toEqual([messageId, messageId]);
+    expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual(["🗜 Компакт выполняется…", "✅ Компакт выполнен."]);
+  });
+
   test("a queued notice keeps its id until the result arrives, then the id is gone", async () => {
     await startHub();
     await enabled("a");
@@ -2201,7 +2230,7 @@ describe("commands", () => {
     runner.turn(false);
     await waitFor(async () => {
       await runner.poll();
-      return fake.callsOf("editMessageText").length === 1;
+      return fake.callsOf("editMessageText").length === 2;
     });
     expect(await storedIds()).toEqual([]);
   });
@@ -2218,9 +2247,9 @@ describe("commands", () => {
     });
     await waitFor(async () => {
       await runner.poll();
-      return fake.callsOf("editMessageText").length === 1;
+      return fake.callsOf("editMessageText").length === 2;
     });
-    expect(fake.callsOf("editMessageText")[0]?.text).toBe("✅ Компакт выполнен.");
+    expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual(["🗜 Компакт выполняется…", "✅ Компакт выполнен."]);
     expect(fake.texts().filter(t => t.message_thread_id === 100)).toHaveLength(1);
   });
 
@@ -2238,9 +2267,12 @@ describe("commands", () => {
     h.release();
     await waitFor(async () => {
       await runner.poll();
-      return fake.callsOf("editMessageText").length === 1;
+      return fake.callsOf("editMessageText").length === 2;
     });
-    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "✅ Компакт выполнен." }]);
+    expect(fake.callsOf("editMessageText")).toEqual([
+      { chat_id: GROUP, message_id: startedId, text: "🗜 Компакт выполняется…" },
+      { chat_id: GROUP, message_id: startedId, text: "✅ Компакт выполнен." },
+    ]);
   });
 
   test("a skipped compaction gives the reason", async () => {
@@ -2248,11 +2280,14 @@ describe("commands", () => {
     await enabled("a");
     const { runner } = mod("a", undefined, undefined, async () => ({ skip: "a hook vetoed it" }));
     command("/compact");
+    // The next bot message is the queued notice: read before the compaction can send another one.
+    const startedId = fake.nextMessageId;
     const started = await reply(runner, t => t.startsWith("🗜"));
-    const startedId = fake.lastMessageId;
     const warning = await reply(runner, t => t.startsWith("⚠️"));
     expect(warning.text).toBe("⚠️ Компакт пропущен: a hook vetoed it");
     expect(warning.disable_notification).toBe(false);
+    await waitFor(() => fake.callsOf("editMessageText").length === 1);
+    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🗜 Компакт выполняется…" }]);
     await waitFor(() => fake.callsOf("deleteMessage").length === 1);
     expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
     expect(started.disable_notification).toBe(true);
@@ -2296,8 +2331,10 @@ describe("commands", () => {
     }
     await waitFor(async () => {
       await runner.poll();
-      return fake.callsOf("editMessageText").length === 1;
+      return fake.callsOf("editMessageText").length === COMPACT_POLLS * 2 + 2;
     });
+    const expectedStatuses = Array.from({ length: COMPACT_POLLS }, () => ["🗜 Компакт выполняется…", "🗜 Компакт на очереди."]).flat();
+    expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual([...expectedStatuses, "🗜 Компакт выполняется…", "✅ Компакт выполнен."]);
     expect(sentText(t => t.startsWith("⚠️"))).toBeUndefined();
   });
 
@@ -2541,9 +2578,12 @@ sys.exit(1)
     await a.next("terminate");
     await waitFor(async () => {
       await runner.poll();
-      return fake.callsOf("editMessageText").length === 1;
+      return fake.callsOf("editMessageText").length === 2;
     });
-    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "✅ Компакт выполнен." }]);
+    expect(fake.callsOf("editMessageText")).toEqual([
+      { chat_id: GROUP, message_id: startedId, text: "🗜 Сжимаю контекст и завершу сессию. Повторный /stop завершит сразу." },
+      { chat_id: GROUP, message_id: startedId, text: "✅ Компакт выполнен." },
+    ]);
     a.close();
     await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
   });
@@ -2553,8 +2593,9 @@ sys.exit(1)
     const a = await enabled("a");
     const { runner } = mod("a", undefined, undefined, async () => ({ skip: "nothing to compact" }));
     command("/stop");
+    // The next bot message is the notice: read before the compaction can send another one.
+    const startedId = fake.nextMessageId;
     const started = await reply(runner, t => t.startsWith("🗜 Сожму контекст"));
-    const startedId = fake.lastMessageId;
     expect(started.disable_notification).toBe(true);
     const warning = await reply(runner, t => t.startsWith("⚠️ Компакт пропущен"));
     expect(warning.disable_notification).toBe(false);
@@ -2717,8 +2758,11 @@ sys.exit(1)
       expect(compacted).toStrictEqual(["keep the plan"]);
       await windowEnds(a);
       // The summary edits the "will compact" message in place.
-      await waitFor(() => fake.callsOf("editMessageText").length);
-      expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🧹 Уборка выполнена, убраны скиллы: a, b." }]);
+      await waitFor(() => fake.callsOf("editMessageText").length === 2);
+      expect(fake.callsOf("editMessageText")).toEqual([
+        { chat_id: GROUP, message_id: startedId, text: "🧹 Уборка выполняется…" },
+        { chat_id: GROUP, message_id: startedId, text: "🧹 Уборка выполнена, убраны скиллы: a, b." },
+      ]);
       expect(sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди"))).toBeUndefined();
       await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
       await Bun.sleep(SETTLE_MS);
@@ -2739,7 +2783,7 @@ sys.exit(1)
       command("meanwhile");
       await Bun.sleep(SETTLE_MS);
       alive = false;
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди")));
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди") && !t.endsWith("…")));
       expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
       await waitFor(() => spawned.length);
       expect(spawned).toEqual([STARTED]);
@@ -2761,6 +2805,9 @@ sys.exit(1)
       const failed = await reply(runner, t => t.startsWith("⚠️"));
       expect(failed.text).toBe("⚠️ Уборка не выполнена: компакт не удался: boom");
       expect(failed.disable_notification).toBe(false);
+      // Tries that fail with no turn in the way stay running: one edit, no flicker.
+      await waitFor(() => fake.callsOf("editMessageText").length === 1);
+      expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🧹 Уборка выполняется…" }]);
       await waitFor(() => fake.callsOf("deleteMessage").length);
       expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
       await Bun.sleep(SETTLE_MS);
@@ -2886,7 +2933,7 @@ sys.exit(1)
       // A failure deletes the queued notice and arrives as a new loud message.
       expect(summary.disable_notification).toBe(false);
       expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
-      expect(fake.callsOf("editMessageText")).toEqual([]);
+      expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🧹 Уборка выполняется…" }]);
       expect(summary.text).toBe(`⚠️ Уборка не выполнена: формат транскрипта изменился (Claude Code ${VERSION})`);
       await waitFor(() => spawned.length);
       expect(spawned).toEqual([STARTED]);
@@ -2919,7 +2966,7 @@ sys.exit(1)
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди")));
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди") && !t.endsWith("…")));
       expect(summary.text).toBe("🧹 Уборка выполнена.");
       await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
       await Bun.sleep(SETTLE_MS);
@@ -2975,7 +3022,7 @@ sys.exit(1)
       command("meanwhile");
       await Bun.sleep(SETTLE_MS);
       alive = false;
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди")));
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди") && !t.endsWith("…")));
       expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
       const window = must(w, "window");
       expect((await window.next("inbound")).content).toBe("meanwhile");
@@ -3116,7 +3163,7 @@ sys.exit(1)
       await Bun.sleep(SETTLE_MS);
       expect(a.messages.filter(m => m.type === "terminate").length).toBe(1);
       await windowEnds(a);
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди")));
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди") && !t.endsWith("…")));
       expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
       await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
@@ -3150,7 +3197,7 @@ sys.exit(1)
       await pollUntil(runner, () => terminated(a));
       await a.next("terminate");
       a.close();
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди")));
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди") && !t.endsWith("…")));
       expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
       await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
       expect(log.lines.some(l => l.includes("the Claude Code process is unknown"))).toBe(true);

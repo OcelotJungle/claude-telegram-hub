@@ -14,7 +14,8 @@ export const DEFAULT_PORT = 47613;
 // with POST /cleanup: the context sizes before and after, or the error. rename
 // goes to any module with the new name as args; it runs the session's /rename.
 export type TopicCommand = { id: string; name: "info" | "compact" | "stop" | "cleanup" | "rename"; args: string };
-export type CommandReply = { sessionId: string; id: string; text: string; notify: boolean; replaces?: { id: string; kind: "success" | "warning" }; awaitsResult?: true };
+export type ResolutionKind = "success" | "warning" | "progress";
+export type CommandReply = { sessionId: string; id: string; text: string; notify: boolean; replaces?: { id: string; kind: ResolutionKind }; awaitsResult?: true };
 export type TerminateRequest = { sessionId: string; id: string };
 export type CleanupReport = { sessionId: string; id: string; before?: number; after?: number; error?: string };
 
