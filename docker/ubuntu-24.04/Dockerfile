@@ -30,5 +30,5 @@ CMD ["/sbin/init"]
 FROM tests AS claude
 # Official native stable installer: https://code.claude.com/docs/en/setup
 RUN curl -fsSL https://claude.ai/install.sh | bash -s stable
-ENV TG_HUB_CONTAINER_TEST=1
+ENV TELEGRAM_HUB_CONTAINER_TEST=1
 CMD ["bash", "scripts/test-claude-linux.sh"]

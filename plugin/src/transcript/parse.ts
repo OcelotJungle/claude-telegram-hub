@@ -202,12 +202,12 @@ function contentText(r: Rec): string {
 // Claude Code names a plugin's channel "plugin:<plugin>:<server>".
 // A channel message of ours, or a topic message that interrupted the agent:
 // the plugin puts those into the window's inbox, where they become peer
-// messages from the tg-hub plugin.
+// messages from the telegram-hub plugin.
 function isOurChannel(origin: unknown): boolean {
   const kind = field(origin, "kind");
-  if (kind === "peer") return field(origin, "plugin") === "tg-hub";
+  if (kind === "peer") return field(origin, "plugin") === "telegram-hub";
   const server = field(origin, "server");
-  return kind === "channel" && typeof server === "string" && server.endsWith(":tg-hub");
+  return kind === "channel" && typeof server === "string" && server.endsWith(":telegram-hub");
 }
 
 // Claude Code wraps each channel message in a <channel …> tag carrying its

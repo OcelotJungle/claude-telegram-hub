@@ -1,4 +1,4 @@
-# tg-hub: keep the hub running, so a message in a topic can start its session.
+# telegram-hub: keep the hub running, so a message in a topic can start its session.
 # Registers a Task Scheduler task for the current user: it starts the hub at
 # logon and checks every 5 minutes; a hub already running (started by the task
 # or by a window) makes the new one exit at once, a crashed hub comes back.
@@ -11,7 +11,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$TaskName = 'tg-hub'
+$TaskName = 'telegram-hub'
 $CheckEveryMinutes = 5
 
 $bun = (Get-Command bun -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
@@ -29,10 +29,10 @@ $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -Execution
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
-    -Description 'tg-hub: Telegram hub for Claude Code sessions' -Force | Out-Null
+    -Description 'telegram-hub: Telegram hub for Claude Code sessions' -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
 # From now on windows only wait for the hub and connect to it; they do not start one (the file service-managed).
-$stateDir = if ($env:TG_HUB_STATE_DIR) { $env:TG_HUB_STATE_DIR } else { Join-Path $HOME '.claude\channels\tg-hub' }
+$stateDir = if ($env:TELEGRAM_HUB_STATE_DIR) { $env:TELEGRAM_HUB_STATE_DIR } else { Join-Path $HOME '.claude\channels\telegram-hub' }
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 New-Item -ItemType File -Force -Path (Join-Path $stateDir 'service-managed') | Out-Null
 Write-Host "Task '$TaskName' registered and started: $bun $main --always-on"

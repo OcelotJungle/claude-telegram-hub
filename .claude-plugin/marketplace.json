@@ -1,14 +1,14 @@
 {
-  "name": "tg-hub-local",
+  "name": "telegram-hub",
   "owner": {
     "name": "OcelotJungle"
   },
   "plugins": [
     {
-      "name": "tg-hub",
+      "name": "telegram-hub",
       "source": "./plugin",
       "description": "One Telegram bot for every Claude Code window: a forum topic per session."
     }
   ],
-  "description": "Local marketplace for the tg-hub Telegram channel plugin."
+  "description": "Local marketplace for the telegram-hub Telegram channel plugin."
 }

@@ -4,7 +4,7 @@ import { join } from "path";
 
 const root = process.argv[2];
 const cli = process.argv[3];
-if (!root || !cli || !existsSync("/.dockerenv") || process.env.TG_HUB_CONTAINER_TEST !== "1") process.exit(1);
+if (!root || !cli || !existsSync("/.dockerenv") || process.env.TELEGRAM_HUB_CONTAINER_TEST !== "1") process.exit(1);
 const gate = join(root, "start");
 await new Promise<void>(resolveGate => {
   const watcher = watch(root, check);

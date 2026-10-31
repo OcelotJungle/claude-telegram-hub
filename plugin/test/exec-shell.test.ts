@@ -19,7 +19,7 @@ afterEach(() => {
 
 // Runs the user's text the way the runner would, in a fresh temp folder.
 function run(shell: ExecShell, text: string): { code: number | null; out: string; err: string; dir: string } {
-  const dir = tempDir("tghub-shell-");
+  const dir = tempDir("telegramhub-shell-");
   dirs.push(dir);
   const r: ShellRun = shellRun(shell, text, dir, "abcd1234", { powershell: findPowershell(), bash: DEFAULT_BASH });
   writeShellFiles(r);

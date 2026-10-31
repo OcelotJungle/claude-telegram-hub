@@ -18,13 +18,13 @@ const hookInput = z.object({
   tool_input: z.looseObject({ questions: z.array(z.unknown()) }),
 });
 
-// The wait ends at the hook's own deadline (TG_HUB_QUESTION_DEADLINE_MS
+// The wait ends at the hook's own deadline (TELEGRAM_HUB_QUESTION_DEADLINE_MS
 // shortens it for tests) or once the parent is gone: a hook that Claude Code
 // no longer waits for must not hold the poll open. Only signals the parent,
 // so it starts no process; on Windows ppid keeps the dead parent's number.
 const stop = new AbortController();
 const parent = process.ppid;
-const deadline = Number(process.env.TG_HUB_QUESTION_DEADLINE_MS) || QUESTION_DEADLINE_MS;
+const deadline = Number(process.env.TELEGRAM_HUB_QUESTION_DEADLINE_MS) || QUESTION_DEADLINE_MS;
 setTimeout(() => stop.abort(), deadline);
 setInterval(() => {
   if (process.ppid !== parent || !isAlive(parent)) stop.abort();

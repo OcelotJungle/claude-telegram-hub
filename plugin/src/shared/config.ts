@@ -16,7 +16,7 @@ const UTF8_BOM = [0xef, 0xbb, 0xbf];
 
 // Shared by every cswap profile, so it never depends on CLAUDE_CONFIG_DIR.
 export function paths() {
-  const stateDir = process.env.TG_HUB_STATE_DIR || join(homedir(), ".claude", "channels", "tg-hub");
+  const stateDir = process.env.TELEGRAM_HUB_STATE_DIR || join(homedir(), ".claude", "channels", "telegram-hub");
   return {
     stateDir,
     envFile: join(stateDir, ".env"),
@@ -42,16 +42,16 @@ export function isInside(dir: string, path: string): boolean {
 }
 
 export function hubPort(): number {
-  return Number(process.env.TG_HUB_PORT) || DEFAULT_PORT;
+  return Number(process.env.TELEGRAM_HUB_PORT) || DEFAULT_PORT;
 }
 
 export function apiBase(): string {
-  return process.env.TG_HUB_API_BASE || API_BASE;
+  return process.env.TELEGRAM_HUB_API_BASE || API_BASE;
 }
 
-// 0 (TG_HUB_IDLE_MS=0): the hub never exits for want of windows.
+// 0 (TELEGRAM_HUB_IDLE_MS=0): the hub never exits for want of windows.
 export function idleMs(): number {
-  const v = process.env.TG_HUB_IDLE_MS;
+  const v = process.env.TELEGRAM_HUB_IDLE_MS;
   if (v === undefined || v.trim() === "") return DEFAULT_IDLE_MS;
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 ? n : DEFAULT_IDLE_MS;

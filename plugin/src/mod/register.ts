@@ -1,4 +1,4 @@
-// tg-hub's function hooks module (hooks.json → modules): runs /info and
+// telegram-hub's function hooks module (hooks.json → modules): runs /info and
 // /compact sent to the session's topic, and gets the session ready for /stop. Claude Code delivers channel
 // messages with slash commands skipped, so the hub keeps them, and this
 // module, inside the session, takes them over localhost HTTP. The logic is in
@@ -16,7 +16,7 @@ let runner: Runner | undefined;
 export const register: Register = on => {
   on("session.start", async ($, e, next) => {
     const result = await next(e);
-    const port = Number(await $.env.get("TG_HUB_PORT")) || DEFAULT_PORT;
+    const port = Number(await $.env.get("TELEGRAM_HUB_PORT")) || DEFAULT_PORT;
     const r = new Runner(`http://127.0.0.1:${port}`, {
       sessionId: () => $.session.id(),
       usage: () => $.session.usage({ breakdown: "summary" }),

@@ -36,7 +36,7 @@ function hubEnv(extra: Record<string, string>): Record<string, string> {
 
 // A spec file for the text in a shell, in a fresh temp folder.
 function shellSpec(shell: ExecShell, text: string): { file: string; spec: RunnerSpec } {
-  const dir = tempDir("tghub-runner-");
+  const dir = tempDir("telegramhub-runner-");
   dirs.push(dir);
   const run = shellRun(shell, text, dir, "abcd1234", { powershell: findPowershell(), bash: DEFAULT_BASH });
   writeShellFiles(run);
@@ -101,7 +101,7 @@ describe("exec runner", () => {
 
   test("the runner outlives a killed parent", async () => {
     const { file, spec } = slowSpec();
-    const parent = join(tempDir("tghub-parent-"), "parent.ts");
+    const parent = join(tempDir("telegramhub-parent-"), "parent.ts");
     dirs.push(join(parent, ".."));
     const runner = join(import.meta.dir, "..", "src", "hub", "exec-runner.ts").replaceAll("\\", "/");
     writeFileSync(parent, `import { spawnRunner } from "${runner}";\nspawnRunner(${JSON.stringify(file)});\nprocess.exit(0);\n`);
@@ -124,7 +124,7 @@ describe("exec runner", () => {
   }, PING_WAIT_MS + 2 * EXIT_WAIT_MS);
 
   test("killTree stops the shell's child too", async () => {
-    const pidDir = tempDir("tghub-ping-");
+    const pidDir = tempDir("telegramhub-ping-");
     dirs.push(pidDir);
     const pidFile = join(pidDir, "ping.pid");
     // The shell's child tells its pid: the log alone would stop growing with

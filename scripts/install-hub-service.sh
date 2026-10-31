@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install tg-hub for the current Linux user, including boot without an SSH login.
+# Install telegram-hub for the current Linux user, including boot without an SSH login.
 set -euo pipefail
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 bun_path=$(command -v bun || command -v "$HOME/.bun/bin/bun" || command -v "$HOME/.local/bin/bun") || { echo 'bun is not on PATH' >&2; exit 1; }
@@ -45,14 +45,14 @@ esac
   printf 'WorkingDirectory=%s\n' "${work_dir//%/%%}"
   printf 'Environment=%s\n' "$(unit_quote "PATH=$unit_path")"
   # The hub and the windows must read the same state directory: the marker below lives there.
-  if [[ -n ${TG_HUB_STATE_DIR:-} ]]; then printf 'Environment=%s\n' "$(unit_quote "TG_HUB_STATE_DIR=$TG_HUB_STATE_DIR")"; fi
+  if [[ -n ${TELEGRAM_HUB_STATE_DIR:-} ]]; then printf 'Environment=%s\n' "$(unit_quote "TELEGRAM_HUB_STATE_DIR=$TELEGRAM_HUB_STATE_DIR")"; fi
   printf 'ExecStart=/usr/bin/bash %s\n' "$(unit_quote "$entry")"
   printf '%s\n' 'Restart=always' 'RestartSec=2' 'KillMode=process' '' '[Install]' 'WantedBy=default.target'
-} > "$unit_dir/tg-hub.service"
+} > "$unit_dir/telegram-hub.service"
 systemctl --user daemon-reload
-systemctl --user enable --now tg-hub.service
+systemctl --user enable --now telegram-hub.service
 # From now on windows only wait for the hub and connect to it; they do not start one (plugin/src/plugin/main.ts).
-state_dir="${TG_HUB_STATE_DIR:-$HOME/.claude/channels/tg-hub}"
+state_dir="${TELEGRAM_HUB_STATE_DIR:-$HOME/.claude/channels/telegram-hub}"
 mkdir -p -- "$state_dir"
 : > "$state_dir/service-managed"
-printf '%s\n' 'tg-hub.service installed and started; linger enabled.'
+printf '%s\n' 'telegram-hub.service installed and started; linger enabled.'

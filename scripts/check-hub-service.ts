@@ -38,7 +38,7 @@ const PORT_SAMPLE_MS = 5;
 const childSchema = z.object({ pid: z.number(), port: z.number().optional() });
 const buttonSchema = z.object({ inline_keyboard: z.array(z.array(z.object({ callback_data: z.string() }))) });
 
-if (!existsSync("/.dockerenv") || process.env.TG_HUB_CONTAINER_TEST !== "1") {
+if (!existsSync("/.dockerenv") || process.env.TELEGRAM_HUB_CONTAINER_TEST !== "1") {
   console.error("Run only inside the disposable systemd test container");
   process.exit(1);
 }
@@ -54,12 +54,12 @@ async function checked(argv: string[], extraEnv: Record<string, string> = {}) {
   return result.stdout.trim();
 }
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-const root = mkdtempSync(join(tmpdir(), "tg-hub-systemd-"));
+const root = mkdtempSync(join(tmpdir(), "telegram-hub-systemd-"));
 const state = join(root, "state");
 // Where the fake rig and the hub meet in the container: the hub reads events from here and writes its readiness here.
 const rigDir = join(homedir(), ".agent-rig");
 process.once("exit", () => { rmSync(root, { recursive: true, force: true }); });
-const dropin = join(homedir(), ".config", "systemd", "user", "tg-hub.service.d", "smoke.conf");
+const dropin = join(homedir(), ".config", "systemd", "user", "telegram-hub.service.d", "smoke.conf");
 const calls: { method: string; params: unknown }[] = [];
 const watchers = new Set<() => void>();
 const updates: object[] = [];
@@ -133,7 +133,7 @@ function eventually(predicate: () => boolean | Promise<boolean>): Promise<void> 
     }, WINDOW_POLL_MS);
   });
 }
-const show = (property: string) => checked(["systemctl", "--user", "show", "tg-hub.service", "-p", property, "--value"]);
+const show = (property: string) => checked(["systemctl", "--user", "show", "telegram-hub.service", "-p", property, "--value"]);
 // Reads one /proc file; undefined when the process is gone.
 function procFile(path: string): string | undefined {
   try { return readFileSync(path, "utf8"); } catch { return undefined; }
@@ -174,9 +174,9 @@ async function cleanup() {
   cleaning = true;
   hubWindow?.stop();
   if (createdGit) rmSync(join(REPO, ".git"), { recursive: true, force: true });
-  await command(["bash", "scripts/uninstall-hub-service.sh"], { TG_HUB_STATE_DIR: state });
+  await command(["bash", "scripts/uninstall-hub-service.sh"], { TELEGRAM_HUB_STATE_DIR: state });
   for (const pid of children) { try { process.kill(pid, "SIGKILL"); } catch {} }
-  await command(["tmux", "kill-session", "-t", "tg-hub-smoke"]);
+  await command(["tmux", "kill-session", "-t", "telegram-hub-smoke"]);
   rmSync(dropin, { force: true });
   rmSync(rigDir, { recursive: true, force: true });
   await command(["systemctl", "--user", "daemon-reload"]);
@@ -208,16 +208,16 @@ try {
   writeFileSync(join(bin, "rig"), `#!/usr/bin/env bash\nexec ${quote(process.execPath)} ${quote(join(REPO, "scripts", "rig-service-process.ts"))} rig "$@"\n`, { mode: 0o755 });
   writeFileSync(join(state, "config.json"), JSON.stringify({ groupId: String(GROUP), allowFrom: [String(USER)] }));
   writeFileSync(join(state, "sessions.json"), JSON.stringify({ [SESSION]: { topicId: TOPIC, title: "Fixture", project: "fixture", cwd: REPO, enabled: true } }));
-  const env = { TG_HUB_CONTAINER_TEST: "1", RIG_SMOKE_DIR: root, TG_HUB_STATE_DIR: state,
-    TG_HUB_API_BASE: `http://127.0.0.1:${server.port}`, TELEGRAM_BOT_TOKEN: "fixture-token", PATH: `${bin}:${process.env.PATH ?? ""}` };
+  const env = { TELEGRAM_HUB_CONTAINER_TEST: "1", RIG_SMOKE_DIR: root, TELEGRAM_HUB_STATE_DIR: state,
+    TELEGRAM_HUB_API_BASE: `http://127.0.0.1:${server.port}`, TELEGRAM_BOT_TOKEN: "fixture-token", PATH: `${bin}:${process.env.PATH ?? ""}` };
   mkdirSync(dirname(dropin), { recursive: true });
   writeFileSync(dropin, "[Service]\n" + Object.entries(env).map(([key, value]) => `Environment=${JSON.stringify(`${key}=${value}`).replaceAll("%", "%%")}\n`).join(""));
-  await checked(["bash", "scripts/install-hub-service.sh"], { TG_HUB_STATE_DIR: state });
+  await checked(["bash", "scripts/install-hub-service.sh"], { TELEGRAM_HUB_STATE_DIR: state });
   assert.ok(existsSync(join(state, "service-managed")), "install leaves the service-managed marker");
   await until(() => calls.some(call => call.method === "getMe"));
   assert.equal(await checked(["loginctl", "show-user", "-p", "Linger", "--value", process.env.USER ?? "ubuntu"]), "yes");
-  assert.equal(await checked(["systemctl", "--user", "show", "tg-hub.service", "-p", "KillMode", "--value"]), "process");
-  assert.equal(await checked(["systemctl", "--user", "show", "tg-hub.service", "-p", "Restart", "--value"]), "always");
+  assert.equal(await checked(["systemctl", "--user", "show", "telegram-hub.service", "-p", "KillMode", "--value"]), "process");
+  assert.equal(await checked(["systemctl", "--user", "show", "telegram-hub.service", "-p", "Restart", "--value"]), "always");
   results.push("linger, KillMode=process and Restart=always");
   // systemd reports RestartSec= as RestartUSec and StartLimitIntervalSec= as StartLimitIntervalUSec (the value in force, not the unit text).
   assert.equal(await show("RestartUSec"), "2s", "RestartSec=2 is in force");
@@ -255,7 +255,7 @@ try {
   const pidBeforeUpdate = await show("MainPID");
   // run-hub-service.sh exports the commit it fixed before bun starts; bun is the unit's main process (exec), so its environment is the hub's.
   const environOf = (pid: string) => (procFile(`/proc/${pid}/environ`) ?? "").split("\0");
-  assert.ok(environOf(pidBeforeUpdate).includes(`TG_HUB_COMMIT=${oldHead}`), "the running hub has TG_HUB_COMMIT = HEAD of the container copy");
+  assert.ok(environOf(pidBeforeUpdate).includes(`TELEGRAM_HUB_COMMIT=${oldHead}`), "the running hub has TELEGRAM_HUB_COMMIT = HEAD of the container copy");
   const serviceManagerPid = parentOf(Number(pidBeforeUpdate));
   assert.ok(serviceManagerPid, "the hub's parent is the user service manager");
   await checked(["git", ...SMOKE_COMMIT_IDENTITY, "commit", "--quiet", "--allow-empty", "-m", "smoke update"]);
@@ -274,16 +274,16 @@ try {
   } finally { clearInterval(sampler); }
   const newPid = await show("MainPID");
   assert.notEqual(newPid, pidBeforeUpdate);
-  assert.ok(environOf(newPid).includes(`TG_HUB_COMMIT=${newHead}`), "the restarted hub has the new commit in TG_HUB_COMMIT");
+  assert.ok(environOf(newPid).includes(`TELEGRAM_HUB_COMMIT=${newHead}`), "the restarted hub has the new commit in TELEGRAM_HUB_COMMIT");
   assert.equal(listenerPid(DEFAULT_PORT), Number(newPid), "the listener on the hub port is the service's new MainPID");
   assert.ok(samples.some(sample => sample.pid === Number(pidBeforeUpdate)), "the port was sampled while the old hub still held it");
   assert.ok(samples.some(sample => sample.pid === Number(newPid)), "the port was sampled with the new hub");
   for (const sample of samples) {
-    const owned: boolean = sample.ppid === serviceManagerPid && (sample.cgroup ?? "").includes("tg-hub.service");
+    const owned: boolean = sample.ppid === serviceManagerPid && (sample.cgroup ?? "").includes("telegram-hub.service");
     assert.ok(owned, `listener ${sample.pid} on the hub port is a service process (parent ${sample.ppid}, cgroup ${sample.cgroup?.trim()})`);
   }
   results.push(`port held only by service processes in ${samples.length} samples during the restart; new MainPID listens`);
-  assert.equal(await checked(["systemctl", "--user", "is-active", "tg-hub.service"]), "active");
+  assert.equal(await checked(["systemctl", "--user", "is-active", "telegram-hub.service"]), "active");
   await eventually(() => client.connected);
   assert.equal(windowStats.spawns, 0, "the window never started a hub");
   results.push("exit 75 with a connected window: the service restarts the hub on the new commit, the window reconnects and starts nothing");
@@ -292,7 +292,7 @@ try {
   await file(join(root, "child-bash.json"));
   const bashChild = childSchema.parse(JSON.parse(readFileSync(join(root, "child-bash.json"), "utf8")));
   children.push(bashChild.pid);
-  send(`/bash tmux new-session -d -s tg-hub-smoke -- ${quote(process.execPath)} ${quote(childScript)} tmux ${quote(root)}`);
+  send(`/bash tmux new-session -d -s telegram-hub-smoke -- ${quote(process.execPath)} ${quote(childScript)} tmux ${quote(root)}`);
   await file(join(root, "child-tmux.json"));
   const tmuxChild = childSchema.parse(JSON.parse(readFileSync(join(root, "child-tmux.json"), "utf8")));
   children.push(tmuxChild.pid);
@@ -314,11 +314,11 @@ try {
     message: { message_id: messageId, chat: { id: GROUP, type: "supergroup" } } } });
   await file(join(root, "rig-finished.json"));
   assert.ok(calls.some(call => String(field(call.params, "text")).includes("rig feature telegram enable")));
-  const stopped = await command(["systemctl", "--user", "is-active", "tg-hub.service"]);
+  const stopped = await command(["systemctl", "--user", "is-active", "telegram-hub.service"]);
   assert.equal(stopped.stdout.trim(), "inactive");
   process.kill(bashChild.pid, 0);
   process.kill(tmuxChild.pid, 0);
-  await checked(["tmux", "has-session", "-t", "tg-hub-smoke"]);
+  await checked(["tmux", "has-session", "-t", "telegram-hub-smoke"]);
   results.push("tmux and /bash survive stop; detached rig finishes after stopping the hub");
   // Scenario B: the service is stopped on purpose; a connected window must not raise the hub behind its back.
   await eventually(() => !client.connected);
@@ -332,10 +332,10 @@ try {
   client.stop();
   const marker = join(state, "service-managed");
   assert.ok(existsSync(marker), "the marker is still there before the uninstall");
-  await checked(["bash", "scripts/uninstall-hub-service.sh"], { TG_HUB_STATE_DIR: state });
+  await checked(["bash", "scripts/uninstall-hub-service.sh"], { TELEGRAM_HUB_STATE_DIR: state });
   assert.equal(existsSync(marker), false, "uninstall removes the service-managed marker");
-  assert.equal(existsSync(join(homedir(), ".config", "systemd", "user", "tg-hub.service")), false, "uninstall removes the unit file");
-  const again = await command(["bash", "scripts/uninstall-hub-service.sh"], { TG_HUB_STATE_DIR: state });
+  assert.equal(existsSync(join(homedir(), ".config", "systemd", "user", "telegram-hub.service")), false, "uninstall removes the unit file");
+  const again = await command(["bash", "scripts/uninstall-hub-service.sh"], { TELEGRAM_HUB_STATE_DIR: state });
   assert.equal(again.code, 0, `the second uninstall exits 0: ${again.stderr}`);
   assert.equal(existsSync(marker), false);
   results.push("uninstall removes the marker and the unit; a second uninstall exits 0");

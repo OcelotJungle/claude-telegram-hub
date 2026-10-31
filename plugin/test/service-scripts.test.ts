@@ -50,12 +50,12 @@ describe("run-hub-service.sh", () => {
   const run = read("run-hub-service.sh");
 
   test("the commit of the code is fixed before bun starts", () => {
-    const commit = run.indexOf("TG_HUB_COMMIT");
+    const commit = run.indexOf("TELEGRAM_HUB_COMMIT");
     expect(commit).toBeGreaterThan(-1);
     expect(run).toContain("rev-parse HEAD");
     expect(commit).toBeLessThan(run.indexOf("bun install"));
     expect(commit).toBeLessThan(run.indexOf("exec bun"));
-    expect(run).toContain("export TG_HUB_COMMIT");
+    expect(run).toContain("export TELEGRAM_HUB_COMMIT");
   });
 });
 
@@ -92,7 +92,7 @@ describe("container smoke check", () => {
   });
 
   test("it installs with the state dir and checks the marker", () => {
-    expect(check).toContain("install-hub-service.sh\"], { TG_HUB_STATE_DIR: state }");
+    expect(check).toContain("install-hub-service.sh\"], { TELEGRAM_HUB_STATE_DIR: state }");
     expect(check).toContain('"service-managed"');
   });
 

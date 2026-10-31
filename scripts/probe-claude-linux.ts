@@ -11,13 +11,13 @@ import { field } from "../plugin/src/shared/guards.ts";
 
 const SCREEN_EXCERPT_LINES = 3;
 const REPO = resolve(import.meta.dir, "..");
-const AUTH_ENV = /^(?:ANTHROPIC_|CLAUDE_|TG_HUB_|TELEGRAM_BOT_TOKEN$)/;
+const AUTH_ENV = /^(?:ANTHROPIC_|CLAUDE_|TELEGRAM_HUB_|TELEGRAM_BOT_TOKEN$)/;
 type Observation = { check: string; result: "pass" | "blocked" | "fail"; detail: string };
 
-if (!existsSync("/.dockerenv") || process.env.TG_HUB_CONTAINER_TEST !== "1") process.exit(1);
+if (!existsSync("/.dockerenv") || process.env.TELEGRAM_HUB_CONTAINER_TEST !== "1") process.exit(1);
 const cli = Bun.which("claude");
 if (!cli) { console.error("Real Claude Code must be installed in the claude Docker target"); process.exit(1); }
-const root = mkdtempSync(join(tmpdir(), "tg-hub-claude-"));
+const root = mkdtempSync(join(tmpdir(), "telegram-hub-claude-"));
 process.once("exit", () => { rmSync(root, { recursive: true, force: true }); });
 const home = join(root, "home");
 const workspace = join(root, "workspace");
@@ -29,14 +29,14 @@ const env: Record<string, string> = {};
 for (const [key, value] of Object.entries(process.env)) if (value !== undefined && !AUTH_ENV.test(key)) env[key] = value;
 env.HOME = home;
 env.CLAUDE_CONFIG_DIR = join(home, ".claude");
-env.TG_HUB_STATE_DIR = join(root, "state");
-env.TG_HUB_CONTAINER_TEST = "1";
+env.TELEGRAM_HUB_STATE_DIR = join(root, "state");
+env.TELEGRAM_HUB_CONTAINER_TEST = "1";
 // Reserve a private port; the plugin may start its own hub even before login.
 const reservation = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("reserved") });
-env.TG_HUB_PORT = String(reservation.port);
+env.TELEGRAM_HUB_PORT = String(reservation.port);
 reservation.stop(true);
 const session = randomUUID();
-const socketName = `tg-hub-probe-${session}`;
+const socketName = `telegram-hub-probe-${session}`;
 const terminal = "probe";
 const observations: Observation[] = [];
 let cleaning = false;
@@ -56,11 +56,11 @@ async function cleanup() {
   cleaning = true;
   await command(["tmux", "-L", socketName, "kill-server"]);
   try {
-    const health: unknown = await (await fetch(`http://127.0.0.1:${env.TG_HUB_PORT}/health`)).json();
+    const health: unknown = await (await fetch(`http://127.0.0.1:${env.TELEGRAM_HUB_PORT}/health`)).json();
     const pid = field(health, "pid");
     if (typeof pid === "number") {
       const variables = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");
-      if (variables.includes(`TG_HUB_STATE_DIR=${env.TG_HUB_STATE_DIR}`)) process.kill(pid, "SIGKILL");
+      if (variables.includes(`TELEGRAM_HUB_STATE_DIR=${env.TELEGRAM_HUB_STATE_DIR}`)) process.kill(pid, "SIGKILL");
     }
   } catch {}
   rmSync(root, { recursive: true, force: true });
@@ -74,7 +74,7 @@ try {
   const help = await command([cli, "--help"]);
   assert.equal(help.code, 0, help.stderr);
   writeFileSync(join(reports, "claude-help.log"), help.stdout + help.stderr);
-  const flags = ["--plugin-dir", join(REPO, "plugin"), "--dangerously-load-development-channels", "plugin:tg-hub@inline", "--session-id", session];
+  const flags = ["--plugin-dir", join(REPO, "plugin"), "--dangerously-load-development-channels", "plugin:telegram-hub@inline", "--session-id", session];
   const parser = await command([cli, ...flags, "--version"]);
   assert.equal(parser.code, 0, parser.stderr);
   observations.push({ check: "development-channel flag", result: "pass", detail: "Real CLI accepts the plugin/channel/session arguments; activation checked below." });

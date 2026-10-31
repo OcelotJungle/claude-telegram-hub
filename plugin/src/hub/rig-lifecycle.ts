@@ -7,7 +7,7 @@ import { writeRigFile } from "./rig-files.ts";
 const commitSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
 const readySchema = z.object({ commit: commitSchema, time: z.string() });
 export const RIG_RESTART_EXIT = 75;
-export const COMMIT_ENV = "TG_HUB_COMMIT";
+export const COMMIT_ENV = "TELEGRAM_HUB_COMMIT";
 const COMMIT_UNKNOWN_ID = "rig-commit-unknown";
 const COMMIT_UNKNOWN_TEXT = "Хаб не смог определить коммит своего кода, поэтому не может обработать обновление. Попытки продолжаются.";
 const CODE_CHANGED_TEXT = "Хаб запущен с другим кодом. Окна подхватят его при следующем запуске.";

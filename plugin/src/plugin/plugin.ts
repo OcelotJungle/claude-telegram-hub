@@ -29,7 +29,7 @@ import { HubClient } from "./hub-client.ts";
 // A turn ended by a failed connection to the API: the agent is told to go
 // on, as the person would, while the mode is on and the person is away.
 export const CONTINUE_PROMPT =
-  "tg-hub: your last turn ended with an API connection error (the API Error message above), " +
+  "telegram-hub: your last turn ended with an API connection error (the API Error message above), " +
   "so your last response may be missing or incomplete. Continue from where you stopped.";
 // Cuts in a row, with no turn ending normally in between, before it stops
 // and calls the person: the network may be down for good.
@@ -42,7 +42,7 @@ export const CUT_LIMIT_NOTE = cutLimitNote(MAX_AUTO_CONTINUES);
 // topic is not told.
 export function filesRejectedPrompt(error: string): string {
   return (
-    `tg-hub: Telegram did not take files you sent earlier with tg_send_file: ${error}. ` +
+    `telegram-hub: Telegram did not take files you sent earlier with tg_send_file: ${error}. ` +
     "The topic was not told. Deal with it yourself: for example, make the files smaller and send them again."
   );
 }
@@ -64,9 +64,9 @@ let chimeConfigWarned = false;
 export function interruptPrompt(content: string, meta: ChannelMeta): string {
   const attrs = Object.entries(meta).map(([k, v]) => ` ${k}="${v.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;")}"`).join("");
   return (
-    "tg-hub: the user interrupted your work from Telegram with this topic message. " +
+    "telegram-hub: the user interrupted your work from Telegram with this topic message. " +
     "It is their message, as if it came through the channel: answer it.\n" +
-    `<channel source="tg-hub"${attrs}>\n${content}\n</channel>`
+    `<channel source="telegram-hub"${attrs}>\n${content}\n</channel>`
   );
 }
 
@@ -80,7 +80,7 @@ export type PluginOptions = {
   port: number;
   // Where text the hub never acked goes when the window closes.
   spoolDir: string;
-  // tg-hub state: never sent, except inbox/ (what came from Telegram).
+  // telegram-hub state: never sent, except inbox/ (what came from Telegram).
   stateDir: string;
   // Where files to send are copied for the hub.
   filesDir: string;
@@ -286,7 +286,7 @@ export class PluginCore {
       real = realpathSync(path);
       state = realpathSync(state);
     } catch {}
-    if (isInside(state, real) && !isInside(join(state, "inbox"), real)) throw new Error(`${p}: refusing to send tg-hub state files`);
+    if (isInside(state, real) && !isInside(join(state, "inbox"), real)) throw new Error(`${p}: refusing to send telegram-hub state files`);
     return { path, name: basename(path), size: st.size };
   }
 
@@ -425,7 +425,7 @@ export class PluginCore {
       if (before === MAX_AUTO_CONTINUES) this.client.enqueue(this.sessionId, CUT_LIMIT_NOTE, notifies("warning"));
       return;
     }
-    this.opts.emitChannel(CONTINUE_PROMPT, { user: "tg-hub", reason: "response_cut" });
+    this.opts.emitChannel(CONTINUE_PROMPT, { user: "telegram-hub", reason: "response_cut" });
   }
 
   private flush(out: Outgoing[]): void {
@@ -480,7 +480,7 @@ export class PluginCore {
       case "filesSent":
         // tg_send_file returned before the hub was done; a late success is
         // what the agent was told to expect.
-        if (m.error) this.opts.emitChannel(filesRejectedPrompt(m.error), { user: "tg-hub", reason: "files_rejected" });
+        if (m.error) this.opts.emitChannel(filesRejectedPrompt(m.error), { user: "telegram-hub", reason: "files_rejected" });
         return;
       case "turnEnd":
         this.onTurnEnd(m.final, m.kind);

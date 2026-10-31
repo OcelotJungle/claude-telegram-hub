@@ -44,12 +44,12 @@ beforeEach(async () => {
     // The spawned hub derives ~/.agent-rig from the home directory; keep it away from real rig files.
     HOME: stateDir,
     USERPROFILE: stateDir,
-    TG_HUB_STATE_DIR: stateDir,
-    TG_HUB_PORT: String(port),
-    TG_HUB_API_BASE: fake.url,
+    TELEGRAM_HUB_STATE_DIR: stateDir,
+    TELEGRAM_HUB_PORT: String(port),
+    TELEGRAM_HUB_API_BASE: fake.url,
     TELEGRAM_BOT_TOKEN: fake.token,
-    TG_HUB_IDLE_MS: "1500",
-    TG_HUB_POLL_TIMEOUT: "1",
+    TELEGRAM_HUB_IDLE_MS: "1500",
+    TELEGRAM_HUB_POLL_TIMEOUT: "1",
   };
 });
 

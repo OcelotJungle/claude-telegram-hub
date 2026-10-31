@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 function dir(): string {
-  const d = tempDir("tghub-cleanup-");
+  const d = tempDir("telegramhub-cleanup-");
   dirs.push(d);
   return d;
 }

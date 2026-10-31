@@ -15,5 +15,5 @@ if command -v cygpath >/dev/null; then
   reference=$(cygpath -m "$reference")
   config_path=$(cygpath -m "$config")
 fi
-printf '{"extends":"%s/plugin/tsconfig.json","compilerOptions":{"baseUrl":"%s","typeRoots":["%s/@types"],"paths":{"@modelcontextprotocol/sdk/*":["%s/@modelcontextprotocol/sdk/dist/esm/*"]}},"include":["%s/plugin/src","%s/plugin/test","%s/scripts/check-hub-service.ts","%s/scripts/rig-service-process.ts","%s/scripts/claude-probe-terminal.ts","%s/scripts/probe-claude-linux.ts"]}\n' "$project_dir" "$reference" "$reference" "$reference" "$project_dir" "$project_dir" "$project_dir" "$project_dir" "$project_dir" "$project_dir" > "$config"
+printf '{"extends":"%s/plugin/tsconfig.json","compilerOptions":{"baseUrl":"%s","typeRoots":["%s/@types"],"paths":{"@modelcontextprotocol/sdk/*":["%s/@modelcontextprotocol/sdk/dist/esm/*"]}},"include":["%s/plugin/src","%s/plugin/test","%s/scripts/check-hub-service.ts","%s/scripts/rig-service-process.ts","%s/scripts/claude-probe-terminal.ts","%s/scripts/probe-claude-linux.ts","%s/scripts/migrate-*.ts"]}\n' "$project_dir" "$reference" "$reference" "$reference" "$project_dir" "$project_dir" "$project_dir" "$project_dir" "$project_dir" "$project_dir" "$project_dir" > "$config"
 node --preserve-symlinks-main "$reference/typescript/bin/tsc" --noEmit -p "$config_path"

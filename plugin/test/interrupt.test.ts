@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 function socketPath(): string {
-  const name = `tg-hub-test-${randomUUID()}`;
+  const name = `telegram-hub-test-${randomUUID()}`;
   return process.platform === "win32" ? `\\\\.\\pipe\\${name}` : join(tmpdir(), `${name}.sock`);
 }
 
@@ -40,7 +40,7 @@ describe("sendInterrupt", () => {
     await waitFor(() => got.length === 1, 3000, "the note");
     expect(got[0]).toEqual([
       { type: "auth", token: "tok-1" },
-      { type: "user", message: { role: "user", content: "стой" }, priority: "now", from_plugin: "tg-hub" },
+      { type: "user", message: { role: "user", content: "стой" }, priority: "now", from_plugin: "telegram-hub" },
     ]);
   });
 

@@ -90,7 +90,7 @@ describe("config", () => {
 
   beforeEach(() => {
     dir = tempDir();
-    process.env.TG_HUB_STATE_DIR = dir;
+    process.env.TELEGRAM_HUB_STATE_DIR = dir;
     delete process.env.TELEGRAM_BOT_TOKEN;
   });
   afterEach(() => {
@@ -144,14 +144,14 @@ describe("config", () => {
     expect(loadConfig()).toEqual({ groupId: "-1001234", allowFrom: ["123456789"], turnEndChime: defaultTurnEndChime() });
   });
 
-  test("TG_HUB_IDLE_MS=0 means never, nonsense means the default", () => {
-    process.env.TG_HUB_IDLE_MS = "0";
+  test("TELEGRAM_HUB_IDLE_MS=0 means never, nonsense means the default", () => {
+    process.env.TELEGRAM_HUB_IDLE_MS = "0";
     expect(idleMs()).toBe(0);
-    process.env.TG_HUB_IDLE_MS = "1500";
+    process.env.TELEGRAM_HUB_IDLE_MS = "1500";
     expect(idleMs()).toBe(1500);
-    process.env.TG_HUB_IDLE_MS = "soon";
+    process.env.TELEGRAM_HUB_IDLE_MS = "soon";
     expect(idleMs()).toBe(300_000);
-    delete process.env.TG_HUB_IDLE_MS;
+    delete process.env.TELEGRAM_HUB_IDLE_MS;
     expect(idleMs()).toBe(300_000);
   });
 

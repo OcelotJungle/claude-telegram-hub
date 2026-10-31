@@ -413,8 +413,8 @@ describe("PluginCore", () => {
       type: "user",
       isSidechain: false,
       isMeta: true,
-      origin: { kind: "channel", server: "plugin:tg-hub:tg-hub" },
-      message: { role: "user", content: `<channel source="plugin:tg-hub:tg-hub" chat_id="${GROUP}" message_id="${id}">\nкак дела?\n</channel>` },
+      origin: { kind: "channel", server: "plugin:telegram-hub:telegram-hub" },
+      message: { role: "user", content: `<channel source="plugin:telegram-hub:telegram-hub" chat_id="${GROUP}" message_id="${id}">\nкак дела?\n</channel>` },
     });
     await waitFor(() => fake.callsOf("setMessageReaction").length === 2, 3000, "reaction cleared");
     expect(fake.callsOf("setMessageReaction")).toEqual([
@@ -451,7 +451,7 @@ describe("PluginCore", () => {
       type: "user",
       isSidechain: false,
       isMeta: true,
-      origin: { kind: "peer", from: "unknown", plugin: "tg-hub" },
+      origin: { kind: "peer", from: "unknown", plugin: "telegram-hub" },
       message: { role: "user", content: `Another Claude session sent a message:\n${interrupts[0].prompt}\n\nThis came from another Claude session.` },
     });
     await waitFor(() => fake.callsOf("setMessageReaction").length === 2, 3000, "reaction cleared");
@@ -460,7 +460,7 @@ describe("PluginCore", () => {
 
   test("the interrupting message keeps its meta in the tag, quotes escaped", () => {
     expect(interruptPrompt("стоп", { chat_id: "-1001", user: 'a "b" <c>' })).toEndWith(
-      '<channel source="tg-hub" chat_id="-1001" user="a &quot;b&quot; &lt;c>">\nстоп\n</channel>',
+      '<channel source="telegram-hub" chat_id="-1001" user="a &quot;b&quot; &lt;c>">\nстоп\n</channel>',
     );
   });
 
@@ -570,7 +570,7 @@ describe("PluginCore", () => {
 
   test("the separator call before a question sends the text before it at once", async () => {
     await enabledCore();
-    append(assistantText("Объясняю, о чём спрошу", "tool_use", "q1"), assistantTool("mcp__plugin_tg-hub_tg-hub__tg_before_question", "q1"));
+    append(assistantText("Объясняю, о чём спрошу", "tool_use", "q1"), assistantTool("mcp__plugin_telegram-hub_telegram-hub__tg_before_question", "q1"));
     await waitFor(() => sent().length === 1, 3000, "the text before the separator");
     expect(sent()).toEqual([{ text: "Объясняю, о чём спрошу", silent: true, topic: 100 }]);
   });
@@ -689,7 +689,7 @@ describe("a turn ended by a failed connection to the API", () => {
     await enabledCore();
     append(assistantText("Правлю тест", "tool_use", "r1"), assistantTool("Edit", "r1"), ...cut());
     await waitFor(() => channel.length === 1, 3000, "continue prompt");
-    expect(channel[0]).toEqual({ content: CONTINUE_PROMPT, meta: { user: "tg-hub", reason: "response_cut" } });
+    expect(channel[0]).toEqual({ content: CONTINUE_PROMPT, meta: { user: "telegram-hub", reason: "response_cut" } });
     await waitFor(() => sent().length === 1, 3000, "relayed answer");
     expect(sent()).toEqual([
       { text: "Правлю тест", silent: true, topic: 100 },
@@ -817,7 +817,7 @@ describe("tg_send_file", () => {
       [[tempDir()], "not a file"],
       [[file("empty.txt", "")], "empty"],
       [[big], "50 MB"],
-      [[file("sessions.json", "{}", state)], "tg-hub state"],
+      [[file("sessions.json", "{}", state)], "telegram-hub state"],
     ];
     for (const [paths, why] of cases) await expect(c.sendFiles(paths)).rejects.toThrow(why);
     await expect(c.sendFiles([ok], "я".repeat(1025))).rejects.toThrow("1024");
@@ -858,22 +858,22 @@ describe("tg_send_file", () => {
     fake.failNext("sendDocument", { code: 413, description: "Request Entity Too Large" });
     expect(await c.sendFiles([file("a.txt")])).toContain("queued");
     await waitFor(() => channel.length === 1, 3000, "rejection prompt");
-    expect(channel[0]).toEqual({ content: filesRejectedPrompt("a.txt: Request Entity Too Large"), meta: { user: "tg-hub", reason: "files_rejected" } });
+    expect(channel[0]).toEqual({ content: filesRejectedPrompt("a.txt: Request Entity Too Large"), meta: { user: "telegram-hub", reason: "files_rejected" } });
     expect(sent()).toEqual([]);
   });
 });
 
 describe("the configured chime", () => {
-  const savedStateDir = process.env.TG_HUB_STATE_DIR;
+  const savedStateDir = process.env.TELEGRAM_HUB_STATE_DIR;
   afterEach(() => {
-    if (savedStateDir === undefined) delete process.env.TG_HUB_STATE_DIR;
-    else process.env.TG_HUB_STATE_DIR = savedStateDir;
+    if (savedStateDir === undefined) delete process.env.TELEGRAM_HUB_STATE_DIR;
+    else process.env.TELEGRAM_HUB_STATE_DIR = savedStateDir;
   });
 
   test("a bad turnEndChime plays the default sound and is logged once", () => {
     const dir = tempDir();
     writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], turnEndChime: 5 }));
-    process.env.TG_HUB_STATE_DIR = dir;
+    process.env.TELEGRAM_HUB_STATE_DIR = dir;
     const log = memLogger();
     const played: [string, ChimeKind][] = [];
     const play = (template: string, kind: ChimeKind) => void played.push([template, kind]);

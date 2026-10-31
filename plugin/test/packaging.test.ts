@@ -32,7 +32,7 @@ async function runHook(port: number, input: object, socket = "pipe-H") {
   const proc = Bun.spawn([process.execPath, HOOK], {
     stdin: new Blob([JSON.stringify(input)]),
     stdout: "pipe",
-    env: { ...process.env, TG_HUB_PORT: String(port), CLAUDE_CODE_MESSAGING_SOCKET: socket },
+    env: { ...process.env, TELEGRAM_HUB_PORT: String(port), CLAUDE_CODE_MESSAGING_SOCKET: socket },
     windowsHide: true,
   });
   const stdout = await new Response(proc.stdout).text();
@@ -72,7 +72,7 @@ describe("SessionStart hook", () => {
 
   test("survives garbage input", async () => {
     const port = await freePort();
-    const r = spawnSync(process.execPath, [HOOK], { input: "not json", env: { ...process.env, TG_HUB_PORT: String(port) }, encoding: "utf8", windowsHide: true });
+    const r = spawnSync(process.execPath, [HOOK], { input: "not json", env: { ...process.env, TELEGRAM_HUB_PORT: String(port) }, encoding: "utf8", windowsHide: true });
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("");
   });
@@ -101,7 +101,7 @@ describe("Stop hook", () => {
     const proc = Bun.spawn([process.execPath, STOP_HOOK], {
       stdin: new Blob([JSON.stringify(input)]),
       stdout: "pipe",
-      env: { ...process.env, TG_HUB_PORT: String(port), TG_HUB_STATE_DIR: stateDir, CLAUDE_CODE_MESSAGING_SOCKET: socket },
+      env: { ...process.env, TELEGRAM_HUB_PORT: String(port), TELEGRAM_HUB_STATE_DIR: stateDir, CLAUDE_CODE_MESSAGING_SOCKET: socket },
       windowsHide: true,
     });
     const stdout = await new Response(proc.stdout).text();
@@ -147,7 +147,7 @@ describe("Stop hook", () => {
 
   test("survives garbage input", async () => {
     const port = await freePort();
-    const r = spawnSync(process.execPath, [STOP_HOOK], { input: "not json", env: { ...process.env, TG_HUB_PORT: String(port) }, encoding: "utf8", windowsHide: true });
+    const r = spawnSync(process.execPath, [STOP_HOOK], { input: "not json", env: { ...process.env, TELEGRAM_HUB_PORT: String(port) }, encoding: "utf8", windowsHide: true });
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("");
   });
@@ -171,7 +171,7 @@ describe("AskUserQuestion hook", () => {
     const proc = Bun.spawn([process.execPath, QUESTION_HOOK], {
       stdin: new Blob([JSON.stringify(input)]),
       stdout: "pipe",
-      env: { ...process.env, TG_HUB_PORT: String(port), CLAUDE_CODE_MESSAGING_SOCKET: "pipe-Q" },
+      env: { ...process.env, TELEGRAM_HUB_PORT: String(port), CLAUDE_CODE_MESSAGING_SOCKET: "pipe-Q" },
       windowsHide: true,
     });
     const stdout = await new Response(proc.stdout).text();
@@ -220,7 +220,7 @@ describe("AskUserQuestion hook", () => {
     const proc = Bun.spawn([process.execPath, QUESTION_HOOK], {
       stdin: new Blob([JSON.stringify(INPUT)]),
       stdout: "pipe",
-      env: { ...process.env, TG_HUB_PORT: String(port), TG_HUB_QUESTION_DEADLINE_MS: String(TEST_DEADLINE_MS) },
+      env: { ...process.env, TELEGRAM_HUB_PORT: String(port), TELEGRAM_HUB_QUESTION_DEADLINE_MS: String(TEST_DEADLINE_MS) },
       windowsHide: true,
     });
     const stdout = await new Response(proc.stdout).text();
@@ -234,7 +234,7 @@ describe("AskUserQuestion hook", () => {
     const parent = Bun.spawn([process.execPath, "-e", PARENT_SCRIPT], {
       stdin: new Blob([JSON.stringify(INPUT)]),
       stdout: "pipe",
-      env: { ...process.env, TG_HUB_PORT: String(port), HOOK_PATH: QUESTION_HOOK },
+      env: { ...process.env, TELEGRAM_HUB_PORT: String(port), HOOK_PATH: QUESTION_HOOK },
       windowsHide: true,
     });
     const reader = parent.stdout.getReader();
@@ -289,7 +289,7 @@ describe("AskUserQuestion hook", () => {
     const proc = Bun.spawn([process.execPath, QUESTION_HOOK], {
       stdin: new Blob([JSON.stringify(INPUT)]),
       stdout: "pipe",
-      env: { ...process.env, TG_HUB_PORT: String(port), CLAUDE_CODE_MESSAGING_SOCKET: "pipe-Q" },
+      env: { ...process.env, TELEGRAM_HUB_PORT: String(port), CLAUDE_CODE_MESSAGING_SOCKET: "pipe-Q" },
       windowsHide: true,
     });
     // A slow reader: the pipe fills up before anything is read.
@@ -327,7 +327,7 @@ describe("AskUserQuestion hook", () => {
 
   test("survives garbage input", async () => {
     const port = await freePort();
-    const r = spawnSync(process.execPath, [QUESTION_HOOK], { input: "not json", env: { ...process.env, TG_HUB_PORT: String(port) }, encoding: "utf8", windowsHide: true });
+    const r = spawnSync(process.execPath, [QUESTION_HOOK], { input: "not json", env: { ...process.env, TELEGRAM_HUB_PORT: String(port) }, encoding: "utf8", windowsHide: true });
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("");
   });
@@ -347,15 +347,15 @@ describe("plugin packaging", () => {
 
   test("marketplace lists the plugin directory", () => {
     const m = json(join(REPO, ".claude-plugin", "marketplace.json"), marketplace);
-    expect(m.name).toBe("tg-hub-local");
-    const entry = must(m.plugins.find(p => p.name === "tg-hub"), "tg-hub entry");
+    expect(m.name).toBe("telegram-hub");
+    const entry = must(m.plugins.find(p => p.name === "telegram-hub"), "telegram-hub entry");
     expect(existsSync(join(REPO, entry.source, ".claude-plugin", "plugin.json"))).toBe(true);
   });
 
   test("plugin manifest, MCP server and hook point at real files", () => {
-    expect(json(join(PLUGIN, ".claude-plugin", "plugin.json"), manifest).name).toBe("tg-hub");
+    expect(json(join(PLUGIN, ".claude-plugin", "plugin.json"), manifest).name).toBe("telegram-hub");
     const mcp = json(join(PLUGIN, ".mcp.json"), mcpConfig);
-    expect(mcp.mcpServers["tg-hub"].command).toBe("bun");
+    expect(mcp.mcpServers["telegram-hub"].command).toBe("bun");
     const pkg = json(join(PLUGIN, "package.json"), pkgJson);
     expect(pkg.scripts.start).toContain("src/plugin/main.ts");
     expect(existsSync(join(PLUGIN, "src", "plugin", "main.ts"))).toBe(true);
@@ -388,37 +388,37 @@ const ps = spawnSync("powershell", ["-NoProfile", "-Command", "$PSVersionTable.P
 const hasPowerShell = ps.status === 0;
 
 describe.skipIf(!hasPowerShell)("PowerShell wrappers", () => {
-  const script = join(REPO, "scripts", "tg-hub-profile.ps1");
+  const script = join(REPO, "scripts", "telegram-hub-profile.ps1");
   function args(fn: string, list: string[]): string {
     const quoted = list.map(a => `'${a.replace(/'/g, "''")}'`).join(",");
     const r = spawnSync(
       "powershell",
-      ["-NoProfile", "-Command", `$global:TgHubClaudeExe='x'; $global:TgHubCswapExe='y'; . '${script}'; (${fn} @(${quoted})) -join '|'`],
+      ["-NoProfile", "-Command", `$global:TelegramHubClaudeExe='x'; $global:TelegramHubCswapExe='y'; . '${script}'; (${fn} @(${quoted})) -join '|'`],
       { encoding: "utf8", windowsHide: true },
     );
     if (r.status !== 0) throw new Error(r.stderr);
     return r.stdout.trim();
   }
-  const CH = "--dangerously-load-development-channels|plugin:tg-hub@tg-hub-local";
+  const CH = "--dangerously-load-development-channels|plugin:telegram-hub@telegram-hub";
 
   test("claude gets the channel flag for interactive sessions", () => {
-    expect(args("Get-TgHubClaudeArgs", [])).toBe(CH);
-    expect(args("Get-TgHubClaudeArgs", ["--resume", "abc"])).toBe(`${CH}|--resume|abc`);
+    expect(args("Get-TelegramHubClaudeArgs", [])).toBe(CH);
+    expect(args("Get-TelegramHubClaudeArgs", ["--resume", "abc"])).toBe(`${CH}|--resume|abc`);
   });
 
   test("claude subcommands and print mode are left alone", () => {
-    expect(args("Get-TgHubClaudeArgs", ["mcp", "list"])).toBe("mcp|list");
-    expect(args("Get-TgHubClaudeArgs", ["-p", "hi"])).toBe("-p|hi");
-    expect(args("Get-TgHubClaudeArgs", ["--version"])).toBe("--version");
+    expect(args("Get-TelegramHubClaudeArgs", ["mcp", "list"])).toBe("mcp|list");
+    expect(args("Get-TelegramHubClaudeArgs", ["-p", "hi"])).toBe("-p|hi");
+    expect(args("Get-TelegramHubClaudeArgs", ["--version"])).toBe("--version");
   });
 
   test("cswap run gets the flag after --", () => {
-    expect(args("Get-TgHubCswapArgs", ["run", "2"])).toBe(`run|2|--|${CH}`);
-    expect(args("Get-TgHubCswapArgs", ["run", "2", "--", "--resume"])).toBe(`run|2|--|${CH}|--resume`);
+    expect(args("Get-TelegramHubCswapArgs", ["run", "2"])).toBe(`run|2|--|${CH}`);
+    expect(args("Get-TelegramHubCswapArgs", ["run", "2", "--", "--resume"])).toBe(`run|2|--|${CH}|--resume`);
   });
 
   test("other cswap commands pass through", () => {
-    expect(args("Get-TgHubCswapArgs", ["list"])).toBe("list");
-    expect(args("Get-TgHubCswapArgs", ["run", "2", "--", "-p", "x"])).toBe("run|2|--|-p|x");
+    expect(args("Get-TelegramHubCswapArgs", ["list"])).toBe("list");
+    expect(args("Get-TelegramHubCswapArgs", ["run", "2", "--", "-p", "x"])).toBe("run|2|--|-p|x");
   });
 });

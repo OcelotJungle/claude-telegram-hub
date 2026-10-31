@@ -56,7 +56,7 @@ afterEach(() => {
 // alive: runner pids alive from the start, for a manager that finds runs on disk.
 // windows: sessions with a window; graceMs: the start's grace, none by default.
 function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; alive?: number[]; windows?: string[]; graceMs?: number } = {}) {
-  const dir = o.dir ?? tempDir("tghub-exec-");
+  const dir = o.dir ?? tempDir("telegramhub-exec-");
   if (o.dir === undefined) dirs.push(dir);
   const specs: RunnerSpec[] = [];
   const alive = new Set<number>(o.alive);
@@ -296,7 +296,7 @@ describe("Execs", () => {
   });
 
   test("a run whose heartbeat stopped ends as lost, whoever has its pid now", async () => {
-    const dir = tempDir("tghub-exec-");
+    const dir = tempDir("telegramhub-exec-");
     dirs.push(dir);
     const rec: ExecRecord = { id: "abcd1234", sessionId: SID, messageId: 1, shell: "cmd", text: "x", cwd: "C:\\proj", state: "running", startedAt: NOW - LONG_AGO_MS, pid: 4242, reported: false };
     saveExecs(join(dir, "execs.json"), [rec]);
@@ -403,7 +403,7 @@ describe("Execs", () => {
   });
 
   test("more than MAX_EXECS runs drop the oldest with their files", () => {
-    const dir = tempDir("tghub-exec-");
+    const dir = tempDir("telegramhub-exec-");
     dirs.push(dir);
     const old: ExecRecord[] = Array.from({ length: MAX_EXECS }, (_, i) => ({
       id: `0000${String(i).padStart(4, "0")}`,
@@ -435,7 +435,7 @@ describe("Execs", () => {
 
 describe("exec texts", () => {
   test("logTail keeps the last lines, after the last carriage return, cut long", () => {
-    const dir = tempDir("tghub-exec-");
+    const dir = tempDir("telegramhub-exec-");
     dirs.push(dir);
     const path = join(dir, "a.log");
     writeFileSync(path, `one\r\ntwo\nthr\rthree\n${"y".repeat(400)}\n\n`);

@@ -1023,14 +1023,14 @@ ${msg.text}`);
   }
 
   private requireApi(): TelegramApi {
-    if (!this.opts.api) throw new SetupError("TELEGRAM_BOT_TOKEN is not set — put it into .env in the tg-hub state dir and restart the hub");
+    if (!this.opts.api) throw new SetupError("TELEGRAM_BOT_TOKEN is not set — put it into .env in the telegram-hub state dir and restart the hub");
     return this.opts.api;
   }
 
   private requireGroup(): string {
     const groupId = this.opts.config().groupId;
     if (!groupId) {
-      throw new SetupError('groupId is not configured — set "groupId" in config.json in the tg-hub state dir; hub.log lists the ids of chats the bot receives messages from');
+      throw new SetupError('groupId is not configured — set "groupId" in config.json in the telegram-hub state dir; hub.log lists the ids of chats the bot receives messages from');
     }
     return groupId;
   }

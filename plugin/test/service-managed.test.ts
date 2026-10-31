@@ -57,9 +57,9 @@ describe("a hub owned by a service", () => {
   });
 
   test("the marker is a file in the state directory, found through paths()", () => {
-    const previous = process.env.TG_HUB_STATE_DIR;
+    const previous = process.env.TELEGRAM_HUB_STATE_DIR;
     const dir = tempDir();
-    process.env.TG_HUB_STATE_DIR = dir;
+    process.env.TELEGRAM_HUB_STATE_DIR = dir;
     try {
       const file = paths().serviceManagedFile;
       expect(file).toBe(join(dir, "service-managed"));
@@ -67,8 +67,8 @@ describe("a hub owned by a service", () => {
       writeFileSync(file, "");
       expect(existsSync(paths().serviceManagedFile)).toBe(true);
     } finally {
-      if (previous === undefined) delete process.env.TG_HUB_STATE_DIR;
-      else process.env.TG_HUB_STATE_DIR = previous;
+      if (previous === undefined) delete process.env.TELEGRAM_HUB_STATE_DIR;
+      else process.env.TELEGRAM_HUB_STATE_DIR = previous;
       rmSync(dir, { recursive: true, force: true });
     }
   });

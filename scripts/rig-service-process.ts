@@ -18,7 +18,7 @@ if (mode === "rig") {
   } else if (args.join(" ") === "feature telegram disable") {
     console.log("Disabling the fixture service");
     writeFileSync(join(root, "rig-started.json"), JSON.stringify({ pid: process.pid }));
-    const child = Bun.spawn(["systemctl", "--user", "stop", "tg-hub.service"], { stdout: "inherit", stderr: "inherit" });
+    const child = Bun.spawn(["systemctl", "--user", "stop", "telegram-hub.service"], { stdout: "inherit", stderr: "inherit" });
     const code = await child.exited;
     if (code !== 0) process.exit(code);
     // This record proves that rig ran after its parent service had stopped.

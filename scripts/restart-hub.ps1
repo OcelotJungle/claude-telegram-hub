@@ -1,4 +1,4 @@
-# tg-hub: restart the hub, for example after its code changed. Queued messages
+# telegram-hub: restart the hub, for example after its code changed. Queued messages
 # survive: the new hub delivers what the old one left.
 # Needs the Task Scheduler task (scripts\install-hub-task.ps1): the hub left
 # running is the task's (--always-on). An open window starts its own hub
@@ -8,7 +8,7 @@
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\restart-hub.ps1
 
-$TaskName = 'tg-hub'
+$TaskName = 'telegram-hub'
 $Tries = 5
 
 function Get-Hubs {

@@ -8,7 +8,7 @@ import { connect } from "net";
 export function sendInterrupt(socket: string, token: string, prompt: string): Promise<void> {
   const lines = [
     { type: "auth", token },
-    { type: "user", message: { role: "user", content: prompt }, priority: "now", from_plugin: "tg-hub" },
+    { type: "user", message: { role: "user", content: prompt }, priority: "now", from_plugin: "telegram-hub" },
   ];
   return new Promise((resolve, reject) => {
     const c = connect(socket, () => c.end(lines.map(l => JSON.stringify(l)).join("\n") + "\n", () => resolve()));

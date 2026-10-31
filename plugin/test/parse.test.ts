@@ -151,7 +151,7 @@ describe("user records", () => {
   });
 
   test("channel message is not terminal input", () => {
-    const rec = { ...userBase, isMeta: true, message: { role: "user", content: '<channel source="tg-hub">hi</channel>' }, origin: { kind: "channel", server: "plugin:tg-hub:tg-hub" } };
+    const rec = { ...userBase, isMeta: true, message: { role: "user", content: '<channel source="telegram-hub">hi</channel>' }, origin: { kind: "channel", server: "plugin:telegram-hub:telegram-hub" } };
     expect(parseRecord(rec)).toEqual([]);
   });
 
@@ -241,8 +241,8 @@ describe("user records", () => {
 });
 
 describe("topic messages reaching the agent", () => {
-  const TG = { kind: "channel", server: "plugin:tg-hub:tg-hub" };
-  const tag = (id: number, body: string) => `<channel source="plugin:tg-hub:tg-hub" chat_id="-1001" message_id="${id}" user="me" user_id="1" ts="2026-01-01T16:08:37.000Z">\n${body}\n</channel>`;
+  const TG = { kind: "channel", server: "plugin:telegram-hub:telegram-hub" };
+  const tag = (id: number, body: string) => `<channel source="plugin:telegram-hub:telegram-hub" chat_id="-1001" message_id="${id}" user="me" user_id="1" ts="2026-01-01T16:08:37.000Z">\n${body}\n</channel>`;
 
   test("a channel prompt names the messages the agent got", () => {
     const rec = { ...userBase, isMeta: true, origin: TG, message: { role: "user", content: tag(4951, "привет") } };
@@ -257,7 +257,7 @@ describe("topic messages reaching the agent", () => {
   });
 
   test("a message that interrupted the agent comes from our plugin through the inbox", () => {
-    const peer = { kind: "peer", from: "unknown", plugin: "tg-hub" };
+    const peer = { kind: "peer", from: "unknown", plugin: "telegram-hub" };
     const rec = { ...userBase, isMeta: true, origin: peer, message: { role: "user", content: `Another Claude session sent a message:\n${tag(5107, "! стоп")}` } };
     expect(parseRecord(rec)).toEqual([{ kind: "channel_seen", messageIds: [5107] }]);
   });

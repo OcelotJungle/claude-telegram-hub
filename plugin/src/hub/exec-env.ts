@@ -47,7 +47,7 @@ const SYSTEM_VARS = new Set(
 const SYSTEM_PREFIX = /^PROCESSOR_/i;
 // What Claude Code and the hub set for themselves; dropped when the registry
 // cannot be read and the hub's environment is all there is.
-const OWN_VARS = /^(CLAUDE|TG_HUB_|ANTHROPIC_)/i;
+const OWN_VARS = /^(CLAUDE|TELEGRAM_HUB_|ANTHROPIC_)/i;
 // A value line of `reg query`: four spaces between name, type and value.
 const REG_LINE = /^ {4}(.+?) {4}(REG_SZ|REG_EXPAND_SZ)(?: {4}(.*))?$/;
 const VAR_REF = /%([^%]+)%/g;

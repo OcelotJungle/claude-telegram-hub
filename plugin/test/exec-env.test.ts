@@ -9,7 +9,7 @@ describe("mergeEnv", () => {
     const env = mergeEnv(
       {
         CLAUDE_CONFIG_DIR: "c",
-        TG_HUB_PORT: "1",
+        TELEGRAM_HUB_PORT: "1",
         TMPDIR: "C:\\proj\\.tmp",
         FOO: "bar",
         USERPROFILE: "C:\\Users\\me",
@@ -96,7 +96,7 @@ describe("freshEnv", () => {
     const names = Object.keys(env);
     expect(env.TG_EXEC_TEST_LEAK).toBeUndefined();
     expect(names.find(k => k.toLowerCase() === "path")).toBeDefined();
-    expect(names.filter(k => /^(CLAUDE|TG_HUB_|ANTHROPIC_)/i.test(k))).toEqual([]);
+    expect(names.filter(k => /^(CLAUDE|TELEGRAM_HUB_|ANTHROPIC_)/i.test(k))).toEqual([]);
     expect(env.SystemRoot ?? env.SYSTEMROOT).toBeDefined();
   });
 });

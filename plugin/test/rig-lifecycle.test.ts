@@ -187,8 +187,8 @@ test("an unknown current HEAD is retried too", () => {
 });
 
 test("the started commit comes from the environment the service script fixed", () => {
-  expect(startedCommit({ TG_HUB_COMMIT: COMMIT })).toBe(COMMIT);
-  expect(startedCommit({ TG_HUB_COMMIT: `${COMMIT}\n` })).toBe(COMMIT);
-  expect(startedCommit({ TG_HUB_COMMIT: "not-a-commit" })).toBeUndefined();
+  expect(startedCommit({ TELEGRAM_HUB_COMMIT: COMMIT })).toBe(COMMIT);
+  expect(startedCommit({ TELEGRAM_HUB_COMMIT: `${COMMIT}\n` })).toBe(COMMIT);
+  expect(startedCommit({ TELEGRAM_HUB_COMMIT: "not-a-commit" })).toBeUndefined();
   expect(startedCommit({})).toBeUndefined();
 });

@@ -190,7 +190,7 @@ describe("relay: closing a turn", () => {
   test("own tool call between text and turn end keeps the text final", () => {
     const { r } = makeRelay();
     expect(r.feed(text("summary", "m1"))).toEqual([]);
-    expect(r.feed(tool("mcp__plugin_tg-hub_tg-hub__tg_enable", "m1"))).toEqual([]);
+    expect(r.feed(tool("mcp__plugin_telegram-hub_telegram-hub__tg_enable", "m1"))).toEqual([]);
     r.feed(end("m2"));
     r.decide(DONE);
     expect(r.feed(CLOSED)).toEqual([{ text: "summary", notify: true }]);
@@ -332,7 +332,7 @@ describe("relay: the mode", () => {
     const { r } = makeRelay(false);
     r.feed(text("before"));
     r.setEnabled(true);
-    expect(r.feed(tool("mcp__plugin_tg-hub_tg-hub__tg_enable"))).toEqual([]);
+    expect(r.feed(tool("mcp__plugin_telegram-hub_telegram-hub__tg_enable"))).toEqual([]);
     r.feed(text("after", "m2"));
     r.feed(end("m2"));
     r.decide(DONE);
@@ -418,7 +418,7 @@ describe("relay: tools of ours", () => {
     r.feed(text("вот скрин"));
     expect(r.textBeforeToolCall()).toEqual([{ text: "вот скрин", notify: false }]);
     // The tool_use record read later finds nothing left to send.
-    expect(r.feed(tool("mcp__plugin_tg-hub_tg-hub__tg_send_file"))).toEqual([]);
+    expect(r.feed(tool("mcp__plugin_telegram-hub_telegram-hub__tg_send_file"))).toEqual([]);
     expect(r.idle()).toEqual([]);
   });
 

@@ -2,7 +2,7 @@
 // over a localhost WebSocket.
 export const PROTOCOL_VERSION = 1;
 
-// The hub's localhost port unless TG_HUB_PORT says otherwise. This file has no
+// The hub's localhost port unless TELEGRAM_HUB_PORT says otherwise. This file has no
 // imports, so the plugin's function hooks module can use it too.
 export const DEFAULT_PORT = 47613;
 

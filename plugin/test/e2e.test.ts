@@ -55,12 +55,12 @@ beforeEach(async () => {
       CLAUDE_CONFIG_DIR: configDir,
       CLAUDE_PROJECT_DIR: CWD,
       CLAUDE_CODE_MESSAGING_SOCKET: "\\\\.\\pipe\\LOCAL\\cc-msg-e2e",
-      TG_HUB_STATE_DIR: state,
-      TG_HUB_PORT: String(port),
-      TG_HUB_API_BASE: fake.url,
+      TELEGRAM_HUB_STATE_DIR: state,
+      TELEGRAM_HUB_PORT: String(port),
+      TELEGRAM_HUB_API_BASE: fake.url,
       TELEGRAM_BOT_TOKEN: fake.token,
-      TG_HUB_IDLE_MS: "1000",
-      TG_HUB_POLL_TIMEOUT: "1",
+      TELEGRAM_HUB_IDLE_MS: "1000",
+      TELEGRAM_HUB_POLL_TIMEOUT: "1",
     },
   });
   client = new Client({ name: "test", version: "0" });

@@ -150,7 +150,7 @@ export class HubClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.waiters = this.waiters.filter(w => w !== done);
-        reject(new Error("tg-hub: the hub is not reachable"));
+        reject(new Error("telegram-hub: the hub is not reachable"));
       }, timeoutMs);
       const done = () => {
         clearTimeout(timer);

@@ -32,7 +32,7 @@ const hub = new Hub({
   config: loadConfig,
   // --always-on: started by the Task Scheduler (scripts/install-hub-task.ps1).
   idleMs: process.argv.includes("--always-on") ? 0 : idleMs(),
-  pollTimeoutSec: Number(process.env.TG_HUB_POLL_TIMEOUT) || undefined,
+  pollTimeoutSec: Number(process.env.TELEGRAM_HUB_POLL_TIMEOUT) || undefined,
   log,
   onExit: (code = 0) => process.exit(code),
 });
