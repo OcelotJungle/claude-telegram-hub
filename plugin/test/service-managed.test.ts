@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, rmSync, writeFileSync } from "fs";
+import { rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { HubClient } from "../src/plugin/hub-client.ts";
-import { paths } from "../src/shared/config.ts";
+import { isServiceManaged } from "../src/shared/config.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { freePort, memLogger, tempDir, waitFor } from "./helpers.ts";
 
@@ -56,16 +56,17 @@ describe("a hub owned by a service", () => {
     await waitFor(() => spawned >= 1, WAIT_MS, "hub start");
   });
 
-  test("the marker is a file in the state directory, found through paths()", () => {
+  test("a window reads the marker the install script writes into the state directory", () => {
     const previous = process.env.TELEGRAM_HUB_STATE_DIR;
     const dir = tempDir();
     process.env.TELEGRAM_HUB_STATE_DIR = dir;
     try {
-      const file = paths().serviceManagedFile;
-      expect(file).toBe(join(dir, "service-managed"));
-      expect(existsSync(file)).toBe(false);
-      writeFileSync(file, "");
-      expect(existsSync(paths().serviceManagedFile)).toBe(true);
+      expect(isServiceManaged()).toBe(false);
+      // The install script creates this file name in the state directory.
+      writeFileSync(join(dir, "service-managed"), "");
+      expect(isServiceManaged()).toBe(true);
+      rmSync(join(dir, "service-managed"));
+      expect(isServiceManaged()).toBe(false);
     } finally {
       if (previous === undefined) delete process.env.TELEGRAM_HUB_STATE_DIR;
       else process.env.TELEGRAM_HUB_STATE_DIR = previous;

@@ -1,4 +1,4 @@
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { isAbsolute, join, relative, resolve } from "path";
 import { z } from "zod";
@@ -33,6 +33,11 @@ export function paths() {
     // Present while a service (systemd unit, Windows task) owns the hub; the install scripts create and remove it.
     serviceManagedFile: join(stateDir, "service-managed"),
   };
+}
+
+// A service owns the hub: windows only wait for it and never start one.
+export function isServiceManaged(): boolean {
+  return existsSync(paths().serviceManagedFile);
 }
 
 // path lies inside dir (not dir itself).

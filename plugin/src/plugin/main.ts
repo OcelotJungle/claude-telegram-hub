@@ -3,11 +3,10 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { existsSync } from "fs";
 import { homedir } from "os";
 import { join, resolve } from "path";
 import { z } from "zod";
-import { hubPort, paths } from "../shared/config.ts";
+import { hubPort, isServiceManaged, paths } from "../shared/config.ts";
 import { createLogger } from "../shared/log.ts";
 import { findClaudePid, processInfoFor } from "./claude-process.ts";
 import { spawnHubDetached } from "./hub-client.ts";
@@ -82,7 +81,7 @@ const core = sessionId
       stateDir: paths().stateDir,
       filesDir: paths().filesDir,
       spawnHub: () => spawnHubDetached(hubMain),
-      serviceManaged: () => existsSync(paths().serviceManagedFile),
+      serviceManaged: isServiceManaged,
       emitChannel: (content, meta) => {
         mcp.notification({ method: "notifications/claude/channel", params: { content, meta } }).catch(e => log.error(`channel notification failed: ${e}`));
       },

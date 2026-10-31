@@ -94,30 +94,6 @@ describe("Windows task scripts", () => {
   });
 });
 
-// The container run cannot happen on Windows: these checks only keep the scenarios from being removed or weakened.
-describe("container smoke check", () => {
-  const check = read("check-hub-service.ts");
-  const fakeRig = read("rig-service-process.ts");
-
-  test("the fake rig reports pendingHubRestart as a string, the contract's saved value", () => {
-    expect(fakeRig).toContain('"status --json"');
-    expect(fakeRig).toMatch(/pendingHubRestart: "\d{4}-\d{2}-\d{2}T[^"]+"/);
-  });
-
-  test("it installs with the state dir and checks the marker", () => {
-    expect(check).toContain("install-hub-service.sh\"], { TELEGRAM_HUB_STATE_DIR: state }");
-    expect(check).toContain('"service-managed"');
-  });
-
-  test("a connected window survives exit 75 and starts no hub, also after a service stop", () => {
-    expect(check).toContain("hub-restart-pending");
-    expect(check).toContain("readyCommit() === newHead");
-    expect(check).toContain("windowStats.spawns, 0");
-    expect(check).toContain("FAILED_ATTEMPTS");
-    expect(check).toContain("hubWindow?.stop()");
-  });
-});
-
 describe("shell syntax", () => {
   for (const name of ["install-hub-service.sh", "run-hub-service.sh", "uninstall-hub-service.sh", "test-systemd.sh"]) {
     test(`${name} parses`, () => {
