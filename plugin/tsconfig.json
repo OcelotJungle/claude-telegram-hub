@@ -8,6 +8,7 @@
     "skipLibCheck": true,
     "types": ["bun"],
     "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
     "verbatimModuleSyntax": true
   },
   "include": ["src", "test"],

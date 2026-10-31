@@ -6,6 +6,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { homedir } from "os";
 import { join, resolve } from "path";
 import { z } from "zod";
+import { version } from "../../package.json";
 import { hubPort, isServiceManaged, paths } from "../shared/config.ts";
 import { createLogger } from "../shared/log.ts";
 import { findClaudePid, processInfoFor } from "./claude-process.ts";
@@ -54,7 +55,7 @@ const windowKey = process.env.CLAUDE_CODE_MESSAGING_SOCKET || `pid:${process.pid
 const hubMain = resolve(import.meta.dir, "../hub/main.ts");
 
 const mcp = new Server(
-  { name: "telegram-hub", version: "0.1.0" },
+  { name: "telegram-hub", version },
   {
     capabilities: {
       tools: {},
