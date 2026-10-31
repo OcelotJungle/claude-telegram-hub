@@ -1,5 +1,5 @@
 // Turns one transcript (.jsonl) record into the events the relay cares about.
-// Record shapes: see "Результаты проверки" in the design spec.
+// Record shapes: see the transcript section of the design spec.
 import { basename } from "path";
 import { arr, field, isObject } from "../shared/guards.ts";
 
@@ -164,7 +164,7 @@ function parseAssistant(r: Rec): TranscriptEvent[] {
 }
 
 // The signature is a base64 protobuf whose field 8 names the block kind
-// ("thinking" or "narration"); observed in Claude Code with the model.
+// ("thinking" or "narration").
 export function thinkingKind(signature: unknown): string | undefined {
   if (typeof signature !== "string") return undefined;
   const head = Buffer.from(signature.slice(0, SIGNATURE_HEAD_CHARS), "base64").toString("latin1");

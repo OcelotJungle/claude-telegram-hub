@@ -41,7 +41,7 @@ beforeEach(async () => {
   stateDir = tempDir();
   writeFileSync(join(stateDir, "config.json"), JSON.stringify({ groupId: GROUP, allowFrom: ["1"] }));
   env = {
-    // The spawned hub derives ~/.agent-rig from the home directory; keep it away from real rig files.
+    // The spawned hub derives ~/.agent-rig from the home directory; keep it away from the real rig files of whoever runs the tests.
     HOME: stateDir,
     USERPROFILE: stateDir,
     TELEGRAM_HUB_STATE_DIR: stateDir,

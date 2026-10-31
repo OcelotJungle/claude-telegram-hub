@@ -520,13 +520,13 @@ describe("PluginCore", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "agent-a1.meta.json"), JSON.stringify({ agentType: "Explore", description: "Find it" }));
     const agent = join(dir, "agent-a1.jsonl");
-    const timestamp = new Date(2026, 9, 21, 18, 39).toISOString();
+    const timestamp = new Date(2026, 0, 1, 12, 0).toISOString();
     appendFileSync(agent, line({ ...assistantText("Looking", "tool_use", "s1"), isSidechain: true, timestamp }));
     await waitFor(() => sent().length === 1, 3000, "card");
-    expect(sent()[0]).toEqual({ text: "🤖 Explore\nFind it\n⏳ 0 с · 0 действий\n\n[18:39] Looking", silent: true, topic: 100 });
+    expect(sent()[0]).toEqual({ text: "🤖 Explore\nFind it\n⏳ 0 с · 0 действий\n\n[12:00] Looking", silent: true, topic: 100 });
     appendFileSync(agent, line({ ...assistantText("Found", "end_turn", "s2"), isSidechain: true, timestamp }));
     await waitFor(() => fake.callsOf("editMessageText").some(c => /✅ \d+ с · \d+ действи(?:е|я|й)/.test(String(c.text))), 3000, "final edit");
-    expect(String(fake.callsOf("editMessageText").at(-1)?.text)).toEndWith("[18:39] Looking\n\n[18:39] Found");
+    expect(String(fake.callsOf("editMessageText").at(-1)?.text)).toEndWith("[12:00] Looking\n\n[12:00] Found");
     expect(sent().length).toBe(1);
   });
 
@@ -703,7 +703,7 @@ describe("a turn ended by a failed connection to the API", () => {
     expect(channel[0]?.content).toBe(CONTINUE_PROMPT);
   });
 
-  // Observed in Claude Code: the auto mode classifier's response broke
+  // Claude Code: the auto mode classifier's response broke
   // off, the tool call got its result and the turn went on.
   test("an API error after which the turn goes on is neither a cut nor a turn end", async () => {
     await enabledCore();

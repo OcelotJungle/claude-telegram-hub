@@ -4,8 +4,8 @@ import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { CodexLimits } from "../src/hub/codex-limits.ts";
 
-const TIMESTAMP = "2026-01-01T12:56:47.467Z";
-const RESET_SECONDS = 1793032691;
+const TIMESTAMP = "2026-01-01T12:00:00.000Z";
+const RESET_SECONDS = 1767286800;
 const OLDER_MTIME = new Date("2026-01-01T10:00:00Z");
 const NEWER_MTIME = new Date("2026-01-01T11:00:00Z");
 const LARGE_LINE_BYTES = 150_000;
@@ -29,8 +29,8 @@ function event(percent = 41, id = "codex", timestamp = TIMESTAMP): string {
   } } });
 }
 
-async function rollout(name: string, contents: string, day = "26"): Promise<string> {
-  const path = join(dir, "2026", "10", day, `rollout-${name}.jsonl`);
+async function rollout(name: string, contents: string, day = "02"): Promise<string> {
+  const path = join(dir, "2026", "01", day, `rollout-${name}.jsonl`);
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, contents);
   return path;
@@ -38,7 +38,7 @@ async function rollout(name: string, contents: string, day = "26"): Promise<stri
 
 describe("Codex limits", () => {
   test("newest file by date and mtime wins and maps the windows", async () => {
-    await rollout("previous-day", event(99), "25");
+    await rollout("previous-day", event(99), "01");
     const older = await rollout("older", event(10));
     const newer = await rollout("newer", `${event(15)}\n${event()}\n`);
     await utimes(older, OLDER_MTIME, OLDER_MTIME);
@@ -53,7 +53,7 @@ describe("Codex limits", () => {
   });
 
   test("falls back to an older file; premium, null and invalid events are ignored", async () => {
-    await rollout("older", event(), "25");
+    await rollout("older", event(), "01");
     await rollout("newer", [event(99, "premium"), JSON.stringify({ type: "event_msg", payload: { type: "token_count", rate_limits: null } }), "{broken", event().replace('"used_percent":41', '"used_percent":"41"')].join("\n"));
     expect((await new CodexLimits(dir).read())?.rateLimits[0]?.percentUsed).toBe(41);
   });

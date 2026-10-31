@@ -2792,9 +2792,9 @@ describe("commands", () => {
     await startHub();
     const get = () => fetch(`http://127.0.0.1:${port}/codex-limits`);
     expect(await (await get()).json()).toBeNull();
-    const day = join(dir, "codex-sessions", "2026", "10", "26");
+    const day = join(dir, "codex-sessions", "2026", "01", "01");
     mkdirSync(day, { recursive: true });
-    const timestamp = "2026-01-01T12:56:47.467Z";
+    const timestamp = "2026-01-01T12:00:00.000Z";
     writeFileSync(join(day, "rollout-test.jsonl"), JSON.stringify({ timestamp, type: "event_msg", payload: { type: "token_count", rate_limits: {
       limit_id: "codex", primary: { used_percent: 41, window_minutes: 300 },
     } } }));
@@ -2815,7 +2815,7 @@ describe("commands", () => {
     writeFileSync(scriptPath, `#!/usr/bin/env python3
 import sys, json
 print(json.dumps({
-  "checked_at": "2026-01-01T08:19:04Z",
+  "checked_at": "2026-01-02T12:00:00Z",
   "source": "proxy",
   "day_percent": 6,
   "used": 240,
@@ -2845,7 +2845,7 @@ print(json.dumps({
     writeFileSync(scriptPath, `#!/usr/bin/env python3
 import sys, json
 print(json.dumps({
-  "checked_at": "2026-01-01T08:19:04Z",
+  "checked_at": "2026-01-02T12:00:00Z",
   "source": "none",
   "day_percent": None,
   "used": None,
@@ -3680,7 +3680,7 @@ describe("cleanupSummary", () => {
   });
 
   test("an unknown format names the Claude Code version when it is known", () => {
-    expect(cleanupSummary({ kind: "format", version: "1.0.0" })).toBe("⚠️ Уборка не выполнена: формат транскрипта изменился (Claude Code)");
+    expect(cleanupSummary({ kind: "format", version: "1.0.1" })).toBe("⚠️ Уборка не выполнена: формат транскрипта изменился (Claude Code 1.0.1)");
     expect(cleanupSummary({ kind: "format" })).toBe("⚠️ Уборка не выполнена: формат транскрипта изменился");
   });
 });

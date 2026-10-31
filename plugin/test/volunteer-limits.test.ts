@@ -4,7 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { VolunteerLimits } from "../src/hub/volunteer-limits.ts";
 
-const CHECKED_AT = "2026-01-01T08:19:04Z";
+const CHECKED_AT = "2026-01-02T12:00:00Z";
 const RESET_IN_S = 56455;
 
 function scriptOutput(overrides: Partial<{

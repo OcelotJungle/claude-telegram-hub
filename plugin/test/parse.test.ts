@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { join } from "path";
 import { parseAgentRecord, parseRecord } from "../src/transcript/parse.ts";
 
-// Shapes mirror records observed in Claude Code transcripts.
+// Shapes mirror records found in Claude Code transcripts.
 const assistant = (id: string, stop: string | null, block: object) => ({
   parentUuid: "p",
   isSidechain: false,
@@ -13,7 +13,7 @@ const assistant = (id: string, stop: string | null, block: object) => ({
 });
 const text = (t: string) => ({ type: "text", text: t });
 const toolUse = (name: string) => ({ type: "tool_use", id: "toolu_1", name, input: {} });
-// Real signature heads (the model): base64 protobuf naming the block kind.
+// Signature heads: base64 protobuf naming the block kind.
 const THINKING_SIG = "CAQS2AYKEAgSGAI4AUIIdGhpbmtpbmcSDMAEHc8RVkFCljXlqhoM4s16bwLW5yY0xreFIjD1gFVyB/I6V96xQnh/Zkc5R853AaR0CaLRbcgfelAoZBntTXsv";
 const NARRATION_SIG = "CAQSrgcKEQgSGAI4AUIJbmFycmF0aW9uEgxhMFJuZKXpKQCYxWIaDLo3cuvEnZjRl04uqSIwcikVdFlQ26x5rHo0oYhd4CFFTF+Qg/KbIJ4gkTpHfgPAWqq3";
 const thinking = { type: "thinking", thinking: "", signature: THINKING_SIG };
@@ -95,7 +95,7 @@ describe("assistant records", () => {
 });
 
 describe("API errors", () => {
-  // Observed in Claude Code: a synthetic message.
+  // Claude Code writes a synthetic message.
   const apiError = (o: object = {}) => ({
     ...assistant("e1", "stop_sequence", text("API Error: Connection lost mid-response. The response above may be incomplete.")),
     error: "server_error",
@@ -130,7 +130,7 @@ describe("API errors", () => {
     expect(parseRecord(apiError({ isSidechain: true }))).toEqual([]);
   });
 
-  // Observed in Claude Code: a turn started by a channel
+  // A turn started by a channel
   // message or a reminder sometimes ends on this stub, never on the agent's text.
   test("Claude Code's own stub reply just ends the turn, without its text", () => {
     const base = assistant("s1", "stop_sequence", text("No response requested."));
@@ -242,7 +242,7 @@ describe("user records", () => {
 
 describe("topic messages reaching the agent", () => {
   const TG = { kind: "channel", server: "plugin:telegram-hub:telegram-hub" };
-  const tag = (id: number, body: string) => `<channel source="plugin:telegram-hub:telegram-hub" chat_id="-1001" message_id="${id}" user="me" user_id="1" ts="2026-01-01T16:08:37.000Z">\n${body}\n</channel>`;
+  const tag = (id: number, body: string) => `<channel source="plugin:telegram-hub:telegram-hub" chat_id="-1001" message_id="${id}" user="me" user_id="1" ts="2026-01-09T12:00:00.000Z">\n${body}\n</channel>`;
 
   test("a channel prompt names the messages the agent got", () => {
     const rec = { ...userBase, isMeta: true, origin: TG, message: { role: "user", content: tag(4951, "привет") } };

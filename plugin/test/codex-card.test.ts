@@ -10,12 +10,12 @@ import { tempDir } from "./helpers.ts";
 
 const STEP = 3000;
 const MINUTE = 60_000;
-const START = new Date(2026, 9, 25, 18, 39).getTime();
+const START = new Date(2026, 0, 1, 12, 0).getTime();
 const JOB = "20260101-120000-abcd";
 const COMMAND_LIMIT = 60;
 const SUMMARY_COUNT = 10;
-const FIRST_RUN_MS = 17 * MINUTE;
-const ANSWER_PAUSE_MS = 40 * MINUTE;
+const FIRST_RUN_MS = 10 * MINUTE;
+const ANSWER_PAUSE_MS = 30 * MINUTE;
 const REPLY_RUN_MS = 2 * MINUTE;
 const RETRY_CASES = [["failed", false], ["limit", false], ["failed", true], ["limit", true]] as const;
 const CONTINUING_EVENTS = [
@@ -120,7 +120,7 @@ describe("Executor cards", () => {
     expect(s.last()).toStartWith([
       "🤖 **codex** · sol · high",
       "Review the parser",
-      "⏳ 0 с · 0 действий · событие 18:39",
+      "⏳ 0 с · 0 действий · событие 12:00",
       "`git status`",
     ].join("\n"));
   });
@@ -147,7 +147,7 @@ describe("Executor cards", () => {
     s.state();
     s.events(message("Reply progress") + command("reply", "reply command"));
     s.tick(REPLY_RUN_MS);
-    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nContinue the fix\n⏳ 19 мин · 2 действия");
+    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nContinue the fix\n⏳ 12 мин · 2 действия");
     expect(s.last()).toContain("Earlier Codex progress");
     expect(s.last()).toContain("Earlier worker question");
     expect(s.last()).toContain("Reply progress");
@@ -156,7 +156,7 @@ describe("Executor cards", () => {
     write(assistant("reply-final", "Reply final", "end_turn"));
     s.tick();
     s.tick(SETTLE_MS);
-    expect(s.last()).toContain("✅ 19 мин · 2 действия");
+    expect(s.last()).toContain("✅ 12 мин · 2 действия");
     expect(s.last()).toContain("Reply final");
     expect(s.cards.at(-1)?.final).toBe(true);
   });
@@ -284,15 +284,15 @@ describe("Executor cards", () => {
     s.start();
     s.write(assistant("m1", "codex job running"));
     s.tick();
-    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nFix tests\n⏳ 0 с · 0 действий · событие 18:39");
+    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nFix tests\n⏳ 0 с · 0 действий · событие 12:00");
     expect(s.last()).not.toContain("haiku");
     expect(s.last()).not.toContain("Inspecting the parser");
     expect(s.last()).not.toContain("codex job running");
     s.events(message("Checking the boundary") + command("check", "check boundary", "item.started"));
     s.tick(MINUTE);
-    expect(s.last()).toContain("`[18:39]` Inspecting the parser");
-    expect(s.last()).toContain("`[18:40]` Checking the boundary");
-    expect(s.last()).toContain("событие 18:40");
+    expect(s.last()).toContain("`[12:00]` Inspecting the parser");
+    expect(s.last()).toContain("`[12:01]` Checking the boundary");
+    expect(s.last()).toContain("событие 12:01");
   });
 
   test("reasoning stays hidden, releases a held agent_message and updates event time", () => {
@@ -302,14 +302,14 @@ describe("Executor cards", () => {
     s.events(reasoning("Hidden reasoning before message"));
     s.tick();
     expect(s.last()).not.toContain("Hidden reasoning before message");
-    expect(s.last()).toContain("событие 18:39");
+    expect(s.last()).toContain("событие 12:00");
     s.events(message("Visible progress"));
     s.tick();
     expect(s.last()).not.toContain("Visible progress");
     s.events(reasoning("Hidden reasoning after message"));
     s.tick(MINUTE);
-    expect(s.last()).toContain("`[18:39]` Visible progress");
-    expect(s.last()).toContain("событие 18:40");
+    expect(s.last()).toContain("`[12:00]` Visible progress");
+    expect(s.last()).toContain("событие 12:01");
     expect(s.cards.every(card => !card.text.includes("Hidden reasoning"))).toBe(true);
   });
 
@@ -320,7 +320,7 @@ describe("Executor cards", () => {
     s.attach(verb);
     s.tick();
     s.events(message("New output") + message("More output") + command("new", "new command"));
-    s.state({ notes: ["17:01 old restart", "18:40 restart 1/3: new attempt"] });
+    s.state({ notes: ["17:01 old restart", "12:01 restart 1/3: new attempt"] });
     s.writeMeta();
     s.tick(MINUTE);
     expect(s.last()).not.toContain("Old output");
@@ -328,7 +328,7 @@ describe("Executor cards", () => {
     expect(s.last()).toContain("New output");
     expect(s.last()).toContain("More output");
     expect(s.last()).toContain("1 действие");
-    expect(s.last()).toContain("`[18:40]` 🔁 restart 1/3: new attempt");
+    expect(s.last()).toContain("`[12:01]` 🔁 restart 1/3: new attempt");
   });
 
   test("discovery via start result survives late meta", () => {
@@ -541,14 +541,14 @@ describe("Executor cards", () => {
     const long = "x".repeat(COMMAND_LIMIT + 1);
     s.events(command("a", "older command", "item.started") + command("b", `${long}\nsecret second line`, "item.started"));
     s.tick(MINUTE);
-    expect(s.last()).toContain(` · событие 18:40\n\`${long.slice(0, COMMAND_LIMIT)}…\``);
+    expect(s.last()).toContain(` · событие 12:01\n\`${long.slice(0, COMMAND_LIMIT)}…\``);
     expect(s.last()).not.toContain("secret second line");
     s.events(command("b", long));
     s.tick();
-    expect(s.last()).toContain("1 действие · событие 18:40\n`older command`");
+    expect(s.last()).toContain("1 действие · событие 12:01\n`older command`");
     s.events(command("a", "older command"));
     s.tick();
-    expect(s.last()).toContain("2 действия · событие 18:40");
+    expect(s.last()).toContain("2 действия · событие 12:01");
     expect(s.last()).not.toContain("older command");
   });
 
@@ -702,7 +702,7 @@ describe("Executor cards", () => {
       s.tick();
       expect(s.last()).toStartWith(`🤖 **${executor}**`);
       expect(s.last()).not.toContain("previous model switch");
-      s.state({ notes: ["17:01 previous model switch", "18:40 current model switch"] });
+      s.state({ notes: ["17:01 previous model switch", "12:01 current model switch"] });
       s.tick();
       expect(s.last()).not.toContain("previous model switch");
       expect(s.last().split("current model switch")).toHaveLength(2);

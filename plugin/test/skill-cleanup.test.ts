@@ -130,12 +130,12 @@ describe("cleanTranscript", () => {
     const d = dir();
     const path = join(d, `${SID}.jsonl`);
     const last = skills("tdd", "debugging");
-    write(path, [invoked("s1", skills("brainstorming")), "\n", user("u1", "x"), "\n", invoked("s2", last, "1.0.0"), "\n"]);
+    write(path, [invoked("s1", skills("brainstorming")), "\n", user("u1", "x"), "\n", invoked("s2", last, "1.0.1"), "\n"]);
     const res = await cleanTranscript(path, NOW);
     if (res.kind !== "cleaned") throw new Error(`kind ${res.kind}`);
     expect(res.skills).toEqual(last.map(s => ({ name: s.name, chars: s.content.length })));
     expect(res.records).toBe(2);
-    expect(res.version).toBe("1.0.0");
+    expect(res.version).toBe("1.0.1");
     expect(res.backup).toBe(join(d, `${SID}.cleanup-${NOW}.jsonl`));
     const backup = readFileSync(res.backup, "utf8")
       .trim()

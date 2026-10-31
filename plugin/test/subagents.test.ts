@@ -10,8 +10,8 @@ import { tempDir } from "./helpers.ts";
 const SEND_EVERY_MS = 3000;
 const SECOND = 1000;
 const MINUTE = 60_000;
-// The tests' clock starts at 18:39 local time.
-const START = new Date(2026, 9, 21, 18, 39).getTime();
+// The tests' clock starts at 12:00 local time.
+const START = new Date(2026, 0, 1, 12, 0).getTime();
 
 const line = (o: object) => JSON.stringify(o) + "\n";
 const assistant = (id: string, stop: string, block: object) =>
@@ -19,7 +19,7 @@ const assistant = (id: string, stop: string, block: object) =>
 const text = (t: string) => ({ type: "text", text: t });
 const tool = (name: string, input: object) => ({ type: "tool_use", id: "t", name, input });
 // Local wall-clock time of the tests' day, as an ISO timestamp of a record.
-const at = (h: number, m: number) => new Date(2026, 9, 21, h, m).toISOString();
+const at = (h: number, m: number) => new Date(2026, 0, 1, h, m).toISOString();
 // An agent's record written at h:m, and the coordinator's message written at h:m.
 const stamped = (h: number, m: number, message: object) => line({ type: "assistant", isSidechain: true, timestamp: at(h, m), message });
 const coordinatorAt = (h: number, m: number, t: string) =>
@@ -70,7 +70,7 @@ describe("SubagentWatcher", () => {
     write(assistant("m1", "tool_use", tool("Read", { file_path: join("src", "parse.ts") })));
     s.advance(SEND_EVERY_MS);
     expect(s.cards).toEqual([
-      { id: "a1-0", final: false, text: "🤖 **Explore** · haiku\nFind the parser\n⏳ 0 с · 1 действие\n`Read parse.ts`\n\n`[18:39]` Looking around" },
+      { id: "a1-0", final: false, text: "🤖 **Explore** · haiku\nFind the parser\n⏳ 0 с · 1 действие\n`Read parse.ts`\n\n`[12:00]` Looking around" },
     ]);
     write(assistant("m2", "tool_use", tool("Grep", { pattern: "x" })));
     s.advance(SECOND);
@@ -79,7 +79,7 @@ describe("SubagentWatcher", () => {
     expect(s.cards.at(-1)?.text).toContain("⏳ 4 с · 2 действия\n`Grep x`");
     write(assistant("m3", "end_turn", text("Found it")));
     s.advance(SEND_EVERY_MS);
-    const done = "🤖 **Explore** · haiku\nFind the parser\n✅ 7 с · 2 действия\n\n`[18:39]` Looking around\n\n`[18:39]` Found it";
+    const done = "🤖 **Explore** · haiku\nFind the parser\n✅ 7 с · 2 действия\n\n`[12:00]` Looking around\n\n`[12:00]` Found it";
     expect(s.cards.at(-1)).toEqual({ id: "a1-0", final: false, text: done });
     // The card closes once the agent has not gone on for SETTLE_MS.
     s.advance(SETTLE_MS - SECOND);
@@ -307,19 +307,19 @@ describe("SubagentWatcher", () => {
     test("a continuation after the restart goes on in the same card", () => {
       const s = setup();
       const write = s.agent("a1");
-      write(stamped(18, 39, { id: "m1", role: "assistant", content: [tool("Read", { file_path: "a.ts" })], stop_reason: "tool_use" }));
-      write(stamped(18, 40, { id: "m2", role: "assistant", content: [text("first run")], stop_reason: "end_turn" }));
+      write(stamped(12, 0, { id: "m1", role: "assistant", content: [tool("Read", { file_path: "a.ts" })], stop_reason: "tool_use" }));
+      write(stamped(12, 1, { id: "m2", role: "assistant", content: [text("first run")], stop_reason: "end_turn" }));
       s.w.start();
       s.advance(12 * MINUTE);
       expect(s.cards).toEqual([]);
-      write(coordinatorAt(18, 45, "second run"));
+      write(coordinatorAt(12, 6, "second run"));
       s.advance(SEND_EVERY_MS);
       expect(s.cards).toEqual([
         {
           id: "a1-0",
           final: false,
           reopen: true,
-          text: "🤖 **Субагент**\n⏳ 7 мин · 1 действие\n`Read a.ts`\n\n`[18:40]` first run\n\n`[18:45]` ↪ second run",
+          text: "🤖 **Субагент**\n⏳ 7 мин · 1 действие\n`Read a.ts`\n\n`[12:01]` first run\n\n`[12:06]` ↪ second run",
         },
       ]);
     });
@@ -342,8 +342,8 @@ describe("SubagentWatcher", () => {
     test("a dormant agent whose file never grows sends nothing", () => {
       const s = setup();
       const write = s.agent("a1");
-      write(stamped(18, 39, { id: "m1", role: "assistant", content: [tool("Read", { file_path: "a.ts" })], stop_reason: "tool_use" }));
-      write(stamped(18, 39, { id: "m2", role: "assistant", content: [text("working")], stop_reason: "tool_use" }));
+      write(stamped(12, 0, { id: "m1", role: "assistant", content: [tool("Read", { file_path: "a.ts" })], stop_reason: "tool_use" }));
+      write(stamped(12, 0, { id: "m2", role: "assistant", content: [text("working")], stop_reason: "tool_use" }));
       s.w.start();
       s.advance(WAIT_MAX_MS + MINUTE);
       expect(s.cards).toEqual([]);
@@ -352,8 +352,8 @@ describe("SubagentWatcher", () => {
     test("a run that was mid-way at the restart goes on in place", () => {
       const s = setup();
       const write = s.agent("a1");
-      write(stamped(18, 39, { id: "m1", role: "assistant", content: [tool("Read", { file_path: "a.ts" })], stop_reason: "tool_use" }));
-      write(stamped(18, 39, { id: "m2", role: "assistant", content: [text("working")], stop_reason: "tool_use" }));
+      write(stamped(12, 0, { id: "m1", role: "assistant", content: [tool("Read", { file_path: "a.ts" })], stop_reason: "tool_use" }));
+      write(stamped(12, 0, { id: "m2", role: "assistant", content: [text("working")], stop_reason: "tool_use" }));
       s.w.start();
       s.advance(12 * MINUTE);
       write(assistant("m3", "tool_use", tool("Grep", { pattern: "x" })));
@@ -363,7 +363,7 @@ describe("SubagentWatcher", () => {
           id: "a1-0",
           final: false,
           reopen: true,
-          text: "🤖 **Субагент**\n⏳ 12 мин · 2 действия\n`Grep x`\n\n`[18:39]` working",
+          text: "🤖 **Субагент**\n⏳ 12 мин · 2 действия\n`Grep x`\n\n`[12:00]` working",
         },
       ]);
     });
@@ -424,7 +424,7 @@ describe("SubagentWatcher", () => {
     expect(s.cards[0]?.replyTo).toBeUndefined();
     write(assistant("m2", "tool_use", text(chunk)));
     s.advance(SECOND);
-    expect(s.cards[1]).toEqual({ id: "a1-0", final: true, text: `🤖 **Субагент**\n⬇️ продолжение ниже\n\n\`[18:39]\` ${chunk}\n\n\`[18:39]\` ${chunk}` });
+    expect(s.cards[1]).toEqual({ id: "a1-0", final: true, text: `🤖 **Субагент**\n⬇️ продолжение ниже\n\n\`[12:00]\` ${chunk}\n\n\`[12:00]\` ${chunk}` });
     s.advance(SEND_EVERY_MS);
     expect(s.cards[2]).toMatchObject({ id: "a1-1", final: false, replyTo: "a1-0" });
     expect(s.cards.every(c => c.text.length <= MAX_CARD)).toBe(true);
@@ -456,7 +456,7 @@ describe("SubagentWatcher", () => {
     expect(card).toMatchObject({ id: "a1-0", final: false, reopen: true });
     expect(card?.replyTo).toBeUndefined();
     // The 10 minutes of idleness are not work; the earlier action is counted.
-    expect(card?.text).toBe("🤖 **Субагент**\n⏳ 3 с · 1 действие\n`Read a.ts`\n\n`[18:39]` first run\n\n`[18:51]` second run");
+    expect(card?.text).toBe("🤖 **Субагент**\n⏳ 3 с · 1 действие\n`Read a.ts`\n\n`[12:00]` first run\n\n`[12:12]` second run");
   });
 
   test("the coordinator's message shows in the card and reopens it at once", () => {
@@ -465,7 +465,7 @@ describe("SubagentWatcher", () => {
     write(idleMessage("Look at B too"));
     s.advance(SEND_EVERY_MS);
     expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: false, reopen: true });
-    expect(s.cards.at(-1)?.text).toEndWith("`[18:39]` first run\n\n`[18:51]` ↪ Look at B too");
+    expect(s.cards.at(-1)?.text).toEndWith("`[12:00]` first run\n\n`[12:12]` ↪ Look at B too");
     expect(s.cards.at(-1)?.text).toContain("⏳");
   });
 
@@ -477,7 +477,7 @@ describe("SubagentWatcher", () => {
     s.advance(SEND_EVERY_MS);
     write(queuedMessage("Stop after A"));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toEndWith("`[18:39]` working\n\n`[18:39]` ↪ Stop after A");
+    expect(s.cards.at(-1)?.text).toEndWith("`[12:00]` working\n\n`[12:00]` ↪ Stop after A");
     expect(s.cards.at(-1)?.reopen).toBeUndefined();
   });
 

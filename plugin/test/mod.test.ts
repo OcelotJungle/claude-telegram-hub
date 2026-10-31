@@ -6,7 +6,7 @@ import { autocompactArg, infoText, Runner } from "../src/mod/commands.ts";
 import { field } from "../src/shared/guards.ts";
 import { tokens } from "../src/shared/tokens.ts";
 
-const NOW = Date.parse("2026-01-01T11:40:00Z");
+const NOW = Date.parse("2026-01-02T11:40:00Z");
 
 const usage = (o: { tokens?: number; limits?: Usage["rateLimits"]; breakdown?: Partial<NonNullable<Usage["context"]["breakdown"]>> | null } = {}): Usage => ({
   context: {
@@ -17,8 +17,8 @@ const usage = (o: { tokens?: number; limits?: Usage["rateLimits"]; breakdown?: P
       : { breakdown: { totalTokens: 36_400, rawMaxTokens: 333_000, autoCompactThreshold: 300_000, isAutoCompactEnabled: true, ...o.breakdown } }),
   },
   rateLimits: o.limits ?? [
-    { kind: "seven_day", percentUsed: 36, resetsAt: "2026-01-01T18:00:00.000Z" },
-    { kind: "five_hour", percentUsed: 30, resetsAt: "2026-01-01T13:00:00.000Z" },
+    { kind: "seven_day", percentUsed: 36, resetsAt: "2026-01-06T18:00:00.000Z" },
+    { kind: "five_hour", percentUsed: 30, resetsAt: "2026-01-02T13:00:00.000Z" },
   ],
 });
 
@@ -86,8 +86,8 @@ describe("/info text", () => {
       usage({
         tokens: 1,
         limits: [
-          { kind: "five_hour", percentUsed: 99.5, resetsAt: "2026-01-01T11:45:00.000Z" },
-          { kind: "seven_day", percentUsed: 7, resetsAt: "2026-01-01T11:00:00.000Z" },
+          { kind: "five_hour", percentUsed: 99.5, resetsAt: "2026-01-02T11:45:00.000Z" },
+          { kind: "seven_day", percentUsed: 7, resetsAt: "2026-01-02T11:00:00.000Z" },
           { kind: "spend_limit", percentUsed: 12 },
         ],
       }),
@@ -207,8 +207,8 @@ describe("replies", () => {
 });
 
 describe("limits shared through the hub", () => {
-  const OWN = [{ kind: "five_hour", percentUsed: 30, resetsAt: "2026-01-01T13:00:00.000Z" }];
-  const FRESH = [{ kind: "five_hour", percentUsed: 64, resetsAt: "2026-01-01T13:00:00.000Z" }];
+  const OWN = [{ kind: "five_hour", percentUsed: 30, resetsAt: "2026-01-02T13:00:00.000Z" }];
+  const FRESH = [{ kind: "five_hour", percentUsed: 64, resetsAt: "2026-01-02T13:00:00.000Z" }];
 
   function runner(
     answer: () => { status: number; text: string },
