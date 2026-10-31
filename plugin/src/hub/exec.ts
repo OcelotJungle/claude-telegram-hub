@@ -28,6 +28,7 @@ export const EXEC_CHECK_MS = 1000;
 export const TELEGRAM_FILE_LIMIT = 50 * 1024 * 1024;
 // A runner is gone once its heartbeat is this old: a few missed beats.
 export const HEARTBEAT_STALE_MS = 3 * HEARTBEAT_MS;
+const SPEC_FILE_MODE = 0o600;
 const ID_BYTES = 4;
 const TAIL_BYTES = 64 * 1024;
 const LINE_MAX = 300;
@@ -263,7 +264,8 @@ export class Execs {
       const at = this.deps.now() / MS_PER_SECOND;
       writeFileSync(spec.alive, "");
       utimesSync(spec.alive, at, at);
-      writeFileSync(specFile, JSON.stringify(spec));
+      // The spec carries the environment (tokens among it): the owner only.
+      writeFileSync(specFile, JSON.stringify(spec), { mode: SPEC_FILE_MODE });
       rec.state = "running";
       rec.startedAt = this.deps.now();
       if (!this.save()) {

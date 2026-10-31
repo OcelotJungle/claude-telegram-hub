@@ -6,7 +6,7 @@ import type { ChannelMeta } from "../src/shared/protocol.ts";
 import type { MessageKind } from "../src/shared/notification.ts";
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
 import { Execs, execCardText, HEARTBEAT_STALE_MS, logTail, MAX_EXECS } from "../src/hub/exec.ts";
 import { loadExecs, saveExecs } from "../src/hub/exec-store.ts";
@@ -37,6 +37,8 @@ const LONG_GRACE_MS = 60_000;
 const SHORT_GRACE_MS = 100;
 // Long enough for any heartbeat to go stale.
 const LONG_AGO_MS = 10 * MIN_MS;
+const PERMISSION_BITS = 0o777;
+const OWNER_ONLY = 0o600;
 
 type CardCall = { sessionId: string; cardId: string; markdown: string; final: boolean; kind: MessageKind; buttons?: Button[][] };
 type ReportCall = { sessionId: string; content: string; meta: ChannelMeta; onSent: () => void };
@@ -295,6 +297,15 @@ describe("Execs", () => {
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     expect(existsSync(t.spec().alive)).toBe(true);
     expect(t.spec().heartbeatMs).toBeGreaterThan(0);
+  });
+
+  test("the runner spec, which carries the environment, is readable by its owner only", () => {
+    const t = setup();
+    t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
+    const specFile = t.spec().alive.replace(/\.alive$/, ".spec.json");
+    expect(existsSync(specFile)).toBe(true);
+    // Windows has no permission bits to assert.
+    if (process.platform !== "win32") expect(statSync(specFile).mode & PERMISSION_BITS).toBe(OWNER_ONLY);
   });
 
   test("a run whose heartbeat stopped ends as lost, whoever has its pid now", async () => {
