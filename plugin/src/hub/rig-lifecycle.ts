@@ -1,16 +1,13 @@
 import { spawnSync } from "child_process";
-import { existsSync, readFileSync, statSync } from "fs";
-import { join } from "path";
+import { existsSync, statSync } from "fs";
 import { z } from "zod";
 import { writeRigFile } from "./rig-files.ts";
 
 const commitSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
-const readySchema = z.object({ commit: commitSchema, time: z.string() });
 export const RIG_RESTART_EXIT = 75;
 export const COMMIT_ENV = "TELEGRAM_HUB_COMMIT";
 const COMMIT_UNKNOWN_ID = "rig-commit-unknown";
 const COMMIT_UNKNOWN_TEXT = "Хаб не смог определить коммит своего кода, поэтому не может обработать обновление. Попытки продолжаются.";
-const CODE_CHANGED_TEXT = "Хаб запущен с другим кодом. Окна подхватят его при следующем запуске.";
 
 export function hubCommit(repository: string): string | undefined {
   const result = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repository, windowsHide: true, encoding: "utf8" });
@@ -98,17 +95,9 @@ export class RigLifecycle {
         this.refreshing = false;
         return;
       }
-      let previous: string | undefined;
-      try {
-        const parsed = readySchema.safeParse(JSON.parse(readFileSync(join(this.deps.dir, "hub-ready.json"), "utf8")));
-        if (parsed.success) previous = parsed.data.commit;
-      } catch {}
-      const time = new Date(this.deps.now()).toISOString();
-      writeRigFile(this.deps.dir, "hub-ready.json", JSON.stringify({ commit: this.commit, time }));
+      writeRigFile(this.deps.dir, "hub-ready.json", JSON.stringify({ commit: this.commit, time: new Date(this.deps.now()).toISOString() }));
       this.unwritten = false;
       this.refreshing = false;
-      // After the write, once, under an id the outbox remembers: a repeated post cannot send it twice.
-      if (previous && previous !== this.commit) this.deps.notice(`hub-code-${previous}-${this.commit}-${time}`, CODE_CHANGED_TEXT);
     } catch (error) { this.warnOnce("readiness", `rig readiness: ${String(error)}`); }
   }
 

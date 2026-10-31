@@ -28,12 +28,13 @@ function fixture(commitKnown = true) {
     idle: (next: boolean) => { idle = next; }, now: (next: number) => { now = next; } };
 }
 
-test("readiness waits for Bot API success, announces changed commits and refreshes its timestamp", () => {
+test("readiness waits for Bot API success, stays silent about a changed commit and refreshes its timestamp", () => {
   const f = fixture();
   expect(existsSync(join(f.dir, "hub-ready.json"))).toBe(false);
   writeFileSync(join(f.dir, "hub-ready.json"), JSON.stringify({ commit: NEW_COMMIT, time: new Date(START).toISOString() }));
   f.lifecycle.ready();
-  expect(f.notices).toHaveLength(1);
+  // The rig update event already names the versions: a second message would repeat it.
+  expect(f.notices).toEqual([]);
   expect(JSON.parse(readFileSync(join(f.dir, "hub-ready.json"), "utf8")).commit).toBe(COMMIT);
   f.now(START + 1);
   f.lifecycle.request();
@@ -112,21 +113,17 @@ function blockRestartFile(dir: string): () => void {
   return () => { rmSync(blocker, { recursive: true, force: true }); };
 }
 
-test("a failed hub-ready.json write is tried again, warned about once, and the notice waits for the write", () => {
+test("a failed hub-ready.json write is tried again and warned about once", () => {
   const f = fixture();
   const unblock = blockReadyFile(f.dir);
   f.lifecycle.ready();
   f.lifecycle.check();
   f.lifecycle.check();
   expect(f.warnings).toHaveLength(1);
-  expect(f.notices).toEqual([]);
   unblock();
   writeFileSync(join(f.dir, "hub-ready.json"), JSON.stringify({ commit: NEW_COMMIT, time: new Date(START).toISOString() }));
   f.lifecycle.check();
   expect(JSON.parse(readFileSync(join(f.dir, "hub-ready.json"), "utf8")).commit).toBe(COMMIT);
-  expect(f.notices).toHaveLength(1);
-  f.lifecycle.check();
-  expect(f.notices).toHaveLength(1);
 });
 
 test("an acknowledgement whose write failed is not lost and the hub does not exit before it is written", () => {
@@ -142,17 +139,6 @@ test("an acknowledgement whose write failed is not lost and the hub does not exi
   f.lifecycle.check();
   expect(f.lifecycle.waiting).toBe(false);
   expect(existsSync(join(f.dir, "hub-ready.json"))).toBe(true);
-});
-
-test("the change notice has a stable id built from both commits and neutral text", () => {
-  const f = fixture();
-  writeFileSync(join(f.dir, "hub-ready.json"), JSON.stringify({ commit: NEW_COMMIT, time: new Date(START).toISOString() }));
-  f.lifecycle.ready();
-  expect(f.notices).toHaveLength(1);
-  expect(f.notices[0]?.id).toContain(NEW_COMMIT);
-  expect(f.notices[0]?.id).toContain(COMMIT);
-  // True after a rollback as well: it says that the code differs, not that it is newer.
-  expect(f.notices[0]?.text).not.toMatch(/обновлён/);
 });
 
 test("an unknown commit does not consume the event: it is retried and General gets one message", () => {
