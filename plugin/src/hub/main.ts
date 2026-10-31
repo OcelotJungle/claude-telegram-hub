@@ -5,13 +5,13 @@ import { join } from "path";
 import { apiBase, hubPort, idleMs, loadConfig, loadToken, paths } from "../shared/config.ts";
 import { createLogger } from "../shared/log.ts";
 import { Hub } from "./hub.ts";
+import { installCrashLogging, installStopSignals, makeStop } from "./process-guard.ts";
 import { TelegramApi } from "./telegram.ts";
 
 const p = paths();
 const log = createLogger(p.logFile, "hub");
 
-process.on("unhandledRejection", e => log.error(`unhandled rejection: ${e}`));
-process.on("uncaughtException", e => log.error(`uncaught exception: ${e}`));
+installCrashLogging(process, log);
 
 const token = loadToken();
 const hub = new Hub({
@@ -36,3 +36,5 @@ const hub = new Hub({
 });
 
 if (!hub.start()) process.exit(0);
+
+installStopSignals(process, makeStop(() => hub.stop(), code => process.exit(code), log));

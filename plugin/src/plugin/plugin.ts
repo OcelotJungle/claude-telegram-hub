@@ -87,6 +87,8 @@ export type PluginOptions = {
   // How long tg_send_file waits for the hub to send the files.
   fileWaitMs?: number;
   spawnHub(): void;
+  // See HubClient: true while a service owns the hub.
+  serviceManaged?(): boolean;
   emitChannel(content: string, meta: ChannelMeta): void;
   // Ends the agent's turn, as Esc in the terminal would, and gives it the
   // prompt instead.
@@ -180,6 +182,7 @@ export class PluginCore {
       port: opts.port,
       hello: () => ({ type: "hello", v: PROTOCOL_VERSION, windowKey: opts.windowKey, sessionId: this.sessionId, cwd: this.cwd, configDir: opts.configDir, busy: this.busy, reportsSeen: true, entrypoint: opts.entrypoint, title: effectiveTitle(this.titles) }),
       spawnHub: opts.spawnHub,
+      serviceManaged: opts.serviceManaged,
       onMessage: m => this.onHubMessage(m),
       log: opts.log,
     });

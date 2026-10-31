@@ -55,6 +55,8 @@ export class HubClient {
       port: number;
       hello: () => Hello;
       spawnHub: () => void;
+      // True while a service owns the hub: the client then only waits and connects, it never starts one.
+      serviceManaged?: () => boolean;
       onMessage(m: HubToPlugin): void;
       log: Logger;
       minDelayMs?: number;
@@ -191,6 +193,8 @@ export class HubClient {
   }
 
   private maybeSpawn(): void {
+    // A service keeps the hub up and restarts it: a hub started here would race the service for the port.
+    if (this.opts.serviceManaged?.()) return;
     if (Date.now() - this.lastSpawn < SPAWN_COOLDOWN_MS) return;
     this.lastSpawn = Date.now();
     this.opts.log.info("no hub listening — starting one");

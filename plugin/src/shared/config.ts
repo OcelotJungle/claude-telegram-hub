@@ -30,6 +30,8 @@ export function paths() {
     inboxDir: join(stateDir, "inbox"),
     execDir: join(stateDir, "exec"),
     execsFile: join(stateDir, "execs.json"),
+    // Present while a service (systemd unit, Windows task) owns the hub; the install scripts create and remove it.
+    serviceManagedFile: join(stateDir, "service-managed"),
   };
 }
 
