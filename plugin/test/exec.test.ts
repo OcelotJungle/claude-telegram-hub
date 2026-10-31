@@ -66,6 +66,7 @@ function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; aliv
   const notices: { text: string; loud: boolean }[] = [];
   const files: { path: string; name: string; loud: boolean }[] = [];
   const reports: ReportCall[] = [];
+  const machineCards: { text: string; final: boolean }[] = [];
   const clock = { now: NOW };
   const log = memLogger();
   const deps: ExecDeps = {
@@ -88,6 +89,7 @@ function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; aliv
       reports.push({ sessionId, content, meta, onSent });
       if (o.sendOnSent !== false) onSent();
     },
+    machineCard: (_record, text, final) => void machineCards.push({ text, final }),
     now: () => clock.now,
     checkMs: CHECK_MS,
     cardMs: CARD_MS,
@@ -108,7 +110,7 @@ function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; aliv
   };
   // The runner's last heartbeat, as its file's time.
   const beat = (n: number, at: number) => utimesSync(spec(n).alive, at / MS_PER_S, at / MS_PER_S);
-  return { dir, deps, execs, specs, alive, windows, killed, cards, notices, files, reports, clock, log, spec, lastCard, finish, beat };
+  return { dir, deps, execs, specs, alive, windows, killed, cards, machineCards, notices, files, reports, clock, log, spec, lastCard, finish, beat };
 }
 
 // Moves the fake clock in steps short enough not to look like a sleep, a few
@@ -430,6 +432,47 @@ describe("Execs", () => {
     expect(recs.find(r => r.id === "00000001")).toBeDefined();
     expect(readdirSync(dir).filter(f => f.startsWith("00000000."))).toEqual([]);
     expect(existsSync(join(dir, "00000001.log"))).toBe(true);
+  });
+});
+
+describe("rig run cards", () => {
+  const INVOCATION = { argv: ["rig", "update"], verbatim: false };
+  const startRig = () => {
+    const t = setup();
+    t.execs.machine(INVOCATION, "rig update", "C:\\proj", { chatId: CHAT }, 1);
+    return t;
+  };
+
+  test("new output redraws the card at once, without waiting for the card pace", async () => {
+    const t = startRig();
+    expect(t.machineCards).toHaveLength(1);
+    appendFileSync(t.spec().log, "waiting for the lock\n");
+    const card = await waitFor(() => t.machineCards.find(c => c.text.includes("waiting for the lock")), WAIT_MS, "card with the lock line");
+    expect(card.final).toBe(false);
+    expect(t.machineCards).toHaveLength(2);
+  });
+
+  test("unchanged output is not redrawn between card paces, only when the pace passes", async () => {
+    const t = startRig();
+    // Many checks pass on the real timer while the fake clock stands still.
+    await Bun.sleep(SETTLE_MS);
+    expect(t.machineCards).toHaveLength(1);
+    // The seconds counter alone changes with the clock, but less than a pace is no reason to redraw.
+    t.clock.now += CARD_MS - 1;
+    await Bun.sleep(SETTLE_MS);
+    expect(t.machineCards).toHaveLength(1);
+    t.clock.now += 1;
+    await waitFor(() => t.machineCards.length === 2, WAIT_MS, "card at the pace");
+    await Bun.sleep(SETTLE_MS);
+    expect(t.machineCards).toHaveLength(2);
+  });
+
+  test("a finished run draws its final card once", async () => {
+    const t = startRig();
+    t.finish(0, 0);
+    await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
+    await Bun.sleep(SETTLE_MS);
+    expect(t.machineCards.filter(c => c.final)).toHaveLength(1);
   });
 });
 

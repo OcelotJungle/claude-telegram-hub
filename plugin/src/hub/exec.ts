@@ -86,6 +86,8 @@ export class Execs {
   // Runs that ended at start or in its grace with no window: their results
   // wait for the windows to reconnect, then for sweep().
   private deferred = new Set<string>();
+  // What the card of a running rig run last showed: its output and when.
+  private rigShown = new Map<string, { tail: string; at: number }>();
   private deferUntil = 0;
   private sweepTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -313,7 +315,7 @@ export class Execs {
       // (after a reboot, a sign-out, a Fast Startup shutdown): that one is
       // neither waited for nor killed.
       if (this.beating(rec) && (rec.pid === undefined || this.deps.alive(rec.pid))) {
-        if (rec.shell === "rig") this.showCard(rec);
+        if (rec.shell === "rig") this.refreshRigCard(rec);
         continue;
       }
       // The runner may have written the file just before it exited.
@@ -393,8 +395,19 @@ export class Execs {
     });
   }
 
+  // Rig cards are paced by check(): see refreshRigCard.
   private editCards(): void {
-    for (const rec of this.recs) if (rec.state === "running") this.showCard(rec);
+    for (const rec of this.recs) if (rec.state === "running" && rec.shell !== "rig") this.showCard(rec);
+  }
+
+  // A rig card shows its output as it arrives, so it is redrawn at once when the
+  // output changed; otherwise only at the card pace (the seconds counter alone
+  // changes every check, which would edit the card every check).
+  private refreshRigCard(rec: ExecRecord): void {
+    const shown = this.rigShown.get(rec.id);
+    const tail = logTail(this.path(rec.id, "log"), EXEC_CARD_LINES);
+    if (shown !== undefined && shown.tail === tail && this.deps.now() - shown.at < this.deps.cardMs) return;
+    this.showCard(rec);
   }
 
   private showCard(rec: ExecRecord): void {
@@ -409,8 +422,11 @@ export class Execs {
       ? "info"
       : rec.end?.kind === "exit" ? "error" : "warning";
     const text = execCardText(rec, tail, this.deps.now(), this.deps.shellNames);
-    if (rec.shell === "rig") this.deps.machineCard?.(rec, text, rec.state === "ended", kind, rec.state === "pending" ? buttons : undefined);
-    else if (rec.sessionId !== undefined) this.deps.card(rec.sessionId, `exec-${rec.id}`, text, rec.state === "ended", kind, buttons);
+    if (rec.shell === "rig") {
+      if (rec.state === "running") this.rigShown.set(rec.id, { tail, at: this.deps.now() });
+      else this.rigShown.delete(rec.id);
+      this.deps.machineCard?.(rec, text, rec.state === "ended", kind, rec.state === "pending" ? buttons : undefined);
+    } else if (rec.sessionId !== undefined) this.deps.card(rec.sessionId, `exec-${rec.id}`, text, rec.state === "ended", kind, buttons);
   }
 }
 
