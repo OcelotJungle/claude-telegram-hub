@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { readFileSync, rmSync } from "fs";
 import { join } from "path";
-import { MachineOutbox } from "../src/hub/machine-outbox.ts";
+import { confirmationPromptId, MachineOutbox } from "../src/hub/machine-outbox.ts";
 import { TelegramApi, TelegramError } from "../src/hub/telegram.ts";
 import { tempDir } from "./helpers.ts";
 
@@ -169,6 +169,29 @@ test("pieces already accepted are not sent again when a later piece fails", asyn
   // A new process continues behind the piece that was accepted.
   await new MachineOutbox(file, () => {}).flush(api);
   expect(sent).toEqual(["0", "1", "2"]);
+});
+
+test("the messages of a confirmation that waits for a press stay remembered however much is sent after them", async () => {
+  const { api, file } = outbox();
+  const queue = new MachineOutbox(file, () => {}, REMEMBERED);
+  let id = 0;
+  api.sendMessage = async () => ({ message_id: ++id });
+  const destination = { chatId: GROUP };
+  const confirmation = { message: { message_id: 7 }, destination };
+  queue.saveConfirmation("key", confirmation);
+  queue.post(confirmationPromptId(confirmation), destination, "Выключить Telegram на этой машине?", false);
+  await queue.flush(api);
+  for (let index = 0; index < REMEMBERED * 2; index++) queue.post(`reply-${index}`, destination, "text");
+  await queue.flush(api);
+  // The hub posts the prompt again on every tick; it must not reach the chat a second time.
+  queue.post(confirmationPromptId(confirmation), destination, "Выключить Telegram на этой машине?", false);
+  expect(queue.size).toBe(0);
+  expect(id).toBe(REMEMBERED * 2 + 1);
+  // Once it is answered, its ids are forgotten like any others.
+  queue.deleteConfirmation("key");
+  for (let index = 0; index < REMEMBERED; index++) queue.post(`later-${index}`, destination, "text");
+  await queue.flush(api);
+  expect(queue.delivered(confirmationPromptId(confirmation))).toBe(false);
 });
 
 test("what the queue remembers about finished work is bounded", async () => {

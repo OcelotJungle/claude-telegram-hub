@@ -58,7 +58,7 @@ import { exitGate } from "./exit-gate.ts";
 import { MAX_RECONNECT_PAUSE_MS } from "../shared/reconnect.ts";
 import { PLATFORM } from "../shared/platform.ts";
 import { featureText, findRig, Rig, RIG_MISSING, rigAction, runRig, statusText } from "./rig.ts";
-import { MachineOutbox } from "./machine-outbox.ts";
+import { confirmationPromptId, MachineOutbox } from "./machine-outbox.ts";
 import { RigEvents, RIG_POLL_MS } from "./rig-events.ts";
 import { hubCommit, RigLifecycle, startedCommit } from "./rig-lifecycle.ts";
 
@@ -2921,7 +2921,7 @@ ${msg.text}`);
 
   private queueRigConfirmation(key: string, confirmation: RigConfirmation): void {
     if (confirmation.recovery) this.machineOutbox.post(confirmation.recovery, confirmation.destination, RIG_RECOVERY_TEXT);
-    else this.machineOutbox.post(`machine-${confirmation.destination.chatId}-${confirmation.message.message_id}`, confirmation.destination,
+    else this.machineOutbox.post(confirmationPromptId(confirmation), confirmation.destination,
       "Выключить Telegram на этой машине?", false, [[{ text: "Выключить Telegram", data: `rig-disable:${key}` }]]);
   }
 

@@ -25,6 +25,11 @@ export type MachineDestination = z.infer<typeof destinationSchema>;
 export type RigConfirmation = z.infer<typeof confirmationSchema>;
 type Item = z.infer<typeof itemSchema>;
 
+// The outbox id of the prompt a confirmation was asked with.
+export function confirmationPromptId(confirmation: Pick<RigConfirmation, "destination" | "message">): string {
+  return `machine-${confirmation.destination.chatId}-${confirmation.message.message_id}`;
+}
+
 function notModified(error: unknown): boolean {
   return error instanceof TelegramError && error.code === BAD_REQUEST && /message is not modified/i.test(error.description);
 }
@@ -156,9 +161,14 @@ export class MachineOutbox {
   }
 
   // Oldest first: arrays and objects both keep insertion order for these ids.
+  // The ids of a confirmation that still waits for a press are kept: the hub posts them on every tick, so a forgotten one would reach the chat again.
   private trim(): void {
     const data = this.data;
-    if (data.delivered.length > this.remembered) data.delivered = data.delivered.slice(-this.remembered);
+    if (data.delivered.length > this.remembered) {
+      const pinned = new Set(Object.values(data.confirmations).flatMap(confirmation => [confirmationPromptId(confirmation), confirmation.recovery ?? ""]));
+      const kept = data.delivered.filter(id => !pinned.has(id)).slice(-this.remembered);
+      data.delivered = data.delivered.filter(id => pinned.has(id) || kept.includes(id));
+    }
     if (data.handled.length > this.remembered) data.handled = data.handled.slice(-this.remembered);
     for (const record of [data.shown, data.messages]) {
       for (const key of Object.keys(record).slice(0, Math.max(0, Object.keys(record).length - this.remembered))) delete record[key];
