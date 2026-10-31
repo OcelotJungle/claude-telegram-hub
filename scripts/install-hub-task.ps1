@@ -30,9 +30,12 @@ $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -Execution
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
     -Description 'telegram-hub: Telegram hub for Claude Code sessions' -Force | Out-Null
-Start-ScheduledTask -TaskName $TaskName
 # From now on windows only wait for the hub and connect to it; they do not start one (the file service-managed).
+# The marker comes before the start: a window open during the install must not start a hub of its own meanwhile.
 $stateDir = if ($env:TELEGRAM_HUB_STATE_DIR) { $env:TELEGRAM_HUB_STATE_DIR } else { Join-Path $HOME '.claude\channels\telegram-hub' }
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
-New-Item -ItemType File -Force -Path (Join-Path $stateDir 'service-managed') | Out-Null
+$marker = Join-Path $stateDir 'service-managed'
+New-Item -ItemType File -Force -Path $marker | Out-Null
+try { Start-ScheduledTask -TaskName $TaskName }
+catch { Remove-Item -Force -ErrorAction SilentlyContinue $marker; throw }
 Write-Host "Task '$TaskName' registered and started: $bun $main --always-on"

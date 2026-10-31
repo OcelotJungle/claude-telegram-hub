@@ -50,9 +50,11 @@ esac
   printf '%s\n' 'Restart=always' 'RestartSec=2' 'KillMode=process' '' '[Install]' 'WantedBy=default.target'
 } > "$unit_dir/telegram-hub.service"
 systemctl --user daemon-reload
-systemctl --user enable --now telegram-hub.service
 # From now on windows only wait for the hub and connect to it; they do not start one (plugin/src/plugin/main.ts).
+# The marker comes before the start: a window open during the install must not start a hub of its own meanwhile.
 state_dir="${TELEGRAM_HUB_STATE_DIR:-$HOME/.claude/channels/telegram-hub}"
 mkdir -p -- "$state_dir"
 : > "$state_dir/service-managed"
+# A service that does not start must not leave windows waiting for a hub that nobody runs.
+systemctl --user enable --now telegram-hub.service || { rm -f -- "$state_dir/service-managed"; exit 1; }
 printf '%s\n' 'telegram-hub.service installed and started; linger enabled.'

@@ -40,9 +40,15 @@ describe("install-hub-service.sh", () => {
     expect(first).toBeGreaterThan(wait);
   });
 
-  test("it marks the hub as service-managed once the service is enabled", () => {
-    expect(install).toContain(MARKER);
-    expect(install.indexOf(MARKER)).toBeGreaterThan(install.indexOf("enable --now"));
+  test("it marks the hub as service-managed before the service starts, so no window starts a second hub", () => {
+    const marker = install.indexOf(`/${MARKER}"`);
+    expect(marker).toBeGreaterThan(-1);
+    expect(install.indexOf("enable --now")).toBeGreaterThan(marker);
+  });
+
+  test("a service that fails to start leaves no marker behind", () => {
+    expect(lineWith(install, "enable --now")).toContain("||");
+    expect(install).toContain('rm -f -- "$state_dir/service-managed"');
   });
 });
 
@@ -73,6 +79,13 @@ describe("Windows task scripts", () => {
   test("the install script creates the marker, the uninstall script removes it", () => {
     expect(read("install-hub-task.ps1")).toContain(MARKER);
     expect(read("uninstall-hub-task.ps1")).toContain(MARKER);
+  });
+
+  test("the install script creates the marker before it starts the task, so no window starts a second hub", () => {
+    const install = read("install-hub-task.ps1");
+    const marker = install.indexOf(`'${MARKER}'`);
+    expect(marker).toBeGreaterThan(-1);
+    expect(install.indexOf("Start-ScheduledTask")).toBeGreaterThan(marker);
   });
 
   test("the uninstall script removes the marker also when the task is already gone", () => {
