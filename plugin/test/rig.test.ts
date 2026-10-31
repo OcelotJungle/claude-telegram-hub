@@ -18,7 +18,7 @@ function fixture(platform = "win32", found = true) {
   return { rig, warnings, calls, clock, output: (next: RigOutput) => { output = next; }, found: (next: boolean) => { found = next; } };
 }
 
-const STATUS = { schemaVersion: 1, mode: "server", versions: { rig: "r", hub: "h" }, features: [], lastUpdate: null, pendingHubRestart: null, errors: [] };
+const STATUS = { schemaVersion: 1, mode: "server", versions: { rig: "r", hub: "h" }, releases: { rig: "1.0.0", hub: null }, features: [], lastUpdate: null, pendingHubRestart: null, errors: [] };
 
 describe("rig contract", () => {
   test("missing rig preserves Windows shells, but Linux shells stay unavailable", async () => {
@@ -79,6 +79,18 @@ describe("rig contract", () => {
     expect(file).toBe("/home/test/.local/bin/rig");
     expect(rigInvocation("/bin/rig", ["feature", "cmd", "enable"], platformFor("linux")).argv).toEqual(["/bin/rig", "feature", "cmd", "enable"]);
     expect(rigInvocation("C:\\rig tools\\rig.cmd", ["update"], platformFor("win32"))).toEqual({ argv: ["cmd.exe", "/d", "/s", "/c", '""C:\\rig tools\\rig.cmd" update"'], verbatim: true });
+  });
+
+  test("status shows a release next to its commit and the commit alone without a release", async () => {
+    const f = fixture();
+    f.output({ code: 0, stdout: JSON.stringify({ ...STATUS, versions: { rig: "r", hub: null } }), stderr: "" });
+    const result = await f.rig.status();
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(statusText(result.value).split("\n").slice(1, 3)).toEqual(["rig: 1.0.0 (r)", "hub: —"]);
+    f.output({ code: 0, stdout: JSON.stringify(STATUS), stderr: "" });
+    const bare = await f.rig.status();
+    expect(bare.ok).toBe(true);
+    if (bare.ok) expect(statusText(bare.value)).toContain("hub: h\n");
   });
 
   test("status keeps the saved restart state as the string the contract defines", async () => {

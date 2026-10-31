@@ -243,10 +243,10 @@ test("telegram disable rejects a stranger and starts only after recovery instruc
 
 test("status uses JSON contract fields rather than parsing the human output", async () => {
   const f = fixture();
-  f.output({ code: 0, stderr: "", stdout: JSON.stringify({ schemaVersion: 1, mode: "server", versions: { rig: "rig-commit", hub: "hub-commit" }, features: [], lastUpdate: null, pendingHubRestart: null, errors: [] }) });
+  f.output({ code: 0, stderr: "", stdout: JSON.stringify({ schemaVersion: 1, mode: "server", versions: { rig: "rig-commit", hub: "hub-commit" }, releases: { rig: null, hub: "1.0.1" }, features: [], lastUpdate: null, pendingHubRestart: null, errors: [] }) });
   await f.update("/rig status");
   expect(f.texts[0]?.text).toContain("Режим: server");
-  expect(f.texts[0]?.text).toContain("hub-commit");
+  expect(f.texts[0]?.text).toContain("hub: 1.0.1 (hub-commit)");
 });
 
 function fakeWindow(sessionId: string, busy = false): Parameters<Hub["onClose"]>[0] {

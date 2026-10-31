@@ -15,6 +15,7 @@ const eventSchema = z.object({ type: z.string(), time: z.string(), text: z.strin
 export const statusSchema = z.strictObject({
   schemaVersion: z.literal(1), mode: z.enum(["dev", "server"]),
   versions: z.strictObject({ rig: z.string().nullable(), hub: z.string().nullable() }),
+  releases: z.strictObject({ rig: z.string().nullable(), hub: z.string().nullable() }),
   features: featuresSchema, lastUpdate: eventSchema.nullable(),
   // The saved state is a string in the contract; it is displayed, never interpreted.
   pendingHubRestart: z.string().nullable(), errors: z.array(eventSchema),
@@ -140,8 +141,14 @@ export function featureText(features: RigFeature[]): string {
   return features.map(feature => `${feature.enabled ? "✅" : "⏹"} ${feature.name}: ${feature.description}${feature.platformAllowed ? "" : " (недоступна на этой платформе)"}`).join("\n") || "Список фич пуст";
 }
 
+// A release is read from a commit, so without a commit there is nothing to name.
+function versionText(release: string | null, commit: string | null): string {
+  if (commit === null) return "—";
+  return release === null ? commit : `${release} (${commit})`;
+}
+
 export function statusText(status: RigStatus): string {
-  return [`Режим: ${status.mode}`, `rig: ${status.versions.rig ?? "—"}`, `hub: ${status.versions.hub ?? "—"}`,
+  return [`Режим: ${status.mode}`, `rig: ${versionText(status.releases.rig, status.versions.rig)}`, `hub: ${versionText(status.releases.hub, status.versions.hub)}`,
     featureText(status.features), `Последнее обновление: ${status.lastUpdate?.text ?? "—"}`,
     `Ожидаемый перезапуск: ${status.pendingHubRestart ?? "—"}`,
     ...status.errors.map(error => `${error.time} ${error.type}: ${error.text}`)].join("\n");
