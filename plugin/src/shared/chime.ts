@@ -1,17 +1,16 @@
 import type { Platform } from "./platform.ts";
 
 import { spawn } from "child_process";
-import { homedir } from "os";
 import { join } from "path";
 import { PLATFORM } from "./platform.ts";
 
 export type ChimeKind = "ask" | "done";
 
-// The terminal sound is a shell command; {kind} is put in.
+const WINDOWS_SYSTEM_SIGNAL = `powershell -NoProfile -Command "[System.Media.SystemSounds]::Asterisk.PlaySync()"`;
+
+// The terminal sound is a shell command; {kind} is put in when the template has it.
 export function defaultTurnEndChime(platform: Platform = PLATFORM): string {
-  if (!platform.sound) return "";
-  const script = `${homedir().replaceAll("\\", "/")}/.claude/skills/chime/chime.ps1`;
-  return `powershell -NoProfile -ExecutionPolicy Bypass -File "${script}" -Kind {kind}`;
+  return platform.sound ? WINDOWS_SYSTEM_SIGNAL : "";
 }
 
 // undefined: no sound (an empty template).

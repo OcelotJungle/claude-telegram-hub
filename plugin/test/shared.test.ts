@@ -201,11 +201,11 @@ describe("config", () => {
 });
 
 describe("chime", () => {
-  test("the default runs chime.ps1 of the chime skill with {kind}", () => {
+  test("the default plays a Windows system sound and depends on no user file", () => {
     const cmd = defaultTurnEndChime(platformFor("win32"));
-    expect(cmd).toContain("/.claude/skills/chime/chime.ps1");
-    expect(cmd).toContain("-Kind {kind}");
-    expect(cmd).not.toContain("\\");
+    expect(cmd).toContain("[System.Media.SystemSounds]::Asterisk.PlaySync()");
+    expect(cmd).not.toContain(".ps1");
+    expect(cmd).not.toContain(".claude");
   });
 
   test("{kind} is replaced everywhere; an empty template gives no command", () => {
