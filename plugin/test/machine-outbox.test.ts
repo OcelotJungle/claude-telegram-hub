@@ -2,8 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import { readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { confirmationPromptId, MachineOutbox } from "../src/hub/machine-outbox.ts";
-import { TelegramApi, TelegramError } from "../src/hub/telegram.ts";
-import { tempDir } from "./helpers.ts";
+import { TelegramError } from "../src/hub/telegram.ts";
+import { offlineApi, tempDir } from "./helpers.ts";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -12,7 +12,7 @@ test("General omits the thread, retries and resumes durable messages after resta
   const dir = tempDir();
   dirs.push(dir);
   const file = join(dir, "machine.json");
-  const api = new TelegramApi({ token: "fake" });
+  const api = offlineApi();
   let fail = true;
   const sent: { thread?: number; silent: boolean; text: string }[] = [];
   api.sendMessage = async (_chat, thread, text, silent) => {
@@ -37,7 +37,7 @@ test("updating an in-flight card keeps the latest output and its original topic"
   const dir = tempDir();
   dirs.push(dir);
   const queue = new MachineOutbox(join(dir, "machine.json"), () => {});
-  const api = new TelegramApi({ token: "fake" });
+  const api = offlineApi();
   let release = () => {};
   const pending = new Promise<void>(resolve => { release = resolve; });
   const edited: string[] = [];
@@ -57,7 +57,7 @@ test("an acknowledged edit replayed after a crash cannot block delivery forever"
   const dir = tempDir();
   dirs.push(dir);
   const queue = new MachineOutbox(join(dir, "machine.json"), () => {});
-  const api = new TelegramApi({ token: "fake" });
+  const api = offlineApi();
   api.sendMessage = async () => ({ message_id: 1 });
   queue.post("card", { chatId: "-1001" }, "old", true, undefined, true);
   await queue.flush(api);
@@ -76,7 +76,7 @@ function outbox(warnings: string[] = []) {
   const dir = tempDir();
   dirs.push(dir);
   const file = join(dir, "machine.json");
-  const api = new TelegramApi({ token: "fake" });
+  const api = offlineApi();
   return { dir, file, api, queue: new MachineOutbox(file, text => { warnings.push(text); }) };
 }
 

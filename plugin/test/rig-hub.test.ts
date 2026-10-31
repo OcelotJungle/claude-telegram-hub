@@ -8,9 +8,8 @@ import { Hub } from "../src/hub/hub.ts";
 import { runnerSpecSchema } from "../src/hub/exec-runner.ts";
 import { EXEC_MAX_AGE_MS, HEARTBEAT_STALE_MS } from "../src/hub/exec.ts";
 import { STALE_POLL } from "../src/hub/questions.ts";
-import { TelegramApi } from "../src/hub/telegram.ts";
 import { buttonPress, topicMsg } from "./fake-telegram.ts";
-import { memLogger, must, tempDir } from "./helpers.ts";
+import { memLogger, must, offlineApi, tempDir } from "./helpers.ts";
 import { manualClock, turn } from "./manual-clock.ts";
 import { platformFor } from "../src/shared/platform.ts";
 
@@ -38,12 +37,13 @@ function fixture(extra: Partial<HubOptions> = {}) {
       for (const hub of hubs) { hub["running"] = false; hub["clearTimer"](hub["rigTimer"]); hub["execs"]?.stop(); }
     } finally { clock.dispose(); rmSync(dir, { recursive: true, force: true }); }
   });
-  const api = new TelegramApi({ token: "fake" });
+  const api = offlineApi();
   const texts: { text: string; topic?: number; silent?: boolean }[] = [];
   const order: string[] = [];
   const spawned: string[] = [];
   const answers: string[] = [];
   const menus: string[][] = [];
+  const removed: number[] = [];
   let offline = false;
   let output: RigOutput = { code: 0, stdout: "[]", stderr: "" };
   api.sendMessage = async (_chat, topic, text, silent) => {
@@ -53,6 +53,7 @@ function fixture(extra: Partial<HubOptions> = {}) {
   api.editMessageText = async (_chat, _id, text) => { if (offline) throw new Error("offline"); texts.push({ text }); };
   api.setMyCommands = async commands => { menus.push(commands.map(command => command.command)); return true; };
   api.answerCallbackQuery = async (_id, text) => { answers.push(text ?? ""); };
+  api.removeKeyboard = async (_chat, id) => { removed.push(id); return true; };
   const options: HubOptions = {
     port: 0, api, idleMs: 0, sessionsFile: join(dir, "sessions.json"), outboxFile: join(dir, "outbox.json"),
     execDir: join(dir, "exec"), execsFile: join(dir, "execs.json"), filesDir: join(dir, "files"), inboxDir: dir,
@@ -74,7 +75,7 @@ function fixture(extra: Partial<HubOptions> = {}) {
   // `intake` is what the poll loop waits for; `update` also waits for the machine command it started.
   const intake = (text: string, from = USER, topic?: number) => hub["handleUpdate"](api, topicMsg({ chatId: GROUP, fromId: from, threadId: topic, text }));
   const update = async (text: string, from = USER, topic?: number) => { await intake(text, from, topic); await settled(hub); };
-  return { hub, options, api, dir, clock, texts, order, spawned, answers, menus, update, intake, track,
+  return { hub, options, api, dir, clock, texts, order, spawned, answers, menus, removed, update, intake, track,
     offline: (next: boolean) => { offline = next; }, output: (next: RigOutput) => { output = next; } };
 }
 
@@ -338,6 +339,7 @@ test("a question button of a closed window is stale: the question goes to the te
   await hub["onPollPress"](f.api, GROUP, { id: "1", data: "q:ab12:0:1", messageId: 5, fromId: USER });
   expect(hub["polls"].size).toBe(0);
   expect(answers).toEqual([STALE_POLL]);
+  expect(f.removed).toEqual([5]);
   expect(hub["rigIdle"]()).toBe(true);
 });
 

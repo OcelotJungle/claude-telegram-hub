@@ -7,11 +7,10 @@ import { appendFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { CLEANUP_SETTLE_MS, Hub } from "../src/hub/hub.ts";
 import { LaunchExitError } from "../src/hub/launch.ts";
-import { TelegramApi } from "../src/hub/telegram.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { MAX_RECONNECT_PAUSE_MS } from "../src/shared/reconnect.ts";
 import { buttonPress, topicMsg } from "./fake-telegram.ts";
-import { memLogger, must, tempDir } from "./helpers.ts";
+import { memLogger, must, offlineApi, tempDir } from "./helpers.ts";
 import { manualClock, turn } from "./manual-clock.ts";
 
 // Synthetic process/chat identifiers and short deterministic timing units.
@@ -38,7 +37,7 @@ function fixture(extra: Partial<HubOptions> = {}) {
   const spawned: string[][] = [];
   const notices: string[] = [];
   const sent: { ws: Parameters<Hub["onClose"]>[0]; msg: HubToPlugin }[] = [];
-  const api = new TelegramApi({ token: "test" });
+  const api = offlineApi();
   api.answerCallbackQuery = async () => {};
   api.removeKeyboard = async () => {};
   api.setMessageReaction = async () => {};

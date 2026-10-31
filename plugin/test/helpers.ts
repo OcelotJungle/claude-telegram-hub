@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { createServer } from "net";
 import { z } from "zod";
+import { TelegramApi } from "../src/hub/telegram.ts";
 import { hubToPlugin } from "../src/shared/protocol-schema.ts";
 import { trackTempDir } from "./temp-cleanup.ts";
 
@@ -32,6 +33,12 @@ export async function waitFor<T>(
 }
 
 // The value a test cannot go on without.
+// A client for tests that replace its methods: a method left real fails at once on a closed local
+// port instead of reaching Telegram. Port 1 is reserved and nothing listens on it.
+export function offlineApi(): TelegramApi {
+  return new TelegramApi({ token: "fake", base: "http://127.0.0.1:1", maxAttempts: 1, networkRetryMs: 0, deadlineMs: 0 });
+}
+
 export function must<T>(v: T | null | undefined, what = "value"): T {
   if (v == null) throw new Error(`no ${what}`);
   return v;
