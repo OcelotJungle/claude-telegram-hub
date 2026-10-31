@@ -1,0 +1,6 @@
+.git
+.tmp
+**/node_modules
+reports
+**/.env
+**/.env.*
