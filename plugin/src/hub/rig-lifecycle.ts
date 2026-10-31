@@ -1,13 +1,24 @@
 import { spawnSync } from "child_process";
-import { existsSync, statSync } from "fs";
+import { existsSync, readFileSync, statSync } from "fs";
+import { join } from "path";
 import { z } from "zod";
 import { writeRigFile } from "./rig-files.ts";
 
 const commitSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
+const readySchema = z.object({ commit: commitSchema, time: z.string() });
+const restartingSchema = z.object({ time: z.string() });
 export const RIG_RESTART_EXIT = 75;
 export const COMMIT_ENV = "TELEGRAM_HUB_COMMIT";
 const COMMIT_UNKNOWN_ID = "rig-commit-unknown";
 const COMMIT_UNKNOWN_TEXT = "Хаб не смог определить коммит своего кода, поэтому не может обработать обновление. Попытки продолжаются.";
+const CODE_CHANGED_TEXT = "Хаб запущен с другим кодом. Окна подхватят его при следующем запуске.";
+
+function readSignal<T>(file: string, schema: z.ZodType<T>): T | undefined {
+  try {
+    const parsed = schema.safeParse(JSON.parse(readFileSync(file, "utf8")));
+    return parsed.success ? parsed.data : undefined;
+  } catch { return undefined; }
+}
 
 export function hubCommit(repository: string): string | undefined {
   const result = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repository, windowsHide: true, encoding: "utf8" });
@@ -32,6 +43,10 @@ export class RigLifecycle {
   private unwritten = true;
   private commitReported = false;
   private lastWarning = "";
+  // Rig asked this process about a restart, so a changed commit is its update and its event describes it.
+  private rigUpdated = false;
+  // The id of a code change notice, held until the check after the first read of rig events.
+  private codeChange: string | undefined;
   get waiting(): boolean { return this.pending || this.refreshing || this.requested; }
 
   constructor(private deps: {
@@ -50,6 +65,7 @@ export class RigLifecycle {
 
   request(): void {
     this.requested = true;
+    this.rigUpdated = true;
     this.resolve();
     this.publish();
   }
@@ -57,6 +73,8 @@ export class RigLifecycle {
   check(): void {
     this.resolve();
     this.publish();
+    if (this.codeChange && !this.rigUpdated) this.deps.notice(this.codeChange, CODE_CHANGED_TEXT);
+    this.codeChange = undefined;
     if (!this.pending || !this.deps.idle()) return;
     try {
       // No await between the final idle check, the marker and process exit.
@@ -95,9 +113,16 @@ export class RigLifecycle {
         this.refreshing = false;
         return;
       }
-      writeRigFile(this.deps.dir, "hub-ready.json", JSON.stringify({ commit: this.commit, time: new Date(this.deps.now()).toISOString() }));
+      const previous = readSignal(join(this.deps.dir, "hub-ready.json"), readySchema);
+      const marker = readSignal(join(this.deps.dir, "hub-restarting.json"), restartingSchema);
+      const time = new Date(this.deps.now()).toISOString();
+      writeRigFile(this.deps.dir, "hub-ready.json", JSON.stringify({ commit: this.commit, time }));
       this.unwritten = false;
       this.refreshing = false;
+      // Rig leaves the marker in place, so only one newer than the last readiness means that rig asked for this restart.
+      const riggedRestart = previous && marker && Date.parse(marker.time) > Date.parse(previous.time);
+      // Under an id the outbox remembers: a repeated post cannot send it twice.
+      if (previous && previous.commit !== this.commit && !riggedRestart) this.codeChange = `hub-code-${previous.commit}-${this.commit}-${time}`;
     } catch (error) { this.warnOnce("readiness", `rig readiness: ${String(error)}`); }
   }
 

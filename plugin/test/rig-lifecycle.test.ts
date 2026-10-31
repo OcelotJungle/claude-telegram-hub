@@ -28,13 +28,19 @@ function fixture(commitKnown = true) {
     idle: (next: boolean) => { idle = next; }, now: (next: number) => { now = next; } };
 }
 
-test("readiness waits for Bot API success, stays silent about a changed commit and refreshes its timestamp", () => {
+function previousReady(dir: string, commit = NEW_COMMIT): void {
+  writeFileSync(join(dir, "hub-ready.json"), JSON.stringify({ commit, time: new Date(START).toISOString() }));
+}
+
+function restartMarker(dir: string, at: number): void {
+  writeFileSync(join(dir, "hub-restarting.json"), JSON.stringify({ time: new Date(at).toISOString() }));
+}
+
+test("readiness waits for Bot API success and refreshes its timestamp", () => {
   const f = fixture();
   expect(existsSync(join(f.dir, "hub-ready.json"))).toBe(false);
-  writeFileSync(join(f.dir, "hub-ready.json"), JSON.stringify({ commit: NEW_COMMIT, time: new Date(START).toISOString() }));
+  previousReady(f.dir);
   f.lifecycle.ready();
-  // The rig update event already names the versions: a second message would repeat it.
-  expect(f.notices).toEqual([]);
   expect(JSON.parse(readFileSync(join(f.dir, "hub-ready.json"), "utf8")).commit).toBe(COMMIT);
   f.now(START + 1);
   f.lifecycle.request();
@@ -113,17 +119,77 @@ function blockRestartFile(dir: string): () => void {
   return () => { rmSync(blocker, { recursive: true, force: true }); };
 }
 
-test("a failed hub-ready.json write is tried again and warned about once", () => {
+test("a failed hub-ready.json write is tried again, warned about once, and the notice waits for the write", () => {
   const f = fixture();
   const unblock = blockReadyFile(f.dir);
   f.lifecycle.ready();
   f.lifecycle.check();
   f.lifecycle.check();
   expect(f.warnings).toHaveLength(1);
+  expect(f.notices).toEqual([]);
   unblock();
-  writeFileSync(join(f.dir, "hub-ready.json"), JSON.stringify({ commit: NEW_COMMIT, time: new Date(START).toISOString() }));
+  previousReady(f.dir);
   f.lifecycle.check();
   expect(JSON.parse(readFileSync(join(f.dir, "hub-ready.json"), "utf8")).commit).toBe(COMMIT);
+  expect(f.notices).toHaveLength(1);
+  f.lifecycle.check();
+  expect(f.notices).toHaveLength(1);
+});
+
+test("a hand restart on another commit is announced once under an id built from both commits, in neutral text", () => {
+  const f = fixture();
+  previousReady(f.dir);
+  f.lifecycle.ready();
+  f.lifecycle.check();
+  f.lifecycle.check();
+  expect(f.notices).toHaveLength(1);
+  expect(f.notices[0]?.id).toContain(NEW_COMMIT);
+  expect(f.notices[0]?.id).toContain(COMMIT);
+  expect(f.notices[0]?.text).toContain("другим кодом");
+  expect(f.notices[0]?.text).not.toMatch(/обновлён/);
+});
+
+test("a marker older than the last readiness belongs to an earlier restart: a hand restart is still announced", () => {
+  const f = fixture();
+  previousReady(f.dir);
+  restartMarker(f.dir, START - 1);
+  f.lifecycle.ready();
+  f.lifecycle.check();
+  expect(f.notices).toHaveLength(1);
+});
+
+test("a restart rig asked for stays silent: the rig update event names the versions", () => {
+  const f = fixture();
+  previousReady(f.dir);
+  restartMarker(f.dir, START + 1);
+  f.lifecycle.ready();
+  f.lifecycle.check();
+  expect(f.notices).toEqual([]);
+});
+
+test("a start on code rig already updated stays silent: its restart event arrives right after readiness", () => {
+  const f = fixture();
+  previousReady(f.dir);
+  f.lifecycle.ready();
+  f.lifecycle.request();
+  f.lifecycle.check();
+  expect(f.notices).toEqual([]);
+});
+
+test("a rollback start on the commit of the last readiness says nothing: rig reports the rollback", () => {
+  const f = fixture();
+  previousReady(f.dir, COMMIT);
+  restartMarker(f.dir, START + 1);
+  f.lifecycle.ready();
+  f.lifecycle.check();
+  expect(f.notices).toEqual([]);
+});
+
+test("a first start has no previous commit to compare with", () => {
+  const f = fixture();
+  f.lifecycle.ready();
+  f.lifecycle.check();
+  expect(f.notices).toEqual([]);
 });
 
 test("an acknowledgement whose write failed is not lost and the hub does not exit before it is written", () => {
