@@ -1,10 +1,21 @@
 import type { Launch } from "../shared/config.ts";
 import type { Platform } from "../shared/platform.ts";
 
-import { closeSync, openSync, readdirSync, readSync, statSync } from "fs";
-import { join } from "path";
+import { spawn } from "child_process";
+import { closeSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync } from "fs";
+import { tmpdir } from "os";
+import { basename, join } from "path";
 import { field } from "../shared/guards.ts";
 import { PLATFORM } from "../shared/platform.ts";
+
+// A launch command that ends within this time with a non-zero code failed to
+// launch (tmux new-session -d exits at once and reports through its code). One
+// that is still running after it (a Windows terminal window) launched.
+export const LAUNCH_EXIT_GRACE_MS = 2000;
+// The part of the command's stderr the topic is told.
+const STDERR_LIMIT = 1000;
+const TMUX_EXECUTABLE = /^tmux(\.exe)?$/i;
+const TMUX_SESSION_FLAG = "-s";
 
 // The head of a transcript read for its cwd: its first records carry it.
 const HEAD_BYTES = 1024 * 1024;
@@ -38,6 +49,83 @@ export function launchCommand(launch: Launch, v: { cwd: string; account: string;
     const expanded = part.replaceAll("{cwd}", v.cwd).replaceAll("{account}", v.account).replaceAll("{session}", v.session).replaceAll("{mode}", mode);
     return expanded === "" ? [] : [expanded];
   });
+}
+
+// A launch command that ended with a failure soon after it started.
+export class LaunchExitError extends Error {
+  constructor(readonly code: number | null, readonly stderr: string) {
+    super(`команда запуска завершилась ${code === null ? "аварийно" : `с кодом ${code}`}${stderr ? `: ${stderr}` : ""}`);
+  }
+}
+
+export type SpawnTimers = {
+  graceMs: number;
+  setTimer(fn: () => void, ms: number): ReturnType<typeof setTimeout>;
+  clearTimer(timer: ReturnType<typeof setTimeout>): void;
+};
+
+// Starts the launch command detached. Resolves once it is running past the
+// grace time or has ended with code 0; rejects when it cannot start or ends
+// within the grace time with another code. Its stderr goes to a file, so a
+// long-lived command never meets a closed pipe.
+export function spawnDetached(command: string[], timers: SpawnTimers = { graceMs: LAUNCH_EXIT_GRACE_MS, setTimer: setTimeout, clearTimer: clearTimeout }): Promise<void> {
+  const [exe, ...args] = command;
+  if (!exe) throw new LaunchError("пустая команда запуска");
+  const dir = mkdtempSync(join(tmpdir(), "hub-launch-"));
+  const errPath = join(dir, "stderr");
+  const errFd = openSync(errPath, "w");
+  const cleanup = () => {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* still open on Windows: the temp dir is swept later */ }
+  };
+  const readStderr = () => {
+    try { return readFileSync(errPath, "utf8").trim().slice(0, STDERR_LIMIT); } catch { return ""; }
+  };
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(exe, args, { detached: true, stdio: ["ignore", "ignore", errFd] });
+  } catch (e) {
+    closeSync(errFd);
+    cleanup();
+    throw e;
+  }
+  closeSync(errFd);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      // Held until now so that its exit is seen; after, it must not keep the hub alive.
+      child.unref();
+      timers.clearTimer(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = timers.setTimer(() => finish(), timers.graceMs);
+    child.once("error", e => { cleanup(); finish(e); });
+    child.once("exit", code => {
+      const stderr = settled || code === 0 ? "" : readStderr();
+      cleanup();
+      finish(code === 0 ? undefined : new LaunchExitError(code, stderr));
+    });
+  });
+}
+
+export function isTmuxCommand(command: string[]): boolean {
+  const [exe] = command;
+  return exe !== undefined && TMUX_EXECUTABLE.test(basename(exe));
+}
+
+// The tmux session a launch command creates (its -s value), if it names one.
+export function tmuxSession(command: string[]): string | undefined {
+  if (!isTmuxCommand(command)) return undefined;
+  const at = command.indexOf(TMUX_SESSION_FLAG);
+  return at < 0 ? undefined : command[at + 1];
+}
+
+// Where to look at a tmux session the user must answer in.
+export function tmuxAttachHint(command: string[]): string {
+  const session = tmuxSession(command);
+  return session ? `tmux attach -t ${session}` : "tmux ls покажет сессию, tmux attach -t <имя> подключит к ней";
 }
 
 export function isPermissionMode(mode: string): mode is PermissionMode {

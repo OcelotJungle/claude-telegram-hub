@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 import { join } from "path";
-import { launchCommand, LaunchError, sessionCwd, transcriptMode } from "../src/hub/launch.ts";
+import { isTmuxCommand, launchCommand, LaunchError, LaunchExitError, sessionCwd, spawnDetached, tmuxAttachHint, tmuxSession, transcriptMode } from "../src/hub/launch.ts";
 import { platformFor } from "../src/shared/platform.ts";
 import { tempDir as makeTempDir } from "./helpers.ts";
 
@@ -89,6 +90,65 @@ describe("launchCommand", () => {
 
   test("refuses a mode when the launch config lost its placeholder", () => {
     expect(() => launchCommand(LAUNCH, { cwd: tempDir(), account: "2", session: SID, mode: "plan" })).toThrow("{mode}");
+  });
+});
+
+describe("spawnDetached", () => {
+  const BUN = process.execPath;
+  const NEVER_FIRES = { graceMs: 0, setTimer: () => setTimeout(() => {}, 0), clearTimer: () => {} };
+  const leftovers = () => readdirSync(tmpdir()).filter(name => name.startsWith("hub-launch-"));
+
+  test("a command that exits at once with a non-zero code is a failed launch with its stderr", async () => {
+    const before = leftovers();
+    const failure = await spawnDetached([BUN, "-e", "console.error('duplicate session: claude-x'); process.exit(1)"], NEVER_FIRES).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(LaunchExitError);
+    if (!(failure instanceof LaunchExitError)) return;
+    expect(failure.code).toBe(1);
+    expect(failure.stderr).toBe("duplicate session: claude-x");
+    expect(failure.message).toBe("команда запуска завершилась с кодом 1: duplicate session: claude-x");
+    expect(leftovers()).toEqual(before);
+  });
+
+  test("a command that exits at once with code 0 is a launch", async () => {
+    await spawnDetached([BUN, "-e", "process.exit(0)"], NEVER_FIRES);
+  });
+
+  test("a command that cannot be found is a failed launch", async () => {
+    const before = leftovers();
+    await expect((async () => spawnDetached(["hub-launch-no-such-command"], NEVER_FIRES))()).rejects.toThrow("hub-launch-no-such-command");
+    expect(leftovers()).toEqual(before);
+  });
+
+  test("a command still running when the grace time ends is a launch, not waited for", async () => {
+    const dir = tempDir();
+    const alive = join(dir, "alive");
+    writeFileSync(alive, "");
+    const timers: (() => void)[] = [];
+    const grace = { graceMs: 1, setTimer: (fn: () => void) => { timers.push(fn); return setTimeout(() => {}, 0); }, clearTimer: () => {} };
+    const poll = `const fs = require('fs'); setInterval(() => { if (!fs.existsSync(${JSON.stringify(alive)})) process.exit(0); }, 20);`;
+    try {
+      let settled = false;
+      const launched = spawnDetached([BUN, "-e", poll], grace).then(() => { settled = true; });
+      for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+      expect(settled).toBe(false);
+      timers[0]?.();
+      await launched;
+      expect(settled).toBe(true);
+    } finally {
+      rmSync(alive, { force: true });
+    }
+  });
+});
+
+describe("tmux launch commands", () => {
+  test("a tmux command is recognised and names its session", () => {
+    const command = ["tmux", "new-session", "-d", "-s", `claude-${SID}`, "--", "claude"];
+    expect(isTmuxCommand(command)).toBe(true);
+    expect(isTmuxCommand(["/usr/bin/tmux", "new-session"])).toBe(true);
+    expect(isTmuxCommand(LAUNCH.command)).toBe(false);
+    expect(tmuxSession(command)).toBe(`claude-${SID}`);
+    expect(tmuxSession(["tmux", "new-session", "-d"])).toBeUndefined();
+    expect(tmuxAttachHint(command)).toBe(`tmux attach -t claude-${SID}`);
   });
 });
 

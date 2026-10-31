@@ -20,7 +20,6 @@ import type { Platform } from "../shared/platform.ts";
 import type { MachineCommand, RigInvocation, RigOutput } from "./rig.ts";
 import type { MachineDestination, RigConfirmation } from "./machine-outbox.ts";
 
-import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync } from "fs";
 import { basename, dirname, join } from "path";
@@ -39,7 +38,7 @@ import { VolunteerLimits } from "./volunteer-limits.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
-import { hasModePlaceholder, launchCommand, LaunchError, PERMISSION_MODES, sessionCwd, sessionTranscript, transcriptMode } from "./launch.ts";
+import { hasModePlaceholder, isTmuxCommand, LAUNCH_EXIT_GRACE_MS, launchCommand, LaunchError, LaunchExitError, PERMISSION_MODES, sessionCwd, sessionTranscript, spawnDetached, tmuxAttachHint, transcriptMode } from "./launch.ts";
 import { commandOf, hubCommandOf, machineCommandOf, routeCallback, routeUpdate } from "./router.ts";
 import { accountOf, SessionStore, topicName } from "./sessions.ts";
 import { isThreadNotFound, TelegramError } from "./telegram.ts";
@@ -2570,7 +2569,11 @@ ${msg.text}`);
       const transcript = mode ? this.transcriptOf(sessionId) : undefined;
       if (transcript) modeOffset = statSync(transcript).size;
       this.log.info(`starting session ${sessionId} on account ${acc}: ${JSON.stringify(command)}`);
-      spawned = (this.opts.spawn ?? spawnDetached)(command);
+      spawned = this.opts.spawn ? this.opts.spawn(command) : spawnDetached(command, {
+        graceMs: LAUNCH_EXIT_GRACE_MS,
+        setTimer: (fn, ms) => this.setTimer(fn, ms),
+        clearTimer: timer => this.clearTimer(timer),
+      });
     } catch (e) {
       const why = e instanceof LaunchError ? e.message : `команда не запустилась (${e instanceof Error ? e.message : e})`;
       this.log.warn(`starting session ${sessionId} failed: ${why}`);
@@ -2584,7 +2587,8 @@ ${msg.text}`);
       this.log.warn(`session ${sessionId} did not connect in ${sec} s; ${l?.held.length ?? 0} held item(s) retained`);
       this.retainHeld(sessionId, l?.held ?? []);
       this.launchEnded(sessionId, "failed");
-      this.notice(sessionId, `⚠️ Сессия не запустилась за ${sec} с`, "error");
+      const waiting = isTmuxCommand(command) ? `. Возможно, она ждёт подтверждения в tmux: ${tmuxAttachHint(command)}` : "";
+      this.notice(sessionId, `⚠️ Сессия не запустилась за ${sec} с${waiting}`, "error");
     }, sec * MS_PER_SECOND);
     this.launches.set(sessionId, { account: acc, held, timer, mode });
     this.launchEnds.delete(sessionId);
@@ -2599,7 +2603,7 @@ ${msg.text}`);
       this.launches.delete(sessionId);
       this.retainHeld(sessionId, l.held);
       this.launchEnded(sessionId, "failed");
-      this.notice(sessionId, `⚠️ Не могу запустить сессию: ${e instanceof Error ? e.message : String(e)}`, "error");
+      this.notice(sessionId, launchFailure(e), "error");
     });
     else started();
   }
@@ -3264,15 +3268,17 @@ ${msg.text}`);
   }
 }
 
-function spawnDetached(command: string[]): Promise<void> {
-  const [exe, ...args] = command;
-  if (!exe) throw new LaunchError("пустая команда запуска");
-  const child = spawn(exe, args, { detached: true, stdio: "ignore" });
-  child.unref();
-  return new Promise((resolve, reject) => {
-    child.once("spawn", resolve);
-    child.once("error", reject);
-  });
+const TMUX_DUPLICATE_SESSION = /duplicate session: (\S+)/;
+
+// What the topic is told when the launch command failed. A tmux session of the
+// same name means an earlier launch is alive, usually at a dialog: it is not
+// launched again.
+function launchFailure(e: unknown): string {
+  if (e instanceof LaunchExitError) {
+    const name = TMUX_DUPLICATE_SESSION.exec(e.stderr)?.[1];
+    if (name) return `⚠️ Сессия уже запущена в tmux (${name}), скорее всего ждёт ответа в диалоге, например подтверждения канала. Подключись: tmux attach -t ${name}`;
+  }
+  return `⚠️ Не могу запустить сессию: ${e instanceof Error ? e.message : String(e)}`;
 }
 
 // The /cleanup summary in the topic: what came of the skills.

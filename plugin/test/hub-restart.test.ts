@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { CLEANUP_SETTLE_MS, Hub } from "../src/hub/hub.ts";
+import { LaunchExitError } from "../src/hub/launch.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { MAX_RECONNECT_PAUSE_MS } from "../src/shared/reconnect.ts";
@@ -390,6 +391,45 @@ describe("held items survive failed starts", () => {
     await turn();
     expect(f.hub["store"].get(SID)?.launchedMode).toBeUndefined();
     expect(f.hub["retained"].get(SID)).toHaveLength(1);
+  });
+
+  test("a launch command that exits with a failure is a failed launch: stderr in the topic, no start notice, no wait", async () => {
+    const f = fixture({ spawn: async () => { throw new LaunchExitError(2, "no server running"); } });
+    f.hub["launch"](SID, undefined, [{ message: f.message("kept after a failed command") }], true, "plan");
+    await turn();
+    expect(f.notices).toContain("⚠️ Не могу запустить сессию: команда запуска завершилась с кодом 2: no server running");
+    expect(f.notices.some(text => text.includes("🚀"))).toBe(false);
+    expect(f.hub["retained"].get(SID)).toHaveLength(1);
+    expect(f.hub["launches"].has(SID)).toBe(false);
+    expect(f.hub["store"].get(SID)?.launchedMode).toBeUndefined();
+    const count = f.notices.length;
+    await f.clock.advance(LAUNCH_SECONDS * MS_PER_SECOND);
+    expect(f.notices).toHaveLength(count);
+  });
+
+  test("tmux saying the session exists names the attach command and does not launch again", async () => {
+    const f = fixture({ spawn: async () => { throw new LaunchExitError(1, `duplicate session: claude-${SID}`); } });
+    f.hub["launch"](SID, undefined, [{ message: f.message("kept for the live session") }], true);
+    await turn();
+    expect(f.notices).toContain(`⚠️ Сессия уже запущена в tmux (claude-${SID}), скорее всего ждёт ответа в диалоге, например подтверждения канала. Подключись: tmux attach -t claude-${SID}`);
+    expect(f.notices.some(text => text.includes("🚀"))).toBe(false);
+    expect(f.hub["retained"].get(SID)).toHaveLength(1);
+  });
+
+  test("a tmux launch that never connects says it may wait for confirmation in tmux", async () => {
+    const tmux = ["tmux", "new-session", "-d", "-s", "claude-{session}", "--", "claude", "--resume", "{session}"];
+    const f = fixture();
+    f.configure({ ...f.config(), launch: { command: tmux, timeoutSec: LAUNCH_SECONDS } });
+    f.hub["launch"](SID, undefined, [{ message: f.message("waiting") }]);
+    await f.clock.advance(LAUNCH_SECONDS * MS_PER_SECOND);
+    expect(f.notices.at(-1)).toBe(`⚠️ Сессия не запустилась за ${LAUNCH_SECONDS} с. Возможно, она ждёт подтверждения в tmux: tmux attach -t claude-${SID}`);
+  });
+
+  test("a launch that never connects through another command gets the plain timeout notice", async () => {
+    const f = fixture();
+    f.hub["launch"](SID, undefined, [{ message: f.message("waiting") }]);
+    await f.clock.advance(LAUNCH_SECONDS * MS_PER_SECOND);
+    expect(f.notices.at(-1)).toBe(`⚠️ Сессия не запустилась за ${LAUNCH_SECONDS} с`);
   });
 
   for (const failure of ["spawn", "timeout", "checks", "placeholder"]) {
