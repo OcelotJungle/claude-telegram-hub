@@ -8,8 +8,10 @@ import type { Button } from "./telegram.ts";
 import type { ChannelMeta } from "../shared/protocol.ts";
 import type { Logger } from "../shared/log.ts";
 import type { MessageKind } from "../shared/notification.ts";
+import type { MachineDestination } from "./machine-outbox.ts";
+import type { RigInvocation } from "./rig.ts";
 
-import { randomBytes } from "crypto";
+import { randomBytes, randomUUID } from "crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "fs";
 import { join } from "path";
 import { loadExecs, saveExecs } from "./exec-store.ts";
@@ -68,6 +70,10 @@ export type ExecDeps = {
   // that ended meanwhile go on without them; none when not given.
   graceMs?: number;
   log: Logger;
+  // Why a shell may not start now (its feature is off), or undefined; asked again when a stale Run button is pressed.
+  unavailable?(shell: ExecRecord["shell"]): string | undefined;
+  machineCard?(record: ExecRecord, text: string, final: boolean, kind: MessageKind, buttons?: Button[][]): void;
+  machineFile?(record: ExecRecord, path: string, kind: MessageKind): void;
 };
 
 export class Execs {
@@ -86,15 +92,24 @@ export class Execs {
   constructor(private deps: ExecDeps) {}
 
   start(): void {
-    this.recs = loadExecs(this.deps.file);
     this.timers.push(setInterval(() => this.check(), this.deps.checkMs));
     this.timers.push(setInterval(() => this.editCards(), this.deps.cardMs));
     const grace = this.deps.graceMs ?? 0;
     this.deferUntil = this.deps.now() + grace;
     // At once: a run gone while no hub watched never gets a stop button press.
     // Its result is not reported yet: a window about to reconnect gets it.
-    this.check(true);
+    this.restore();
     this.sweepTimer = setTimeout(() => this.sweep(), grace);
+  }
+
+  restore(): void {
+    this.recs = loadExecs(this.deps.file);
+    this.check(true);
+    for (const rec of this.recs) {
+      if (rec.shell !== "rig" || rec.state !== "ended") continue;
+      this.showCard(rec);
+      if (rec.end) this.sendLog(rec, rec.end);
+    }
   }
 
   // After the start's grace: deferred results go to the sessions that still
@@ -102,7 +117,7 @@ export class Execs {
   // got them on connect, and one connecting now gets them so.
   sweep(): void {
     for (const rec of this.recs) {
-      if (!this.deferred.has(rec.id) || rec.reported || this.deps.hasWindow(rec.sessionId)) continue;
+      if (!this.deferred.has(rec.id) || rec.reported || (rec.sessionId !== undefined && this.deps.hasWindow(rec.sessionId))) continue;
       this.report(rec);
     }
     this.deferred.clear();
@@ -150,12 +165,31 @@ export class Execs {
     this.launch(rec);
   }
 
+  // `sentAt` (ms) is when the user sent the command; one older than the age limit waits for the button like a stale /bash.
+  // A command the user confirmed later passes none: the confirmation press had its own age check.
+  machine(invocation: RigInvocation, text: string, cwd: string, destination: MachineDestination, messageId: number, sentAt?: number): void {
+    if (this.recs.some(rec => rec.messageId === messageId && rec.chatId === destination.chatId)) return;
+    const rec: ExecRecord = { id: randomUUID().replaceAll("-", ""), shell: "rig", invocation,
+      destination, chatId: destination.chatId, messageId, text, cwd, state: "pending", sentAt, reported: false };
+    this.recs.push(rec);
+    this.prune();
+    if (sentAt !== undefined && this.deps.now() - sentAt > this.deps.maxAgeMs) {
+      this.save();
+      this.showCard(rec);
+      return;
+    }
+    this.launch(rec);
+  }
+
   press(id: string, action: "stop" | "run"): string {
     const rec = this.recs.find(r => r.id === id);
     if (!rec) return "Запуск не найден";
     if (rec.state === "ended") return "Команда уже закончилась";
     if (action === "run") {
       if (rec.state === "running") return "Команда уже запущена";
+      // The button may be old: the feature could have been switched off since the card was shown.
+      const why = this.deps.unavailable?.(rec.shell);
+      if (why) return why;
       this.launch(rec);
       return "Запускаю";
     }
@@ -194,17 +228,22 @@ export class Execs {
     return join(this.deps.dir, `${id}.${ext}`);
   }
 
-  private save(): void {
+  private save(): boolean {
     try {
       saveExecs(this.deps.file, this.recs);
+      return true;
     } catch (e) {
       this.deps.log.error(`exec: saving runs failed: ${e}`);
+      return false;
     }
   }
 
   private launch(rec: ExecRecord): void {
     try {
-      const run = shellRun(rec.shell, rec.text, this.deps.dir, rec.id, this.deps.shells());
+      const run = rec.shell === "rig"
+        ? rec.invocation && { ...rec.invocation, files: [], env: {} }
+        : shellRun(rec.shell, rec.text, this.deps.dir, rec.id, this.deps.shells());
+      if (!run) return this.end(rec, { kind: "lost", at: this.deps.now(), reason: "нет команды rig" });
       writeShellFiles(run);
       const spec: RunnerSpec = {
         argv: run.argv,
@@ -223,9 +262,13 @@ export class Execs {
       writeFileSync(spec.alive, "");
       utimesSync(spec.alive, at, at);
       writeFileSync(specFile, JSON.stringify(spec));
-      rec.pid = this.deps.spawnRunner(specFile);
       rec.state = "running";
       rec.startedAt = this.deps.now();
+      if (!this.save()) {
+        this.end(rec, { kind: "lost", at: this.deps.now(), reason: "не удалось сохранить запуск" });
+        return;
+      }
+      rec.pid = this.deps.spawnRunner(specFile);
       this.deps.log.info(`exec ${rec.id}: started ${rec.shell} in ${rec.cwd}, runner ${rec.pid}`);
       this.save();
       this.showCard(rec);
@@ -269,7 +312,10 @@ export class Execs {
       // A runner without a fresh heartbeat is gone, whoever has its pid now
       // (after a reboot, a sign-out, a Fast Startup shutdown): that one is
       // neither waited for nor killed.
-      if (rec.pid !== undefined && this.beating(rec) && this.deps.alive(rec.pid)) continue;
+      if (this.beating(rec) && (rec.pid === undefined || this.deps.alive(rec.pid))) {
+        if (rec.shell === "rig") this.showCard(rec);
+        continue;
+      }
       // The runner may have written the file just before it exited.
       if (existsSync(exit)) this.ended(rec, exit, quiet);
       else this.end(rec, rec.stopping ? { kind: "stopped", at: this.deps.now() } : { kind: "lost", at: this.deps.now(), reason: LOST_REASON }, quiet);
@@ -298,21 +344,30 @@ export class Execs {
     rec.end = end;
     this.deps.log.info(`exec ${rec.id}: ended ${end.kind}${end.code === undefined ? "" : ` ${end.code}`}`);
     this.save();
-    const log = this.path(rec.id, "log");
     this.showCard(rec);
-    const kind = end.kind === "lost" ? "warning" : end.kind === "exit" && end.code !== 0 ? "error" : "info";
-    if (!fitsCard(log)) {
-      try {
-        this.deps.sendFile(rec.sessionId, this.fileToSend(rec.id, log), `${rec.id}.log`, kind);
-      } catch (e) {
-        this.deps.log.warn(`exec ${rec.id}: sending the log failed: ${e}`);
-      }
-    }
+    this.sendLog(rec, end);
     // In the start's grace a session without a window may be reconnecting:
     // reporting now would launch a second copy of it or say "not delivered".
-    const inGrace = this.deps.now() < this.deferUntil && !this.deps.hasWindow(rec.sessionId);
+    if (rec.shell === "rig") return;
+    const inGrace = this.deps.now() < this.deferUntil && (rec.sessionId === undefined || !this.deps.hasWindow(rec.sessionId));
     if (quiet || inGrace) this.deferred.add(rec.id);
     else this.report(rec);
+  }
+
+  // A log that does not fit the card goes as a file. Also called on restore for
+  // a rig record: the hub may have died between saving the end and handing the
+  // file over, and the machine outbox ignores a log it already knows.
+  private sendLog(rec: ExecRecord, end: NonNullable<ExecRecord["end"]>): void {
+    const log = this.path(rec.id, "log");
+    const kind = end.kind === "lost" ? "warning" : end.kind === "exit" && end.code !== 0 ? "error" : "info";
+    if (fitsCard(log)) return;
+    try {
+      const file = this.fileToSend(rec.id, log);
+      if (rec.shell === "rig") this.deps.machineFile?.(rec, file, kind);
+      else if (rec.sessionId !== undefined) this.deps.sendFile(rec.sessionId, file, `${rec.id}.log`, kind);
+    } catch (e) {
+      this.deps.log.warn(`exec ${rec.id}: sending the log failed: ${e}`);
+    }
   }
 
   // The log, or a copy of its last bytes with a note when Telegram would
@@ -328,6 +383,7 @@ export class Execs {
   }
 
   private report(rec: ExecRecord): void {
+    if (rec.sessionId === undefined || rec.shell === "rig") return;
     const log = this.path(rec.id, "log");
     const meta: ChannelMeta = { source: "exec", exec_id: rec.id, ts: new Date(rec.end?.at ?? this.deps.now()).toISOString() };
     if (rec.end?.kind === "exit" && rec.end.code !== undefined) meta.exit_code = String(rec.end.code);
@@ -352,7 +408,9 @@ export class Execs {
     const kind = rec.state !== "ended" || rec.end?.kind === "stopped" || (rec.end?.kind === "exit" && rec.end.code === 0)
       ? "info"
       : rec.end?.kind === "exit" ? "error" : "warning";
-    this.deps.card(rec.sessionId, `exec-${rec.id}`, execCardText(rec, tail, this.deps.now(), this.deps.shellNames), rec.state === "ended", kind, buttons);
+    const text = execCardText(rec, tail, this.deps.now(), this.deps.shellNames);
+    if (rec.shell === "rig") this.deps.machineCard?.(rec, text, rec.state === "ended", kind, rec.state === "pending" ? buttons : undefined);
+    else if (rec.sessionId !== undefined) this.deps.card(rec.sessionId, `exec-${rec.id}`, text, rec.state === "ended", kind, buttons);
   }
 }
 
@@ -479,7 +537,7 @@ export function execCardText(rec: ExecRecord, tail: string, now: number, names =
     const minutes = Math.round((now - (rec.sentAt ?? now)) / MS_PER_MINUTE);
     head = `⏸ Команда пришла ${minutes} мин назад, пока хаб был выключен`;
   } else if (rec.state === "running") {
-    head = `▶ ${names[rec.shell]} · ${duration(now - (rec.startedAt ?? now))}`;
+    head = `▶ ${rec.shell === "rig" ? "rig" : names[rec.shell]} · ${duration(now - (rec.startedAt ?? now))}`;
   } else {
     head = `${outcome(rec)} · ${duration((rec.end?.at ?? now) - (rec.startedAt ?? now))}`;
   }
@@ -495,7 +553,7 @@ export function execReportText(rec: ExecRecord, tail: string, logPath: string, n
   const took = duration((rec.end?.at ?? 0) - (rec.startedAt ?? rec.end?.at ?? 0));
   return [
     `Команда из топика закончилась: ${outcome(rec)} за ${took}.`,
-    `Оболочка: ${names[rec.shell]}, папка: ${rec.cwd}`,
+    `Оболочка: ${rec.shell === "rig" ? "rig" : names[rec.shell]}, папка: ${rec.cwd}`,
     `Команда: ${rec.text}`,
     `Полный лог: ${logPath}`,
     tail ? `Последние ${EXEC_AGENT_LINES} строк:\n${tail}` : "Вывода не было.",

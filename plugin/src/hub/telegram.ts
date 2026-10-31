@@ -224,10 +224,10 @@ export class TelegramApi {
     return this.call("getUpdates", { offset, timeout: timeoutSec, allowed_updates: ["message", "callback_query"] }, updatesSchema, { signal, retry: false, waitMs: timeoutSec * MS_PER_SECOND });
   }
 
-  sendMessage(chatId: string, threadId: number, text: string, silent: boolean, entities?: Entity[], buttons?: Button[][], replyTo?: number): Promise<{ message_id: number }> {
+  sendMessage(chatId: string, threadId: number | undefined, text: string, silent: boolean, entities?: Entity[], buttons?: Button[][], replyTo?: number): Promise<{ message_id: number }> {
     return this.call(
       "sendMessage",
-      { chat_id: chatId, message_thread_id: threadId, text, disable_notification: silent, ...(entities?.length ? { entities } : {}), ...keyboard(buttons), ...(replyTo === undefined ? {} : { reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } }) },
+      { chat_id: chatId, ...(threadId === undefined ? {} : { message_thread_id: threadId }), text, disable_notification: silent, ...(entities?.length ? { entities } : {}), ...keyboard(buttons), ...(replyTo === undefined ? {} : { reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } }) },
       sentSchema,
       { sends: true },
     );
@@ -267,13 +267,13 @@ export class TelegramApi {
 
   // One file by the method of its kind, several as a media group with the
   // caption on the first item (Telegram shows it under the album).
-  sendFiles(chatId: string, threadId: number, files: OutFile[], caption: string, captionEntities: Entity[] | undefined, silent: boolean): Promise<unknown> {
+  sendFiles(chatId: string, threadId: number | undefined, files: OutFile[], caption: string, captionEntities: Entity[] | undefined, silent: boolean): Promise<unknown> {
     const cap = caption ? { caption, ...(captionEntities?.length ? { caption_entities: captionEntities } : {}) } : {};
     const single = files.length === 1 ? files[0] : undefined;
     const form = () => {
       const f = new FormData();
       f.set("chat_id", chatId);
-      f.set("message_thread_id", String(threadId));
+      if (threadId !== undefined) f.set("message_thread_id", String(threadId));
       f.set("disable_notification", String(silent));
       if (single) {
         f.set(single.kind, Bun.file(single.path), single.name);

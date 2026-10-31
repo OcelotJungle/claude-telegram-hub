@@ -24,6 +24,8 @@ const hub = new Hub({
   inboxDir: p.inboxDir,
   execDir: p.execDir,
   execsFile: p.execsFile,
+  rigDir: join(homedir(), ".agent-rig"),
+  repository: join(import.meta.dir, "..", "..", ".."),
   // Every cswap profile links its projects/ here.
   projectsDir: join(homedir(), ".claude", "projects"),
   api: token ? new TelegramApi({ token, base: apiBase(), log }) : undefined,
@@ -32,7 +34,7 @@ const hub = new Hub({
   idleMs: process.argv.includes("--always-on") ? 0 : idleMs(),
   pollTimeoutSec: Number(process.env.TG_HUB_POLL_TIMEOUT) || undefined,
   log,
-  onExit: () => process.exit(0),
+  onExit: (code = 0) => process.exit(code),
 });
 
 if (!hub.start()) process.exit(0);

@@ -41,6 +41,9 @@ beforeEach(async () => {
   stateDir = tempDir();
   writeFileSync(join(stateDir, "config.json"), JSON.stringify({ groupId: GROUP, allowFrom: ["1"] }));
   env = {
+    // The spawned hub derives ~/.agent-rig from the home directory; keep it away from real rig files.
+    HOME: stateDir,
+    USERPROFILE: stateDir,
     TG_HUB_STATE_DIR: stateDir,
     TG_HUB_PORT: String(port),
     TG_HUB_API_BASE: fake.url,

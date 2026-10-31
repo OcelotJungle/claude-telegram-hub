@@ -2,6 +2,7 @@ import type { Config } from "../shared/config.ts";
 import type { TopicCommand } from "../shared/protocol.ts";
 import type { SessionStore } from "./sessions.ts";
 import type { Message, Update } from "./telegram.ts";
+import type { MachineCommand } from "./rig.ts";
 
 import { z } from "zod";
 
@@ -10,20 +11,27 @@ const ENVELOPE = new Set([
   "message_id", "date", "edit_date", "chat", "from", "sender_chat", "message_thread_id", "is_topic_message",
   "reply_to_message", "external_reply", "quote", "forward_origin", "via_bot", "author_signature", "has_protected_content",
 ]);
+// Telegram reserves forum topic 1 for General, which may carry a thread id.
+const GENERAL_TOPIC_ID = 1;
 
 export type Route =
   | { action: "ignore"; reason: string }
+  | { action: "machine"; topicId?: number }
   | { action: "inactive"; sessionId: string; topicId: number }
   | { action: "deliver"; sessionId: string; topicId: number };
 
 // Only topic messages from allowed senders in the configured group reach a
 // session; General, DMs, other chats and strangers are ignored.
-export function routeUpdate(u: Update, cfg: Pick<Config, "groupId" | "allowFrom">, sessions: SessionStore, isConnected: (sessionId: string) => boolean): Route {
+export function routeUpdate(u: Update, cfg: Pick<Config, "groupId" | "allowFrom">, sessions: SessionStore, isConnected: (sessionId: string) => boolean, botUsername?: string): Route {
   const m = u.message;
   if (!m) return ignore("no message");
   if (!cfg.groupId || String(m.chat.id) !== cfg.groupId) return ignore(`chat ${m.chat.id} is not the group`);
   if (!m.from || m.from.is_bot) return ignore("bot or anonymous sender");
   if (!cfg.allowFrom.includes(String(m.from.id))) return ignore(`sender ${m.from.id} not allowed`);
+  if (m.text && machineCommandOf(m.text, botUsername)) {
+    const topicId = m.is_topic_message === true && m.message_thread_id !== GENERAL_TOPIC_ID ? m.message_thread_id : undefined;
+    if (topicId === undefined || sessions.findByTopic(topicId)) return { action: "machine", ...(topicId === undefined ? {} : { topicId }) };
+  }
   if (m.is_topic_message !== true || m.message_thread_id == null) return ignore("not in a topic");
   if (!hasContent(m)) return ignore(`service message (fields: ${Object.keys(m).filter(k => !ENVELOPE.has(k)).join(", ")})`);
   const topicId = m.message_thread_id;
@@ -87,6 +95,11 @@ function parseCommand(text: string, botUsername: string | undefined): { name: st
   if (!m?.[1]) return undefined;
   if (m[2] && botUsername && m[2].toLowerCase() !== botUsername.toLowerCase()) return undefined;
   return { name: m[1].toLowerCase(), args: (m[3] ?? "").trim() };
+}
+
+export function machineCommandOf(text: string, botUsername?: string): MachineCommand | undefined {
+  const command = parseCommand(text, botUsername);
+  return command && (command.name === "feature" || command.name === "rig") ? { name: command.name, args: command.args } : undefined;
 }
 
 function ignore(reason: string): Route {

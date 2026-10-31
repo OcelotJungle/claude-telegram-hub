@@ -3001,7 +3001,7 @@ sys.exit(1)
   test("the hub puts the commands into the bot menu", async () => {
     await startHub();
     const call = await waitFor(() => fake.callsOf("setMyCommands")[0]);
-    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "rename", "run", "stop", "cleanup", "mode", "pwsh", "cmd", "bash"]);
+    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "rename", "run", "stop", "cleanup", "mode", "pwsh", "cmd", "bash", "feature", "rig"]);
     expect(field(arr(call.commands).find(c => field(c, "command") === "compact"), "description")).toBe("Сжать контекст; /compact <указания> — с указаниями; /compact N — окно автокомпакта");
     expect(field(arr(call.commands).find(c => field(c, "command") === "rename"), "description")).toBe("Переименовать сессию и её тему; /rename <имя> — новое имя");
     expect(field(arr(call.commands).find(c => field(c, "command") === "pwsh"), "description")).toBe("Команда в PowerShell в папке сессии");

@@ -17,6 +17,8 @@ import type { CleanupResult } from "./skill-cleanup.ts";
 import type { MessageKind } from "../shared/notification.ts";
 import type { ExitGate } from "./exit-gate.ts";
 import type { Platform } from "../shared/platform.ts";
+import type { MachineCommand, RigInvocation, RigOutput } from "./rig.ts";
+import type { MachineDestination, RigConfirmation } from "./machine-outbox.ts";
 
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
@@ -38,7 +40,7 @@ import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./d
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
 import { hasModePlaceholder, launchCommand, LaunchError, PERMISSION_MODES, sessionCwd, sessionTranscript, transcriptMode } from "./launch.ts";
-import { commandOf, hubCommandOf, routeCallback, routeUpdate } from "./router.ts";
+import { commandOf, hubCommandOf, machineCommandOf, routeCallback, routeUpdate } from "./router.ts";
 import { accountOf, SessionStore, topicName } from "./sessions.ts";
 import { isThreadNotFound, TelegramError } from "./telegram.ts";
 import { media, richPhotos, richToMarkdown } from "./rich.ts";
@@ -55,6 +57,10 @@ import { formatPermission } from "./format-permission.ts";
 import { exitGate } from "./exit-gate.ts";
 import { MAX_RECONNECT_PAUSE_MS } from "../shared/reconnect.ts";
 import { PLATFORM } from "../shared/platform.ts";
+import { featureText, findRig, Rig, RIG_MISSING, rigAction, runRig, statusText } from "./rig.ts";
+import { MachineOutbox } from "./machine-outbox.ts";
+import { RigEvents, RIG_POLL_MS } from "./rig-events.ts";
+import { hubCommit, RigLifecycle, startedCommit } from "./rig-lifecycle.ts";
 
 const INACTIVE_TEXT = "сессия сейчас не активна";
 // The queue id prefix of the start notice, "starting the session".
@@ -147,8 +153,11 @@ const BOT_COMMANDS = [
   { command: "pwsh", description: "Команда в PowerShell в папке сессии" },
   { command: "cmd", description: "Команда в cmd в папке сессии" },
   { command: "bash", description: "Команда в Git Bash в папке сессии" },
+  { command: "feature", description: "Фичи машины; /feature <name> enable|disable" },
+  { command: "rig", description: "Состояние и обновление машины: /rig status|update" },
 ];
 const EXEC_NOT_SET = "⚠️ Команды оболочки в этом хабе не настроены";
+const RIG_RECOVERY_TEXT = "Включить Telegram обратно на сервере: `rig feature telegram enable`";
 
 // exitingPid: the Claude Code process the plugin said it is ending.
 type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; entrypoint?: string; busy?: boolean; reportsSeen?: boolean; exitingPid?: number; attachedOffset?: number; launchedMode?: PermissionMode };
@@ -273,7 +282,12 @@ export type HubOptions = {
   spawnRunner?(specFile: string): number;
   execEnv?(): Record<string, string>;
   log: Logger;
-  onExit(): void;
+  rigDir?: string;
+  repository?: string;
+  findRig?(): string | undefined;
+  runRig?(invocation: RigInvocation, signal?: AbortSignal): Promise<RigOutput>;
+  hubCommit?(): string | undefined;
+  onExit(code?: number): void;
 };
 
 // A spool file: what a closing window could not hand to a hub. Older plugins
@@ -327,8 +341,10 @@ export class Hub {
   private volunteerLimits: VolunteerLimits;
   private botUsername: string | undefined;
   private botId: number | undefined;
+  private registeredCommands: string | undefined;
+  private registeringCommands: Promise<void> | undefined;
   // Permission prompts sent to topics, by the key in their buttons' data.
-  private permissions = new Map<string, { sessionId: string; requestId: string } & Formatted>();
+  private permissions = new Map<string, { sessionId: string; requestId: string; settled?: boolean } & Formatted>();
   // Open AskUserQuestion polls, by the key in their buttons' data; one per session.
   private polls = new Map<string, Poll>();
   // Questions waiting for their window to catch up, by poll key.
@@ -403,6 +419,20 @@ export class Hub {
   private abort = new AbortController();
   private running = false;
   private log: Logger;
+  private rig: Rig;
+  private machineOutbox: MachineOutbox;
+  private rigEvents: RigEvents | undefined;
+  private rigLifecycle: RigLifecycle | undefined;
+  private rigTimer: ReturnType<typeof setTimeout> | undefined;
+  private rigTickRunning = false;
+  private botReady = false;
+  private machineQueries = 0;
+  // Machine commands run beside the poll loop, so a slow rig cannot delay the intake of other updates.
+  private machineTasks = new Set<Promise<void>>();
+  private featureRefresh: Promise<void> | undefined;
+  private featureRefreshAgain = false;
+  private updatesInFlight = 0;
+  private disableConfirmations = new Map<string, RigConfirmation>();
 
   constructor(private opts: HubOptions) {
     this.codexLimits = new CodexLimits(opts.codexSessionsDir);
@@ -414,6 +444,35 @@ export class Hub {
     this.store = new SessionStore(opts.sessionsFile);
     this.log = opts.log;
     this.outbox = new Outbox(opts.outboxFile, opts.log);
+    this.rig = new Rig({ find: opts.findRig ?? (() => opts.rigDir ? findRig(opts.platform ?? PLATFORM) : undefined), platform: opts.platform ?? PLATFORM,
+      run: opts.runRig ?? runRig, warn: text => this.log.warn(text),
+      setTimer: (fn, ms) => this.setTimer(fn, ms), clearTimer: timer => this.clearTimer(timer) });
+    this.machineOutbox = new MachineOutbox(join(dirname(opts.outboxFile), "machine-outbox.json"), text => this.log.warn(text));
+    this.disableConfirmations = new Map(this.machineOutbox.confirmations());
+    if (opts.rigDir) {
+      const head = opts.hubCommit ?? (() => hubCommit(opts.repository ?? join(import.meta.dir, "..", "..", "..")));
+      // The commit of the code that was loaded: the service script fixes it before `bun` starts; without it HEAD at start is the best guess.
+      const started = startedCommit(process.env) ?? head();
+      this.rigLifecycle = new RigLifecycle({ dir: opts.rigDir, head, started: () => started,
+        now: opts.now ?? Date.now, idle: () => this.rigIdle(),
+        notice: (id, text) => { const group = opts.config().groupId; if (group) this.machineOutbox.post(id, { chatId: group }, text); },
+        // Stopping first hands waiting answers and open polls back and flushes batches; the exit happens even if that fails.
+        exit: code => { void this.stop().catch(error => this.log.warn(`stop before restart: ${String(error)}`)).then(() => opts.onExit(code)); },
+        warn: text => this.log.warn(text) });
+      this.rigEvents = new RigEvents({ dir: opts.rigDir, stateDir: dirname(opts.outboxFile), running: () => this.running,
+        available: () => this.running && this.botReady && Boolean(opts.config().groupId),
+        send: async (event, sent, accepted) => {
+          const group = opts.config().groupId;
+          if (!group || !opts.api) return false;
+          const pieces = chunk(toTelegram(event.text));
+          for (const [index, piece] of pieces.entries()) {
+            if (index < sent) continue;
+            await opts.api.sendMessage(group, undefined, piece.text, event.level === "info", piece.entities);
+            accepted(index + 1);
+          }
+          return true;
+        }, features: () => this.refreshFeatures(), restart: () => this.rigLifecycle?.request(), warn: text => this.log.warn(text) });
+    }
     // A card's edits go on after a restart; one not yet shown gets its next
     // version as an edit, a "not modified" answer being no error.
     if (opts.cardsFile) {
@@ -452,6 +511,22 @@ export class Hub {
         hasWindow: sid => this.connOf(sid) !== undefined,
         graceMs: opts.execGraceMs ?? EXEC_GRACE_MS,
         log: opts.log,
+        unavailable: shell => shell === "powershell" ? this.rig.unavailable("pwsh") : shell === "cmd" ? this.rig.unavailable("cmd") : undefined,
+        machineCard: (record, text, final, kind, buttons) => {
+          if (record.destination) this.machineOutbox.post(`rig-${record.id}`, record.destination, text, !notifies(kind), buttons, true);
+          if (record.destination && final && kind !== "info") this.machineOutbox.post(`rig-failed-${record.id}`, record.destination, text.split("\n").slice(0, 2).join("\n"), false);
+          if (this.botReady && opts.api) void this.machineOutbox.flush(opts.api);
+        },
+        machineFile: (record, path, kind) => {
+          const id = `rig-log-${record.id}`;
+          // A restore offers the log again: a copy for a log already queued or sent would stay on disk.
+          if (record.destination && !this.machineOutbox.known(id)) {
+            const copy = join(opts.filesDir, "rig", `${record.id}.log`);
+            mkdirSync(dirname(copy), { recursive: true });
+            copyFileSync(path, copy);
+            this.machineOutbox.post(id, record.destination, "", !notifies(kind), undefined, false, copy);
+          }
+        },
       });
     }
   }
@@ -484,6 +559,8 @@ export class Hub {
     }, this.opts.typingEveryMs ?? TYPING_EVERY_MS);
     // Before armIdle: commands still running keep the hub up.
     this.execs?.start();
+    void this.refreshFeatures();
+    void this.rigTick();
     this.armIdle();
     if (this.opts.api) void this.pollLoop(this.opts.api);
     else this.log.error("no TELEGRAM_BOT_TOKEN — not polling Telegram");
@@ -493,6 +570,7 @@ export class Hub {
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
+    this.clearTimer(this.rigTimer);
     for (const gate of this.exitGates.values()) gate.cancel();
     // Polling stops first, so no batch starts after the flush.
     this.abort.abort();
@@ -658,12 +736,22 @@ export class Hub {
     return taken.map(e => e.cmd);
   }
 
-  private async registerCommands(api: TelegramApi): Promise<void> {
-    try {
-      await api.setMyCommands(BOT_COMMANDS, this.abort.signal);
-    } catch (e) {
-      if (this.running) this.log.warn(`registering bot commands failed: ${e}`);
-    }
+  private registerCommands(api: TelegramApi): Promise<void> {
+    if (this.registeringCommands) return this.registeringCommands;
+    const platform = this.opts.platform ?? PLATFORM;
+    const commands = BOT_COMMANDS.filter(c => c.command !== "pwsh" && c.command !== "cmd" || !this.rig.unavailable(c.command))
+      .map(c => c.command === "bash" ? { ...c, description: `Команда в ${platform.bashName} в папке сессии` } : c);
+    const signature = JSON.stringify(commands);
+    if (signature === this.registeredCommands) return Promise.resolve();
+    this.registeringCommands = (async () => {
+      try {
+        await api.setMyCommands(commands, this.abort.signal);
+        this.registeredCommands = signature;
+      } catch (error) {
+        if (this.running) this.log.warn(`registering bot commands failed: ${String(error)}`);
+      }
+    })().finally(() => { this.registeringCommands = undefined; });
+    return this.registeringCommands;
   }
 
   private onOpen(ws: WS): void {
@@ -728,7 +816,7 @@ export class Hub {
   // hub stays up with no window at all; and while a topic command runs, so
   // its result reaches the topic.
   private alwaysOn(): boolean {
-    return this.opts.idleMs <= 0 || this.opts.config().launch !== undefined || (this.execs?.running() ?? 0) > 0;
+    return this.opts.idleMs <= 0 || this.opts.config().launch !== undefined || (this.execs?.running() ?? 0) > 0 || this.machineQueries > 0 || this.rigLifecycle?.waiting === true;
   }
 
   private armIdle(): void {
@@ -751,7 +839,7 @@ export class Hub {
   }
 
   private maybeExit(): void {
-    if (!this.idleExpired || !this.running || this.conns.size > 0 || this.deliverable() > 0) return;
+    if (!this.idleExpired || !this.running || this.conns.size > 0 || this.deliverable() > 0 || this.machineOutbox.size > 0 || this.machineOutbox.busy || this.alwaysOn()) return;
     if (this.outbox.size) this.log.info(`no plugins connected — exiting; ${this.outbox.size} queued piece(s) wait on disk until the setup is fixed`);
     else this.log.info("no plugins connected — exiting");
     void this.stop().then(() => this.opts.onExit());
@@ -863,7 +951,14 @@ ${msg.text}`);
       // Shown at once, then renewed by the typing timer.
       case "busy":
         ws.data.busy = msg.busy;
-        if (!msg.busy) return;
+        if (!msg.busy) {
+          // Completed turns may have had their permission answered in the terminal.
+          // Keep the cached card for existing button behavior, but it no longer blocks an update.
+          if (sid && ![...this.conns].some(connection => connection.data.sessionId === sid && connection.data.busy)) {
+            for (const permission of this.permissions.values()) if (permission.sessionId === sid) permission.settled = true;
+          }
+          return;
+        }
         this.showTyping(ws);
         if (sid) this.dropLaunchNotices(sid);
         return;
@@ -1173,7 +1268,11 @@ ${msg.text}`);
     const warn = (what: string) => (e: unknown) => this.log.warn(`${what} failed: ${e}`);
     const ack = (text?: string) => api.answerCallbackQuery(press.id, text).catch(warn("answering a button press"));
     const parsed = parsePollPress(press.data);
-    const p = parsed ? this.polls.get(parsed.key) : undefined;
+    const known = parsed ? this.polls.get(parsed.key) : undefined;
+    // Nobody is left to take the answer: the question moves to the terminal and the button is stale.
+    const closed = known && !this.connOf(known.sessionId);
+    if (known && closed) void this.finishPoll(known, { decision: "none" }, TO_TERMINAL);
+    const p = closed ? undefined : known;
     const q = p?.questions[p.index];
     const action = parsed?.action;
     const valid = p && q && parsed?.index === p.index && action !== undefined && (typeof action === "number" ? action >= 1 && action <= q.options.length : action !== "done" || q.multiSelect);
@@ -1698,6 +1797,8 @@ ${msg.text}`);
             void this.registerCommands(api);
           }
           online = wasOnline = true;
+          this.botReady = true;
+          this.rigLifecycle?.ready();
           failures = 0;
         } catch (e) {
           if (!this.running) return;
@@ -1706,27 +1807,30 @@ ${msg.text}`);
             return;
           }
           this.log.warn(`Telegram unreachable (${e}); still trying`);
-          await Bun.sleep(this.opts.pollRetryBaseMs ?? POLL_RETRY_BASE_MS);
+          await (this.opts.sleep ?? Bun.sleep)(this.opts.pollRetryBaseMs ?? POLL_RETRY_BASE_MS);
           continue;
         }
       }
       let updates: Update[];
       try {
         updates = await api.getUpdates(offset, this.opts.pollTimeoutSec ?? POLL_TIMEOUT_SEC, this.abort.signal);
+        this.botReady = true;
         if (failures) this.log.info("Telegram polling works again");
         failures = 0;
       } catch (e) {
         if (!this.running) return;
+        this.botReady = false;
         if (!(e instanceof TelegramError)) {
           this.log.warn(`getUpdates lost the connection (${e}); reconnecting`);
           online = false;
+          this.botReady = false;
           continue;
         }
         failures++;
         const delay = Math.min((this.opts.pollRetryBaseMs ?? POLL_RETRY_BASE_MS) * failures, MAX_POLL_DELAY_MS);
         const conflict = e.code === 409;
         this.log.warn(`${conflict ? "getUpdates 409 Conflict — another poller uses this bot token" : `getUpdates failed: ${e}`}; retry in ${delay}ms`);
-        await Bun.sleep(delay);
+        await (this.opts.sleep ?? Bun.sleep)(delay);
         continue;
       }
       for (const u of updates) {
@@ -1743,6 +1847,12 @@ ${msg.text}`);
   }
 
   private async handleUpdate(api: TelegramApi, u: Update): Promise<void> {
+    this.updatesInFlight++;
+    try { await this.processUpdate(api, u); }
+    finally { this.updatesInFlight--; }
+  }
+
+  private async processUpdate(api: TelegramApi, u: Update): Promise<void> {
     const cfg = this.opts.config();
     const press = routeCallback(u, cfg);
     if (press?.action === "ignore") {
@@ -1751,10 +1861,11 @@ ${msg.text}`);
       return;
     }
     if (press?.data.startsWith("x:")) return this.onExecPress(api, press);
+    if (press?.data.startsWith("rig-disable:")) return this.onRigDisablePress(api, press);
     if (press?.data.startsWith("m:")) return this.onModePress(api, press);
     if (press?.data.startsWith(POLL_PREFIX) && cfg.groupId) return this.onPollPress(api, cfg.groupId, press);
     if (press && cfg.groupId) return this.onPermissionPress(api, cfg.groupId, press);
-    const route = routeUpdate(u, cfg, this.store, id => this.isConnected(id));
+    const route = routeUpdate(u, cfg, this.store, id => this.isConnected(id), this.botUsername);
     const m = u.message;
     if (m) this.deliveryOrder(m);
     if (route.action === "ignore") {
@@ -1762,6 +1873,11 @@ ${msg.text}`);
       return;
     }
     if (!m) return;
+    if (route.action === "machine") {
+      const command = machineCommandOf(m.text ?? "", this.botUsername);
+      if (command) this.runMachineCommand(command, m, { chatId: String(m.chat.id), topicId: route.topicId });
+      return;
+    }
     // Whether Telegram sent a reply's quote shows only in the raw update.
     const r = m.reply_to_message;
     if (r && !r.forum_topic_created && r.message_id !== m.message_thread_id) {
@@ -2645,6 +2761,179 @@ ${msg.text}`);
 
   // --- topic commands -------------------------------------------------------
 
+  // One refresh runs at a time; requests that arrive meanwhile share one more run behind it,
+  // so the final state is always read after the last request.
+  private refreshFeatures(): Promise<void> {
+    if (this.featureRefresh) {
+      this.featureRefreshAgain = true;
+      return this.featureRefresh;
+    }
+    this.machineQueries++;
+    this.featureRefresh = (async () => {
+      try {
+        do {
+          this.featureRefreshAgain = false;
+          await this.rig.refresh();
+          if (this.botReady && this.opts.api) await this.registerCommands(this.opts.api);
+        } while (this.featureRefreshAgain && this.running);
+      } finally {
+        this.featureRefresh = undefined;
+        this.endMachineQuery();
+      }
+    })();
+    return this.featureRefresh;
+  }
+
+  private runMachineCommand(command: MachineCommand, message: Message, destination: MachineDestination): void {
+    const task: Promise<void> = this.onMachineCommand(command, message, destination)
+      .catch(error => this.log.error(`machine command failed: ${String(error)}`))
+      .finally(() => { this.machineTasks.delete(task); });
+    this.machineTasks.add(task);
+  }
+
+  // A finished query that kept the hub alive lets the idle timer start again.
+  private endMachineQuery(): void {
+    this.machineQueries--;
+    this.armIdle();
+  }
+
+  // A question or permission request counts only while its window is open: after it closes nobody can answer.
+  private rigIdle(): boolean {
+    return ![...this.conns].some(ws => ws.data.busy)
+      && ![...this.permissions.values()].some(permission => !permission.settled && this.connOf(permission.sessionId))
+      && ![...this.polls.values()].some(poll => this.connOf(poll.sessionId))
+      && !this.catchUps.size && !this.questionSends.size
+      && ![...this.commands.values()].some(queued => queued.length)
+      && !(this.execs?.running() ?? 0) && !this.machineQueries && !this.machineTasks.size && !this.updatesInFlight
+      && !this.launches.size && !this.modeRestarts.size && !this.exitGates.size && !this.gatedLaunches.size
+      && !this.cleanups.size && !this.stops.size && !this.stopping.size && !this.readyTimers.size
+      && ![...this.retained.values(), ...this.dyingHeld.values(), ...this.heldResults.values()].some(items => items.length)
+      && !this.replays.size && !this.batches.size && !this.batchSends.size && !this.answerGroups.size
+      && this.deliverable() === 0 && !this.pumping.size && ![...this.cards.values()].some(card => card.editing)
+      && !this.machineOutbox.size && !this.machineOutbox.busy && !this.rigEvents?.busy
+      && ![...this.disableConfirmations.values()].some(item => item.recovery !== undefined);
+  }
+
+  private async rigStage(name: string, run: () => Promise<void>): Promise<void> {
+    try { await run(); } catch (error) { this.log.warn(`rig ${name}: ${String(error)}`); }
+  }
+
+  private async rigTick(): Promise<void> {
+    if (!this.running || this.rigTickRunning) return;
+    this.rigTickRunning = true;
+    try {
+      // Events come first and each stage has its own guard: a failing Telegram call must not hold back
+      // a service event, and a failing event must not hold back the queue.
+      await this.rigStage("events", async () => { await this.rigEvents?.poll(); });
+      await this.rigStage("queue", async () => {
+        const api = this.opts.api;
+        for (const [key, confirmation] of this.disableConfirmations) this.queueRigConfirmation(key, confirmation);
+        if (api && this.botReady) {
+          await this.registerCommands(api);
+          await this.machineOutbox.flush(api);
+        }
+        if (!this.running) return;
+        for (const [key, confirmation] of this.disableConfirmations) {
+          if (!confirmation.recovery || !this.machineOutbox.delivered(confirmation.recovery)) continue;
+          this.launchRig(["feature", "telegram", "disable"], confirmation.message, confirmation.destination);
+          this.disableConfirmations.delete(key);
+          this.machineOutbox.deleteConfirmation(key);
+        }
+      });
+      if (this.running) await this.rigStage("lifecycle", async () => { this.rigLifecycle?.check(); });
+      if (this.running) this.maybeExit();
+    } catch (error) { this.log.warn(`rig tick: ${String(error)}`); }
+    finally {
+      this.rigTickRunning = false;
+      if (this.running) this.rigTimer = this.setTimer(() => { void this.rigTick(); }, RIG_POLL_MS);
+    }
+  }
+
+  private async onMachineCommand(command: MachineCommand, message: Message, destination: MachineDestination): Promise<void> {
+    const id = `machine-${destination.chatId}-${message.message_id}`;
+    const answer = (text: string, error = false) => this.machineOutbox.post(id, destination, text, !error);
+    const action = rigAction(command);
+    if (!action.ok) answer(action.error, true);
+    else if (action.value.kind === "features" || action.value.kind === "status") {
+      this.machineQueries++;
+      try {
+        if (action.value.kind === "features") {
+          const result = await this.rig.refresh();
+          answer(result.ok ? featureText(result.value) : result.error, !result.ok);
+          if (this.opts.api) await this.registerCommands(this.opts.api);
+        } else {
+          const result = await this.rig.status();
+          answer(result.ok ? statusText(result.value) : result.error, !result.ok);
+        }
+      } finally { this.endMachineQuery(); }
+    } else if (this.machineOutbox.handled(id)) return;
+    else if (!this.rig.invocation(action.value.args).ok) answer(this.rigInvocationError(action.value.args), true);
+    else if (action.value.confirm) {
+      // Duplicate updates do not create another active button for the same command.
+      if (![...this.disableConfirmations.values()].some(item => item.message.message_id === message.message_id && item.destination.chatId === destination.chatId)) {
+        const key = randomUUID();
+        const confirmation = { message: { message_id: message.message_id }, destination, sentAt: message.date * MS_PER_SECOND };
+        this.disableConfirmations.set(key, confirmation);
+        this.machineOutbox.saveConfirmation(key, confirmation);
+        this.queueRigConfirmation(key, confirmation);
+      }
+    } else this.launchRig(action.value.args, message, destination, message.date * MS_PER_SECOND);
+    if (this.opts.api) await this.machineOutbox.flush(this.opts.api);
+  }
+
+  private rigInvocationError(args: string[]): string {
+    const invocation = this.rig.invocation(args);
+    return invocation.ok ? RIG_MISSING : invocation.error;
+  }
+
+  // `sentAt` (ms) is set for a command run straight from the user's message; a confirmed one was age-checked at the press.
+  private launchRig(args: string[], message: Pick<Message, "message_id">, destination: MachineDestination, sentAt?: number): void {
+    const id = `machine-${destination.chatId}-${message.message_id}`;
+    if (this.machineOutbox.handled(id)) return;
+    const invocation = this.rig.invocation(args);
+    if (!invocation.ok || !this.execs) {
+      this.machineOutbox.post(`rig-error-${destination.chatId}-${message.message_id}`, destination, invocation.ok ? EXEC_NOT_SET : invocation.error, false);
+      return;
+    }
+    this.execs.machine(invocation.value, `rig ${args.join(" ")}`, this.opts.repository ?? join(import.meta.dir, "..", "..", ".."), destination, message.message_id, sentAt);
+    this.machineOutbox.markHandled(id);
+  }
+
+  private queueRigConfirmation(key: string, confirmation: RigConfirmation): void {
+    if (confirmation.recovery) this.machineOutbox.post(confirmation.recovery, confirmation.destination, RIG_RECOVERY_TEXT);
+    else this.machineOutbox.post(`machine-${confirmation.destination.chatId}-${confirmation.message.message_id}`, confirmation.destination,
+      "Выключить Telegram на этой машине?", false, [[{ text: "Выключить Telegram", data: `rig-disable:${key}` }]]);
+  }
+
+  private async onRigDisablePress(api: TelegramApi, press: { id: string; data: string; messageId: number; fromId: string }): Promise<void> {
+    const key = press.data.slice("rig-disable:".length);
+    const confirmation = this.disableConfirmations.get(key);
+    if (!confirmation || confirmation.recovery) {
+      await api.answerCallbackQuery(press.id, "Подтверждение уже обработано или устарело");
+      return;
+    }
+    // Same age limit as /bash: an old button must not switch Telegram off. A confirmation without a time is from an older hub.
+    const now = this.opts.now ?? Date.now;
+    if (confirmation.sentAt === undefined || now() - confirmation.sentAt > (this.opts.execMaxAgeMs ?? EXEC_MAX_AGE_MS)) {
+      this.disableConfirmations.delete(key);
+      this.machineOutbox.deleteConfirmation(key);
+      await api.answerCallbackQuery(press.id, "Подтверждение устарело, отправь команду заново").catch(error => this.log.warn(`rig confirmation: ${String(error)}`));
+      return;
+    }
+    const recovery = `rig-recovery-${key}`;
+    confirmation.recovery = recovery;
+    this.machineOutbox.saveConfirmation(key, confirmation);
+    this.queueRigConfirmation(key, confirmation);
+    await api.answerCallbackQuery(press.id, "Подтверждено").catch(error => this.log.warn(`rig confirmation: ${String(error)}`));
+    await this.machineOutbox.flush(api);
+    // Starting rig is deferred until the recovery message is accepted by Telegram.
+    if (this.machineOutbox.delivered(recovery)) {
+      this.launchRig(["feature", "telegram", "disable"], confirmation.message, confirmation.destination);
+      this.disableConfirmations.delete(key);
+      this.machineOutbox.deleteConfirmation(key);
+    }
+  }
+
   private bashPath(): string {
     return this.opts.config().exec?.bash ?? (this.opts.platform ?? PLATFORM).bash;
   }
@@ -2658,6 +2947,10 @@ ${msg.text}`);
   private onExecCommand(sessionId: string, name: "pwsh" | "cmd" | "bash", text: string, m: Message): void {
     const platform = this.opts.platform ?? PLATFORM;
     if (name !== "bash" && !platform.windows) return this.notice(sessionId, `/${name} недоступна на этой платформе`, "warning");
+    if (name !== "bash") {
+      const why = this.rig.unavailable(name);
+      if (why) return this.notice(sessionId, why, "warning");
+    }
     if (!this.execs) return this.notice(sessionId, EXEC_NOT_SET, "error");
     if (!text) return this.enqueue(sessionId, `hub-${randomUUID()}`, `Напиши команду: \`/${name} npm run migrate\``, notifies("info"));
     // cmd /c runs only up to the first line break.
