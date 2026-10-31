@@ -1,11 +1,15 @@
+import type { Platform } from "./platform.ts";
+
 import { spawn } from "child_process";
 import { homedir } from "os";
 import { join } from "path";
+import { PLATFORM } from "./platform.ts";
 
 export type ChimeKind = "ask" | "done";
 
 // The terminal sound is a shell command; {kind} is put in.
-export function defaultTurnEndChime(): string {
+export function defaultTurnEndChime(platform: Platform = PLATFORM): string {
+  if (!platform.sound) return "";
   const script = `${homedir().replaceAll("\\", "/")}/.claude/skills/chime/chime.ps1`;
   return `powershell -NoProfile -ExecutionPolicy Bypass -File "${script}" -Kind {kind}`;
 }
@@ -25,7 +29,7 @@ export function chimeCommand(template: string, kind: ChimeKind): string | undefi
 // with it. So a detached relay runs the shell attached and waits for it.
 export function spawnShellDetached(cmd: string): void {
   const options = { detached: true, stdio: "ignore", windowsHide: true } as const;
-  const child = process.platform === "win32"
+  const child = PLATFORM.windows
     ? spawn(process.execPath, [join(import.meta.dir, "shell-relay.ts"), cmd], options)
     : spawn(cmd, { ...options, shell: true });
   child.on("error", () => {});
@@ -33,7 +37,8 @@ export function spawnShellDetached(cmd: string): void {
 }
 
 // Starts the sound without waiting for it; never throws.
-export function playChime(template: string, kind: ChimeKind, run: (cmd: string) => void = spawnShellDetached): void {
+export function playChime(template: string, kind: ChimeKind, run: (cmd: string) => void = spawnShellDetached, platform: Platform = PLATFORM): void {
+  if (!platform.sound) return;
   const cmd = chimeCommand(template, kind);
   if (cmd === undefined) return;
   try {

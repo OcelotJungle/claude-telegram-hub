@@ -81,7 +81,7 @@ export function loadToken(): string | undefined {
 // and its arguments, with {cwd}, {account} and {session} put in.
 export type Launch = { command: string[]; timeoutSec: number };
 
-// Topic commands: bash is the Git Bash /bash runs in.
+// Topic commands: bash overrides the platform's default /bash executable.
 export type ExecConfig = { bash?: string };
 
 // launchError: config.json has a launch section that is not valid.

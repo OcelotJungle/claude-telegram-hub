@@ -12,6 +12,7 @@ import { Execs, execCardText, HEARTBEAT_STALE_MS, logTail, MAX_EXECS } from "../
 import { loadExecs, saveExecs } from "../src/hub/exec-store.ts";
 import { HEARTBEAT_MS, runnerSpecSchema } from "../src/hub/exec-runner.ts";
 import { notifies } from "../src/shared/notification.ts";
+import { platformFor } from "../src/shared/platform.ts";
 import { memLogger, must, tempDir, waitFor } from "./helpers.ts";
 
 const SID = "s1";
@@ -454,7 +455,8 @@ describe("exec texts", () => {
       startedAt: NOW,
       reported: false,
     };
-    expect(execCardText(rec, "", NOW + 42_000)).toBe("▶ Git Bash · 42 с\n`make`");
-    expect(execCardText(rec, "", NOW + 3 * MIN_MS + 12_000)).toBe("▶ Git Bash · 3 мин 12 с\n`make`");
+    expect(execCardText(rec, "", NOW + 42_000, platformFor("win32").shellNames)).toBe("▶ Git Bash · 42 с\n`make`");
+    expect(execCardText(rec, "", NOW + 3 * MIN_MS + 12_000, platformFor("win32").shellNames)).toBe("▶ Git Bash · 3 мин 12 с\n`make`");
+    expect(execCardText(rec, "", NOW + 42_000, platformFor("linux").shellNames)).toBe("▶ bash · 42 с\n`make`");
   });
 });

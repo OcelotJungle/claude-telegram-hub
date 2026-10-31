@@ -20,6 +20,7 @@ import { notifies } from "../src/shared/notification.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { freePort, hasFfmpeg, makeVideo, memLogger, must, NO_PACE, tempDir, waitFor, wsClient } from "./helpers.ts";
 import { manualClock } from "./manual-clock.ts";
+import { PLATFORM, platformFor } from "../src/shared/platform.ts";
 
 const GROUP = "-1001";
 const ME = "123456789";
@@ -93,6 +94,8 @@ type HubExtras = {
 async function startHub(o: { port?: number; idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number; batchQuietMs?: number; batchMaxMs?: number } & HubExtras = {}) {
   port = o.port ?? (await freePort());
   hub = new Hub({
+    platform: platformFor("win32"),
+    accountsAvailable: () => true,
     port,
     codexSessionsDir: join(dir, "codex-sessions"),
     sessionsFile: join(dir, "sessions.json"),
@@ -3634,6 +3637,13 @@ describe("topic commands", () => {
     arr(field(field(call, "reply_markup"), "inline_keyboard"))
       .flatMap(row => arr(row))
       .map(b => String(field(b, "callback_data")));
+  // Commands that really run: cmd on Windows, bash elsewhere (the hub is told
+  // where bash is; its cards still use the Windows platform's shell names).
+  const hostCommand = (cmdText: string, bashText: string) => (PLATFORM.windows ? `/cmd ${cmdText}` : `/bash ${bashText}`);
+  const HOST_CARD = PLATFORM.windows ? "cmd" : platformFor("win32").bashName;
+  beforeEach(() => {
+    if (!PLATFORM.windows) config = { ...config, exec: { bash: PLATFORM.bash } };
+  });
 
   // A session with a topic and no window, as the hub finds it on disk.
   const closedSession = () => new SessionStore(join(dir, "sessions.json")).set(SID, { topicId: 100, title: "T", project: "p", enabled: true, cwd: CWD, account: "2" });
@@ -3641,7 +3651,7 @@ describe("topic commands", () => {
   test("/cmd runs in the session folder, shows a card and wakes the agent", async () => {
     await startHub();
     const a = await enabled(SID);
-    fake.pushUpdate(msg("/cmd echo привет && cd && exit /b 3"));
+    fake.pushUpdate(msg(hostCommand("echo привет && cd && exit /b 3", "echo привет; pwd; exit 3")));
     const inbound = await a.nextNew("inbound", m => m.meta.source === "exec", RUN_MS);
     expect(inbound.meta.exit_code).toBe("3");
     expect(inbound.content).toContain("❌ код 3");
@@ -3654,7 +3664,7 @@ describe("topic commands", () => {
   test("a stop button ends a running command", async () => {
     await startHub();
     await enabled(SID);
-    fake.pushUpdate(msg("/cmd ping -n 30 127.0.0.1"));
+    fake.pushUpdate(msg(hostCommand("ping -n 30 127.0.0.1", "sleep 30")));
     const card = await waitFor(() => fake.callsOf("sendMessage").find(c => buttonsOf(c).some(d => d.startsWith("x:"))), WAIT_MS, "card with a stop button");
     const data = must(buttonsOf(card).find(d => d.endsWith(":stop")), "stop button");
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
@@ -3793,7 +3803,7 @@ describe("topic commands", () => {
   test("a result for a session without a window and without launch says it was not delivered", async () => {
     closedSession();
     await startHub();
-    fake.pushUpdate(msg("/cmd echo hi"));
+    fake.pushUpdate(msg(hostCommand("echo hi", "echo hi")));
     await waitFor(() => texts().includes("⚠️ Сессия не запущена: результат команды агенту не доставлен"), RUN_MS, "notice");
     // The final card is an edit, cardEditMs after the end.
     await waitFor(() => shown().some(t => t.startsWith("✅ код 0")), WAIT_MS, "final card");
@@ -3804,7 +3814,7 @@ describe("topic commands", () => {
     const spawned: string[][] = [];
     config = { ...config, launch: { command: ["wt.exe", "{session}"], timeoutSec: LAUNCH_TIMEOUT_S } };
     await startHub({ spawn: c => void spawned.push(c) });
-    fake.pushUpdate(msg("/cmd echo hi"));
+    fake.pushUpdate(msg(hostCommand("echo hi", "echo hi")));
     await waitFor(() => spawned.length === 1, RUN_MS, "session start");
     const w = await plugin(SID);
     const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
@@ -3816,9 +3826,9 @@ describe("topic commands", () => {
 
   test("the hub does not exit idle while a command runs", async () => {
     closedSession();
-    fake.pushUpdate(msg("/cmd ping -n 3 127.0.0.1"));
+    fake.pushUpdate(msg(hostCommand("ping -n 3 127.0.0.1", "sleep 3")));
     await startHub({ idleMs: IDLE_MS });
-    await waitFor(() => shown().some(t => t.startsWith("▶ cmd")), WAIT_MS, "running card");
+    await waitFor(() => shown().some(t => t.startsWith(`▶ ${HOST_CARD}`)), WAIT_MS, "running card");
     await Bun.sleep(IDLE_MS * 2);
     expect(exited).toBe(false);
     await waitFor(() => shown().some(t => t.startsWith("✅ код 0")), RUN_MS, "final card");
@@ -3828,7 +3838,7 @@ describe("topic commands", () => {
   test("a log over the Telegram limit goes as its last 50 MB", async () => {
     await startHub({ execFileLimit: FILE_LIMIT });
     await enabled(SID);
-    fake.pushUpdate(msg("/cmd for /l %i in (1,1,40) do @echo line %i"));
+    fake.pushUpdate(msg(hostCommand("for /l %i in (1,1,40) do @echo line %i", "for i in $(seq 1 40); do echo line $i; done")));
     const doc = await waitFor(() => fake.callsOf("sendDocument")[0], RUN_MS, "log file");
     const file = field(doc, "document");
     expect(String(field(file, "file"))).toEndWith(".log");

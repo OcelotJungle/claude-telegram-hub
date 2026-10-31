@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
+import { PLATFORM } from "../src/shared/platform.ts";
 import { z } from "zod";
 import { QUESTION_DEADLINE_MS } from "../src/hook/question-limits.ts";
 import { isAlive } from "../src/hub/exec-runner.ts";
@@ -120,6 +121,10 @@ describe("Stop hook", () => {
     expect(await c.next("turnEnd")).toEqual({ type: "turnEnd", final: true, kind: "ask" });
     // A hook with no hub to tell chimes; by then a chime of the first would be heard too.
     expect((await runStop(await freePort(), { session_id: "s", last_assistant_message: "Готово." }, dir)).status).toBe(0);
+    if (!PLATFORM.sound) {
+      expect(chimes()).toEqual([]);
+      return;
+    }
     await waitFor(() => chimes().length > 0, 5000, "chime");
     expect(chimes()).toEqual(["done"]);
   });
@@ -132,6 +137,10 @@ describe("Stop hook", () => {
     const loud = await runStop(port, { session_id: "s", last_assistant_message: "Готово." }, dir);
     expect(loud.status).toBe(0);
     expect(loud.stdout).toBe("");
+    if (!PLATFORM.sound) {
+      expect(chimes()).toEqual([]);
+      return;
+    }
     await waitFor(() => chimes().length > 0, 5000, "chime");
     expect(chimes()).toEqual(["done"]);
   });

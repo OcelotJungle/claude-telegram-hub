@@ -4,11 +4,13 @@ import type { ChannelMeta, HubToPlugin, PermissionBehavior } from "../shared/pro
 import type { TranscriptEvent } from "../transcript/parse.ts";
 import type { Outgoing } from "../transcript/relay.ts";
 import type { Titles } from "../transcript/tail.ts";
+import type { Platform } from "../shared/platform.ts";
 
 import { randomUUID } from "crypto";
 import { copyFileSync, mkdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { playChime } from "../shared/chime.ts";
+import { PLATFORM } from "../shared/platform.ts";
 import { isInside, loadConfig } from "../shared/config.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { BYTES_PER_MB, MAX_CAPTION, MAX_UPLOAD } from "../shared/media.ts";
@@ -105,7 +107,8 @@ export type PluginOptions = {
 
 // Plays the turnEndChime of config.json; a bad one is logged once per
 // process and the default sound plays instead.
-export function playConfiguredChime(kind: ChimeKind, log: Logger, play: (template: string, kind: ChimeKind) => void = playChime): void {
+export function playConfiguredChime(kind: ChimeKind, log: Logger, play: (template: string, kind: ChimeKind) => void = playChime, platform: Platform = PLATFORM): void {
+  if (!platform.sound) return;
   const config = loadConfig();
   if (config.turnEndChimeError && !chimeConfigWarned) {
     chimeConfigWarned = true;

@@ -3,6 +3,7 @@ import { existsSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { accountOf, SessionStore, topicName } from "../src/hub/sessions.ts";
 import { tempDir } from "./helpers.ts";
+import { platformFor } from "../src/shared/platform.ts";
 
 const rec = { topicId: 101, title: "Fix login", project: "app", enabled: true };
 
@@ -38,9 +39,9 @@ describe("SessionStore", () => {
   });
 
   test("the account is the number of the cswap profile folder", () => {
-    expect(accountOf("C:\\Users\\me\\.claude-swap-backup\\sessions\\1-me_gmail.com")).toBe("1");
-    expect(accountOf("C:\\Users\\me\\.claude-swap-backup\\sessions\\12-x_y.com\\")).toBe("12");
-    expect(accountOf("C:\\Users\\me\\.claude")).toBeUndefined();
+    expect(accountOf("C:\\Users\\me\\.claude-swap-backup\\sessions\\1-me_gmail.com", platformFor("win32"))).toBe("1");
+    expect(accountOf("C:\\Users\\me\\.claude-swap-backup\\sessions\\12-x_y.com\\", platformFor("win32"))).toBe("12");
+    expect(accountOf("C:\\Users\\me\\.claude", platformFor("win32"))).toBeUndefined();
     expect(accountOf(undefined)).toBeUndefined();
   });
 

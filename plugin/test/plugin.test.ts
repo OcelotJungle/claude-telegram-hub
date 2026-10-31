@@ -9,6 +9,7 @@ import { SessionStore } from "../src/hub/sessions.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
 import { CHIME_MIN_TURN_MS, CONTINUE_PROMPT, CUT_LIMIT_NOTE, cutLimitNote, filesRejectedPrompt, interruptPrompt, MAX_AUTO_CONTINUES, playConfiguredChime, PluginCore } from "../src/plugin/plugin.ts";
 import { defaultTurnEndChime } from "../src/shared/chime.ts";
+import { platformFor } from "../src/shared/platform.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { TURN_DECISION_MS } from "../src/transcript/relay.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
@@ -876,8 +877,8 @@ describe("the configured chime", () => {
     const log = memLogger();
     const played: [string, ChimeKind][] = [];
     const play = (template: string, kind: ChimeKind) => void played.push([template, kind]);
-    playConfiguredChime("done", log, play);
-    playConfiguredChime("ask", log, play);
+    playConfiguredChime("done", log, play, platformFor("win32"));
+    playConfiguredChime("ask", log, play, platformFor("win32"));
     expect(played).toEqual([
       [defaultTurnEndChime(), "done"],
       [defaultTurnEndChime(), "ask"],

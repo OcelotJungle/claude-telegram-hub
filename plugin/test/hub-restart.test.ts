@@ -47,6 +47,7 @@ function fixture(extra: Partial<HubOptions> = {}) {
     port: 0, sessionsFile: join(dir, "sessions.json"), outboxFile: join(dir, "outbox.json"),
     filesDir: join(dir, "files"), inboxDir: join(dir, "inbox"), api, config: () => config,
     idleMs: 0, spawn: command => { spawned.push(command); }, log: memLogger(), onExit: () => {},
+    accountsAvailable: () => true,
     now: clock.now, sleep: clock.sleep, setTimer: clock.set, clearTimer: clock.clear,
     cleanupExitMs: EXIT_MS, exitPollMs: POLL_MS, cleanupSettleMs: SETTLE_MS, readyDelayMs: READY_MS,
     isAlive: () => alive, ...extra,

@@ -1,6 +1,9 @@
+import type { Platform } from "../shared/platform.ts";
+
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
-import { basename, dirname } from "path";
+import { dirname } from "path";
 import { z } from "zod";
+import { PLATFORM } from "../shared/platform.ts";
 
 const MAX_TOPIC_NAME = 128;
 const SEP = " · ";
@@ -42,8 +45,8 @@ const dataSchema: z.ZodType<Record<string, SessionRecord>> = z.record(
 );
 
 // The cswap account of a Claude Code config dir (…\sessions\1-me_gmail.com → "1").
-export function accountOf(configDir: string | undefined): string | undefined {
-  return configDir ? basename(configDir).match(CSWAP_PROFILE)?.[1] : undefined;
+export function accountOf(configDir: string | undefined, platform: Platform = PLATFORM): string | undefined {
+  return configDir ? platform.pathBase(configDir).match(CSWAP_PROFILE)?.[1] : undefined;
 }
 
 // sessionId → topic. Only the hub writes it; a session keeps its topic forever.

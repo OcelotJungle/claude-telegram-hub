@@ -5,6 +5,7 @@ import { chunk } from "../src/shared/chunk.ts";
 import { chimeCommand, defaultTurnEndChime, playChime, spawnShellDetached } from "../src/shared/chime.ts";
 import { idleMs, loadConfig, loadToken, paths } from "../src/shared/config.ts";
 import { tempDir, waitFor } from "./helpers.ts";
+import { platformFor } from "../src/shared/platform.ts";
 
 const CHIME_WAIT_MS = 10_000;
 
@@ -201,7 +202,7 @@ describe("config", () => {
 
 describe("chime", () => {
   test("the default runs chime.ps1 of the chime skill with {kind}", () => {
-    const cmd = defaultTurnEndChime();
+    const cmd = defaultTurnEndChime(platformFor("win32"));
     expect(cmd).toContain("/.claude/skills/chime/chime.ps1");
     expect(cmd).toContain("-Kind {kind}");
     expect(cmd).not.toContain("\\");
@@ -215,11 +216,11 @@ describe("chime", () => {
 
   test("playChime hands the command to the runner, not at all for an empty template, and swallows its errors", () => {
     const ran: string[] = [];
-    playChime("beep {kind}", "done", cmd => ran.push(cmd));
+    playChime("beep {kind}", "done", cmd => ran.push(cmd), platformFor("win32"));
     expect(ran).toEqual(["beep done"]);
-    playChime("", "done", cmd => ran.push(cmd));
+    playChime("", "done", cmd => ran.push(cmd), platformFor("win32"));
     expect(ran).toEqual(["beep done"]);
-    expect(() => playChime("beep", "ask", () => { throw new Error("no shell"); })).not.toThrow();
+    expect(() => playChime("beep", "ask", () => { throw new Error("no shell"); }, platformFor("win32"))).not.toThrow();
   });
 
   // A program the shell starts must not get a visible console: Windows

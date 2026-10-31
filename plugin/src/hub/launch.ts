@@ -1,8 +1,10 @@
 import type { Launch } from "../shared/config.ts";
+import type { Platform } from "../shared/platform.ts";
 
 import { closeSync, openSync, readdirSync, readSync, statSync } from "fs";
 import { join } from "path";
 import { field } from "../shared/guards.ts";
+import { PLATFORM } from "../shared/platform.ts";
 
 // The head of a transcript read for its cwd: its first records carry it.
 const HEAD_BYTES = 1024 * 1024;
@@ -21,12 +23,14 @@ export class LaunchError extends Error {}
 
 // The configured command with {cwd}, {account}, {session} and {mode} put in. Every
 // value is checked first, so nothing from outside can change what runs.
-export function launchCommand(launch: Launch, v: { cwd: string; account: string; session: string; mode?: string }): string[] {
+export function launchCommand(launch: Launch, v: { cwd: string; account: string; session: string; mode?: string }, platform: Platform = PLATFORM): string[] {
   if (!SESSION_ID.test(v.session)) throw new LaunchError(`странный id сессии: ${v.session}`);
-  if (!ACCOUNT.test(v.account)) throw new LaunchError(`странный аккаунт: ${v.account}`);
+  if (v.account !== "" && !ACCOUNT.test(v.account)) throw new LaunchError(`странный аккаунт: ${v.account}`);
   if (v.mode !== undefined && !isPermissionMode(v.mode)) throw new LaunchError(`неизвестный режим разрешений: ${v.mode}`);
   if (v.mode !== undefined && !hasModePlaceholder(launch)) throw new LaunchError("добавь {mode} в launch.command в config.json");
-  if (CMD_SPECIAL.test(v.cwd)) throw new LaunchError(`в пути папки сессии есть символы, опасные для cmd.exe: ${v.cwd}`);
+  // On Windows cmd may sit anywhere in the template (wt.exe starts it), so the check always applies;
+  // on Linux the command runs without a shell.
+  if (platform.windows && CMD_SPECIAL.test(v.cwd)) throw new LaunchError(`в пути папки сессии есть символы, опасные для cmd.exe: ${v.cwd}`);
   if (!isDir(v.cwd)) throw new LaunchError(`папки сессии нет: ${v.cwd}`);
   const mode = v.mode === undefined ? "" : `--permission-mode ${v.mode}`;
   return launch.command.flatMap(part => {

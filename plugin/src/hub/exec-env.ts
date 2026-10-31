@@ -4,6 +4,7 @@
 import type { Logger } from "../shared/log.ts";
 
 import { spawnSync } from "child_process";
+import { PLATFORM } from "../shared/platform.ts";
 
 const REG_TIMEOUT_MS = 10_000;
 const MACHINE_KEY = "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment";
@@ -124,7 +125,7 @@ function regQuery(key: string): Record<string, RegValue> | undefined {
 }
 
 export function freshEnv(log?: Logger): Record<string, string> {
-  if (process.platform !== "win32") return hubEnv();
+  if (!PLATFORM.windows) return hubEnv();
   const machine = regQuery(MACHINE_KEY);
   const user = regQuery(USER_KEY);
   if (machine === undefined || user === undefined) {

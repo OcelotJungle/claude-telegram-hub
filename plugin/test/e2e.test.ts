@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
-import { appendFileSync, mkdirSync, writeFileSync } from "fs";
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { z } from "zod";
 import { arr, field } from "../src/shared/guards.ts";
@@ -22,6 +22,7 @@ let client: Client;
 let transport: StdioClientTransport;
 const channel: { content: string; meta: Record<string, string> }[] = [];
 const permissionAnswers: { request_id: string; behavior: string }[] = [];
+const dirs: string[] = [];
 
 const health = () => hubHealth(port);
 
@@ -34,8 +35,10 @@ beforeEach(async () => {
   fake = new FakeTelegram();
   port = await freePort();
   const state = tempDir();
+  dirs.push(state);
   writeFileSync(join(state, "config.json"), JSON.stringify({ groupId: GROUP, allowFrom: [ME] }));
   const configDir = tempDir();
+  dirs.push(configDir);
   const proj = join(configDir, "projects", "C--code-e2e-proj");
   mkdirSync(proj, { recursive: true });
   transcript = join(proj, `${SID}.jsonl`);
@@ -43,9 +46,11 @@ beforeEach(async () => {
   transport = new StdioClientTransport({
     command: process.execPath,
     args: [MAIN],
-    cwd: "C:\\",
+    cwd: state,
     env: {
       ...definedEnv(),
+      HOME: state,
+      USERPROFILE: state,
       CLAUDE_CODE_SESSION_ID: SID,
       CLAUDE_CONFIG_DIR: configDir,
       CLAUDE_PROJECT_DIR: CWD,
@@ -71,14 +76,16 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await client.close().catch(() => {});
-  const h = await health();
-  if (h) {
-    try {
-      process.kill(h.pid);
-    } catch {}
+  try {
+    await client?.close().catch(() => {});
+    const h = await health();
+    if (h) {
+      try { process.kill(h.pid, "SIGKILL"); } catch {}
+    }
+  } finally {
+    fake?.stop();
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   }
-  fake.stop();
 });
 
 test("a window talks to Telegram through a hub it started itself", async () => {

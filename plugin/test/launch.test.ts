@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { launchCommand, LaunchError, sessionCwd, transcriptMode } from "../src/hub/launch.ts";
+import { platformFor } from "../src/shared/platform.ts";
 import { tempDir as makeTempDir } from "./helpers.ts";
 
 // launch.ts reads backwards in MiB blocks; fixtures cross that boundary.
@@ -33,7 +34,7 @@ describe("launchCommand", () => {
     expect(() => launchCommand(LAUNCH, { cwd, account: "1 & calc", session: SID })).toThrow(LaunchError);
     expect(() => launchCommand(LAUNCH, { cwd, account: "1", session: `${SID}&calc` })).toThrow(LaunchError);
     expect(() => launchCommand(LAUNCH, { cwd: join(cwd, "missing"), account: "1", session: SID })).toThrow("папки сессии нет");
-    expect(() => launchCommand(LAUNCH, { cwd: `${cwd}&calc`, account: "1", session: SID })).toThrow("опасные для cmd.exe");
+    expect(() => launchCommand({ ...LAUNCH, command: ["cmd.exe", "/c", "claude --resume {session}"] }, { cwd: `${cwd}&calc`, account: "1", session: SID }, platformFor("win32"))).toThrow("опасные для cmd.exe");
     expect(launchCommand(LAUNCH, { cwd, account: "me@mail.com", session: SID })[5]).toContain("run me@mail.com --");
   });
 
@@ -48,6 +49,38 @@ describe("launchCommand", () => {
     expect(launchCommand({ ...launch, command: ["{mode}"] }, { cwd, account: "2", session: SID })).toEqual([]);
     expect(launchCommand({ ...launch, command: ["{mode}{mode}"] }, { cwd, account: "2", session: SID })).toEqual([]);
     expect(launchCommand({ ...launch, command: ["run {mode}"] }, { cwd, account: "2", session: SID })).toEqual(["run "]);
+  });
+
+  test("tmux passes separate arguments, mode and a shell metacharacter in the folder", () => {
+    const cwd = join(tempDir(), "a&b");
+    mkdirSync(cwd);
+    const launch = { command: ["tmux", "new-session", "-d", "-s", "claude-{session}", "-c", "{cwd}", "--", "claude", "--resume", "{session}", "{mode}"], timeoutSec: 90 };
+    expect(launchCommand(launch, { cwd, account: "", session: SID, mode: "plan" }, platformFor("linux"))).toEqual([
+      "tmux", "new-session", "-d", "-s", `claude-${SID}`, "-c", cwd, "--", "claude", "--resume", SID, "--permission-mode", "plan",
+    ]);
+    for (const executable of ["cmd", "cmd.exe", "CMD.EXE", "C:\\Windows\\System32\\cmd.exe"]) {
+      expect(() => launchCommand({ ...launch, command: [executable, "/c", "claude"] }, { cwd, account: "", session: SID }, platformFor("win32"))).toThrow("опасные для cmd.exe");
+    }
+  });
+
+  test("on Windows cmd.exe checks always apply, because cmd can sit inside the template", () => {
+    const cwd = join(tempDir(), "a&b");
+    mkdirSync(cwd);
+    // wt.exe starts cmd.exe itself: the executable is not cmd, the folder still reaches cmd.
+    expect(() => launchCommand(LAUNCH, { cwd, account: "1", session: SID }, platformFor("win32"))).toThrow("опасные для cmd.exe");
+    const tmux = { command: ["tmux", "new-session", "-d", "-c", "{cwd}"], timeoutSec: 90 };
+    expect(() => launchCommand(tmux, { cwd, account: "", session: SID }, platformFor("win32"))).toThrow("опасные для cmd.exe");
+  });
+
+  test("on Linux there is no shell, so cmd.exe characters in the folder are plain text", () => {
+    const cwd = join(tempDir(), "a&b%c");
+    mkdirSync(cwd);
+    const linux = platformFor("linux");
+    expect(launchCommand({ command: ["cmd", "/c", "claude"], timeoutSec: 90 }, { cwd, account: "", session: SID }, linux)).toEqual(["cmd", "/c", "claude"]);
+    expect(launchCommand({ command: ["tmux", "-c", "{cwd}"], timeoutSec: 90 }, { cwd, account: "", session: SID }, linux)).toEqual(["tmux", "-c", cwd]);
+    // Session id, account, mode and folder existence stay checked everywhere.
+    expect(() => launchCommand(LAUNCH, { cwd, account: "1 & calc", session: SID }, linux)).toThrow(LaunchError);
+    expect(() => launchCommand(LAUNCH, { cwd: join(cwd, "missing"), account: "1", session: SID }, linux)).toThrow("папки сессии нет");
   });
 
   test("rejects modes outside the strict allowlist", () => {

@@ -16,6 +16,7 @@ import type { ExecShell } from "./exec-shell.ts";
 import type { CleanupResult } from "./skill-cleanup.ts";
 import type { MessageKind } from "../shared/notification.ts";
 import type { ExitGate } from "./exit-gate.ts";
+import type { Platform } from "../shared/platform.ts";
 
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
@@ -48,11 +49,12 @@ import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath } from "./video.ts";
 import { EXEC_CARD_MS, EXEC_CHECK_MS, EXEC_MAX_AGE_MS, Execs } from "./exec.ts";
 import { freshEnv } from "./exec-env.ts";
 import { isAlive, killTree, spawnRunner } from "./exec-runner.ts";
-import { DEFAULT_BASH, findPowershell } from "./exec-shell.ts";
+import { findPowershell } from "./exec-shell.ts";
 import { cleanTranscript } from "./skill-cleanup.ts";
 import { formatPermission } from "./format-permission.ts";
 import { exitGate } from "./exit-gate.ts";
 import { MAX_RECONNECT_PAUSE_MS } from "../shared/reconnect.ts";
+import { PLATFORM } from "../shared/platform.ts";
 
 const INACTIVE_TEXT = "сессия сейчас не активна";
 // The queue id prefix of the start notice, "starting the session".
@@ -255,6 +257,8 @@ export type HubOptions = {
   // asked of defaultAccount (cswap by default).
   defaultConfigDir?: string;
   defaultAccount?(): Promise<string | undefined>;
+  platform?: Platform;
+  accountsAvailable?(): boolean;
   // Topic commands (/exec, /cmd, /bash): their logs and runs; without them
   // the commands answer that they are not set up.
   execDir?: string;
@@ -267,6 +271,7 @@ export type HubOptions = {
   execFileLimit?: number;
   // Starts a command's runner; the detached exec-runner by default.
   spawnRunner?(specFile: string): number;
+  execEnv?(): Record<string, string>;
   log: Logger;
   onExit(): void;
 };
@@ -430,15 +435,16 @@ export class Hub {
         dir: opts.execDir,
         file: opts.execsFile,
         shells: () => ({ powershell: findPowershell(), bash: this.bashPath() }),
-        env: () => freshEnv(this.log),
+        shellNames: (opts.platform ?? PLATFORM).shellNames,
+        env: opts.execEnv ?? (() => freshEnv(this.log)),
         spawnRunner: opts.spawnRunner ?? spawnRunner,
-        alive: isAlive,
+        alive: opts.isAlive ?? isAlive,
         kill: killTree,
         card: (sid, cardId, markdown, final, kind, buttons) => this.upsertCard(sid, cardId, markdown, final, buttons, false, undefined, kind),
         notice: (sid, text, kind) => this.notice(sid, text, kind),
         sendFile: (sid, path, name, kind) => this.sendExecFile(sid, path, name, kind),
         report: (sid, content, meta, onSent) => this.reportExec(sid, { content, meta, onSent }),
-        now: () => Date.now(),
+        now: opts.now ?? Date.now,
         checkMs: opts.execCheckMs ?? EXEC_CHECK_MS,
         cardMs: opts.execCardMs ?? EXEC_CARD_MS,
         maxAgeMs: opts.execMaxAgeMs ?? EXEC_MAX_AGE_MS,
@@ -989,7 +995,7 @@ ${msg.text}`);
 
   // Every attachment applies the same window default to its session; topics remain lazy until the first text.
   private attachSession(ws: WS, msg: { sessionId: string; cwd: string; configDir?: string; entrypoint?: string; title?: string }): void {
-    const account = accountOf(msg.configDir) ?? ws.data.account;
+    const account = accountOf(msg.configDir, this.opts.platform ?? PLATFORM) ?? ws.data.account;
     const entrypoint = msg.entrypoint ?? ws.data.entrypoint;
     const transcript = this.transcriptOf(msg.sessionId);
     const attachedOffset = transcript ? statSync(transcript).size : undefined;
@@ -2087,6 +2093,7 @@ ${msg.text}`);
   private onHubCommand(sessionId: string, cmd: HubCommand, m: Message): void {
     if (cmd.name === "pwsh" || cmd.name === "cmd" || cmd.name === "bash") return this.onExecCommand(sessionId, cmd.name, cmd.args, m);
     if (cmd.name === "run") {
+      if (cmd.args && !this.hasAccounts()) return this.notice(sessionId, "На этой машине нет аккаунтов cswap. Используй /run без номера.", "warning");
       if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, "info");
       if (this.isStarting(sessionId)) return this.notice(sessionId, "Сессия уже запускается", "info");
       if (this.connOf(sessionId)) return this.notice(sessionId, "Сессия уже работает", "info");
@@ -2138,7 +2145,7 @@ ${msg.text}`);
     if ("error" in location) return this.notice(sessionId, location.error === "account" ? "⚠️ Аккаунт сессии неизвестен, используй /run N." : "⚠️ Не знаю, в какой директории запустить сессию.", "warning");
     const { account, cwd } = location;
     try {
-      launchCommand(cfg.launch, { cwd, account, session: sessionId, mode: requested });
+      launchCommand(cfg.launch, { cwd, account, session: sessionId, mode: requested }, this.opts.platform ?? PLATFORM);
     } catch (e) {
       const why = e instanceof LaunchError ? e.message : String(e);
       return this.notice(sessionId, `⚠️ Не могу подготовить перезапуск: ${why}`, "warning");
@@ -2176,8 +2183,8 @@ ${msg.text}`);
   private launchLocation(sessionId: string, account: string | undefined): { account: string; cwd: string } | { error: "account" | "cwd" | "record" } {
     const rec = this.store.get(sessionId);
     if (!rec) return { error: "record" };
-    const resolvedAccount = account ?? rec.account;
-    if (!resolvedAccount) return { error: "account" };
+    const resolvedAccount = this.hasAccounts() ? account ?? rec.account : "";
+    if (resolvedAccount === undefined) return { error: "account" };
     const cwd = rec.cwd ?? (this.opts.projectsDir ? sessionCwd(sessionId, this.opts.projectsDir) : undefined);
     if (!cwd) return { error: "cwd" };
     return { account: resolvedAccount, cwd };
@@ -2443,7 +2450,7 @@ ${msg.text}`);
     let modeOffset: number | undefined;
     let spawned: void | Promise<void>;
     try {
-      command = launchCommand(cfg.launch, { cwd, account: acc, session: sessionId, ...(mode ? { mode } : {}) });
+      command = launchCommand(cfg.launch, { cwd, account: acc, session: sessionId, ...(mode ? { mode } : {}) }, this.opts.platform ?? PLATFORM);
       const transcript = mode ? this.transcriptOf(sessionId) : undefined;
       if (transcript) modeOffset = statSync(transcript).size;
       this.log.info(`starting session ${sessionId} on account ${acc}: ${JSON.stringify(command)}`);
@@ -2467,7 +2474,7 @@ ${msg.text}`);
     this.launchEnds.delete(sessionId);
     const started = () => {
       this.store.setLaunchedMode(sessionId, mode, modeOffset);
-      if (announce) this.launchNotice(sessionId, `🚀 Запускаю сессию (аккаунт ${acc})…`);
+      if (announce) this.launchNotice(sessionId, acc ? `🚀 Запускаю сессию (аккаунт ${acc})…` : "🚀 Запускаю сессию…");
     };
     if (spawned) void spawned.then(started, e => {
       const l = this.launches.get(sessionId);
@@ -2639,18 +2646,24 @@ ${msg.text}`);
   // --- topic commands -------------------------------------------------------
 
   private bashPath(): string {
-    return this.opts.config().exec?.bash ?? DEFAULT_BASH;
+    return this.opts.config().exec?.bash ?? (this.opts.platform ?? PLATFORM).bash;
+  }
+
+  private hasAccounts(): boolean {
+    return this.opts.accountsAvailable?.() ?? (Bun.which((this.opts.platform ?? PLATFORM).cswapName) !== null);
   }
 
   // /pwsh, /cmd or /bash: the text runs in the session's folder, with or
   // without its window.
   private onExecCommand(sessionId: string, name: "pwsh" | "cmd" | "bash", text: string, m: Message): void {
+    const platform = this.opts.platform ?? PLATFORM;
+    if (name !== "bash" && !platform.windows) return this.notice(sessionId, `/${name} недоступна на этой платформе`, "warning");
     if (!this.execs) return this.notice(sessionId, EXEC_NOT_SET, "error");
-    if (!text) return this.enqueue(sessionId, `hub-${randomUUID()}`, "Напиши команду: `/pwsh npm run migrate`", notifies("info"));
+    if (!text) return this.enqueue(sessionId, `hub-${randomUUID()}`, `Напиши команду: \`/${name} npm run migrate\``, notifies("info"));
     // cmd /c runs only up to the first line break.
     if (name === "cmd" && /[\r\n]/.test(text)) return this.notice(sessionId, "/cmd выполняет одну строку. Для нескольких — /pwsh или /bash", "error");
     const bash = this.bashPath();
-    if (name === "bash" && !existsSync(bash)) return this.notice(sessionId, `Git Bash не найден: ${bash}. Укажи exec.bash в config.json`, "error");
+    if (name === "bash" && !Bun.which(bash)) return this.notice(sessionId, `${platform.bashName} не найден: ${bash}. Укажи exec.bash в config.json`, "error");
     const rec = this.store.get(sessionId);
     const cwd = rec?.cwd ?? (this.opts.projectsDir ? sessionCwd(sessionId, this.opts.projectsDir) : undefined);
     if (!cwd) return this.notice(sessionId, "⚠️ Не знаю, в какой папке запускать команду: её нет ни в записи хаба, ни в транскрипте", "warning");
@@ -2823,7 +2836,7 @@ ${msg.text}`);
   // A window on the default login does not name its account in its config
   // dir; cswap tells which account that login is.
   private askDefaultAccount(ws: WS, configDir: string | undefined): void {
-    if (!configDir || !isDefaultConfigDir(configDir, this.opts.defaultConfigDir ?? DEFAULT_CONFIG_DIR)) return;
+    if (!this.hasAccounts() || !configDir || !isDefaultConfigDir(configDir, this.opts.defaultConfigDir ?? DEFAULT_CONFIG_DIR, this.opts.platform ?? PLATFORM)) return;
     void (this.opts.defaultAccount ?? defaultLoginAccount)().then(account => {
       const sid = ws.data.sessionId;
       if (!account || !sid) return this.log.warn(`window ${ws.data.windowKey}: the account of the default login is unknown`);

@@ -2,12 +2,13 @@ import type { ExecShell, ShellRun } from "../src/hub/exec-shell.ts";
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
-import { existsSync, rmSync } from "fs";
+import { rmSync } from "fs";
 import { DEFAULT_BASH, findPowershell, shellRun, writeShellFiles } from "../src/hub/exec-shell.ts";
 import { tempDir } from "./helpers.ts";
+import { PLATFORM } from "../src/shared/platform.ts";
 
 const SHELL_TIMEOUT_MS = 60_000;
-const hasBash = existsSync(DEFAULT_BASH);
+const hasBash = Bun.which(DEFAULT_BASH) !== null;
 
 let dirs: string[] = [];
 
@@ -37,7 +38,7 @@ function run(shell: ExecShell, text: string): { code: number | null; out: string
 
 const lastLine = (out: string) => out.trim().split(/\r?\n/).at(-1)?.trim();
 
-describe("powershell", () => {
+describe.skipIf(!PLATFORM.windows)("powershell", () => {
   test("powershell stops at the first failing native command", () => {
     const r = run("powershell", "cmd /c exit 3\necho дальше");
     expect(r.code).toBe(3);
@@ -162,7 +163,7 @@ describe("bash", () => {
     const r = run("bash", "false; echo дальше");
     expect(r.code).toBe(1);
     expect(r.out).not.toContain("дальше");
-    const w = run("bash", "pwd -W");
+    const w = run("bash", PLATFORM.windows ? "pwd -W" : "pwd");
     expect(w.code).toBe(0);
     expect(lastLine(w.out)).toBe(w.dir.replaceAll("\\", "/"));
   }, SHELL_TIMEOUT_MS);
@@ -174,7 +175,7 @@ describe("bash", () => {
   }, SHELL_TIMEOUT_MS);
 });
 
-describe("cmd", () => {
+describe.skipIf(!PLATFORM.windows)("cmd", () => {
   test("cmd runs one line and keeps Cyrillic", () => {
     const r = run("cmd", "echo привет && exit /b 4");
     expect(r.code).toBe(4);

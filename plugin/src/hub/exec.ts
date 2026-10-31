@@ -46,6 +46,7 @@ export type ExecDeps = {
   dir: string;
   file: string;
   shells(): ShellPaths;
+  shellNames?: Record<ExecShell, string>;
   env(): Record<string, string>;
   spawnRunner(specFile: string): number;
   alive(pid: number): boolean;
@@ -330,7 +331,7 @@ export class Execs {
     const log = this.path(rec.id, "log");
     const meta: ChannelMeta = { source: "exec", exec_id: rec.id, ts: new Date(rec.end?.at ?? this.deps.now()).toISOString() };
     if (rec.end?.kind === "exit" && rec.end.code !== undefined) meta.exit_code = String(rec.end.code);
-    this.deps.report(rec.sessionId, execReportText(rec, logTail(log, EXEC_AGENT_LINES), log), meta, () => {
+    this.deps.report(rec.sessionId, execReportText(rec, logTail(log, EXEC_AGENT_LINES), log, this.deps.shellNames), meta, () => {
       rec.reported = true;
       this.save();
     });
@@ -351,7 +352,7 @@ export class Execs {
     const kind = rec.state !== "ended" || rec.end?.kind === "stopped" || (rec.end?.kind === "exit" && rec.end.code === 0)
       ? "info"
       : rec.end?.kind === "exit" ? "error" : "warning";
-    this.deps.card(rec.sessionId, `exec-${rec.id}`, execCardText(rec, tail, this.deps.now()), rec.state === "ended", kind, buttons);
+    this.deps.card(rec.sessionId, `exec-${rec.id}`, execCardText(rec, tail, this.deps.now(), this.deps.shellNames), rec.state === "ended", kind, buttons);
   }
 }
 
@@ -472,13 +473,13 @@ function outcome(rec: ExecRecord): string {
   return end.code === 0 ? "✅ код 0" : `❌ код ${end.code}`;
 }
 
-export function execCardText(rec: ExecRecord, tail: string, now: number): string {
+export function execCardText(rec: ExecRecord, tail: string, now: number, names = SHELL_NAMES): string {
   let head: string;
   if (rec.state === "pending") {
     const minutes = Math.round((now - (rec.sentAt ?? now)) / MS_PER_MINUTE);
     head = `⏸ Команда пришла ${minutes} мин назад, пока хаб был выключен`;
   } else if (rec.state === "running") {
-    head = `▶ ${SHELL_NAMES[rec.shell]} · ${duration(now - (rec.startedAt ?? now))}`;
+    head = `▶ ${names[rec.shell]} · ${duration(now - (rec.startedAt ?? now))}`;
   } else {
     head = `${outcome(rec)} · ${duration((rec.end?.at ?? now) - (rec.startedAt ?? now))}`;
   }
@@ -490,11 +491,11 @@ export function execCardText(rec: ExecRecord, tail: string, now: number): string
   return lines.join("\n");
 }
 
-export function execReportText(rec: ExecRecord, tail: string, logPath: string): string {
+export function execReportText(rec: ExecRecord, tail: string, logPath: string, names = SHELL_NAMES): string {
   const took = duration((rec.end?.at ?? 0) - (rec.startedAt ?? rec.end?.at ?? 0));
   return [
     `Команда из топика закончилась: ${outcome(rec)} за ${took}.`,
-    `Оболочка: ${SHELL_NAMES[rec.shell]}, папка: ${rec.cwd}`,
+    `Оболочка: ${names[rec.shell]}, папка: ${rec.cwd}`,
     `Команда: ${rec.text}`,
     `Полный лог: ${logPath}`,
     tail ? `Последние ${EXEC_AGENT_LINES} строк:\n${tail}` : "Вывода не было.",

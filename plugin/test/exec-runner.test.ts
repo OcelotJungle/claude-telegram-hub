@@ -5,8 +5,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import { exitInfoSchema, isAlive, killTree, spawnRunner } from "../src/hub/exec-runner.ts";
-import { findPowershell, shellRun, writeShellFiles } from "../src/hub/exec-shell.ts";
+import { DEFAULT_BASH, findPowershell, shellRun, writeShellFiles } from "../src/hub/exec-shell.ts";
 import { tempDir, waitFor } from "./helpers.ts";
+import { PLATFORM } from "../src/shared/platform.ts";
 
 const EXIT_WAIT_MS = 5000;
 const PING_WAIT_MS = 15_000;
@@ -37,7 +38,7 @@ function hubEnv(extra: Record<string, string>): Record<string, string> {
 function shellSpec(shell: ExecShell, text: string): { file: string; spec: RunnerSpec } {
   const dir = tempDir("tghub-runner-");
   dirs.push(dir);
-  const run = shellRun(shell, text, dir, "abcd1234", { powershell: findPowershell(), bash: "" });
+  const run = shellRun(shell, text, dir, "abcd1234", { powershell: findPowershell(), bash: DEFAULT_BASH });
   writeShellFiles(run);
   const spec: RunnerSpec = {
     argv: run.argv,
@@ -56,6 +57,11 @@ function shellSpec(shell: ExecShell, text: string): { file: string; spec: Runner
 
 const cmdSpec = (text: string) => shellSpec("cmd", text);
 
+// The same command on each system: cmd on Windows, bash elsewhere.
+const hostSpec = (cmdText: string, bashText: string) => (PLATFORM.windows ? cmdSpec(cmdText) : shellSpec("bash", bashText));
+// A command that takes about three seconds.
+const slowSpec = () => hostSpec("ping -n 3 127.0.0.1 >nul", "sleep 3");
+
 function start(file: string): number {
   const pid = spawnRunner(file);
   pids.push(pid);
@@ -68,7 +74,7 @@ const textOf = (path: string) => (existsSync(path) ? readFileSync(path, "utf8") 
 
 describe("exec runner", () => {
   test("the runner logs the output and writes the exit code", async () => {
-    const { file, spec } = cmdSpec("echo один && echo два 1>&2 && exit /b 5");
+    const { file, spec } = hostSpec("echo один && echo два 1>&2 && exit /b 5", "echo один; echo два 1>&2; exit 5");
     expect(start(file)).toBeGreaterThan(0);
     await waitFor(() => existsSync(spec.exit), EXIT_WAIT_MS, "exit file");
     expect(readExit(spec.exit).code).toBe(5);
@@ -94,7 +100,7 @@ describe("exec runner", () => {
   });
 
   test("the runner outlives a killed parent", async () => {
-    const { file, spec } = cmdSpec("ping -n 3 127.0.0.1 >nul");
+    const { file, spec } = slowSpec();
     const parent = join(tempDir("tghub-parent-"), "parent.ts");
     dirs.push(join(parent, ".."));
     const runner = join(import.meta.dir, "..", "src", "hub", "exec-runner.ts").replaceAll("\\", "/");
@@ -107,7 +113,7 @@ describe("exec runner", () => {
   }, PING_WAIT_MS + EXIT_WAIT_MS);
 
   test("the runner beats while the command runs and exits after it", async () => {
-    const { file, spec } = cmdSpec("ping -n 3 127.0.0.1 >nul");
+    const { file, spec } = slowSpec();
     const pid = start(file);
     await waitFor(() => existsSync(spec.alive), EXIT_WAIT_MS, "heartbeat file");
     const first = statSync(spec.alive).mtimeMs;
@@ -123,10 +129,12 @@ describe("exec runner", () => {
     const pidFile = join(pidDir, "ping.pid");
     // The shell's child tells its pid: the log alone would stop growing with
     // the runner gone even if the child lived on.
-    const { file, spec } = shellSpec(
-      "powershell",
-      `$p = Start-Process ping -ArgumentList '-n','30','127.0.0.1' -PassThru -NoNewWindow\nSet-Content -Path '${pidFile}' -Value $p.Id\n$p.WaitForExit()`,
-    );
+    const { file, spec } = PLATFORM.windows
+      ? shellSpec(
+          "powershell",
+          `$p = Start-Process ping -ArgumentList '-n','30','127.0.0.1' -PassThru -NoNewWindow\nSet-Content -Path '${pidFile}' -Value $p.Id\n$p.WaitForExit()`,
+        )
+      : shellSpec("bash", `sleep 30 &\necho $! > '${pidFile}'\nwait`);
     const pid = start(file);
     const ping = Number(await waitFor(() => textOf(pidFile).trim(), PING_WAIT_MS, "the ping's pid"));
     pids.push(ping);
@@ -140,7 +148,8 @@ describe("exec runner", () => {
     expect(existsSync(spec.exit)).toBe(false);
   }, PING_WAIT_MS + 2 * EXIT_WAIT_MS + QUIET_MS);
 
-  test("PowerShell Cyrillic reaches the log through the runner", async () => {
+  // Windows PowerShell and its console code page exist only there.
+  test.skipIf(!PLATFORM.windows)("PowerShell Cyrillic reaches the log through the runner", async () => {
     const { file, spec } = shellSpec("powershell", "echo привет; cmd /c echo мир");
     start(file);
     await waitFor(() => existsSync(spec.exit), PING_WAIT_MS, "exit file");

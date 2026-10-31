@@ -7,6 +7,7 @@ import { appendFileSync, readFileSync, renameSync, utimesSync, writeFileSync } f
 import { join } from "path";
 import { z } from "zod";
 import { field } from "../shared/guards.ts";
+import { PLATFORM } from "../shared/platform.ts";
 
 // How often the runner touches its heartbeat file.
 export const HEARTBEAT_MS = 10_000;
@@ -48,7 +49,7 @@ export function spawnRunner(specFile: string, runtime = process.execPath): numbe
 
 // A topic command's runner and everything it started.
 export function killTree(pid: number): void {
-  if (process.platform === "win32") {
+  if (PLATFORM.windows) {
     spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], { windowsHide: true });
     return;
   }

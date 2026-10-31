@@ -3,6 +3,7 @@
 // cmd as the one line after /s /c.
 import { mkdirSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
+import { PLATFORM } from "../shared/platform.ts";
 
 const UTF8_BOM = "\uFEFF";
 // Carries a /cmd line to the inner cmd; see shellRun.
@@ -10,9 +11,9 @@ const CMD_LINE_VAR = "TG_EXEC_LINE";
 
 export type ExecShell = "powershell" | "cmd" | "bash";
 
-export const SHELL_NAMES: Record<ExecShell, string> = { powershell: "PowerShell", cmd: "cmd", bash: "Git Bash" };
+export const SHELL_NAMES: Record<ExecShell, string> = PLATFORM.shellNames;
 
-export const DEFAULT_BASH = "C:\\Program Files\\Git\\bin\\bash.exe";
+export const DEFAULT_BASH = PLATFORM.bash;
 
 export type ShellPaths = { powershell: string; bash: string };
 

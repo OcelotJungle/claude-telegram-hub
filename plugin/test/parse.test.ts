@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "path";
 import { parseAgentRecord, parseRecord } from "../src/transcript/parse.ts";
 
 // Shapes mirror records observed in Claude Code transcripts.
@@ -274,7 +275,7 @@ describe("tool call details", () => {
   const call = (input: object) => parseRecord(assistant("m1", "tool_use", { type: "tool_use", id: "t", name: "X", input }));
 
   test("a path shows as its file name", () => {
-    expect(call({ file_path: "C:\\src\\hub\\hub.ts", old_string: "a" })).toEqual([{ kind: "tool_use", name: "X", messageId: "m1", detail: "hub.ts" }]);
+    expect(call({ file_path: join("src", "hub", "hub.ts"), old_string: "a" })).toEqual([{ kind: "tool_use", name: "X", messageId: "m1", detail: "hub.ts" }]);
   });
 
   test("a description beats a command, and only the first line is kept", () => {

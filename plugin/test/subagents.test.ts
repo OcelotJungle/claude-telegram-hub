@@ -67,7 +67,7 @@ describe("SubagentWatcher", () => {
     s.w.start();
     const write = s.agent("a1", { agentType: "Explore", description: "Find the parser", model: "haiku" });
     write(assistant("m1", "tool_use", text("Looking around")));
-    write(assistant("m1", "tool_use", tool("Read", { file_path: "C:\\src\\parse.ts" })));
+    write(assistant("m1", "tool_use", tool("Read", { file_path: join("src", "parse.ts") })));
     s.advance(SEND_EVERY_MS);
     expect(s.cards).toEqual([
       { id: "a1-0", final: false, text: "🤖 **Explore** · haiku\nFind the parser\n⏳ 0 с · 1 действие\n`Read parse.ts`\n\n`[18:39]` Looking around" },

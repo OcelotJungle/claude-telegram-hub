@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { isDefaultConfigDir, statusAccount } from "../src/hub/default-account.ts";
+import { defaultLoginAccount, isDefaultConfigDir, statusAccount } from "../src/hub/default-account.ts";
+import { platformFor } from "../src/shared/platform.ts";
 
 describe("default login account", () => {
   test("is read from the first line of cswap status", () => {
@@ -9,7 +10,17 @@ describe("default login account", () => {
   });
 
   test("the default config dir is matched whatever the case and trailing slash", () => {
-    expect(isDefaultConfigDir("C:\\Users\\Me\\.claude\\", "C:\\Users\\me\\.claude")).toBe(true);
-    expect(isDefaultConfigDir("C:\\Users\\me\\.claude-swap-backup\\sessions\\2-me_gmail.com", "C:\\Users\\me\\.claude")).toBe(false);
+    const windows = platformFor("win32");
+    expect(isDefaultConfigDir("C:\\Users\\Me\\.claude\\", "C:\\Users\\me\\.claude", windows)).toBe(true);
+    expect(isDefaultConfigDir("C:\\Users\\me\\.claude-swap-backup\\sessions\\2-me_gmail.com", "C:\\Users\\me\\.claude", windows)).toBe(false);
+  });
+
+  test("Linux config paths are case sensitive and missing cswap does not spawn", async () => {
+    const linux = platformFor("linux");
+    expect(isDefaultConfigDir("/home/Me/.claude/", "/home/me/.claude", linux)).toBe(false);
+    expect(isDefaultConfigDir("/home/me/.claude/", "/home/me/.claude", linux)).toBe(true);
+    const lookedUp: string[] = [];
+    expect(await defaultLoginAccount(linux, name => { lookedUp.push(name); return null; })).toBeUndefined();
+    expect(lookedUp).toEqual(["cswap"]);
   });
 });
