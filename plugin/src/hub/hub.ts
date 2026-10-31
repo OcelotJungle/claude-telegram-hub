@@ -33,6 +33,7 @@ import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { cleanupReport, commandReply, hookBody, limitsPost, pluginToHub, questionBody, sendFilesMessage, sendMessage, terminateRequest, turnEndBody } from "../shared/protocol-schema.ts";
 import { loadCards, saveCards } from "./cards.ts";
+import { loadPollOffset, savePollOffset } from "./poll-offset.ts";
 import { CodexLimits } from "./codex-limits.ts";
 import { VolunteerLimits } from "./volunteer-limits.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
@@ -215,6 +216,8 @@ export type HubOptions = {
   outboxFile: string;
   // Where subagent cards are kept across restarts; in memory only without it.
   cardsFile?: string;
+  // Where the Telegram update offset is kept across restarts; in memory only without it.
+  pollOffsetFile?: string;
   // Where a closing window leaves the text it could not hand to a hub.
   spoolDir?: string;
   spoolScanMs?: number;
@@ -1793,6 +1796,8 @@ ${msg.text}`);
           if (!wasOnline) {
             this.botUsername = me.username;
             this.botId = me.id;
+            // Updates before it were handled by an earlier hub; Telegram would send them again.
+            if (this.opts.pollOffsetFile) offset = loadPollOffset(this.opts.pollOffsetFile, me.id);
             void this.registerCommands(api);
           }
           online = wasOnline = true;
@@ -1841,7 +1846,18 @@ ${msg.text}`);
         } catch (e) {
           this.log.error(`update ${u.update_id} failed: ${e}`);
         }
+        this.savePollOffset(offset);
       }
+    }
+  }
+
+  // Once an update is handled, which is also when the next getUpdates confirms it to Telegram.
+  private savePollOffset(offset: number): void {
+    if (!this.opts.pollOffsetFile || this.botId === undefined) return;
+    try {
+      savePollOffset(this.opts.pollOffsetFile, this.botId, offset);
+    } catch (e) {
+      this.log.warn(`saving the update offset failed: ${e}`);
     }
   }
 

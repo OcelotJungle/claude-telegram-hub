@@ -89,6 +89,7 @@ type HubExtras = {
   volunteerLimitsScript?: string;
   volunteerLimitsCommand?: string[];
   volunteerLimitsTimeoutMs?: number;
+  pollOffsetFile?: string;
 };
 
 async function startHub(o: { port?: number; idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number; batchQuietMs?: number; batchMaxMs?: number } & HubExtras = {}) {
@@ -106,6 +107,7 @@ async function startHub(o: { port?: number; idleMs?: number; token?: boolean | s
     filesDir: join(dir, "outbox-files"),
     inboxDir: join(dir, "inbox"),
     ...(o.videoTools ? { videoTools: o.videoTools } : {}),
+    ...(o.pollOffsetFile ? { pollOffsetFile: o.pollOffsetFile } : {}),
     api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === "string" ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, sendAttemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500, groupPace: NO_PACE }),
     config: () => config,
     idleMs: o.idleMs ?? 60_000,
@@ -1545,6 +1547,62 @@ describe("polling", () => {
     await waitFor(() => log.lines.some(l => l.includes("polling Telegram as @test_bot")), 3000, "bot name in log");
     // The line is logged before getUpdates reaches the fake.
     await waitFor(() => fake.callsOf("getUpdates").length > 0, 3000, "getUpdates after getMe");
+  });
+
+  describe("the update offset", () => {
+    const FAKE_BOT_ID = 1;
+    const OTHER_BOT_ID = 2;
+    const STALE_OFFSET = 500;
+    const savedSchema = z.object({ botId: z.number(), offset: z.number() });
+    const savedOffset = (file: string) => {
+      try {
+        return savedSchema.parse(JSON.parse(readFileSync(file, "utf8")));
+      } catch {
+        return undefined;
+      }
+    };
+    // The offset of the first getUpdates a hub sends after `before` calls.
+    const firstOffsetAfter = async (before: number) => {
+      await waitFor(() => fake.callsOf("getUpdates").length > before, WAIT_MS, "poll after the restart");
+      return Number(fake.callsOf("getUpdates")[before]?.offset ?? 0);
+    };
+
+    test("a restarted hub polls on from the saved offset, so it does not act twice on a handled message", async () => {
+      const file = join(dir, "poll-offset.json");
+      await startHub({ pollOffsetFile: file });
+      const first = await enabled("a");
+      const handled = fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "one" }));
+      await first.nextNew("inbound");
+      await waitFor(() => savedOffset(file), WAIT_MS, "offset saved");
+      expect(savedOffset(file)).toEqual({ botId: FAKE_BOT_ID, offset: handled.update_id + 1 });
+      await hub.stop();
+      first.close();
+      // Telegram never saw the confirmation of the first message, and sends it again with the next one.
+      fake.pushAgain(handled);
+      fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "two" }));
+      const before = fake.callsOf("getUpdates").length;
+      await startHub({ pollOffsetFile: file });
+      const second = await plugin("a");
+      expect(await firstOffsetAfter(before)).toBe(handled.update_id + 1);
+      const inbound = await second.next("inbound");
+      expect(inbound.content).toContain("two");
+      expect(inbound.content).not.toContain("one");
+    });
+
+    test("an offset saved for another bot is not used", async () => {
+      const file = join(dir, "poll-offset.json");
+      writeFileSync(file, JSON.stringify({ botId: OTHER_BOT_ID, offset: STALE_OFFSET }));
+      await startHub({ pollOffsetFile: file });
+      expect(await firstOffsetAfter(0)).toBe(0);
+    });
+
+    test("an unreadable offset file is set aside and polling starts from the beginning", async () => {
+      const file = join(dir, "poll-offset.json");
+      writeFileSync(file, "{not json");
+      await startHub({ pollOffsetFile: file });
+      expect(await firstOffsetAfter(0)).toBe(0);
+      expect(readdirSync(dir).some(name => name.startsWith("poll-offset.json.corrupt-"))).toBe(true);
+    });
   });
 
   test("a hung getUpdates warms the connection up with getMe and polls again", async () => {

@@ -19,6 +19,7 @@ const hub = new Hub({
   sessionsFile: p.sessionsFile,
   outboxFile: p.outboxFile,
   cardsFile: p.cardsFile,
+  pollOffsetFile: p.pollOffsetFile,
   spoolDir: p.spoolDir,
   filesDir: p.filesDir,
   inboxDir: p.inboxDir,

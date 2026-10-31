@@ -61,6 +61,12 @@ export class FakeTelegram {
     return full;
   }
 
+  // An update Telegram still holds because no getUpdates confirmed it (the poller died first).
+  pushAgain(u: Update): void {
+    this.updates.push(u);
+    this.waiting?.resolve();
+  }
+
   failNext(method: string, f: Failure): void {
     const list = this.failures.get(method) ?? [];
     list.push(f);
