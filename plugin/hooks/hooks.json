@@ -30,7 +30,7 @@
             "type": "command",
             "command": "bun \"${CLAUDE_PLUGIN_ROOT}/src/hook/question.ts\"",
             "timeout": 86400,
-            "statusMessage": "Жду ответа в Телеграме"
+            "statusMessage": "Waiting for an answer in Telegram"
           }
         ]
       }
