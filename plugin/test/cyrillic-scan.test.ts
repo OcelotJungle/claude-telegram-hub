@@ -6,7 +6,7 @@ import { findCyrillic, listTracked } from "./cyrillic-scan.ts";
 import { tempDir } from "./helpers.ts";
 
 // Written as escapes: this file is tracked too, and the guard would flag it.
-const ZHE = "ж";
+const ZHE = "\u0436";
 
 test("a file that exists but cannot be read is reported, not skipped", () => {
   const scan = findCyrillic(["a.ts", "b.ts"], "none", {
