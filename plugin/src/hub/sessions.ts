@@ -1,3 +1,4 @@
+import type { Messages } from "../shared/i18n/index.ts";
 import type { Platform } from "../shared/platform.ts";
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
@@ -143,8 +144,8 @@ export class SessionStore {
   }
 }
 
-export function topicName(project: string, title: string): string {
-  const t = title.trim() || "без названия";
+export function topicName(project: string, title: string, m: Messages): string {
+  const t = title.trim() || m.untitledTopic;
   const name = `${project}${SEP}${t}`;
   if (name.length <= MAX_TOPIC_NAME) return name;
   return name.slice(0, MAX_TOPIC_NAME - 1) + "…";

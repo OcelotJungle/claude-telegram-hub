@@ -122,7 +122,7 @@ function parseLine(line: string): LimitsReading | undefined {
       if (!window) continue;
       const minutes = window.window_minutes;
       rateLimits.push({
-        kind: minutes === FIVE_HOUR_MINUTES ? "five_hour" : minutes === SEVEN_DAY_MINUTES ? "seven_day" : `${minutes} мин`,
+        kind: minutes === FIVE_HOUR_MINUTES ? "five_hour" : minutes === SEVEN_DAY_MINUTES ? "seven_day" : `${minutes}m`,
         percentUsed: window.used_percent,
         ...(window.resets_at === undefined ? {} : { resetsAt: new Date(window.resets_at * MS_PER_SECOND).toISOString() }),
       });

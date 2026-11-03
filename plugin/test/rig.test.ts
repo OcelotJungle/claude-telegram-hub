@@ -1,7 +1,8 @@
 import type { RigOutput } from "../src/hub/rig.ts";
 
 import { describe, expect, test } from "bun:test";
-import { findRig, Rig, rigAction, rigInvocation, RIG_QUERY_LIMIT_MS, statusSchema, statusText } from "../src/hub/rig.ts";
+import { findRig, Rig, rigAction, rigErrorText, rigInvocation, RIG_QUERY_LIMIT_MS, statusSchema, statusText } from "../src/hub/rig.ts";
+import { en } from "../src/shared/i18n/en.ts";
 import { platformFor } from "../src/shared/platform.ts";
 import { manualClock } from "./manual-clock.ts";
 
@@ -12,7 +13,7 @@ function fixture(platform = "win32", found = true) {
   const warnings: string[] = [];
   const calls: string[][] = [];
   const clock = manualClock();
-  const rig = new Rig({ find: () => found ? "rig-file" : undefined, platform: platformFor(platform),
+  const rig = new Rig({ find: () => found ? "rig-file" : undefined, platform: platformFor(platform), messages: () => en,
     run: async invocation => { calls.push(invocation.argv); return output; }, warn: text => { warnings.push(text); },
     setTimer: clock.set, clearTimer: clock.clear });
   return { rig, warnings, calls, clock, output: (next: RigOutput) => { output = next; }, found: (next: boolean) => { found = next; } };
@@ -26,12 +27,12 @@ describe("rig contract", () => {
     expect((await f.rig.refresh()).ok).toBe(false);
     expect(f.rig.unavailable("pwsh")).toBeUndefined();
     expect(f.calls).toEqual([]);
-    expect(fixture("linux", false).rig.unavailable("cmd")).toContain("платформе");
+    expect(fixture("linux", false).rig.unavailable("cmd")).toBe(en.commandUnavailable({ name: "cmd" }));
   });
 
   test("startup errors close shells, successful JSON opens them and runtime failure retains it", async () => {
     const f = fixture();
-    expect(f.rig.unavailable("pwsh")).toContain("загружается");
+    expect(f.rig.unavailable("pwsh")).toBe(en.rigFeaturesLoading);
     f.output({ code: 1, stdout: "", stderr: "broken" });
     await f.rig.refresh();
     expect(f.rig.unavailable("pwsh")).toContain("broken");
@@ -41,7 +42,7 @@ describe("rig contract", () => {
     f.output({ code: 1, stdout: "", stderr: "later" });
     await f.rig.refresh();
     expect(f.rig.unavailable("pwsh")).toBeUndefined();
-    expect(f.warnings).toEqual(["rig: код 1: later"]);
+    expect(f.warnings).toEqual(["rig: exit code 1: later"]);
   });
 
   test("feature JSON refuses missing or extra fields and non-JSON output", async () => {
@@ -58,7 +59,7 @@ describe("rig contract", () => {
       const f = fixture();
       f.output({ code: 0, stdout: JSON.stringify([{ ...FEATURES[0], ...flags }]), stderr: "" });
       await f.rig.refresh();
-      expect(f.rig.unavailable("pwsh")).toContain("/feature pwsh enable");
+      expect(f.rig.unavailable("pwsh")).toBe(en.commandDisabled({ name: "pwsh" }));
     }
   });
 
@@ -66,7 +67,7 @@ describe("rig contract", () => {
     const f = fixture();
     f.output({ code: 0, stdout: "[]", stderr: "" });
     await f.rig.refresh();
-    expect(f.rig.unavailable("cmd")).toContain("/feature cmd enable");
+    expect(f.rig.unavailable("cmd")).toBe(en.commandDisabled({ name: "cmd" }));
     f.found(false);
     await f.rig.refresh();
     expect(f.rig.unavailable("cmd")).toBeUndefined();
@@ -86,11 +87,11 @@ describe("rig contract", () => {
     f.output({ code: 0, stdout: JSON.stringify({ ...STATUS, versions: { rig: "r", hub: null } }), stderr: "" });
     const result = await f.rig.status();
     expect(result.ok).toBe(true);
-    if (result.ok) expect(statusText(result.value).split("\n").slice(1, 3)).toEqual(["rig: 1.0.0 (r)", "hub: —"]);
+    if (result.ok) expect(statusText(result.value, en).split("\n").slice(1, 3)).toEqual(["rig: 1.0.0 (r)", "hub: —"]);
     f.output({ code: 0, stdout: JSON.stringify(STATUS), stderr: "" });
     const bare = await f.rig.status();
     expect(bare.ok).toBe(true);
-    if (bare.ok) expect(statusText(bare.value)).toContain("hub: h\n");
+    if (bare.ok) expect(statusText(bare.value, en)).toContain("hub: h\n");
   });
 
   test("status keeps the saved restart state as the string the contract defines", async () => {
@@ -101,7 +102,7 @@ describe("rig contract", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.value.pendingHubRestart).toBe(pending);
-      expect(statusText(result.value)).toContain(`Ожидаемый перезапуск: ${pending}`);
+      expect(statusText(result.value, en)).toContain(en.statusPendingRestart({ text: pending }));
     }
     f.output({ code: 0, stdout: JSON.stringify(STATUS), stderr: "" });
     expect((await f.rig.status()).ok).toBe(true);
@@ -112,10 +113,10 @@ describe("rig contract", () => {
   test("a rig JSON query that exceeds the limit fails and is cancelled", async () => {
     const f = fixture();
     let signal: AbortSignal | undefined;
-    const hung = new Rig({ find: () => "rig-file", platform: platformFor("linux"), warn: text => { f.warnings.push(text); },
+    const hung = new Rig({ find: () => "rig-file", platform: platformFor("linux"), messages: () => en, warn: text => { f.warnings.push(text); },
       run: (_invocation, abort) => { signal = abort; return new Promise<RigOutput>(() => {}); }, setTimer: f.clock.set, clearTimer: f.clock.clear });
     let settled: string | undefined;
-    void hung.status().then(result => { settled = result.ok ? "ok" : result.error; });
+    void hung.status().then(result => { settled = result.ok ? "ok" : rigErrorText(result.error, en); });
     await f.clock.advance(RIG_QUERY_LIMIT_MS - 1);
     expect(settled).toBeUndefined();
     await f.clock.advance(1);
@@ -130,19 +131,19 @@ describe("rig contract", () => {
   test("a rig path with a percent sign is refused on Windows, where cmd.exe would expand it", async () => {
     const run = async () => ({ code: 0, stdout: "[]", stderr: "" });
     const clock = manualClock();
-    const make = (windows: string) => new Rig({ find: () => "C:\\100%\\rig.cmd", platform: platformFor(windows), run, warn: () => {}, setTimer: clock.set, clearTimer: clock.clear });
+    const make = (windows: string) => new Rig({ find: () => "C:\\100%\\rig.cmd", platform: platformFor(windows), messages: () => en, run, warn: () => {}, setTimer: clock.set, clearTimer: clock.clear });
     const refused = make("win32").invocation(["update"]);
     expect(refused.ok).toBe(false);
-    if (!refused.ok) expect(refused.error).toContain("%");
+    if (!refused.ok) expect(rigErrorText(refused.error, en)).toContain("%");
     expect(make("linux").invocation(["update"]).ok).toBe(true);
   });
 
   test("client text cannot become an executable, path, option or shell expression", () => {
     for (const args of ["../cmd enable", "cmd&calc enable", "--help enable", "cmd enable extra", "cmd ENABLE", "cmd%PATH% enable", '"cmd" enable', "cmd enable\nupdate"]) {
-      expect(rigAction({ name: "feature", args }).ok).toBe(false);
+      expect(rigAction({ name: "feature", args }, en).ok).toBe(false);
     }
-    expect(rigAction({ name: "feature", args: "telegram disable" })).toEqual({ ok: true, value: { kind: "mutate", args: ["feature", "telegram", "disable"], confirm: true } });
-    expect(rigAction({ name: "rig", args: "status --json" }).ok).toBe(false);
+    expect(rigAction({ name: "feature", args: "telegram disable" }, en)).toEqual({ ok: true, value: { kind: "mutate", args: ["feature", "telegram", "disable"], confirm: true } });
+    expect(rigAction({ name: "rig", args: "status --json" }, en).ok).toBe(false);
     expect(statusSchema.safeParse({ schemaVersion: 2 }).success).toBe(false);
   });
 });

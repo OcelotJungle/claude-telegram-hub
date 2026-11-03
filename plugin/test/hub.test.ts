@@ -8,7 +8,8 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSyn
 import { basename, join } from "path";
 import { z } from "zod";
 import { cleanupSummary, Hub, projectName } from "../src/hub/hub.ts";
-import { CANCEL_REASON, CANCELLED, CUSTOM_HINT, PICK_ONE, STALE_POLL, TO_TERMINAL } from "../src/hub/questions.ts";
+import { CANCEL_REASON } from "../src/hub/questions.ts";
+import { en } from "../src/shared/i18n/en.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
 import { cleanTranscript } from "../src/hub/skill-cleanup.ts";
 import { saveExecs } from "../src/hub/exec-store.ts";
@@ -199,11 +200,11 @@ describe("enable", () => {
     await startHub();
     const c = await plugin("s1");
     const state = c.nextNew("state", m => m.enabled === true);
-    const res = await req(c, { op: "enable", title: "Реализация хаба" });
+    const res = await req(c, { op: "enable", title: "\u0420\u0435\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u044f \u0445\u0430\u0431\u0430" });
     await state;
-    expect(res).toMatchObject({ ok: true, result: { topicTitle: `${projectName(CWD)} · Реализация хаба`, created: true } });
-    expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: `${projectName(CWD)} · Реализация хаба` }]);
-    expect(new SessionStore(join(dir, "sessions.json")).get("s1")).toEqual({ topicId: 100, title: "Реализация хаба", project: projectName(CWD), enabled: true, cwd: CWD, account: "2" });
+    expect(res).toMatchObject({ ok: true, result: { topicTitle: `${projectName(CWD)} · \u0420\u0435\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u044f \u0445\u0430\u0431\u0430`, created: true } });
+    expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: `${projectName(CWD)} · \u0420\u0435\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u044f \u0445\u0430\u0431\u0430` }]);
+    expect(new SessionStore(join(dir, "sessions.json")).get("s1")).toEqual({ topicId: 100, title: "\u0420\u0435\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u044f \u0445\u0430\u0431\u0430", project: projectName(CWD), enabled: true, cwd: CWD, account: "2" });
   });
 
   test("the session record follows the window's cwd and account", async () => {
@@ -284,7 +285,7 @@ async function connect(body: object) {
 describe("interactive windows", () => {
   test("an interactive window is on at once and gets no topic before it writes", async () => {
     await startHub();
-    const c = await connect(cliHello("s1", { title: "Фикс входа" }));
+    const c = await connect(cliHello("s1", { title: "\u0424\u0438\u043a\u0441 \u0432\u0445\u043e\u0434\u0430" }));
     expect(c.messages.filter(m => m.type === "state").at(-1)?.enabled).toBe(true);
     expect(fake.callsOf("createForumTopic")).toEqual([]);
     const rec = new SessionStore(STORE_FILE()).get("s1");
@@ -294,12 +295,12 @@ describe("interactive windows", () => {
 
   test("the first text of an interactive window creates its topic from the title, later text reuses it", async () => {
     await startHub();
-    const c = await connect(cliHello("s1", { title: "Фикс входа" }));
-    c.send({ type: "send", id: "x1", text: "первый", notify: false });
+    const c = await connect(cliHello("s1", { title: "\u0424\u0438\u043a\u0441 \u0432\u0445\u043e\u0434\u0430" }));
+    c.send({ type: "send", id: "x1", text: "\u043f\u0435\u0440\u0432\u044b\u0439", notify: false });
     await waitFor(() => fake.texts().length === 1, 3000, "the first message");
-    expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: `${basename(CWD)} · Фикс входа` }]);
+    expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: `${basename(CWD)} · \u0424\u0438\u043a\u0441 \u0432\u0445\u043e\u0434\u0430` }]);
     expect(fake.texts()[0]).toMatchObject({ message_thread_id: 100 });
-    c.send({ type: "send", id: "x2", text: "второй", notify: false });
+    c.send({ type: "send", id: "x2", text: "\u0432\u0442\u043e\u0440\u043e\u0439", notify: false });
     await waitFor(() => fake.texts().length === 2, 3000, "the second message");
     expect(fake.callsOf("createForumTopic").length).toBe(1);
     expect(new SessionStore(STORE_FILE()).get("s1")?.topicId).toBe(100);
@@ -376,7 +377,7 @@ describe("interactive windows", () => {
     const c = await enabled("s1", "T");
     await req(c, { op: "disable" });
     expect(new SessionStore(STORE_FILE()).get("s1")).toMatchObject({ enabled: false, disabledByUser: true });
-    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "вернись" }));
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "\u0432\u0435\u0440\u043d\u0438\u0441\u044c" }));
     await c.nextNew("inbound");
     expect(new SessionStore(STORE_FILE()).get("s1")?.enabled).toBe(true);
     expect(new SessionStore(STORE_FILE()).get("s1")?.disabledByUser).toBeUndefined();
@@ -413,7 +414,7 @@ describe("interactive windows", () => {
     await waitFor(() => new SessionStore(STORE_FILE()).get("s1")?.title === "B", 3000, "the stored title");
     expect(fake.callsOf("editForumTopic")).toEqual([]);
     expect(fake.callsOf("createForumTopic")).toEqual([]);
-    c.send({ type: "send", id: "x1", text: "текст", notify: false });
+    c.send({ type: "send", id: "x1", text: "\u0442\u0435\u043a\u0441\u0442", notify: false });
     await waitFor(() => fake.texts().length === 1, 3000, "the message");
     expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: `${basename(CWD)} · B` }]);
   });
@@ -431,7 +432,7 @@ describe("interactive windows", () => {
     const c = await connect({ ...cliHello("s1"), busy: true });
     await Bun.sleep(150);
     expect(fake.callsOf("sendChatAction")).toEqual([]);
-    c.send({ type: "send", id: "x1", text: "готово", notify: false });
+    c.send({ type: "send", id: "x1", text: "\u0433\u043e\u0442\u043e\u0432\u043e", notify: false });
     await waitFor(() => fake.texts().length === 1, 3000, "the message");
   });
 });
@@ -442,9 +443,9 @@ describe("inbound", () => {
     const a = await enabled("a", "A");
     const b = await enabled("b", "B");
     await req(b, { op: "disable" });
-    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 101, fromId: ME, text: "привет B" }));
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 101, fromId: ME, text: "\u043f\u0440\u0438\u0432\u0435\u0442 B" }));
     const msg = await b.nextNew("inbound");
-    expect(msg.content).toBe("привет B");
+    expect(msg.content).toBe("\u043f\u0440\u0438\u0432\u0435\u0442 B");
     expect(msg.meta).toMatchObject({ chat_id: GROUP, user_id: ME, user: "user" });
     await waitFor(() => b.messages.filter(m => m.type === "state").at(-1)?.enabled === true, 3000, "enabled state");
     expect(new SessionStore(join(dir, "sessions.json")).get("b")?.enabled).toBe(true);
@@ -454,20 +455,20 @@ describe("inbound", () => {
   test("a reply carries what it answers before the text, a forward its origin before it", async () => {
     await startHub();
     const a = await enabled("a");
-    const original = { message_id: 50, date: 0, chat: { id: Number(GROUP), type: "supergroup" }, from: { id: 1, is_bot: true, first_name: "Hub" }, text: "готово" };
-    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!стоп", extra: { reply_to_message: original } }));
+    const original = { message_id: 50, date: 0, chat: { id: Number(GROUP), type: "supergroup" }, from: { id: 1, is_bot: true, first_name: "Hub" }, text: "\u0433\u043e\u0442\u043e\u0432\u043e" };
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!\u0441\u0442\u043e\u043f", extra: { reply_to_message: original } }));
     const stop = await a.nextNew("inbound");
-    expect(stop.content).toBe("[reply to your message]\n> готово\n\nстоп");
+    expect(stop.content).toBe("[reply to your message]\n> \u0433\u043e\u0442\u043e\u0432\u043e\n\n\u0441\u0442\u043e\u043f");
     expect(stop.interrupt).toBe(true);
-    const origin = { type: "hidden_user", date: 0, sender_user_name: "Аноним" };
-    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "смотри", extra: { forward_origin: origin } }));
-    expect((await a.nextNew("inbound", m => m.content.endsWith("смотри"))).content).toBe("[forwarded from Аноним]\nсмотри");
+    const origin = { type: "hidden_user", date: 0, sender_user_name: "\u0410\u043d\u043e\u043d\u0438\u043c" };
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "\u0441\u043c\u043e\u0442\u0440\u0438", extra: { forward_origin: origin } }));
+    expect((await a.nextNew("inbound", m => m.content.endsWith("\u0441\u043c\u043e\u0442\u0440\u0438"))).content).toBe("[forwarded from \u0410\u043d\u043e\u043d\u0438\u043c]\n\u0441\u043c\u043e\u0442\u0440\u0438");
   });
 
   test("a message the agent has at once never wears ✍", async () => {
     await startHub({ reactionDelayMs: 300 });
     const a = await enabled("a");
-    const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "привет" });
+    const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "\u043f\u0440\u0438\u0432\u0435\u0442" });
     fake.pushUpdate(u);
     await a.nextNew("inbound");
     a.send({ type: "seen", messageIds: [u.message?.message_id] });
@@ -478,7 +479,7 @@ describe("inbound", () => {
   test("a message taken for the agent wears ✍ until the window says the agent has it", async () => {
     await startHub();
     const a = await enabled("a");
-    const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "привет" });
+    const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "\u043f\u0440\u0438\u0432\u0435\u0442" });
     const id = u.message?.message_id;
     fake.pushUpdate(u);
     await a.nextNew("inbound");
@@ -493,7 +494,7 @@ describe("inbound", () => {
     await startHub();
     const a = await enabled("a");
     fake.hangNext("setMessageReaction");
-    const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "привет" });
+    const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "\u043f\u0440\u0438\u0432\u0435\u0442" });
     fake.pushUpdate(u);
     await a.nextNew("inbound");
     await waitFor(() => fake.callsOf("setMessageReaction").length === 1);
@@ -565,7 +566,7 @@ describe("inbound", () => {
     clients.push(old);
     await old.next("state");
     expect((await req(old, { op: "enable", title: "T" })).ok).toBe(true);
-    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "привет" }));
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "\u043f\u0440\u0438\u0432\u0435\u0442" }));
     await old.nextNew("inbound");
     await Bun.sleep(100);
     expect(fake.callsOf("setMessageReaction")).toEqual([]);
@@ -583,7 +584,7 @@ describe("inbound", () => {
   test("a formatted message is delivered as its text, and the log names it without the text", async () => {
     await startHub();
     const a = await enabled("a");
-    const text = "# План\n\nСначала **v2g1**, потом `cleanup`.";
+    const text = "# \u041f\u043b\u0430\u043d\n\n\u0421\u043d\u0430\u0447\u0430\u043b\u0430 **v2g1**, \u043f\u043e\u0442\u043e\u043c `cleanup`.";
     const entities = [
       { type: "bold", offset: 0, length: 6 },
       { type: "bold", offset: 17, length: 4 },
@@ -600,11 +601,11 @@ describe("inbound", () => {
   test("a rich message reaches the session as Markdown", async () => {
     await startHub();
     const a = await enabled("a");
-    const rich_message = { blocks: [{ type: "heading", size: 2, text: "План" }, { type: "paragraph", text: ["Сначала ", { type: "bold", text: "v2g1" }] }] };
+    const rich_message = { blocks: [{ type: "heading", size: 2, text: "\u041f\u043b\u0430\u043d" }, { type: "paragraph", text: ["\u0421\u043d\u0430\u0447\u0430\u043b\u0430 ", { type: "bold", text: "v2g1" }] }] };
     const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, extra: { rich_message } });
     fake.pushUpdate(u);
     const msg = await a.nextNew("inbound");
-    expect(msg.content).toBe("## План\n\nСначала **v2g1**");
+    expect(msg.content).toBe("## \u041f\u043b\u0430\u043d\n\n\u0421\u043d\u0430\u0447\u0430\u043b\u0430 **v2g1**");
     expect(log.lines).toContain(`INFO message ${u.message?.message_id} in topic 100 → session a: rich_message, 25 chars`);
   });
 
@@ -629,13 +630,13 @@ describe("inbound", () => {
     expect(log.lines.some(l => l.startsWith("WARN photo download failed"))).toBe(true);
   });
 
-  test('a topic of a session without a window gets "сессия сейчас не активна"', async () => {
+  test('a topic of a session without a window gets "the session is not active right now"', async () => {
     await startHub();
     const a = await enabled("a");
     a.close();
     await waitFor(() => !hub.isConnected("a"), 3000, "disconnect");
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "hello?" }));
-    const sent = await waitFor(() => fake.texts().find(p => p.text === "сессия сейчас не активна"));
+    const sent = await waitFor(() => fake.texts().find(p => p.text === "the session is not active right now"));
     expect(sent).toMatchObject({ chat_id: GROUP, message_thread_id: 100, disable_notification: false });
   });
 
@@ -717,11 +718,11 @@ describe("batching", () => {
   test("forwards and the text sent after them come as one notification", async () => {
     await startHub();
     const a = await enabled("a");
-    const forward_origin = { type: "hidden_user", date: 0, sender_user_name: "Аноним" };
-    fake.pushUpdate(msg("раз", { forward_origin }));
-    fake.pushUpdate(msg("два", { forward_origin }));
-    fake.pushUpdate(msg("что скажешь?"));
-    expect((await a.nextNew("inbound")).content).toBe("[forwarded from Аноним]\nраз\n\n[forwarded from Аноним]\nдва\n\nчто скажешь?");
+    const forward_origin = { type: "hidden_user", date: 0, sender_user_name: "\u0410\u043d\u043e\u043d\u0438\u043c" };
+    fake.pushUpdate(msg("\u0440\u0430\u0437", { forward_origin }));
+    fake.pushUpdate(msg("\u0434\u0432\u0430", { forward_origin }));
+    fake.pushUpdate(msg("\u0447\u0442\u043e \u0441\u043a\u0430\u0436\u0435\u0448\u044c?"));
+    expect((await a.nextNew("inbound")).content).toBe("[forwarded from \u0410\u043d\u043e\u043d\u0438\u043c]\n\u0440\u0430\u0437\n\n[forwarded from \u0410\u043d\u043e\u043d\u0438\u043c]\n\u0434\u0432\u0430\n\n\u0447\u0442\u043e \u0441\u043a\u0430\u0436\u0435\u0448\u044c?");
   });
 
   test("a message after the quiet window is a notification of its own", async () => {
@@ -814,21 +815,21 @@ describe("send", () => {
     await enabled("a");
     const cases: { text: string; kind: MessageKind; loud: boolean }[] = [
       { text: "/info reply", kind: "info", loud: false },
-      { text: "✅ /autocompact 80 выполнена.", kind: "info", loud: false },
-      { text: "🗜 Компакт запущен…", kind: "info", loud: false },
-      { text: "✅ Компакт выполнен.", kind: "info", loud: false },
-      { text: "🧹 Очистка выполнена", kind: "info", loud: false },
-      { text: "✅ Сессия запущена", kind: "info", loud: false },
-      { text: "🚀 Запускаю сессию…", kind: "info", loud: false },
-      { text: "⏹ Сессия завершена", kind: "info", loud: false },
-      { text: "⏳ Сессия уже завершается", kind: "info", loud: false },
-      { text: "✅ код 0", kind: "info", loud: false },
-      { text: "⏹ остановлена", kind: "info", loud: false },
-      { text: "❌ код 2", kind: "error", loud: true },
-      { text: "⚠️ прервана: процесс исчез", kind: "warning", loud: true },
-      { text: "🔐 Нужно подтверждение", kind: "action", loud: true },
-      { text: "Выбери вариант ответа", kind: "action", loud: true },
-      { text: "⚠️ Компакт не выполнен", kind: "error", loud: true },
+      { text: "✅ /autocompact 80 done.", kind: "info", loud: false },
+      { text: "🗜 Compaction is running…", kind: "info", loud: false },
+      { text: "✅ Compaction done.", kind: "info", loud: false },
+      { text: "🧹 Cleanup done", kind: "info", loud: false },
+      { text: "✅ Session started", kind: "info", loud: false },
+      { text: "🚀 Starting the session…", kind: "info", loud: false },
+      { text: "⏹ Session ended", kind: "info", loud: false },
+      { text: "⏳ Session is already ending", kind: "info", loud: false },
+      { text: "✅ code 0", kind: "info", loud: false },
+      { text: "⏹ stopped", kind: "info", loud: false },
+      { text: "❌ code 2", kind: "error", loud: true },
+      { text: "⚠️ interrupted: the process disappeared", kind: "warning", loud: true },
+      { text: "🔐 Confirmation needed", kind: "action", loud: true },
+      { text: "Pick an answer option", kind: "action", loud: true },
+      { text: "⚠️ Compaction failed", kind: "error", loud: true },
     ];
     for (const [index, item] of cases.entries()) {
       const response = await fetch(`http://127.0.0.1:${port}/reply`, {
@@ -951,7 +952,7 @@ describe("send", () => {
     const a = await enabled("a");
     a.send({ type: "permission", toolName: "Bash", description: "rm -rf build" });
     await waitFor(() => fake.texts().length === 1);
-    expect(fake.texts()[0]).toMatchObject({ text: "🔐 Нужно подтверждение: Bash", disable_notification: false });
+    expect(fake.texts()[0]).toMatchObject({ text: "🔐 Confirmation needed: Bash", disable_notification: false });
     await req(a, { op: "disable" });
     a.send({ type: "permission", toolName: "Bash", description: "again" });
     await Bun.sleep(100);
@@ -967,7 +968,7 @@ describe("send", () => {
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
     expect(await a.next("permissionReply")).toEqual({ type: "permissionReply", requestId: "r1", behavior: "deny" });
     await waitFor(() => fake.callsOf("editMessageText").length === 1);
-    expect(fake.callsOf("editMessageText")[0].text).toBe("🔐 Нужно подтверждение: Bash\nRemove build output\n\ncommand: rm -rf build\n\n❌ Отклонено");
+    expect(fake.callsOf("editMessageText")[0].text).toBe("🔐 Confirmation needed: Bash\nRemove build output\n\ncommand: rm -rf build\n\n❌ Denied");
   });
 
   test("a button pressed by a stranger or outside the group does nothing", async () => {
@@ -991,7 +992,7 @@ describe("send", () => {
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: 77, data: "p:deadbeef:allow" }));
     await waitFor(() => fake.callsOf("editMessageReplyMarkup").length === 1);
     expect(fake.callsOf("editMessageReplyMarkup")[0]).toEqual({ chat_id: GROUP, message_id: 77 });
-    expect(fake.callsOf("answerCallbackQuery")[0]).toMatchObject({ text: "Запрос устарел" });
+    expect(fake.callsOf("answerCallbackQuery")[0]).toMatchObject({ text: "The request is outdated" });
   });
 
   test("a button pressed after the window closed says the session is not active", async () => {
@@ -1004,7 +1005,7 @@ describe("send", () => {
     await waitFor(() => !hub.isConnected("a"));
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
     await waitFor(() => fake.callsOf("editMessageText").length === 1);
-    expect(fake.callsOf("editMessageText")[0].text).toEndWith("⚠️ Сессия не активна, ответ не доставлен");
+    expect(fake.callsOf("editMessageText")[0].text).toEndWith("⚠️ The session is not active, the answer was not delivered");
   });
 
   test("download saves the file into the inbox", async () => {
@@ -1086,7 +1087,7 @@ describe("delivery", () => {
     await waitFor(() => texts().includes("after"), 3000);
     expect(log.lines.some(l => l.startsWith("ERROR") && l.includes("odd words") && l.includes("message text is empty"))).toBe(true);
     const sent = fake.texts();
-    expect(sent.map(p => p.text)).toEqual(["odd words", "⚠️ Telegram не принял сообщение: Bad Request: message text is empty. Текст в hub.log.", "after"]);
+    expect(sent.map(p => p.text)).toEqual(["odd words", "⚠️ Telegram did not accept the message: Bad Request: message text is empty. The text is in hub.log.", "after"]);
     expect(sent[1].disable_notification).toBe(false);
   });
 
@@ -1151,11 +1152,11 @@ describe("formatting", () => {
   test("short formatted text goes as an ordinary message with entities", async () => {
     await startHub();
     const a = await enabled("a");
-    a.send({ type: "send", id: "x1", text: "**Итог**\n\n**готово**", notify: false });
+    a.send({ type: "send", id: "x1", text: "**\u0418\u0442\u043e\u0433**\n\n**\u0433\u043e\u0442\u043e\u0432\u043e**", notify: false });
     await waitFor(() => fake.texts().length === 1);
     expect(fake.callsOf("sendRichMessage")).toEqual([]);
     expect(fake.callsOf("sendMessage")[0]).toMatchObject({
-      text: "Итог\n\nготово",
+      text: "\u0418\u0442\u043e\u0433\n\n\u0433\u043e\u0442\u043e\u0432\u043e",
       entities: [
         { type: "bold", offset: 0, length: 4 },
         { type: "bold", offset: 6, length: 6 },
@@ -1166,12 +1167,12 @@ describe("formatting", () => {
   test("agent markdown with a table goes as a rich message in blocks", async () => {
     await startHub();
     const a = await enabled("a");
-    a.send({ type: "send", id: "x1", text: "## Итог\n\n**готово**, см. `hub.ts`\n\n| a | b |\n|---|---|\n| 1 | 2 |", notify: false });
+    a.send({ type: "send", id: "x1", text: "## \u0418\u0442\u043e\u0433\n\n**\u0433\u043e\u0442\u043e\u0432\u043e**, \u0441\u043c. `hub.ts`\n\n| a | b |\n|---|---|\n| 1 | 2 |", notify: false });
     await waitFor(() => fake.texts().length === 1);
     expect(fake.callsOf("sendMessage")).toEqual([]);
     expect(field(fake.callsOf("sendRichMessage")[0].rich_message, "blocks")).toEqual([
-      { type: "heading", size: 2, text: "Итог" },
-      { type: "paragraph", text: [{ type: "bold", text: "готово" }, ", см. ", { type: "code", text: "hub.ts" }] },
+      { type: "heading", size: 2, text: "\u0418\u0442\u043e\u0433" },
+      { type: "paragraph", text: [{ type: "bold", text: "\u0433\u043e\u0442\u043e\u0432\u043e" }, ", \u0441\u043c. ", { type: "code", text: "hub.ts" }] },
       {
         type: "table",
         cells: [
@@ -1193,10 +1194,10 @@ describe("formatting", () => {
   test("a block too big for a rich message goes as plain text with entities, cut in pieces", async () => {
     await startHub();
     const a = await enabled("a");
-    a.send({ type: "send", id: "x1", text: "## до\n\n```\n" + "z".repeat(31000) + "\n```", notify: true });
+    a.send({ type: "send", id: "x1", text: "## \u0434\u043e\n\n```\n" + "z".repeat(31000) + "\n```", notify: true });
     await waitFor(() => fake.texts().length === 9);
     const [first, ...rest] = fake.texts();
-    expect(first).toMatchObject({ text: "до", disable_notification: false });
+    expect(first).toMatchObject({ text: "\u0434\u043e", disable_notification: false });
     expect(rest.map(s => s.text).join("")).toBe("z".repeat(31000));
     expect(rest.every(s => field(arr(s.entities)[0], "type") === "pre" && s.disable_notification === true)).toBe(true);
   });
@@ -1221,7 +1222,7 @@ describe("formatting", () => {
     const a = await enabled("a");
     a.send({ type: "permission", toolName: "Bash", description: "Executes a given bash command", inputPreview: '{"description":"rm *.tmp and *.log"}' });
     await waitFor(() => fake.texts().length === 1);
-    expect(fake.texts()[0].text).toBe("🔐 Нужно подтверждение: Bash\nrm *.tmp and *.log");
+    expect(fake.texts()[0].text).toBe("🔐 Confirmation needed: Bash\nrm *.tmp and *.log");
     expect(fake.texts()[0].entities).toBeUndefined();
   });
 });
@@ -1627,14 +1628,14 @@ describe("subagent cards", () => {
   test("a card is sent silently once, then edited in place", async () => {
     await startHub();
     const a = await enabled("a");
-    a.send(card("x-0", "🤖 **Explore**\n⏳ 1 действие"));
+    a.send(card("x-0", "🤖 **Explore**\n⏳ 1 action"));
     await waitFor(() => fake.texts().length === 1);
-    expect(fake.texts()[0]).toMatchObject({ text: "🤖 Explore\n⏳ 1 действие", disable_notification: true, entities: [{ type: "bold", offset: 3, length: 7 }] });
+    expect(fake.texts()[0]).toMatchObject({ text: "🤖 Explore\n⏳ 1 action", disable_notification: true, entities: [{ type: "bold", offset: 3, length: 7 }] });
     const id = fake.lastMessageId;
-    a.send(card("x-0", "🤖 **Explore**\n✅ готово", true));
+    a.send(card("x-0", "🤖 **Explore**\n✅ done", true));
     await waitFor(() => fake.callsOf("editMessageText").length === 1);
-    expect(fake.callsOf("editMessageText")[0]).toMatchObject({ chat_id: GROUP, message_id: id, text: "🤖 Explore\n✅ готово" });
-    a.send(card("x-0", "🤖 **Explore**\n✅ готово", true));
+    expect(fake.callsOf("editMessageText")[0]).toMatchObject({ chat_id: GROUP, message_id: id, text: "🤖 Explore\n✅ done" });
+    a.send(card("x-0", "🤖 **Explore**\n✅ done", true));
     await Bun.sleep(150);
     expect(fake.texts().length).toBe(1);
     expect(fake.callsOf("editMessageText").length).toBe(1);
@@ -1842,14 +1843,14 @@ describe("starting and stopping sessions", () => {
   test("a message to a closed session starts it and reaches it once it connects", async () => {
     const spawned = await closedSession();
     fake.pushUpdate(msg("first"));
-    await waitFor(() => texts().includes("🚀 Запускаю сессию (аккаунт 2)…"));
+    await waitFor(() => texts().includes("🚀 Starting the session (account 2)…"));
     fake.pushUpdate(msg("second"));
     await Bun.sleep(150);
     expect(spawned).toEqual([["wt.exe", "-d", CWD, "cswap.exe", "run", "2", "--", "--resume", SID]]);
     const w = await plugin(SID);
     // Held messages go together as one notification.
     expect((await w.next("inbound")).content).toBe("first\n\nsecond");
-    await waitFor(() => fake.callsOf("editMessageText").some(c => c.text === "✅ Сессия запущена"));
+    await waitFor(() => fake.callsOf("editMessageText").some(c => c.text === "✅ Session started"));
     expect(spawned.length).toBe(1);
   });
 
@@ -1863,7 +1864,7 @@ describe("starting and stopping sessions", () => {
     await waitFor(async () => (await (await fetch(`http://127.0.0.1:${port}/commands?session=${SID}`)).text()).includes("info"));
     expect(w.messages.filter(m => m.type === "inbound")).toEqual([]);
     expect(spawned.length).toBe(1);
-    expect(texts()).toContain("🚀 Запускаю сессию (аккаунт 2)…");
+    expect(texts()).toContain("🚀 Starting the session (account 2)…");
   });
 
   test("a module command without launch keeps the inactive-session answer", async () => {
@@ -1872,7 +1873,7 @@ describe("starting and stopping sessions", () => {
     a.close();
     await waitFor(() => !hub.isConnected(SID));
     fake.pushUpdate(msg("/info"));
-    await waitFor(() => texts().includes("сессия сейчас не активна"));
+    await waitFor(() => texts().includes("the session is not active right now"));
   });
 
   test("/cleanup to a closed session launches it and queues cleanup after connect", async () => {
@@ -1882,20 +1883,20 @@ describe("starting and stopping sessions", () => {
     const w = await plugin(SID);
     await waitFor(async () => (await (await fetch(`http://127.0.0.1:${port}/commands?session=${SID}&cleanup=1`)).text()).includes("cleanup"));
     expect(w.messages.filter(m => m.type === "inbound")).toEqual([]);
-    expect(texts()).toContain("🚀 Запускаю сессию (аккаунт 2)…");
+    expect(texts()).toContain("🚀 Starting the session (account 2)…");
   });
 
   test("the start notice is one message: edited once the session starts, gone once the agent works", async () => {
     await closedSession();
     fake.pushUpdate(msg("first"));
-    await waitFor(() => texts().includes("🚀 Запускаю сессию (аккаунт 2)…"));
+    await waitFor(() => texts().includes("🚀 Starting the session (account 2)…"));
     const notice = fake.lastMessageId;
     const w = await plugin(SID);
     await waitFor(() => fake.callsOf("editMessageText").length === 1);
-    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: notice, text: "✅ Сессия запущена" }]);
+    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: notice, text: "✅ Session started" }]);
     await w.next("inbound");
     await Bun.sleep(100);
-    expect(texts().filter(t => /[Сс]есси/.test(t))).toEqual(["🚀 Запускаю сессию (аккаунт 2)…"]);
+    expect(texts().filter(t => /[Ss]ession/.test(t))).toEqual(["🚀 Starting the session (account 2)…"]);
     expect(fake.callsOf("deleteMessage")).toEqual([]);
     w.send({ type: "busy", busy: true });
     await waitFor(() => fake.callsOf("deleteMessage").length === 1);
@@ -1914,7 +1915,7 @@ describe("starting and stopping sessions", () => {
     await waitFor(() => fake.callsOf("sendMessage").length === 1);
     await plugin(SID);
     await waitFor(() => fake.callsOf("editMessageText").length === 1);
-    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: fake.lastMessageId, text: "✅ Сессия запущена" }]);
+    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: fake.lastMessageId, text: "✅ Session started" }]);
   });
 
   test("a start notice still queued goes already saying the session started", async () => {
@@ -1926,18 +1927,18 @@ describe("starting and stopping sessions", () => {
     // Failed attempts are among the calls too: the first said "starting".
     await waitFor(() => fake.callsOf("sendMessage").length === 9, 3000);
     await Bun.sleep(100);
-    const notices = texts().filter(t => /[Сс]есси/.test(t));
-    expect(notices[0]).toBe("🚀 Запускаю сессию (аккаунт 2)…");
-    expect(notices.at(-1)).toBe("✅ Сессия запущена");
+    const notices = texts().filter(t => /[Ss]ession/.test(t));
+    expect(notices[0]).toBe("🚀 Starting the session (account 2)…");
+    expect(notices.at(-1)).toBe("✅ Session started");
     expect(fake.callsOf("editMessageText")).toEqual([]);
   });
 
   test("a session that does not connect in time is reported, and the start notice goes", async () => {
     await closedSession({ timeoutSec: 0.2 });
     fake.pushUpdate(msg("hello?"));
-    await waitFor(() => texts().includes("🚀 Запускаю сессию (аккаунт 2)…"));
+    await waitFor(() => texts().includes("🚀 Starting the session (account 2)…"));
     const notice = fake.lastMessageId;
-    await waitFor(() => texts().includes("⚠️ Сессия не запустилась за 0.2 с"), 3000);
+    await waitFor(() => texts().includes("⚠️ The session did not start within 0.2 s"), 3000);
     expect(fake.texts().at(-1)).toMatchObject({ disable_notification: false });
     await waitFor(() => fake.callsOf("deleteMessage").length === 1);
     expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: notice }]);
@@ -1949,17 +1950,17 @@ describe("starting and stopping sessions", () => {
     await waitFor(() => spawned.length === 1);
     expect(spawned[0]?.[5]).toBe("1");
     fake.pushUpdate(msg("/run"));
-    await waitFor(() => texts().includes("Сессия уже запускается"));
+    await waitFor(() => texts().includes("Session is already starting"));
     await plugin(SID);
     fake.pushUpdate(msg("/run"));
-    await waitFor(() => texts().includes("Сессия уже работает"));
+    await waitFor(() => texts().includes("Session is already running"));
     expect(spawned.length).toBe(1);
   });
 
   test("a bad account is refused before anything runs", async () => {
     const spawned = await closedSession();
     fake.pushUpdate(msg("/run 1&calc"));
-    await waitFor(() => texts().some(t => t.startsWith("⚠️ Не могу запустить сессию: странный аккаунт")));
+    await waitFor(() => texts().some(t => t.startsWith("⚠️ Cannot start the session: odd account")));
     expect(spawned).toEqual([]);
   });
 
@@ -1986,14 +1987,14 @@ describe("starting and stopping sessions", () => {
     store.set(SID, { topicId: rec.topicId, title: rec.title, project: rec.project, enabled: rec.enabled, cwd: CWD });
     await startHub({ spawn: c => void spawned.push(c) });
     fake.pushUpdate(msg("hi"));
-    await waitFor(() => texts().includes("⚠️ Аккаунт сессии неизвестен, используй /run N."));
+    await waitFor(() => texts().includes("⚠️ The session's account is unknown, use /run N."));
     expect(spawned).toEqual([]);
     fake.pushUpdate(msg("/run 2"));
     await waitFor(() => spawned.length === 1);
     expect(spawned[0]?.[5]).toBe("2");
     const w = await wsClient(port, { type: "hello", v: PROTOCOL_VERSION, windowKey: "w-started", sessionId: SID, cwd: CWD });
     clients.push(w);
-    await waitFor(() => [...texts(), ...fake.callsOf("editMessageText").map(c => c.text)].includes("✅ Сессия запущена"));
+    await waitFor(() => [...texts(), ...fake.callsOf("editMessageText").map(c => c.text)].includes("✅ Session started"));
     expect(new SessionStore(join(dir, "sessions.json")).get(SID)?.account).toBe("2");
   });
 
@@ -2031,7 +2032,7 @@ describe("starting and stopping sessions", () => {
     fake.pushUpdate(msg("one"));
     await Bun.sleep(100);
     a.close();
-    await waitFor(() => texts().includes("сессия сейчас не активна"), WAIT_MS);
+    await waitFor(() => texts().includes("the session is not active right now"), WAIT_MS);
   });
 
   test("without launch in the config a closed session is just inactive", async () => {
@@ -2040,9 +2041,9 @@ describe("starting and stopping sessions", () => {
     a.close();
     await waitFor(() => !hub.isConnected(SID));
     fake.pushUpdate(msg("hi"));
-    await waitFor(() => texts().includes("сессия сейчас не активна"));
+    await waitFor(() => texts().includes("the session is not active right now"));
     fake.pushUpdate(msg("/run"));
-    await waitFor(() => texts().some(t => t.startsWith("⚠️ Автозапуск не настроен")));
+    await waitFor(() => texts().some(t => t.startsWith("⚠️ Autolaunch is not set up")));
   });
 
   // These windows have no module: /stop ends them once nobody takes it.
@@ -2052,7 +2053,7 @@ describe("starting and stopping sessions", () => {
     fake.pushUpdate(msg("/stop"));
     await a.next("terminate");
     a.close();
-    await waitFor(() => texts().includes("⏹ Сессия завершена"));
+    await waitFor(() => texts().includes("⏹ Session ended"));
   });
 
   test("/stop that does not end the window is reported", async () => {
@@ -2060,7 +2061,7 @@ describe("starting and stopping sessions", () => {
     const a = await enabled(SID);
     fake.pushUpdate(msg("/stop"));
     await a.next("terminate");
-    await waitFor(() => texts().includes("⚠️ Не удалось завершить сессию за 0.2 с"), 3000);
+    await waitFor(() => texts().includes("⚠️ Could not end the session within 0.2 s"), 3000);
     fake.pushUpdate(msg("/stop"));
     await a.nextNew("terminate");
   });
@@ -2068,7 +2069,7 @@ describe("starting and stopping sessions", () => {
   test("/stop of a closed session says so", async () => {
     const spawned = await closedSession();
     fake.pushUpdate(msg("/stop"));
-    await waitFor(() => texts().includes("Сессия не запущена"));
+    await waitFor(() => texts().includes("Session is not running"));
     expect(spawned).toEqual([]);
   });
 
@@ -2078,8 +2079,8 @@ describe("starting and stopping sessions", () => {
     await startHub({ spawn: c => void spawned.push(c) });
     const a = await enabled(SID);
     fake.pushUpdate(msg("/mode"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("режим неизвестен")));
-    const sent = fake.callsOf("sendMessage").find(c => String(c.text).includes("режим неизвестен"));
+    await waitFor(() => fake.texts().some(t => t.text.includes("mode unknown")));
+    const sent = fake.callsOf("sendMessage").find(c => String(c.text).includes("mode unknown"));
     expect(sent?.reply_markup).toBeDefined();
     expect(spawned).toEqual([]);
     a.close();
@@ -2093,7 +2094,7 @@ describe("starting and stopping sessions", () => {
     a.close();
     await waitFor(() => !hub.isConnected(SID));
     fake.pushUpdate(msg("/mode"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("режим неизвестен")));
+    await waitFor(() => fake.texts().some(t => t.text.includes("mode unknown")));
     expect(spawned).toEqual([]);
   });
 
@@ -2127,9 +2128,9 @@ describe("starting and stopping sessions", () => {
     await waitFor(() => !hub.isConnected(SID));
     // While the old process lives nothing may start a second one on the transcript.
     fake.pushUpdate(msg("/run"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Сессия уже запускается")));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Session is already starting")));
     fake.pushUpdate(msg("/mode auto"));
-    await waitFor(() => fake.texts().filter(t => t.text.includes("Сессия уже запускается")).length === 2);
+    await waitFor(() => fake.texts().filter(t => t.text.includes("Session is already starting")).length === 2);
     fake.pushUpdate(msg("held until the exit"));
     expect(spawned).toEqual([]);
     alive = false;
@@ -2154,7 +2155,7 @@ describe("starting and stopping sessions", () => {
     a.close();
     await waitFor(() => !hub.isConnected(SID));
     await clock.advance(MODE_SETTLE_MS);
-    await waitFor(() => fake.texts().some(t => t.text.includes("Режим не сменён: Claude Code не завершился")));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Mode not changed: Claude Code did not exit")));
     expect(spawned).toEqual([]);
     alive = false;
     await clock.advance(MODE_SETTLE_MS);
@@ -2179,7 +2180,7 @@ describe("starting and stopping sessions", () => {
     await waitFor(() => !hub.isConnected(SID));
     fake.pushUpdate(msg("not lost"));
     fake.pushUpdate(msg("/stop"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Запуск отменён")));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Launch cancelled")));
     expect(spawned).toEqual([]);
     alive = false;
     await waitFor(() => spawned.length === 1);
@@ -2205,7 +2206,7 @@ describe("starting and stopping sessions", () => {
     const again = await plugin(SID);
     again.close();
     await waitFor(() => !hub.isConnected(SID));
-    // Still "plan" here would answer «Режим уже plan» and refuse the switch.
+    // Still "plan" here would answer “Mode is already plan” and refuse the switch.
     fake.pushUpdate(msg("/mode plan"));
     await waitFor(() => spawned.length === 3);
     expect(spawned[2]).toContain("plan");
@@ -2221,7 +2222,7 @@ describe("starting and stopping sessions", () => {
     await a.next("terminate");
     // The message preceded the button and was still in the batch when restart began.
     fake.pushUpdate(msg("/run"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Сессия уже запускается")));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Session is already starting")));
     expect(a.messages.some(m => m.type === "inbound")).toBe(false);
     a.close();
     await waitFor(() => spawned.length === 1);
@@ -2239,7 +2240,7 @@ describe("starting and stopping sessions", () => {
     await c.next("state");
     expect((await req(c, { op: "enable", title: "Title" })).ok).toBe(true);
     fake.pushUpdate(msg("/mode plan"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Не могу подготовить перезапуск")));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Cannot prepare the restart")));
     expect(c.messages.some(m => m.type === "terminate")).toBe(false);
     expect(spawned).toEqual([]);
   });
@@ -2250,12 +2251,12 @@ describe("starting and stopping sessions", () => {
     await startHub({ spawn: c => void spawned.push(c) });
     const a = await enabled(SID);
     for (const mode of ["other", "bypassPermissions"]) {
-      const previous = fake.texts().filter(t => t.text.includes("Режимы:")).length;
+      const previous = fake.texts().filter(t => t.text.includes("Modes:")).length;
       fake.pushUpdate(msg(`/mode ${mode}`));
-      await waitFor(() => fake.texts().filter(t => t.text.includes("Режимы:")).length > previous);
+      await waitFor(() => fake.texts().filter(t => t.text.includes("Modes:")).length > previous);
     }
     fake.pushUpdate(msg("/mode plan"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Добавь {mode}")));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Add {mode}")));
     expect(a.messages.some(m => m.type === "terminate")).toBe(false);
     expect(spawned).toEqual([]);
     a.close();
@@ -2266,7 +2267,7 @@ describe("starting and stopping sessions", () => {
     await startHub({ spawn: c => void spawned.push(c) });
     const a = await enabled(SID);
     fake.pushUpdate(msg("/mode auto"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Автозапуск не настроен")));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Autolaunch is not set up")));
     expect(a.messages.some(m => m.type === "terminate")).toBe(false);
     expect(spawned).toEqual([]);
     a.close();
@@ -2279,8 +2280,8 @@ describe("starting and stopping sessions", () => {
     fake.pushUpdate(msg("/mode plan"));
     await a.next("terminate");
     fake.pushUpdate(msg("held for the window that stays"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Не удалось завершить сессию")));
-    expect(fake.callsOf("sendMessage").some(c => String(c.text).includes("🚀 Запускаю сессию"))).toBe(false);
+    await waitFor(() => fake.texts().some(t => t.text.includes("Could not end the session")));
+    expect(fake.callsOf("sendMessage").some(c => String(c.text).includes("🚀 Starting the session"))).toBe(false);
     expect((await a.next("inbound")).content).toBe("held for the window that stays");
     a.close();
   });
@@ -2313,7 +2314,7 @@ describe("starting and stopping sessions", () => {
     fake.pushUpdate(msg("held for stopped session"));
     fake.pushUpdate(msg("/stop"));
     fake.pushUpdate(msg("/run"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Сессия уже запускается")));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Session is already starting")));
     a.close();
     await waitFor(() => spawned.length === 1);
     expect(spawned[0]).not.toContain("--permission-mode");
@@ -2327,8 +2328,8 @@ describe("starting and stopping sessions", () => {
     await startHub({ spawn: c => void spawned.push(c) });
     const a = await enabled(SID);
     fake.pushUpdate(msg("/mode"));
-    await waitFor(() => fake.callsOf("sendMessage").some(c => String(c.text).includes("Текущий режим")));
-    const prompt = fake.callsOf("sendMessage").find(c => String(c.text).includes("Текущий режим"));
+    await waitFor(() => fake.callsOf("sendMessage").some(c => String(c.text).includes("Current mode")));
+    const prompt = fake.callsOf("sendMessage").find(c => String(c.text).includes("Current mode"));
     const messageId = fake.lastMessageId;
     expect(prompt?.reply_markup).toBeDefined();
     fake.pushUpdate(buttonPress({ chatId: Number(GROUP), fromId: Number(ME), messageId, data: `m:${SID}:plan` }));
@@ -2348,9 +2349,9 @@ describe("starting and stopping sessions", () => {
     const a = await enabled(SID);
     appendFileSync(join(transcriptDir, `${SID}.jsonl`), `${JSON.stringify({ type: "permission-mode", permissionMode: "plan" })}\n`);
     fake.pushUpdate(msg("/mode"));
-    await waitFor(() => fake.callsOf("sendMessage").some(c => String(c.text).includes("Текущий режим")));
+    await waitFor(() => fake.callsOf("sendMessage").some(c => String(c.text).includes("Current mode")));
     fake.pushUpdate(buttonPress({ chatId: Number(GROUP), fromId: Number(ME), messageId: fake.lastMessageId, data: `m:${SID}:plan` }));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Режим уже plan")));
+    await waitFor(() => fake.texts().some(t => t.text.includes("Mode is already plan")));
     expect(a.messages.some(m => m.type === "terminate")).toBe(false);
     a.close();
   });
@@ -2463,10 +2464,10 @@ describe("commands", () => {
     await req(a, { op: "disable" });
     const { runner } = mod("a");
     command("/info");
-    const sent = await reply(runner, t => t.startsWith("Лимиты"));
+    const sent = await reply(runner, t => t.startsWith("Claude limits"));
     expect(sent).toMatchObject({ message_thread_id: 100, disable_notification: true });
     expect(sent.text).toContain("128/300k");
-    expect(arr(sent.entities)[0]).toEqual({ type: "bold", offset: 0, length: "Лимиты Claude".length });
+    expect(arr(sent.entities)[0]).toEqual({ type: "bold", offset: 0, length: "Claude limits".length });
     expect(a.messages.some(m => m.type === "inbound")).toBe(false);
     expect(new SessionStore(join(dir, "sessions.json")).get("a")?.enabled).toBe(false);
   });
@@ -2517,7 +2518,7 @@ describe("commands", () => {
     await enabled("a");
     command("/info");
     const sent = await waitFor(() => sentText(t => t.startsWith("⚠️")));
-    expect(sent.text).toBe("⚠️ /info не выполнена: окно не забрало её за 0.15 с.");
+    expect(sent.text).toBe("⚠️ /info failed: the window did not pick it up within 0.15 s.");
     expect(sent.disable_notification).toBe(false);
     // Picked up too late, it is not run.
     const { runner, ran } = mod("a");
@@ -2532,7 +2533,7 @@ describe("commands", () => {
     runner.turn(true);
     command("/compact keep the plan");
     const started = await reply(runner, t => t.startsWith("🗜"));
-    expect(started.text).toBe("🗜 Компакт на очереди.");
+    expect(started.text).toBe("🗜 Compaction is queued.");
     expect(started.disable_notification).toBe(true);
     const startedId = fake.lastMessageId;
     await runner.poll();
@@ -2545,8 +2546,8 @@ describe("commands", () => {
       return fake.callsOf("editMessageText").length === 2;
     });
     expect(fake.callsOf("editMessageText")).toEqual([
-      { chat_id: GROUP, message_id: startedId, text: "🗜 Компакт выполняется…" },
-      { chat_id: GROUP, message_id: startedId, text: "✅ Компакт выполнен." },
+      { chat_id: GROUP, message_id: startedId, text: "🗜 Compaction is running…" },
+      { chat_id: GROUP, message_id: startedId, text: "✅ Compaction done." },
     ]);
     expect(fake.texts().filter(t => t.message_thread_id === 100)).toHaveLength(1);
     expect(compacted).toStrictEqual(["keep the plan"]);
@@ -2572,25 +2573,25 @@ describe("commands", () => {
     await startHub();
     await enabled("a");
     const post = (body: unknown) => fetch(`http://127.0.0.1:${port}/reply`, { method: "POST", body: JSON.stringify(body) });
-    expect((await post({ sessionId: "a", id: "progress.1", text: "🗜 Компакт выполняется…", notify: false, replaces: { id: "missing.0", kind: "progress" } })).status).toBe(200);
+    expect((await post({ sessionId: "a", id: "progress.1", text: "🗜 Compaction is running…", notify: false, replaces: { id: "missing.0", kind: "progress" } })).status).toBe(200);
     expect((await post({ sessionId: "a", id: "later.0", text: "after progress", notify: false })).status).toBe(200);
     await waitFor(() => sentText(t => t === "after progress"));
-    expect(sentText(t => t === "🗜 Компакт выполняется…")).toBeUndefined();
+    expect(sentText(t => t === "🗜 Compaction is running…")).toBeUndefined();
   });
 
   test("a failed progress edit leaves its id for the result and does not stop delivery", async () => {
     await startHub();
     await enabled("a");
     const post = (body: unknown) => fetch(`http://127.0.0.1:${port}/reply`, { method: "POST", body: JSON.stringify(body) });
-    await post({ sessionId: "a", id: "compact.0", text: "🗜 Компакт на очереди.", notify: false, awaitsResult: true });
-    await waitFor(() => sentText(t => t === "🗜 Компакт на очереди."));
+    await post({ sessionId: "a", id: "compact.0", text: "🗜 Compaction is queued.", notify: false, awaitsResult: true });
+    await waitFor(() => sentText(t => t === "🗜 Compaction is queued."));
     const messageId = fake.lastMessageId;
     fake.failNext("editMessageText", { code: 400, description: "Bad Request: message to edit not found" });
-    await post({ sessionId: "a", id: "compact.1", text: "🗜 Компакт выполняется…", notify: false, replaces: { id: "compact.0", kind: "progress" } });
-    await post({ sessionId: "a", id: "compact.2", text: "✅ Компакт выполнен.", notify: false, replaces: { id: "compact.0", kind: "success" } });
-    await waitFor(() => fake.callsOf("editMessageText").some(c => c.text === "✅ Компакт выполнен."));
+    await post({ sessionId: "a", id: "compact.1", text: "🗜 Compaction is running…", notify: false, replaces: { id: "compact.0", kind: "progress" } });
+    await post({ sessionId: "a", id: "compact.2", text: "✅ Compaction done.", notify: false, replaces: { id: "compact.0", kind: "success" } });
+    await waitFor(() => fake.callsOf("editMessageText").some(c => c.text === "✅ Compaction done."));
     expect(fake.callsOf("editMessageText").map(c => c.message_id)).toEqual([messageId, messageId]);
-    expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual(["🗜 Компакт выполняется…", "✅ Компакт выполнен."]);
+    expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual(["🗜 Compaction is running…", "✅ Compaction done."]);
   });
 
   test("a queued notice keeps its id until the result arrives, then the id is gone", async () => {
@@ -2623,7 +2624,7 @@ describe("commands", () => {
       await runner.poll();
       return fake.callsOf("editMessageText").length === 2;
     });
-    expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual(["🗜 Компакт выполняется…", "✅ Компакт выполнен."]);
+    expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual(["🗜 Compaction is running…", "✅ Compaction done."]);
     expect(fake.texts().filter(t => t.message_thread_id === 100)).toHaveLength(1);
   });
 
@@ -2635,6 +2636,12 @@ describe("commands", () => {
     command("/compact");
     await reply(runner, t => t.startsWith("🗜"));
     const startedId = fake.lastMessageId;
+    // The running edit asks the hub for the language first, so it lands a moment after the queued notice:
+    // wait for it, or the hub could stop while that edit is on its way.
+    await waitFor(async () => {
+      await runner.poll();
+      return fake.callsOf("editMessageText").length === 1;
+    });
     const oldPort = port;
     await hub.stop();
     await startHub({ port: oldPort });
@@ -2644,8 +2651,8 @@ describe("commands", () => {
       return fake.callsOf("editMessageText").length === 2;
     });
     expect(fake.callsOf("editMessageText")).toEqual([
-      { chat_id: GROUP, message_id: startedId, text: "🗜 Компакт выполняется…" },
-      { chat_id: GROUP, message_id: startedId, text: "✅ Компакт выполнен." },
+      { chat_id: GROUP, message_id: startedId, text: "🗜 Compaction is running…" },
+      { chat_id: GROUP, message_id: startedId, text: "✅ Compaction done." },
     ]);
   });
 
@@ -2658,10 +2665,10 @@ describe("commands", () => {
     const startedId = fake.nextMessageId;
     const started = await reply(runner, t => t.startsWith("🗜"));
     const warning = await reply(runner, t => t.startsWith("⚠️"));
-    expect(warning.text).toBe("⚠️ Компакт пропущен: a hook vetoed it");
+    expect(warning.text).toBe("⚠️ Compaction skipped: a hook vetoed it");
     expect(warning.disable_notification).toBe(false);
     await waitFor(() => fake.callsOf("editMessageText").length === 1);
-    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🗜 Компакт выполняется…" }]);
+    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🗜 Compaction is running…" }]);
     await waitFor(() => fake.callsOf("deleteMessage").length === 1);
     expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
     expect(started.disable_notification).toBe(true);
@@ -2676,7 +2683,7 @@ describe("commands", () => {
     command("/compact");
     const started = await reply(runner, t => t.startsWith("🗜"));
     const startedId = fake.lastMessageId;
-    expect((await reply(runner, t => t.startsWith("⚠️"))).text).toBe("⚠️ Компакт не выполнен: Not enough messages to compact.");
+    expect((await reply(runner, t => t.startsWith("⚠️"))).text).toBe("⚠️ Compaction failed: Not enough messages to compact.");
     await waitFor(() => fake.callsOf("deleteMessage").length === 1);
     expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
     expect(started.disable_notification).toBe(true);
@@ -2707,8 +2714,8 @@ describe("commands", () => {
       await runner.poll();
       return fake.callsOf("editMessageText").length === COMPACT_POLLS * 2 + 2;
     });
-    const expectedStatuses = Array.from({ length: COMPACT_POLLS }, () => ["🗜 Компакт выполняется…", "🗜 Компакт на очереди."]).flat();
-    expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual([...expectedStatuses, "🗜 Компакт выполняется…", "✅ Компакт выполнен."]);
+    const expectedStatuses = Array.from({ length: COMPACT_POLLS }, () => ["🗜 Compaction is running…", "🗜 Compaction is queued."]).flat();
+    expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual([...expectedStatuses, "🗜 Compaction is running…", "✅ Compaction done."]);
     expect(sentText(t => t.startsWith("⚠️"))).toBeUndefined();
   });
 
@@ -2726,15 +2733,15 @@ describe("commands", () => {
     await startHub();
     await enabled("a");
     const { runner, ran } = mod("a");
-    command("/rename Спринт 3");
+    command("/rename \u0421\u043f\u0440\u0438\u043d\u0442 3");
     const started = await reply(runner, t => t.startsWith("🏷"));
-    expect(started.text).toBe("🏷 Переименование на очереди.");
+    expect(started.text).toBe("🏷 Rename is queued.");
     const edited = await waitFor(async () => {
       await runner.poll();
       return editedText(t => t.startsWith("✅ /rename"));
     });
-    expect(edited.text).toBe("✅ /rename Спринт 3 выполнена.");
-    expect(ran).toEqual([["rename", "Спринт 3"]]);
+    expect(edited.text).toBe("✅ /rename \u0421\u043f\u0440\u0438\u043d\u0442 3 done.");
+    expect(ran).toEqual([["rename", "\u0421\u043f\u0440\u0438\u043d\u0442 3"]]);
   });
 
   test("a reply the mod could not deliver goes with the next poll, once", async () => {
@@ -2761,10 +2768,10 @@ describe("commands", () => {
       return ran.includes("POST /reply");
     });
     down = false;
-    await reply(runner, t => t.startsWith("Лимиты"));
+    await reply(runner, t => t.startsWith("Claude limits"));
     await runner.poll();
     await runner.poll();
-    expect(fake.texts().filter(p => p.text.startsWith("Лимиты")).length).toBe(1);
+    expect(fake.texts().filter(p => p.text.startsWith("Claude limits")).length).toBe(1);
   });
 
   test("/limits answers the freshest reading of the sessions on the account", async () => {
@@ -2939,7 +2946,7 @@ sys.exit(1)
     command("/stop");
     const started = await reply(runner, t => t.startsWith("🗜"));
     const startedId = fake.lastMessageId;
-    expect(started.text).toBe("🗜 Сожму контекст и завершу сессию. Повторный /stop завершит сразу.");
+    expect(started.text).toBe("🗜 I will compact the context and end the session. A second /stop ends it right away.");
     expect(started.disable_notification).toBe(true);
     await waitFor(async () => {
       await runner.poll();
@@ -2955,11 +2962,11 @@ sys.exit(1)
       return fake.callsOf("editMessageText").length === 2;
     });
     expect(fake.callsOf("editMessageText")).toEqual([
-      { chat_id: GROUP, message_id: startedId, text: "🗜 Сжимаю контекст и завершу сессию. Повторный /stop завершит сразу." },
-      { chat_id: GROUP, message_id: startedId, text: "✅ Компакт выполнен." },
+      { chat_id: GROUP, message_id: startedId, text: "🗜 Compacting the context and ending the session. A second /stop ends it right away." },
+      { chat_id: GROUP, message_id: startedId, text: "✅ Compaction done." },
     ]);
     a.close();
-    await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
+    await waitFor(() => sentText(t => t === "⏹ Session ended"));
   });
 
   test("/stop deletes its compaction notice and sends a skipped result loudly", async () => {
@@ -2969,16 +2976,16 @@ sys.exit(1)
     command("/stop");
     // The next bot message is the notice: read before the compaction can send another one.
     const startedId = fake.nextMessageId;
-    const started = await reply(runner, t => t.startsWith("🗜 Сожму контекст"));
+    const started = await reply(runner, t => t.startsWith("🗜 I will compact the context"));
     expect(started.disable_notification).toBe(true);
-    const warning = await reply(runner, t => t.startsWith("⚠️ Компакт пропущен"));
+    const warning = await reply(runner, t => t.startsWith("⚠️ Compaction skipped"));
     expect(warning.disable_notification).toBe(false);
-    expect(warning.text).toBe("⚠️ Компакт пропущен: nothing to compact");
+    expect(warning.text).toBe("⚠️ Compaction skipped: nothing to compact");
     await waitFor(() => fake.callsOf("deleteMessage").length === 1);
     expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
     await a.next("terminate");
     a.close();
-    await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
+    await waitFor(() => sentText(t => t === "⏹ Session ended"));
   });
 
   test("/stop waits for a /compact from the topic", async () => {
@@ -2991,7 +2998,7 @@ sys.exit(1)
     await reply(runner, t => t.startsWith("🗜"));
     command("/stop");
     const waiting = await reply(runner, t => t.startsWith("⏳"));
-    expect(waiting.text).toBe("⏳ После компакта завершу сессию. Повторный /stop завершит сразу.");
+    expect(waiting.text).toBe("⏳ I will end the session after the compaction. A second /stop ends it right away.");
     await Bun.sleep(100);
     expect(terminated(a)).toBe(false);
     usage = SMALL;
@@ -3015,9 +3022,9 @@ sys.exit(1)
     h.release();
     await a.next("terminate");
     a.close();
-    await waitFor(() => fake.callsOf("editMessageText").some(c => c.text === "⏹ Сессия завершена"));
-    expect(fake.callsOf("editMessageText").filter(c => c.message_id === waitingId)).toEqual([{ chat_id: GROUP, message_id: waitingId, text: "⏹ Сессия завершена" }]);
-    expect(fake.callsOf("sendMessage").filter(c => c.text === "⏹ Сессия завершена")).toEqual([]);
+    await waitFor(() => fake.callsOf("editMessageText").some(c => c.text === "⏹ Session ended"));
+    expect(fake.callsOf("editMessageText").filter(c => c.message_id === waitingId)).toEqual([{ chat_id: GROUP, message_id: waitingId, text: "⏹ Session ended" }]);
+    expect(fake.callsOf("sendMessage").filter(c => c.text === "⏹ Session ended")).toEqual([]);
   });
 
   test("/stop with no compaction running sends the ended notice as a new message", async () => {
@@ -3030,7 +3037,7 @@ sys.exit(1)
       return terminated(a);
     });
     a.close();
-    await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
+    await waitFor(() => sentText(t => t === "⏹ Session ended"));
     expect(fake.callsOf("editMessageText")).toEqual([]);
   });
 
@@ -3060,9 +3067,9 @@ sys.exit(1)
     await startHub();
     const call = await waitFor(() => fake.callsOf("setMyCommands")[0]);
     expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "rename", "run", "stop", "cleanup", "mode", "pwsh", "cmd", "bash", "feature", "rig"]);
-    expect(field(arr(call.commands).find(c => field(c, "command") === "compact"), "description")).toBe("Сжать контекст; /compact <указания> — с указаниями; /compact N — окно автокомпакта");
-    expect(field(arr(call.commands).find(c => field(c, "command") === "rename"), "description")).toBe("Переименовать сессию и её тему; /rename <имя> — новое имя");
-    expect(field(arr(call.commands).find(c => field(c, "command") === "pwsh"), "description")).toBe("Команда в PowerShell в папке сессии");
+    expect(field(arr(call.commands).find(c => field(c, "command") === "compact"), "description")).toBe("Compact the context; /compact <instructions> adds instructions; /compact N sets the autocompact window");
+    expect(field(arr(call.commands).find(c => field(c, "command") === "rename"), "description")).toBe("Rename the session and its topic; /rename <name> is the new name");
+    expect(field(arr(call.commands).find(c => field(c, "command") === "pwsh"), "description")).toBe("Run a command in PowerShell in the session folder");
   });
 
   describe("/cleanup", () => {
@@ -3124,8 +3131,8 @@ sys.exit(1)
       const { a, spawned, transcript, folder } = await liveSession(SKILLS);
       const { runner, compacted } = mod(SID);
       command("/cleanup keep the plan");
-      const started = await reply(runner, t => t.startsWith("🧹 Уборка"));
-      expect(started.text).toBe("🧹 Уборка на очереди.");
+      const started = await reply(runner, t => t.startsWith("🧹 Cleanup"));
+      expect(started.text).toBe("🧹 Cleanup is queued.");
       expect(started.disable_notification).toBe(true);
       const startedId = fake.lastMessageId;
       await pollUntil(runner, () => terminated(a));
@@ -3134,11 +3141,11 @@ sys.exit(1)
       // The summary edits the "will compact" message in place.
       await waitFor(() => fake.callsOf("editMessageText").length === 2);
       expect(fake.callsOf("editMessageText")).toEqual([
-        { chat_id: GROUP, message_id: startedId, text: "🧹 Уборка выполняется…" },
-        { chat_id: GROUP, message_id: startedId, text: "🧹 Уборка выполнена, убраны скиллы: a, b." },
+        { chat_id: GROUP, message_id: startedId, text: "🧹 Cleanup is running…" },
+        { chat_id: GROUP, message_id: startedId, text: "🧹 Cleanup done, skills removed: a, b." },
       ]);
-      expect(sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди"))).toBeUndefined();
-      await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
+      expect(sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued"))).toBeUndefined();
+      await waitFor(() => sentText(t => t === "⏹ Session ended"));
       await Bun.sleep(SETTLE_MS);
       expect(spawned).toEqual([]);
       expect(fake.callsOf("deleteMessage")).toEqual([]);
@@ -3157,8 +3164,8 @@ sys.exit(1)
       command("meanwhile");
       await Bun.sleep(SETTLE_MS);
       alive = false;
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди") && !t.endsWith("…")));
-      expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued") && !t.endsWith("…")));
+      expect(summary.text).toBe("🧹 Cleanup done, skills removed: a, b.");
       await waitFor(() => spawned.length);
       expect(spawned).toEqual([STARTED]);
       const w = await plugin(SID);
@@ -3177,11 +3184,11 @@ sys.exit(1)
       command("/cleanup");
       const startedId = fake.nextMessageId;
       const failed = await reply(runner, t => t.startsWith("⚠️"));
-      expect(failed.text).toBe("⚠️ Уборка не выполнена: компакт не удался: boom");
+      expect(failed.text).toBe("⚠️ Cleanup failed: the compaction failed: boom");
       expect(failed.disable_notification).toBe(false);
       // Tries that fail with no turn in the way stay running: one edit, no flicker.
       await waitFor(() => fake.callsOf("editMessageText").length === 1);
-      expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🧹 Уборка выполняется…" }]);
+      expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🧹 Cleanup is running…" }]);
       await waitFor(() => fake.callsOf("deleteMessage").length);
       expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
       await Bun.sleep(SETTLE_MS);
@@ -3198,12 +3205,12 @@ sys.exit(1)
         answers.add(await (await fetch(`http://127.0.0.1:${port}/commands?session=${SID}&stop=1`)).text());
         return sentText(t => t.startsWith("⚠️"));
       }, 3000);
-      expect(lost.text).toBe("⚠️ /cleanup не выполнена: окно не забрало её за 0.15 с.");
+      expect(lost.text).toBe("⚠️ /cleanup failed: the window did not pick it up within 0.15 s.");
       expect([...answers]).toEqual(["[]"]);
       expect(terminated(a)).toBe(false);
       // The cleanup is over: /run answers for a working session.
       command("/run");
-      await waitFor(() => sentText(t => t === "Сессия уже работает"));
+      await waitFor(() => sentText(t => t === "Session is already running"));
     });
 
     test("a Claude Code that does not exit keeps the transcript and does not relaunch", async () => {
@@ -3213,7 +3220,7 @@ sys.exit(1)
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
       const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
-      expect(warning.text).toBe("⚠️ Уборка не выполнена: Claude Code не завершился");
+      expect(warning.text).toBe("⚠️ Cleanup failed: Claude Code did not exit");
       expect(warning.disable_notification).toBe(false);
       expect(readFileSync(transcript, "utf8")).toBe(original);
       expect(spawned).toEqual([]);
@@ -3224,15 +3231,15 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Уборка"));
+      await reply(runner, t => t.startsWith("🧹 Cleanup"));
       const startedId = fake.lastMessageId;
       command("/stop");
-      const cancelled = await waitFor(() => sentText(t => t === "⏹ Уборка отменена"));
+      const cancelled = await waitFor(() => sentText(t => t === "⏹ Cleanup cancelled"));
       expect(cancelled.disable_notification).toBe(true);
       await waitFor(() => fake.callsOf("deleteMessage").length);
       expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
       await windowEnds(a);
-      await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
+      await waitFor(() => sentText(t => t === "⏹ Session ended"));
       await Bun.sleep(SETTLE_MS);
       expect(readFileSync(transcript, "utf8")).toBe(original);
       expect(backups(folder)).toEqual([]);
@@ -3245,7 +3252,7 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Уборка"));
+      await reply(runner, t => t.startsWith("🧹 Cleanup"));
       command("meanwhile");
       await heldForCleanup();
       command("/stop");
@@ -3271,7 +3278,7 @@ sys.exit(1)
       await waitFor(() => !hub.isConnected(SID));
       await clock.advance(EXIT_MS);
       const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
-      expect(warning.text).toBe("⚠️ Уборка не выполнена: Claude Code не завершился");
+      expect(warning.text).toBe("⚠️ Cleanup failed: Claude Code did not exit");
       expect(spawned).toEqual([]);
       alive = false;
       await clock.advance(EXIT_MS);
@@ -3287,7 +3294,7 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Уборка"));
+      await reply(runner, t => t.startsWith("🧹 Cleanup"));
       command("/cmd echo hi");
       await waitFor(() => log.lines.some(l => l.includes("a command result for session") && l.includes("held until /cleanup ends")), RUN_MS);
       expect(a.messages.some(m => m.type === "inbound")).toBe(false);
@@ -3306,17 +3313,17 @@ sys.exit(1)
       const { a, spawned, transcript, original } = await liveSession([odd]);
       const { runner } = mod(SID);
       command("/cleanup");
-      const startedId = (await reply(runner, t => t.startsWith("🧹 Уборка на очереди")), fake.lastMessageId);
+      const startedId = (await reply(runner, t => t.startsWith("🧹 Cleanup is queued")), fake.lastMessageId);
       command("format held");
       await heldForCleanup();
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
-      const summary = await waitFor(() => sentText(t => t.startsWith("⚠️ Уборка не выполнена")));
+      const summary = await waitFor(() => sentText(t => t.startsWith("⚠️ Cleanup failed")));
       // A failure deletes the queued notice and arrives as a new loud message.
       expect(summary.disable_notification).toBe(false);
       expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
-      expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🧹 Уборка выполняется…" }]);
-      expect(summary.text).toBe(`⚠️ Уборка не выполнена: формат транскрипта изменился (Claude Code ${VERSION})`);
+      expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🧹 Cleanup is running…" }]);
+      expect(summary.text).toBe(`⚠️ Cleanup failed: the transcript format changed (Claude Code ${VERSION})`);
       await waitFor(() => spawned.length);
       expect(spawned).toEqual([STARTED]);
       const w = await plugin(SID);
@@ -3333,8 +3340,8 @@ sys.exit(1)
       await heldForCleanup();
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
-      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️ Уборка не выполнена")));
-      expect(warning.text).toBe("⚠️ Уборка не выполнена: транскрипт не найден");
+      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️ Cleanup failed")));
+      expect(warning.text).toBe("⚠️ Cleanup failed: transcript not found");
       await waitFor(() => spawned.length);
       expect(spawned).toEqual([STARTED]);
       const w = await plugin(SID);
@@ -3348,9 +3355,9 @@ sys.exit(1)
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди") && !t.endsWith("…")));
-      expect(summary.text).toBe("🧹 Уборка выполнена.");
-      await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued") && !t.endsWith("…")));
+      expect(summary.text).toBe("🧹 Cleanup done.");
+      await waitFor(() => sentText(t => t === "⏹ Session ended"));
       await Bun.sleep(SETTLE_MS);
       expect(spawned).toEqual([]);
     });
@@ -3360,10 +3367,10 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Уборка"));
+      await reply(runner, t => t.startsWith("🧹 Cleanup"));
       command("/cleanup");
       command("/run");
-      await waitFor(() => fake.texts().filter(p => p.text === "⏳ Уборка уже идёт").length === 2);
+      await waitFor(() => fake.texts().filter(p => p.text === "⏳ Cleanup is already running").length === 2);
       expect(terminated(a)).toBe(false);
       h.release();
     });
@@ -3380,7 +3387,7 @@ sys.exit(1)
       const w = await plugin(SID);
       expect((await w.next("inbound")).content).toBe("meanwhile");
       const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
-      expect(warning.text).toBe("⚠️ Уборка не выполнена: сессия снова открыта");
+      expect(warning.text).toBe("⚠️ Cleanup failed: the session was reopened");
       expect(readFileSync(transcript, "utf8")).toBe(original);
       expect(backups(folder)).toEqual([]);
       expect(spawned).toEqual([]);
@@ -3404,8 +3411,8 @@ sys.exit(1)
       command("meanwhile");
       await Bun.sleep(SETTLE_MS);
       alive = false;
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди") && !t.endsWith("…")));
-      expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued") && !t.endsWith("…")));
+      expect(summary.text).toBe("🧹 Cleanup done, skills removed: a, b.");
       const window = must(w, "window");
       expect((await window.next("inbound")).content).toBe("meanwhile");
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
@@ -3421,7 +3428,7 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Уборка"));
+      await reply(runner, t => t.startsWith("🧹 Cleanup"));
       command("meanwhile");
       await heldForCleanup();
       await Bun.sleep(SETTLE_MS);
@@ -3441,7 +3448,7 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Уборка"));
+      await reply(runner, t => t.startsWith("🧹 Cleanup"));
       command(" !stop now");
       const stop = await a.nextNew("inbound");
       expect(stop.content).toBe("stop now");
@@ -3458,12 +3465,12 @@ sys.exit(1)
         throw new Error("boom");
       });
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Уборка"));
+      await reply(runner, t => t.startsWith("🧹 Cleanup"));
       command("meanwhile");
       await heldForCleanup();
       expect(inbound(a)).toBe(false);
       release();
-      await reply(runner, t => t.startsWith("⚠️ Уборка не выполнена"));
+      await reply(runner, t => t.startsWith("⚠️ Cleanup failed"));
       expect((await a.next("inbound")).content).toBe("meanwhile");
       expect(terminated(a)).toBe(false);
       expect(spawned).toEqual([]);
@@ -3481,7 +3488,7 @@ sys.exit(1)
       const contents = () => inbounds(a);
       const heldCount = () => log.lines.filter(l => l.includes("held until /cleanup ends")).length;
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Уборка"));
+      await reply(runner, t => t.startsWith("🧹 Cleanup"));
       command("before");
       await waitFor(() => heldCount() === 1);
       // Goes live, and waits in its batch for the quiet window.
@@ -3491,7 +3498,7 @@ sys.exit(1)
       await waitFor(() => heldCount() === 2);
       expect(inbound(a)).toBe(false);
       release();
-      await reply(runner, t => t.startsWith("⚠️ Уборка не выполнена"));
+      await reply(runner, t => t.startsWith("⚠️ Cleanup failed"));
       await waitFor(() => contents().length === 2, 1000, "both batches before the quiet window ends");
       expect(contents()).toEqual(["before", "stop\n\nafter"]);
     });
@@ -3501,11 +3508,11 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Уборка"));
+      await reply(runner, t => t.startsWith("🧹 Cleanup"));
       command("meanwhile");
       await heldForCleanup();
       const late = await waitFor(() => sentText(t => t.startsWith("⚠️")), COMPACT_MS * 3);
-      expect(late.text).toBe("⚠️ Уборка не выполнена: компакт не закончился за 0.02 мин");
+      expect(late.text).toBe("⚠️ Cleanup failed: the compaction did not finish within 0.02 min");
       expect(late.disable_notification).toBe(false);
       expect((await a.next("inbound")).content).toBe("meanwhile");
       h.release();
@@ -3521,12 +3528,12 @@ sys.exit(1)
       const h = held();
       const { runner } = mod(SID, undefined, undefined, h.answer);
       command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Уборка"));
+      await reply(runner, t => t.startsWith("🧹 Cleanup"));
       command("meanwhile");
       await heldForCleanup();
       a.close();
-      const closed = await waitFor(() => sentText(t => t.startsWith("⚠️ Уборка не выполнена")));
-      expect(closed.text).toBe("⚠️ Уборка не выполнена: окно закрылось до конца компакта");
+      const closed = await waitFor(() => sentText(t => t.startsWith("⚠️ Cleanup failed")));
+      expect(closed.text).toBe("⚠️ Cleanup failed: the window closed before the compaction ended");
       expect(closed.disable_notification).toBe(false);
       await waitFor(() => spawned.length);
       expect(spawned).toEqual([STARTED]);
@@ -3545,9 +3552,9 @@ sys.exit(1)
       await Bun.sleep(SETTLE_MS);
       expect(a.messages.filter(m => m.type === "terminate").length).toBe(1);
       await windowEnds(a);
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди") && !t.endsWith("…")));
-      expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
-      await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued") && !t.endsWith("…")));
+      expect(summary.text).toBe("🧹 Cleanup done, skills removed: a, b.");
+      await waitFor(() => sentText(t => t === "⏹ Session ended"));
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
       await Bun.sleep(SETTLE_MS);
       expect(spawned).toEqual([]);
@@ -3561,12 +3568,12 @@ sys.exit(1)
       command("meanwhile");
       await heldForCleanup();
       const failed = await waitFor(() => sentText(t => t.startsWith("⚠️")), STOP_MS * 3);
-      expect(failed.text).toBe("⚠️ Не удалось завершить сессию за 0.4 с");
+      expect(failed.text).toBe("⚠️ Could not end the session within 0.4 s");
       expect(failed.disable_notification).toBe(false);
       expect((await a.next("inbound")).content).toBe("meanwhile");
       // The cleanup is over: /run answers for a working session.
       command("/run");
-      await waitFor(() => sentText(t => t === "Сессия уже работает"));
+      await waitFor(() => sentText(t => t === "Session is already running"));
       expect(readFileSync(transcript, "utf8")).toBe(original);
       expect(spawned).toEqual([]);
     });
@@ -3579,9 +3586,9 @@ sys.exit(1)
       await pollUntil(runner, () => terminated(a));
       await a.next("terminate");
       a.close();
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Уборка на очереди") && !t.endsWith("…")));
-      expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
-      await waitFor(() => sentText(t => t === "⏹ Сессия завершена"));
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued") && !t.endsWith("…")));
+      expect(summary.text).toBe("🧹 Cleanup done, skills removed: a, b.");
+      await waitFor(() => sentText(t => t === "⏹ Session ended"));
       expect(log.lines.some(l => l.includes("the Claude Code process is unknown"))).toBe(true);
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
       await Bun.sleep(SETTLE_MS);
@@ -3600,8 +3607,8 @@ sys.exit(1)
       await heldForCleanup();
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
-      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️ Уборка не выполнена")));
-      expect(warning.text).toBe("⚠️ Уборка не выполнена: disk");
+      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️ Cleanup failed")));
+      expect(warning.text).toBe("⚠️ Cleanup failed: disk");
       expect(warning.disable_notification).toBe(false);
       await waitFor(() => spawned.length);
       expect(spawned).toEqual([STARTED]);
@@ -3618,8 +3625,8 @@ sys.exit(1)
       await heldForCleanup();
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹 Уборка выполнена")));
-      expect(summary.text).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
+      const summary = await waitFor(() => editedText(t => t.startsWith("🧹 Cleanup done")));
+      expect(summary.text).toBe("🧹 Cleanup done, skills removed: a, b.");
       await waitFor(() => spawned.length);
       expect(spawned).toEqual([STARTED]);
       const w = await plugin(SID);
@@ -3671,17 +3678,17 @@ describe("cleanupSummary", () => {
 
   test("removed skills are listed without sizes", () => {
     const r = { kind: "cleaned" as const, skills: [{ name: "a", chars: 4000 }, { name: "b", chars: 72_000 }], records: 2, backup: BACKUP };
-    expect(cleanupSummary(r)).toBe("🧹 Уборка выполнена, убраны скиллы: a, b.");
+    expect(cleanupSummary(r, en)).toBe("🧹 Cleanup done, skills removed: a, b.");
   });
 
   test("nothing to remove and empty skills both report completion", () => {
-    expect(cleanupSummary({ kind: "nothing" })).toBe("🧹 Уборка выполнена.");
-    expect(cleanupSummary({ kind: "cleaned", skills: [], records: 1, backup: BACKUP })).toBe("🧹 Уборка выполнена.");
+    expect(cleanupSummary({ kind: "nothing" }, en)).toBe("🧹 Cleanup done.");
+    expect(cleanupSummary({ kind: "cleaned", skills: [], records: 1, backup: BACKUP }, en)).toBe("🧹 Cleanup done.");
   });
 
   test("an unknown format names the Claude Code version when it is known", () => {
-    expect(cleanupSummary({ kind: "format", version: "1.0.1" })).toBe("⚠️ Уборка не выполнена: формат транскрипта изменился (Claude Code 1.0.1)");
-    expect(cleanupSummary({ kind: "format" })).toBe("⚠️ Уборка не выполнена: формат транскрипта изменился");
+    expect(cleanupSummary({ kind: "format", version: "1.0.1" }, en)).toBe("⚠️ Cleanup failed: the transcript format changed (Claude Code 1.0.1)");
+    expect(cleanupSummary({ kind: "format" }, en)).toBe("⚠️ Cleanup failed: the transcript format changed");
   });
 });
 
@@ -3709,14 +3716,14 @@ describe("topic commands", () => {
   test("/cmd runs in the session folder, shows a card and wakes the agent", async () => {
     await startHub();
     const a = await enabled(SID);
-    fake.pushUpdate(msg(hostCommand("echo привет && cd && exit /b 3", "echo привет; pwd; exit 3")));
+    fake.pushUpdate(msg(hostCommand("echo \u043f\u0440\u0438\u0432\u0435\u0442 && cd && exit /b 3", "echo \u043f\u0440\u0438\u0432\u0435\u0442; pwd; exit 3")));
     const inbound = await a.nextNew("inbound", m => m.meta.source === "exec", RUN_MS);
     expect(inbound.meta.exit_code).toBe("3");
-    expect(inbound.content).toContain("❌ код 3");
-    expect(inbound.content).toContain("привет");
+    expect(inbound.content).toContain("❌ code 3");
+    expect(inbound.content).toContain("\u043f\u0440\u0438\u0432\u0435\u0442");
     expect(inbound.content).toContain(CWD);
     expect(inbound.content).toContain(join(dir, "exec", `${inbound.meta.exec_id}.log`));
-    await waitFor(() => shown().find(t => t.startsWith("❌ код 3") && t.includes("привет")), WAIT_MS, "final card");
+    await waitFor(() => shown().find(t => t.startsWith("❌ code 3") && t.includes("\u043f\u0440\u0438\u0432\u0435\u0442")), WAIT_MS, "final card");
   }, RUN_MS + WAIT_MS);
 
   test("a stop button ends a running command", async () => {
@@ -3726,11 +3733,11 @@ describe("topic commands", () => {
     const card = await waitFor(() => fake.callsOf("sendMessage").find(c => buttonsOf(c).some(d => d.startsWith("x:"))), WAIT_MS, "card with a stop button");
     const data = must(buttonsOf(card).find(d => d.endsWith(":stop")), "stop button");
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
-    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Останавливаю"), WAIT_MS, "answer");
-    const end = await waitFor(() => fake.callsOf("editMessageText").find(c => String(c.text).startsWith("⏹ остановлена")), WAIT_MS, "stopped card");
+    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Stopping"), WAIT_MS, "answer");
+    const end = await waitFor(() => fake.callsOf("editMessageText").find(c => String(c.text).startsWith("⏹ stopped")), WAIT_MS, "stopped card");
     expect(field(end, "reply_markup")).toBeUndefined();
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
-    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Команда уже закончилась"), WAIT_MS, "second answer");
+    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "The command has already ended"), WAIT_MS, "second answer");
   }, RUN_MS);
 
   test("an old /pwsh waits for the run button", async () => {
@@ -3743,7 +3750,7 @@ describe("topic commands", () => {
     });
     await enabled(SID);
     fake.pushUpdate(msg("/pwsh npm run migrate", { date: Math.floor(Date.now() / MS_PER_S) - OLD_COMMAND_S }));
-    const card = await waitFor(() => fake.callsOf("sendMessage").find(c => String(c.text).startsWith("⏸ Команда пришла 5 мин назад, пока хаб был выключен")), WAIT_MS, "pending card");
+    const card = await waitFor(() => fake.callsOf("sendMessage").find(c => String(c.text).startsWith("⏸ The command arrived 5 min ago while the hub was off")), WAIT_MS, "pending card");
     expect(buttonsOf(card).some(d => d.endsWith(":run"))).toBe(true);
     expect(spawned).toBe(0);
   });
@@ -3761,7 +3768,7 @@ describe("topic commands", () => {
     const card = await waitFor(() => fake.callsOf("sendMessage").find(c => buttonsOf(c).some(d => d.endsWith(":run"))), WAIT_MS, "pending card");
     const data = must(buttonsOf(card).find(d => d.endsWith(":run")), "run button");
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
-    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Запускаю"), WAIT_MS, "answer");
+    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Starting"), WAIT_MS, "answer");
     expect(specs).toHaveLength(1);
     const running = await waitFor(() => fake.callsOf("editMessageText").find(c => String(c.text).startsWith("▶ PowerShell")), WAIT_MS, "running card");
     expect(buttonsOf(running).some(d => d.endsWith(":stop"))).toBe(true);
@@ -3771,14 +3778,14 @@ describe("topic commands", () => {
     await startHub();
     await enabled(SID);
     fake.pushUpdate(msg("/cmd echo a\necho b"));
-    await waitFor(() => texts().includes("/cmd выполняет одну строку. Для нескольких — /pwsh или /bash"), WAIT_MS, "refusal");
+    await waitFor(() => texts().includes("/cmd runs one line. For several use /pwsh or /bash"), WAIT_MS, "refusal");
   });
 
   test("empty /pwsh asks for a command", async () => {
     await startHub();
     await enabled(SID);
     fake.pushUpdate(msg("/pwsh"));
-    await waitFor(() => texts().includes("Напиши команду: /pwsh npm run migrate"), WAIT_MS, "hint");
+    await waitFor(() => texts().includes("Write the command: /pwsh npm run migrate"), WAIT_MS, "hint");
   });
 
   test("/bash without Git Bash says where it looked", async () => {
@@ -3786,7 +3793,7 @@ describe("topic commands", () => {
     await startHub();
     await enabled(SID);
     fake.pushUpdate(msg("/bash ls"));
-    await waitFor(() => texts().includes(`Git Bash не найден: ${join(dir, "no-bash.exe")}. Укажи exec.bash в config.json`), WAIT_MS, "notice");
+    await waitFor(() => texts().includes(`Git Bash not found: ${join(dir, "no-bash.exe")}. Set exec.bash in config.json`), WAIT_MS, "notice");
   });
 
   // A run that ended while no hub watched: running on disk, its exit file there.
@@ -3811,7 +3818,7 @@ describe("topic commands", () => {
     await Bun.sleep(EXEC_GRACE_MS * 2);
     expect(w.messages.filter(m => m.type === "inbound").length).toBe(1);
     expect(spawned).toEqual([]);
-    expect(texts()).not.toContain("⚠️ Сессия не запущена: результат команды агенту не доставлен");
+    expect(texts()).not.toContain("⚠️ The session is not running: the command result was not delivered to the agent");
   });
 
   test("a run that ends during the start's grace waits for the reconnecting window", async () => {
@@ -3829,7 +3836,7 @@ describe("topic commands", () => {
     await Bun.sleep(SETTLE_MS);
     expect(shown().some(t => t.startsWith("▶ cmd"))).toBe(true);
     writeFileSync(join(execDir, `${id}.exit.json`), JSON.stringify({ code: 0, endedAt: Date.now() }));
-    await waitFor(() => shown().some(t => t.startsWith("✅ код 0")), WAIT_MS, "final card");
+    await waitFor(() => shown().some(t => t.startsWith("✅ code 0")), WAIT_MS, "final card");
     const w = await plugin(SID);
     const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
     expect(inbound.meta.exec_id).toBe(id);
@@ -3854,17 +3861,17 @@ describe("topic commands", () => {
     endedWhileOff();
     await startHub();
     await Bun.sleep(EXEC_GRACE_MS / 2);
-    expect(texts()).not.toContain("⚠️ Сессия не запущена: результат команды агенту не доставлен");
-    await waitFor(() => texts().includes("⚠️ Сессия не запущена: результат команды агенту не доставлен"), WAIT_MS, "notice");
+    expect(texts()).not.toContain("⚠️ The session is not running: the command result was not delivered to the agent");
+    await waitFor(() => texts().includes("⚠️ The session is not running: the command result was not delivered to the agent"), WAIT_MS, "notice");
   });
 
   test("a result for a session without a window and without launch says it was not delivered", async () => {
     closedSession();
     await startHub();
     fake.pushUpdate(msg(hostCommand("echo hi", "echo hi")));
-    await waitFor(() => texts().includes("⚠️ Сессия не запущена: результат команды агенту не доставлен"), RUN_MS, "notice");
+    await waitFor(() => texts().includes("⚠️ The session is not running: the command result was not delivered to the agent"), RUN_MS, "notice");
     // The final card is an edit, cardEditMs after the end.
-    await waitFor(() => shown().some(t => t.startsWith("✅ код 0")), WAIT_MS, "final card");
+    await waitFor(() => shown().some(t => t.startsWith("✅ code 0")), WAIT_MS, "final card");
   }, RUN_MS + WAIT_MS);
 
   test("a result for a closed session with launch starts it and reaches the agent once", async () => {
@@ -3879,7 +3886,7 @@ describe("topic commands", () => {
     expect(inbound.meta.exit_code).toBe("0");
     await Bun.sleep(SETTLE_MS);
     expect(w.messages.filter(m => m.type === "inbound").length).toBe(1);
-    expect(texts()).not.toContain("⚠️ Сессия не запущена: результат команды агенту не доставлен");
+    expect(texts()).not.toContain("⚠️ The session is not running: the command result was not delivered to the agent");
   }, RUN_MS + 2 * WAIT_MS);
 
   test("the hub does not exit idle while a command runs", async () => {
@@ -3889,7 +3896,7 @@ describe("topic commands", () => {
     await waitFor(() => shown().some(t => t.startsWith(`▶ ${HOST_CARD}`)), WAIT_MS, "running card");
     await Bun.sleep(IDLE_MS * 2);
     expect(exited).toBe(false);
-    await waitFor(() => shown().some(t => t.startsWith("✅ код 0")), RUN_MS, "final card");
+    await waitFor(() => shown().some(t => t.startsWith("✅ code 0")), RUN_MS, "final card");
     await waitFor(() => exited, WAIT_MS, "idle exit once the command ended");
   }, RUN_MS + WAIT_MS);
 
@@ -3901,7 +3908,7 @@ describe("topic commands", () => {
     const file = field(doc, "document");
     expect(String(field(file, "file"))).toEndWith(".log");
     const body = String(field(file, "body"));
-    expect(body).toStartWith("[лог обрезан");
+    expect(body).toStartWith("[log trimmed");
     expect(body).toContain("line 40");
     expect(Number(field(file, "size"))).toBeLessThanOrEqual(FILE_LIMIT);
   }, RUN_MS + WAIT_MS);
@@ -3909,22 +3916,22 @@ describe("topic commands", () => {
 
 describe("questions", () => {
   const Q1 = {
-    question: "Какой цвет?",
-    header: "Цвет",
+    question: "Which color?",
+    header: "Color",
     options: [
-      { label: "Красный", description: "тёплый" },
-      { label: "Синий", description: "" },
+      { label: "Red", description: "warm" },
+      { label: "Blue", description: "" },
     ],
     multiSelect: false,
   };
-  const Q1_TEXT = "Цвет\nКакой цвет?\n\n1. Красный — тёплый\n2. Синий";
+  const Q1_TEXT = "Color\nWhich color?\n\n1. Red — warm\n2. Blue";
   const Q2 = {
-    question: "Что добавить?",
-    header: "Добавки",
+    question: "What to add?",
+    header: "Extras",
     options: [
-      { label: "Сыр", description: "" },
-      { label: "Лук", description: "" },
-      { label: "Перец", description: "" },
+      { label: "Cheese", description: "" },
+      { label: "Onion", description: "" },
+      { label: "Pepper", description: "" },
     ],
     multiSelect: true,
   };
@@ -3957,11 +3964,11 @@ describe("questions", () => {
     const id = fake.lastMessageId;
     expect(msg.text).toBe(Q1_TEXT);
     expect(fake.texts()[0].disable_notification).toBe(false);
-    expect(keys(msg)).toEqual([["1. Красный"], ["2. Синий"], ["✏️ Свой вариант", "✖️ Отменить"]]);
+    expect(keys(msg)).toEqual([["1. Red"], ["2. Blue"], ["✏️ Own option", "✖️ Cancel"]]);
     press(dataOf(msg, 1), id);
-    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Синий" } });
+    expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "Blue" } });
     const edit = await waitFor(() => edits()[0]);
-    expect(edit).toMatchObject({ message_id: id, text: `${Q1_TEXT}\n\n✅ Синий` });
+    expect(edit).toMatchObject({ message_id: id, text: `${Q1_TEXT}\n\n✅ Blue` });
     expect(edit.reply_markup).toBeUndefined();
     await waitFor(() => fake.callsOf("answerCallbackQuery").length === 1);
   });
@@ -3974,13 +3981,13 @@ describe("questions", () => {
     const m = await a.next("catchUp");
     await Bun.sleep(SHOWN_MS);
     expect(fake.callsOf("sendMessage")).toEqual([]);
-    a.send({ type: "send", id: "s1", sessionId: "a", text: "Спрошу про цвет", notify: false });
+    a.send({ type: "send", id: "s1", sessionId: "a", text: "Asking about color", notify: false });
     a.send({ type: "caughtUp", id: m.id });
     const msg = await polled(2);
     expect(Date.now() - started).toBeLessThan(LONG_CATCH_UP_MS);
-    expect(fake.texts().map(t => t.text)).toEqual(["Спрошу про цвет", Q1_TEXT]);
+    expect(fake.texts().map(t => t.text)).toEqual(["Asking about color", Q1_TEXT]);
     press(dataOf(msg, 0), fake.lastMessageId);
-    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Красный" } });
+    expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "Red" } });
   });
 
   test("a window that does not answer the catch-up still gets the poll after a short wait", async () => {
@@ -3992,7 +3999,7 @@ describe("questions", () => {
     expect((await polled()).text).toBe(Q1_TEXT);
     expect(Date.now() - started).toBeGreaterThanOrEqual(SHORT_CATCH_UP_MS);
     press(dataOf(await polled(), 1), fake.lastMessageId);
-    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Синий" } });
+    expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "Blue" } });
   });
 
   test("a poll ended while the window catches up is never shown", async () => {
@@ -4011,59 +4018,59 @@ describe("questions", () => {
   test("a question too long for one message is cut, and so is the message with its answer", async () => {
     await startHub();
     await enabled("a");
-    const question = "Очень длинный вопрос ".repeat(300);
+    const question = "\u041e\u0447\u0435\u043d\u044c \u0434\u043b\u0438\u043d\u043d\u044b\u0439 \u0432\u043e\u043f\u0440\u043e\u0441 ".repeat(300);
     const options = [
-      { label: "Да", description: "д".repeat(1500), preview: "п".repeat(5000) },
-      { label: "Нет", description: "н".repeat(1500) },
+      { label: "\u0414\u0430", description: "\u0434".repeat(1500), preview: "\u043f".repeat(5000) },
+      { label: "\u041d\u0435\u0442", description: "\u043d".repeat(1500) },
     ];
-    const answer = ask([{ question, header: "Длинный", options, multiSelect: false }]);
+    const answer = ask([{ question, header: "\u0414\u043b\u0438\u043d\u043d\u044b\u0439", options, multiSelect: false }]);
     const msg = await shown();
     const id = fake.lastMessageId;
     expect(fake.callsOf("sendMessage")).toHaveLength(1);
     expect(String(msg.text).length).toBeLessThanOrEqual(TELEGRAM_LIMIT);
-    expect(String(msg.text).startsWith("Длинный\nОчень длинный вопрос")).toBe(true);
-    expect(keys(msg)[0]).toEqual(["1. Да"]);
+    expect(String(msg.text).startsWith("\u0414\u043b\u0438\u043d\u043d\u044b\u0439\n\u041e\u0447\u0435\u043d\u044c \u0434\u043b\u0438\u043d\u043d\u044b\u0439 \u0432\u043e\u043f\u0440\u043e\u0441")).toBe(true);
+    expect(keys(msg)[0]).toEqual(["1. \u0414\u0430"]);
     press(dataOf(msg, 0), id);
-    expect(await answer).toEqual({ decision: "allow", answers: { [question]: "Да" } });
+    expect(await answer).toEqual({ decision: "allow", answers: { [question]: "\u0414\u0430" } });
     const edit = await waitFor(() => edits()[0]);
     expect(String(edit.text).length).toBeLessThanOrEqual(TELEGRAM_LIMIT);
-    expect(String(edit.text).endsWith("\n\n✅ Да")).toBe(true);
+    expect(String(edit.text).endsWith("\n\n✅ \u0414\u0430")).toBe(true);
   });
 
-  test("a multiple choice toggles options and is answered by «Готово» with the labels joined", async () => {
+  test("a multiple choice toggles options and is answered by «Done» with the labels joined", async () => {
     await startHub();
     await enabled("a");
     const answer = ask([Q2]);
     const msg = await polled();
     const id = fake.lastMessageId;
-    expect(keys(msg)).toEqual([["1. Сыр"], ["2. Лук"], ["3. Перец"], ["✅ Готово"], ["✏️ Свой вариант", "✖️ Отменить"]]);
+    expect(keys(msg)).toEqual([["1. Cheese"], ["2. Onion"], ["3. Pepper"], ["✅ Done"], ["✏️ Own option", "✖️ Cancel"]]);
     press(dataOf(msg, 3), id);
-    await waitFor(() => fake.callsOf("answerCallbackQuery").some(c => c.text === PICK_ONE));
+    await waitFor(() => fake.callsOf("answerCallbackQuery").some(c => c.text === en.pollPickOne));
     expect(edits()).toEqual([]);
     press(dataOf(msg, 0), id);
     press(dataOf(msg, 2), id);
     const toggled = await waitFor(() => edits()[1]);
-    expect(toggled.text).toBe("Добавки\nЧто добавить?\n\n1. Сыр\n2. Лук\n3. Перец");
-    expect(keys(toggled).slice(0, 3)).toEqual([["☑️ 1. Сыр"], ["2. Лук"], ["☑️ 3. Перец"]]);
+    expect(toggled.text).toBe("Extras\nWhat to add?\n\n1. Cheese\n2. Onion\n3. Pepper");
+    expect(keys(toggled).slice(0, 3)).toEqual([["☑️ 1. Cheese"], ["2. Onion"], ["☑️ 3. Pepper"]]);
     press(dataOf(msg, 3), id);
-    expect(await answer).toEqual({ decision: "allow", answers: { "Что добавить?": "Сыр, Перец" } });
+    expect(await answer).toEqual({ decision: "allow", answers: { "What to add?": "Cheese, Pepper" } });
     const last = await waitFor(() => edits()[2]);
-    expect(String(last.text).endsWith("\n\n✅ Сыр, Перец")).toBe(true);
+    expect(String(last.text).endsWith("\n\n✅ Cheese, Pepper")).toBe(true);
     expect(last.reply_markup).toBeUndefined();
   });
 
-  test("«Свой вариант» asks for a message, and the next message is the answer, not an inbound", async () => {
+  test("«Own option» asks for a message, and the next message is the answer, not an inbound", async () => {
     await startHub();
     const a = await enabled("a");
     const answer = ask([Q1]);
     const msg = await polled();
     press(dataOf(msg, 2), fake.lastMessageId);
     const hint = await shown(2);
-    expect(hint.text).toBe(CUSTOM_HINT);
+    expect(hint.text).toBe(en.pollCustomHint);
     expect(hint.disable_notification).toBe(true);
-    say("Зелёный");
-    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Зелёный" } });
-    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n✅ Зелёный`));
+    say("Green");
+    expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "Green" } });
+    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n✅ Green`));
     await Bun.sleep(SETTLE_MS);
     expect(a.messages.filter(m => m.type === "inbound")).toEqual([]);
   });
@@ -4073,8 +4080,8 @@ describe("questions", () => {
     await enabled("a");
     const answer = ask([Q1]);
     await shown();
-    say("любой");
-    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "любой" } });
+    say("any");
+    expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "any" } });
   });
 
   test("a photo answers with its caption and file mark", async () => {
@@ -4085,7 +4092,7 @@ describe("questions", () => {
     fake.files.set("P2", { path: "photos/p.jpg", body: new Uint8Array([9]) });
     say(undefined, { caption: "look", photo: [{ file_id: "P1", file_unique_id: "u1" }, { file_id: "P2", file_unique_id: "u2" }] });
     const res = await answer;
-    const given = String(field(field(res, "answers"), "Какой цвет?"));
+    const given = String(field(field(res, "answers"), "Which color?"));
     expect(field(res, "decision")).toBe("allow");
     expect(given.startsWith(`look (photo: ${join(dir, "inbox")}`)).toBe(true);
   });
@@ -4096,10 +4103,10 @@ describe("questions", () => {
     const answer = ask([Q1]);
     const msg = await shown();
     const id = fake.lastMessageId;
-    say("раньше", { message_id: id - 1 });
-    expect(await a.nextNew("inbound")).toMatchObject({ content: "раньше" });
+    say("earlier", { message_id: id - 1 });
+    expect(await a.nextNew("inbound")).toMatchObject({ content: "earlier" });
     press(dataOf(msg, 0), id);
-    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Красный" } });
+    expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "Red" } });
   });
 
   test("a message sent while the question is not shown yet reaches the agent", async () => {
@@ -4108,10 +4115,10 @@ describe("questions", () => {
     fake.delayNext("sendMessage", SLOW_SEND_MS);
     const answer = ask([Q1]);
     const msg = await polled();
-    say("пока нет");
-    expect(await a.nextNew("inbound")).toMatchObject({ content: "пока нет" });
+    say("not yet");
+    expect(await a.nextNew("inbound")).toMatchObject({ content: "not yet" });
     press(dataOf(msg, 0), fake.lastMessageId);
-    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Красный" } });
+    expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "Red" } });
   });
 
   test("messages sent together answer once, joined by blank lines", async () => {
@@ -4119,9 +4126,9 @@ describe("questions", () => {
     const a = await enabled("a");
     const answer = ask([Q1]);
     await shown();
-    say("раз");
-    say("два");
-    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "раз\n\nдва" } });
+    say("one");
+    say("two");
+    expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "one\n\ntwo" } });
     await Bun.sleep(SETTLE_MS);
     expect(a.messages.filter(m => m.type === "inbound")).toEqual([]);
   });
@@ -4131,10 +4138,10 @@ describe("questions", () => {
     await enabled("a");
     const answer = ask([Q1]);
     await shown();
-    say(undefined, { caption: "смотри", media_group_id: "G1", document: { file_id: "D1", file_unique_id: "d1", file_name: "a.txt" } });
+    say(undefined, { caption: "look", media_group_id: "G1", document: { file_id: "D1", file_unique_id: "d1", file_name: "a.txt" } });
     say(undefined, { media_group_id: "G1", document: { file_id: "D2", file_unique_id: "d2", file_name: "b.txt" } });
-    const given = "смотри (document: a.txt, file_id: D1)\n\n(document: b.txt, file_id: D2)";
-    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": given } });
+    const given = "look (document: a.txt, file_id: D1)\n\n(document: b.txt, file_id: D2)";
+    expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": given } });
   });
 
   test("a message that answers gets ✍ while the poll waits, and loses it once the agent has the answers", async () => {
@@ -4143,13 +4150,13 @@ describe("questions", () => {
     const answer = ask([Q1, Q2]);
     await shown();
     const id = fake.nextMessageId;
-    say("мой");
+    say("mine");
     const second = await polled(2);
     await waitFor(() => fake.callsOf("setMessageReaction").length === 1);
     expect(fake.callsOf("setMessageReaction")[0]).toEqual({ chat_id: GROUP, message_id: id, reaction: [{ type: "emoji", emoji: "✍" }] });
     press(dataOf(second, 1), fake.lastMessageId);
     press(dataOf(second, 3), fake.lastMessageId);
-    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "мой", "Что добавить?": "Лук" } });
+    expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "mine", "What to add?": "Onion" } });
     await waitFor(() => fake.callsOf("setMessageReaction").length === 2);
     expect(fake.callsOf("setMessageReaction")[1]).toEqual({ chat_id: GROUP, message_id: id, reaction: [] });
   });
@@ -4163,7 +4170,7 @@ describe("questions", () => {
     say("/info");
     await waitFor(async () => (await (await fetch(`http://127.0.0.1:${port}/commands?session=a`)).text()).includes("info"));
     press(dataOf(msg, 0), id);
-    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Красный" } });
+    expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "Red" } });
   });
 
   test('a "!" message cancels the poll and reaches the agent as an ordinary message', async () => {
@@ -4172,12 +4179,12 @@ describe("questions", () => {
     const answer = ask([Q1]);
     await polled();
     const arrived = a.nextNew("inbound");
-    say("!стоп");
+    say("!stop");
     expect(await answer).toEqual({ decision: "deny", reason: CANCEL_REASON });
     const inbound = await arrived;
-    expect(inbound).toMatchObject({ content: "стоп" });
+    expect(inbound).toMatchObject({ content: "stop" });
     expect(field(inbound, "interrupt")).toBeUndefined();
-    await waitFor(() => edits().some(e => String(e.text).endsWith(`\n\n${CANCELLED}`)));
+    await waitFor(() => edits().some(e => String(e.text).endsWith(`\n\n${en.pollCancelled}`)));
   });
 
   test('a lone "!" cancels the poll and delivers nothing', async () => {
@@ -4191,7 +4198,7 @@ describe("questions", () => {
     expect(a.messages.filter(m => m.type === "inbound")).toEqual([]);
   });
 
-  test("«Отменить» denies the question", async () => {
+  test("«Cancel» denies the question", async () => {
     await startHub();
     await enabled("a");
     const answer = ask([Q1]);
@@ -4199,7 +4206,7 @@ describe("questions", () => {
     press(dataOf(msg, 2, 1), fake.lastMessageId);
     expect(await answer).toEqual({ decision: "deny", reason: CANCEL_REASON });
     const edit = await waitFor(() => edits()[0]);
-    expect(edit.text).toBe(`${Q1_TEXT}\n\n${CANCELLED}`);
+    expect(edit.text).toBe(`${Q1_TEXT}\n\n${en.pollCancelled}`);
   });
 
   test("several questions come one at a time and are answered together", async () => {
@@ -4208,24 +4215,24 @@ describe("questions", () => {
     const answer = ask([Q1, Q2]);
     const first = await polled();
     const firstId = fake.lastMessageId;
-    expect(String(first.text).startsWith("Вопрос 1 из 2: Цвет\nКакой цвет?")).toBe(true);
+    expect(String(first.text).startsWith("Question 1 of 2: Color\nWhich color?")).toBe(true);
     press(dataOf(first, 0), firstId);
     const second = await polled(2);
-    expect(String(second.text).startsWith("Вопрос 2 из 2: Добавки\n")).toBe(true);
+    expect(String(second.text).startsWith("Question 2 of 2: Extras\n")).toBe(true);
     press(dataOf(first, 1), firstId);
-    await waitFor(() => fake.callsOf("answerCallbackQuery").some(c => c.text === STALE_POLL));
+    await waitFor(() => fake.callsOf("answerCallbackQuery").some(c => c.text === en.pollStale));
     press(dataOf(second, 1), fake.lastMessageId);
     press(dataOf(second, 3), fake.lastMessageId);
-    expect(await answer).toEqual({ decision: "allow", answers: { "Какой цвет?": "Красный", "Что добавить?": "Лук" } });
+    expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "Red", "What to add?": "Onion" } });
   });
 
-  test("a button of a poll the hub does not know answers «Опрос устарел» and loses its buttons", async () => {
+  test("a button of a poll the hub does not know answers «The poll is outdated» and loses its buttons", async () => {
     await startHub();
     await enabled("a");
     press("q:deadbeef:0:1", 77);
     await waitFor(() => fake.callsOf("editMessageReplyMarkup")[0]);
     expect(fake.callsOf("editMessageReplyMarkup")[0]).toMatchObject({ chat_id: GROUP, message_id: 77 });
-    expect(fake.callsOf("answerCallbackQuery")[0]).toMatchObject({ text: STALE_POLL });
+    expect(fake.callsOf("answerCallbackQuery")[0]).toMatchObject({ text: en.pollStale });
   });
 
   test("with the mode off the hub leaves the question to the terminal", async () => {
@@ -4244,7 +4251,7 @@ describe("questions", () => {
     await polled();
     ctl.abort();
     await answer;
-    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`));
+    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${en.pollMovedToTerminal}`));
   });
 
   test("a new poll of the session closes the old one", async () => {
@@ -4254,11 +4261,11 @@ describe("questions", () => {
     await polled();
     const fresh = ask([Q2]);
     expect(await old).toEqual({ decision: "none" });
-    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`));
+    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${en.pollMovedToTerminal}`));
     const msg = await polled(2);
     press(dataOf(msg, 0), fake.lastMessageId);
     press(dataOf(msg, 3), fake.lastMessageId);
-    expect(await fresh).toEqual({ decision: "allow", answers: { "Что добавить?": "Сыр" } });
+    expect(await fresh).toEqual({ decision: "allow", answers: { "What to add?": "Cheese" } });
   });
 
   test("a stopping hub moves the poll to the terminal", async () => {
@@ -4268,7 +4275,7 @@ describe("questions", () => {
     await polled();
     await hub.stop();
     expect(await answer).toEqual({ decision: "none" });
-    expect(edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`)).toBe(true);
+    expect(edits().some(e => e.text === `${Q1_TEXT}\n\n${en.pollMovedToTerminal}`)).toBe(true);
   });
 
   test("a hub that stops while the poll is still being sent has moved it to the terminal when stop returns", async () => {
@@ -4282,7 +4289,7 @@ describe("questions", () => {
     await Bun.sleep(SHOWN_MS);
     release();
     await stopping;
-    expect(edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`)).toBe(true);
+    expect(edits().some(e => e.text === `${Q1_TEXT}\n\n${en.pollMovedToTerminal}`)).toBe(true);
     expect(await answer).toEqual({ decision: "none" });
   });
 
@@ -4293,7 +4300,7 @@ describe("questions", () => {
     await polled();
     a.close();
     expect(await answer).toEqual({ decision: "none" });
-    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`));
+    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${en.pollMovedToTerminal}`));
   });
 
   test("turning the mode off moves the poll to the terminal", async () => {
@@ -4303,7 +4310,7 @@ describe("questions", () => {
     await polled();
     await req(a, { op: "disable" });
     expect(await answer).toEqual({ decision: "none" });
-    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${TO_TERMINAL}`));
+    await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n${en.pollMovedToTerminal}`));
   });
 
   test("a poll message Telegram rejects leaves the question to the terminal", async () => {

@@ -75,9 +75,9 @@ describe("markdown to Telegram entities", () => {
   });
 
   test("heading becomes a bold line", () => {
-    const f = toTelegram("## Итог\n\ntext");
-    expect(f.text).toBe("Итог\n\ntext");
-    expect(spans(f)).toEqual([{ type: "bold", offset: 0, length: 4, text: "Итог" }]);
+    const f = toTelegram("## \u0418\u0442\u043e\u0433\n\ntext");
+    expect(f.text).toBe("\u0418\u0442\u043e\u0433\n\ntext");
+    expect(spans(f)).toEqual([{ type: "bold", offset: 0, length: 4, text: "\u0418\u0442\u043e\u0433" }]);
   });
 
   test("paragraphs are separated by a blank line, soft breaks kept", () => {

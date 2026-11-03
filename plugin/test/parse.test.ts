@@ -44,14 +44,14 @@ describe("assistant records", () => {
 
   // Claude Code shows narration in the terminal as ordinary assistant text.
   test("narration is text", () => {
-    expect(parseRecord(assistant("m1", "tool_use", narration("Проверяю тесты.\n\n")))).toEqual([
-      { kind: "text", text: "Проверяю тесты.", messageId: "m1" },
+    expect(parseRecord(assistant("m1", "tool_use", narration("\u041f\u0440\u043e\u0432\u0435\u0440\u044f\u044e \u0442\u0435\u0441\u0442\u044b.\n\n")))).toEqual([
+      { kind: "text", text: "\u041f\u0440\u043e\u0432\u0435\u0440\u044f\u044e \u0442\u0435\u0441\u0442\u044b.", messageId: "m1" },
     ]);
   });
 
   test("narration of an end_turn message is text then turn_end", () => {
-    expect(parseRecord(assistant("m2", "end_turn", narration("Готово.")))).toEqual([
-      { kind: "text", text: "Готово.", messageId: "m2" },
+    expect(parseRecord(assistant("m2", "end_turn", narration("\u0413\u043e\u0442\u043e\u0432\u043e.")))).toEqual([
+      { kind: "text", text: "\u0413\u043e\u0442\u043e\u0432\u043e.", messageId: "m2" },
       { kind: "turn_end", messageId: "m2" },
     ]);
   });
@@ -181,7 +181,7 @@ describe("user records", () => {
       parentUuid: "p",
       isSidechain: false,
       type: "attachment",
-      attachment: { type: "queued_command", prompt: "Как успехи?", commandMode: "prompt", origin: { kind: "human" }, humanTurn: true },
+      attachment: { type: "queued_command", prompt: "\u041a\u0430\u043a \u0443\u0441\u043f\u0435\u0445\u0438?", commandMode: "prompt", origin: { kind: "human" }, humanTurn: true },
     };
     expect(parseRecord(rec)).toEqual([{ kind: "terminal_input" }]);
   });
@@ -245,20 +245,20 @@ describe("topic messages reaching the agent", () => {
   const tag = (id: number, body: string) => `<channel source="plugin:telegram-hub:telegram-hub" chat_id="-1001" message_id="${id}" user="me" user_id="1" ts="2026-01-09T12:00:00.000Z">\n${body}\n</channel>`;
 
   test("a channel prompt names the messages the agent got", () => {
-    const rec = { ...userBase, isMeta: true, origin: TG, message: { role: "user", content: tag(4951, "привет") } };
+    const rec = { ...userBase, isMeta: true, origin: TG, message: { role: "user", content: tag(4951, "\u043f\u0440\u0438\u0432\u0435\u0442") } };
     expect(parseRecord(rec)).toEqual([{ kind: "channel_seen", messageIds: [4951] }]);
     const blocks = { ...rec, message: { role: "user", content: [{ type: "text", text: `${tag(7, "a")}\n${tag(8, "b")}` }] } };
     expect(parseRecord(blocks)).toEqual([{ kind: "channel_seen", messageIds: [7, 8] }]);
   });
 
   test("a channel message absorbed mid-turn is seen too", () => {
-    const rec = { type: "attachment", isSidechain: false, attachment: { type: "queued_command", prompt: tag(4841, "и ещё"), commandMode: "prompt", origin: TG } };
+    const rec = { type: "attachment", isSidechain: false, attachment: { type: "queued_command", prompt: tag(4841, "\u0438 \u0435\u0449\u0451"), commandMode: "prompt", origin: TG } };
     expect(parseRecord(rec)).toEqual([{ kind: "channel_seen", messageIds: [4841] }]);
   });
 
   test("a message that interrupted the agent comes from our plugin through the inbox", () => {
     const peer = { kind: "peer", from: "unknown", plugin: "telegram-hub" };
-    const rec = { ...userBase, isMeta: true, origin: peer, message: { role: "user", content: `Another Claude session sent a message:\n${tag(5107, "! стоп")}` } };
+    const rec = { ...userBase, isMeta: true, origin: peer, message: { role: "user", content: `Another Claude session sent a message:\n${tag(5107, "! \u0441\u0442\u043e\u043f")}` } };
     expect(parseRecord(rec)).toEqual([{ kind: "channel_seen", messageIds: [5107] }]);
   });
 

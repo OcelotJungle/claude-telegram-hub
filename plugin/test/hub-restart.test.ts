@@ -7,6 +7,7 @@ import { appendFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { CLEANUP_SETTLE_MS, Hub } from "../src/hub/hub.ts";
 import { LaunchExitError } from "../src/hub/launch.ts";
+import { en } from "../src/shared/i18n/en.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { MAX_RECONNECT_PAUSE_MS } from "../src/shared/reconnect.ts";
 import { buttonPress, topicMsg } from "./fake-telegram.ts";
@@ -115,9 +116,9 @@ describe("all starts share the exit gate", () => {
     f.close(old);
     await f.clock.advance(EXIT_MS * 2);
     expect(f.spawned).toEqual([]);
-    expect(f.notices.filter(text => text.includes("Claude Code не завершился"))).toHaveLength(1);
+    expect(f.notices.filter(text => text === en.modeNotChangedExit)).toHaveLength(1);
     await f.update("/mode");
-    expect(f.notices.at(-1)).toBe("Сессия уже запускается");
+    expect(f.notices.at(-1)).toBe(en.sessionAlreadyStarting);
     f.die();
     await f.clock.advance(POLL_MS);
     expect(f.spawned).toHaveLength(1);
@@ -201,7 +202,7 @@ describe("all starts share the exit gate", () => {
     const returned = f.connect();
     await turn();
     await f.clock.advance(READY_MS);
-    expect(f.notices).toContain("⚠️ Режим не сменён: сессия снова открыта");
+    expect(f.notices).toContain(en.modeNotChangedReopened);
     expect(f.contents(returned)).toEqual(["held for reconnect"]);
     expect(f.spawned).toEqual([]);
   });
@@ -246,7 +247,7 @@ describe("restart delivery races", () => {
     await f.press(`m:${SID}:plan`);
     expect(f.sent.some(({ ws, msg }) => ws === old && msg.type === "terminate")).toBe(true);
     await f.press(`m:${SID}:auto`);
-    expect(f.notices.at(-1)).toBe("Сессия уже запускается");
+    expect(f.notices.at(-1)).toBe(en.sessionAlreadyStarting);
     f.close(old);
     f.die();
   });
@@ -351,7 +352,7 @@ describe("restart delivery races", () => {
     expect(f.contents(next)).toEqual(["first", "during restart", "last held message", "during readiness"]);
     expect(delivered).toBe(2);
     expect(f.contents(old)).toEqual([]);
-    expect(f.notices).not.toContain("⏹ Сессия завершена");
+    expect(f.notices).not.toContain(en.sessionEnded);
   });
 
   test("keyboard removal hanging does not delay the switch; refusals retain buttons", async () => {
@@ -396,7 +397,7 @@ describe("held items survive failed starts", () => {
     const f = fixture({ spawn: async () => { throw new LaunchExitError(2, "no server running"); } });
     f.hub["launch"](SID, undefined, [{ message: f.message("kept after a failed command") }], true, "plan");
     await turn();
-    expect(f.notices).toContain("⚠️ Не могу запустить сессию: команда запуска завершилась с кодом 2: no server running");
+    expect(f.notices).toContain(en.cannotLaunch({ why: en.launchExited({ code: 2, stderr: "no server running" }) }));
     expect(f.notices.some(text => text.includes("🚀"))).toBe(false);
     expect(f.hub["retained"].get(SID)).toHaveLength(1);
     expect(f.hub["launches"].has(SID)).toBe(false);
@@ -410,7 +411,7 @@ describe("held items survive failed starts", () => {
     const f = fixture({ spawn: async () => { throw new LaunchExitError(1, `duplicate session: claude-${SID}`); } });
     f.hub["launch"](SID, undefined, [{ message: f.message("kept for the live session") }], true);
     await turn();
-    expect(f.notices).toContain(`⚠️ Сессия уже запущена в tmux (claude-${SID}), скорее всего ждёт ответа в диалоге, например подтверждения канала. Подключись: tmux attach -t claude-${SID}`);
+    expect(f.notices).toContain(en.tmuxSessionAlive({ name: `claude-${SID}` }));
     expect(f.notices.some(text => text.includes("🚀"))).toBe(false);
     expect(f.hub["retained"].get(SID)).toHaveLength(1);
   });
@@ -421,14 +422,14 @@ describe("held items survive failed starts", () => {
     f.configure({ ...f.config(), launch: { command: tmux, timeoutSec: LAUNCH_SECONDS } });
     f.hub["launch"](SID, undefined, [{ message: f.message("waiting") }]);
     await f.clock.advance(LAUNCH_SECONDS * MS_PER_SECOND);
-    expect(f.notices.at(-1)).toBe(`⚠️ Сессия не запустилась за ${LAUNCH_SECONDS} с. Возможно, она ждёт подтверждения в tmux: tmux attach -t claude-${SID}`);
+    expect(f.notices.at(-1)).toBe(en.sessionDidNotStart({ seconds: LAUNCH_SECONDS, tmuxHint: `tmux attach -t claude-${SID}` }));
   });
 
   test("a launch that never connects through another command gets the plain timeout notice", async () => {
     const f = fixture();
     f.hub["launch"](SID, undefined, [{ message: f.message("waiting") }]);
     await f.clock.advance(LAUNCH_SECONDS * MS_PER_SECOND);
-    expect(f.notices.at(-1)).toBe(`⚠️ Сессия не запустилась за ${LAUNCH_SECONDS} с`);
+    expect(f.notices.at(-1)).toBe(en.sessionDidNotStart({ seconds: LAUNCH_SECONDS, tmuxHint: undefined }));
   });
 
   for (const failure of ["spawn", "timeout", "checks", "placeholder"]) {
@@ -448,7 +449,7 @@ describe("held items survive failed starts", () => {
       await f.clock.advance(POLL_MS);
       if (failure === "timeout") await f.clock.advance(LAUNCH_SECONDS * MS_PER_SECOND);
       expect(delivered).toBe(false);
-      expect(f.notices.some(text => text.includes("Ожидают доставки: 2"))).toBe(true);
+      expect(f.notices.some(text => text.includes(en.pendingDelivery({ count: 2 })))).toBe(true);
       if (failure !== "timeout") expect(commands).toEqual([]);
       failSpawn = false;
       f.configure({ ...f.config(), launch: { command: COMMAND, timeoutSec: LAUNCH_SECONDS } });
@@ -491,7 +492,7 @@ describe("mode belongs to the current run", () => {
     expect(f.hub["knownMode"](SID)).toBeUndefined();
     expect(f.hub["currentMode"](SID)).toBe("plan");
     await f.update("/mode");
-    expect(f.hub["outbox"].head(SID)?.text).toContain("Последний известный режим: plan");
+    expect(f.hub["outbox"].head(SID)?.text).toContain(en.modeLastKnown({ mode: "plan" }));
     await f.update("/mode plan");
     expect(f.sent.some(({ ws, msg }) => ws === old && msg.type === "terminate")).toBe(true);
   });
@@ -504,7 +505,7 @@ describe("mode belongs to the current run", () => {
     f.connect();
     appendFileSync(path, `${JSON.stringify({ type: "permission-mode", permissionMode: "plan" })}\n`);
     await f.update("/mode plan");
-    expect(f.notices).toContain("Режим уже plan");
+    expect(f.notices).toContain(en.modeAlready({ mode: "plan" }));
     expect(f.sent.some(({ msg }) => msg.type === "terminate")).toBe(false);
   });
 

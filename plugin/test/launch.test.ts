@@ -3,6 +3,7 @@ import { mkdirSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { isTmuxCommand, launchCommand, LaunchError, LaunchExitError, sessionCwd, spawnDetached, tmuxAttachHint, tmuxSession, transcriptMode } from "../src/hub/launch.ts";
+import { en } from "../src/shared/i18n/en.ts";
 import { platformFor } from "../src/shared/platform.ts";
 import { tempDir as makeTempDir } from "./helpers.ts";
 
@@ -34,8 +35,8 @@ describe("launchCommand", () => {
     const cwd = tempDir();
     expect(() => launchCommand(LAUNCH, { cwd, account: "1 & calc", session: SID })).toThrow(LaunchError);
     expect(() => launchCommand(LAUNCH, { cwd, account: "1", session: `${SID}&calc` })).toThrow(LaunchError);
-    expect(() => launchCommand(LAUNCH, { cwd: join(cwd, "missing"), account: "1", session: SID })).toThrow("папки сессии нет");
-    expect(() => launchCommand({ ...LAUNCH, command: ["cmd.exe", "/c", "claude --resume {session}"] }, { cwd: `${cwd}&calc`, account: "1", session: SID }, platformFor("win32"))).toThrow("опасные для cmd.exe");
+    expect(() => launchCommand(LAUNCH, { cwd: join(cwd, "missing"), account: "1", session: SID })).toThrow(en.launchNoDirectory({ cwd: join(cwd, "missing") }));
+    expect(() => launchCommand({ ...LAUNCH, command: ["cmd.exe", "/c", "claude --resume {session}"] }, { cwd: `${cwd}&calc`, account: "1", session: SID }, platformFor("win32"))).toThrow(en.launchUnsafeCwd({ cwd: `${cwd}&calc` }));
     expect(launchCommand(LAUNCH, { cwd, account: "me@mail.com", session: SID })[5]).toContain("run me@mail.com --");
   });
 
@@ -60,7 +61,7 @@ describe("launchCommand", () => {
       "tmux", "new-session", "-d", "-s", `claude-${SID}`, "-c", cwd, "--", "claude", "--resume", SID, "--permission-mode", "plan",
     ]);
     for (const executable of ["cmd", "cmd.exe", "CMD.EXE", "C:\\Windows\\System32\\cmd.exe"]) {
-      expect(() => launchCommand({ ...launch, command: [executable, "/c", "claude"] }, { cwd, account: "", session: SID }, platformFor("win32"))).toThrow("опасные для cmd.exe");
+      expect(() => launchCommand({ ...launch, command: [executable, "/c", "claude"] }, { cwd, account: "", session: SID }, platformFor("win32"))).toThrow(en.launchUnsafeCwd({ cwd }));
     }
   });
 
@@ -68,9 +69,9 @@ describe("launchCommand", () => {
     const cwd = join(tempDir(), "a&b");
     mkdirSync(cwd);
     // wt.exe starts cmd.exe itself: the executable is not cmd, the folder still reaches cmd.
-    expect(() => launchCommand(LAUNCH, { cwd, account: "1", session: SID }, platformFor("win32"))).toThrow("опасные для cmd.exe");
+    expect(() => launchCommand(LAUNCH, { cwd, account: "1", session: SID }, platformFor("win32"))).toThrow(en.launchUnsafeCwd({ cwd }));
     const tmux = { command: ["tmux", "new-session", "-d", "-c", "{cwd}"], timeoutSec: 90 };
-    expect(() => launchCommand(tmux, { cwd, account: "", session: SID }, platformFor("win32"))).toThrow("опасные для cmd.exe");
+    expect(() => launchCommand(tmux, { cwd, account: "", session: SID }, platformFor("win32"))).toThrow(en.launchUnsafeCwd({ cwd }));
   });
 
   test("on Linux there is no shell, so cmd.exe characters in the folder are plain text", () => {
@@ -81,7 +82,7 @@ describe("launchCommand", () => {
     expect(launchCommand({ command: ["tmux", "-c", "{cwd}"], timeoutSec: 90 }, { cwd, account: "", session: SID }, linux)).toEqual(["tmux", "-c", cwd]);
     // Session id, account, mode and folder existence stay checked everywhere.
     expect(() => launchCommand(LAUNCH, { cwd, account: "1 & calc", session: SID }, linux)).toThrow(LaunchError);
-    expect(() => launchCommand(LAUNCH, { cwd: join(cwd, "missing"), account: "1", session: SID }, linux)).toThrow("папки сессии нет");
+    expect(() => launchCommand(LAUNCH, { cwd: join(cwd, "missing"), account: "1", session: SID }, linux)).toThrow(en.launchNoDirectory({ cwd: join(cwd, "missing") }));
   });
 
   test("rejects modes outside the strict allowlist", () => {
@@ -105,7 +106,7 @@ describe("spawnDetached", () => {
     if (!(failure instanceof LaunchExitError)) return;
     expect(failure.code).toBe(1);
     expect(failure.stderr).toBe("duplicate session: claude-x");
-    expect(failure.message).toBe("команда запуска завершилась с кодом 1: duplicate session: claude-x");
+    expect(failure.message).toBe(en.launchExited({ code: 1, stderr: "duplicate session: claude-x" }));
     expect(leftovers()).toEqual(before);
   });
 
@@ -148,7 +149,7 @@ describe("tmux launch commands", () => {
     expect(isTmuxCommand(LAUNCH.command)).toBe(false);
     expect(tmuxSession(command)).toBe(`claude-${SID}`);
     expect(tmuxSession(["tmux", "new-session", "-d"])).toBeUndefined();
-    expect(tmuxAttachHint(command)).toBe(`tmux attach -t claude-${SID}`);
+    expect(tmuxAttachHint(command, en)).toBe(`tmux attach -t claude-${SID}`);
   });
 });
 
@@ -182,7 +183,8 @@ describe("transcriptMode", () => {
 
   test("reads a record split across a byte block boundary and guards a shrunken offset", () => {
     const path = join(tempDir(), "split.jsonl");
-    const record = `${JSON.stringify({ type: "permission-mode", permissionMode: "plan", note: "я".repeat(TAIL_READ_BYTES) })}\n`;
+    // A Cyrillic letter is a two-byte UTF-8 character, so the block boundary can split it.
+    const record = `${JSON.stringify({ type: "permission-mode", permissionMode: "plan", note: "\u044f".repeat(TAIL_READ_BYTES) })}\n`;
     writeFileSync(path, record);
     expect(transcriptMode(path)).toBe("plan");
     expect(transcriptMode(path, Buffer.byteLength(record) + 1)).toBeUndefined();

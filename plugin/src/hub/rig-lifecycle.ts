@@ -1,3 +1,5 @@
+import type { Messages } from "../shared/i18n/index.ts";
+
 import { spawnSync } from "child_process";
 import { existsSync, readFileSync, statSync } from "fs";
 import { join } from "path";
@@ -10,8 +12,6 @@ const restartingSchema = z.object({ time: z.string() });
 export const RIG_RESTART_EXIT = 75;
 export const COMMIT_ENV = "TELEGRAM_HUB_COMMIT";
 const COMMIT_UNKNOWN_ID = "rig-commit-unknown";
-const COMMIT_UNKNOWN_TEXT = "Хаб не смог определить коммит своего кода, поэтому не может обработать обновление. Попытки продолжаются.";
-const CODE_CHANGED_TEXT = "Хаб запущен с другим кодом. Окна подхватят его при следующем запуске.";
 
 function readSignal<T>(file: string, schema: z.ZodType<T>): T | undefined {
   try {
@@ -52,6 +52,8 @@ export class RigLifecycle {
   constructor(private deps: {
     dir: string; started(): string | undefined; head(): string | undefined; now(): number; idle(): boolean;
     notice(id: string, text: string): void; exit(code: number): void; warn(text: string): void;
+    // The catalog of the hub's current language, read when a notice is made.
+    messages(): Messages;
   }) {
     this.commit = deps.started();
   }
@@ -73,7 +75,7 @@ export class RigLifecycle {
   check(): void {
     this.resolve();
     this.publish();
-    if (this.codeChange && !this.rigUpdated) this.deps.notice(this.codeChange, CODE_CHANGED_TEXT);
+    if (this.codeChange && !this.rigUpdated) this.deps.notice(this.codeChange, this.deps.messages().codeChanged);
     this.codeChange = undefined;
     if (!this.pending || !this.deps.idle()) return;
     try {
@@ -93,7 +95,7 @@ export class RigLifecycle {
       this.warnOnce("commit", "rig restart: cannot determine hub commit");
       if (!this.commitReported) {
         this.commitReported = true;
-        this.deps.notice(`${COMMIT_UNKNOWN_ID}-${this.deps.now()}`, COMMIT_UNKNOWN_TEXT);
+        this.deps.notice(`${COMMIT_UNKNOWN_ID}-${this.deps.now()}`, this.deps.messages().commitUnknown);
       }
       return;
     }

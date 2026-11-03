@@ -124,7 +124,7 @@ export function shellRun(shell: ExecShell, text: string, dir: string, id: string
       env: { CHERE_INVOKING: "1" },
     };
   }
-  // cmd reads the code page once per line, so `chcp 65001 & echo привет` in one
+  // cmd reads the code page once per line, so `chcp 65001 & echo <Cyrillic word>` in one
   // line still prints "??????" to a hidden console. An outer cmd switches the
   // console to UTF-8 and starts the user's cmd, which then starts in UTF-8.
   // The outer takes the line by delayed expansion (!VAR!), after its own

@@ -1,5 +1,5 @@
 // Static checks of the service install scripts: they cannot run on Windows, the container run (scripts/test-systemd.sh)
-// covers their behaviour. These keep the contract of the spec («Служба на Linux», «Хабом управляет служба») from drifting.
+// covers their behaviour. These keep the contract of the spec's Linux and hub-managed service sections from drifting.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "fs";
 import { join, resolve } from "path";

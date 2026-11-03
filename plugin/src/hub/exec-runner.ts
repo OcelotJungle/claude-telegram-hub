@@ -43,7 +43,7 @@ export function spawnRunner(specFile: string, runtime = process.execPath): numbe
   // A failed spawn reports here too; unheard, it would take the hub down.
   child.on("error", () => {});
   child.unref();
-  if (child.pid === undefined) throw new Error(`раннер не запустился: ${runtime}`);
+  if (child.pid === undefined) throw new Error(`runner did not start: ${runtime}`);
   return child.pid;
 }
 
@@ -97,12 +97,12 @@ function run(specFile: string): void {
     clearInterval(heartbeat);
     writeExit(spec.exit, info);
   };
+  // The reason goes into the exit file; the hub words it for the user in the language it has then.
   const failed = (message: string) => {
-    appendFileSync(spec.log, `⚠️ не запустилось: ${message}\n`);
     end({ code: null, endedAt: Date.now(), error: message });
   };
   const [cmd, ...args] = spec.argv;
-  if (cmd === undefined) return failed("пустая команда");
+  if (cmd === undefined) return failed("empty command");
   const child = spawn(cmd, args, {
     cwd: spec.cwd,
     env: spec.env,

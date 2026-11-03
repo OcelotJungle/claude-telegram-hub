@@ -10,6 +10,7 @@ import type { Logger } from "../shared/log.ts";
 import type { MessageKind } from "../shared/notification.ts";
 import type { MachineDestination } from "./machine-outbox.ts";
 import type { RigInvocation } from "./rig.ts";
+import type { Messages } from "../shared/i18n/index.ts";
 
 import { randomBytes, randomUUID } from "crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "fs";
@@ -18,6 +19,7 @@ import { loadExecs, saveExecs } from "./exec-store.ts";
 import { notifies } from "../shared/notification.ts";
 import { SHELL_NAMES, shellRun, writeShellFiles } from "./exec-shell.ts";
 import { exitInfoSchema, HEARTBEAT_MS } from "./exec-runner.ts";
+import { catalogOf } from "../shared/i18n/index.ts";
 
 export const EXEC_CARD_MS = 60_000;
 export const EXEC_CARD_LINES = 10;
@@ -43,9 +45,14 @@ const BYTES_PER_MB = 1024 * 1024;
 // The first bytes of a UTF-8 character's continuation: 10xxxxxx.
 const UTF8_CONT_MASK = 0xc0;
 const UTF8_CONT = 0x80;
-const LOST_REASON = "процесс исчез";
+const LOST_PROCESS_GONE = "process-gone";
+const LOST_NO_RIG_COMMAND = "no-rig-command";
+const LOST_SAVE_FAILED = "save-failed";
+const LOST_START_FAILED = "start-failed";
 
 export type ExecDeps = {
+  // The hub's current language: cards and answers are rendered in it each time.
+  messages(): Messages;
   dir: string;
   file: string;
   shells(): ShellPaths;
@@ -185,28 +192,29 @@ export class Execs {
   }
 
   press(id: string, action: "stop" | "run"): string {
+    const m = this.deps.messages();
     const rec = this.recs.find(r => r.id === id);
-    if (!rec) return "Запуск не найден";
-    if (rec.state === "ended") return "Команда уже закончилась";
+    if (!rec) return m.execNotFound;
+    if (rec.state === "ended") return m.execAlreadyEnded;
     if (action === "run") {
-      if (rec.state === "running") return "Команда уже запущена";
+      if (rec.state === "running") return m.execAlreadyRunning;
       // The button may be old: the feature could have been switched off since the card was shown.
       const why = this.deps.unavailable?.(rec.shell);
       if (why) return why;
       this.launch(rec);
-      return "Запускаю";
+      return m.execStarting;
     }
-    if (rec.state === "pending" || rec.pid === undefined) return "Команда ещё не запущена";
+    if (rec.state === "pending" || rec.pid === undefined) return m.execNotStarted;
     // A run that ended, or whose runner is gone, is not killed: its pid may
     // belong to another process by now.
     if (existsSync(this.path(rec.id, "exit.json")) || !this.beating(rec)) {
       this.check();
-      return "Команда уже закончилась";
+      return m.execAlreadyEnded;
     }
     rec.stopping = true;
     this.save();
     this.deps.kill(rec.pid);
-    return "Останавливаю";
+    return m.execStopping;
   }
 
   // Results the agent has not got go again once its session is back.
@@ -246,7 +254,7 @@ export class Execs {
       const run = rec.shell === "rig"
         ? rec.invocation && { ...rec.invocation, files: [], env: {} }
         : shellRun(rec.shell, rec.text, this.deps.dir, rec.id, this.deps.shells());
-      if (!run) return this.end(rec, { kind: "lost", at: this.deps.now(), reason: "нет команды rig" });
+      if (!run) return this.end(rec, { kind: "lost", at: this.deps.now(), reason: LOST_NO_RIG_COMMAND });
       writeShellFiles(run);
       const spec: RunnerSpec = {
         argv: run.argv,
@@ -269,7 +277,7 @@ export class Execs {
       rec.state = "running";
       rec.startedAt = this.deps.now();
       if (!this.save()) {
-        this.end(rec, { kind: "lost", at: this.deps.now(), reason: "не удалось сохранить запуск" });
+        this.end(rec, { kind: "lost", at: this.deps.now(), reason: LOST_SAVE_FAILED });
         return;
       }
       rec.pid = this.deps.spawnRunner(specFile);
@@ -279,7 +287,7 @@ export class Execs {
     } catch (e) {
       this.deps.log.error(`exec ${rec.id}: start failed: ${e}`);
       rec.startedAt = this.deps.now();
-      this.end(rec, { kind: "lost", at: this.deps.now(), reason: `не запустилось: ${e instanceof Error ? e.message : String(e)}` });
+      this.end(rec, { kind: "lost", at: this.deps.now(), reason: LOST_START_FAILED, detail: e instanceof Error ? e.message : String(e) });
     }
   }
 
@@ -322,7 +330,7 @@ export class Execs {
       }
       // The runner may have written the file just before it exited.
       if (existsSync(exit)) this.ended(rec, exit, quiet);
-      else this.end(rec, rec.stopping ? { kind: "stopped", at: this.deps.now() } : { kind: "lost", at: this.deps.now(), reason: LOST_REASON }, quiet);
+      else this.end(rec, rec.stopping ? { kind: "stopped", at: this.deps.now() } : { kind: "lost", at: this.deps.now(), reason: LOST_PROCESS_GONE }, quiet);
     }
   }
 
@@ -335,11 +343,11 @@ export class Execs {
       return;
     }
     const at = info.endedAt;
-    if (info.error !== undefined) this.end(rec, { kind: "lost", at, reason: `не запустилось: ${info.error}` }, quiet);
+    if (info.error !== undefined) this.end(rec, { kind: "lost", at, reason: LOST_START_FAILED, detail: info.error }, quiet);
     // After a stop, a non-zero code is most likely the kill's; a run that
     // ended before the press never got killed (see press).
     else if (rec.stopping && info.code !== 0) this.end(rec, { kind: "stopped", at }, quiet);
-    else if (info.code === null) this.end(rec, { kind: "lost", at, reason: LOST_REASON }, quiet);
+    else if (info.code === null) this.end(rec, { kind: "lost", at, reason: LOST_PROCESS_GONE }, quiet);
     else this.end(rec, { kind: "exit", code: info.code, at }, quiet);
   }
 
@@ -380,7 +388,8 @@ export class Execs {
     const limit = this.deps.fileLimit ?? TELEGRAM_FILE_LIMIT;
     const size = statSync(log).size;
     if (size <= limit) return log;
-    const note = Buffer.from(`[лог обрезан: здесь последние ${mb(limit)} из ${mb(size)}]\n`);
+    const m = this.deps.messages();
+    const note = Buffer.from(`${m.execLogTrimmed({ limit: mb(limit, m), size: mb(size, m) })}\n`);
     const copy = this.path(id, "tail.log");
     copyTail(log, copy, note, Math.max(0, limit - note.length));
     return copy;
@@ -413,17 +422,18 @@ export class Execs {
   }
 
   private showCard(rec: ExecRecord): void {
+    const m = this.deps.messages();
     const tail = rec.state === "pending" ? "" : logTail(this.path(rec.id, "log"), EXEC_CARD_LINES);
     const buttons: Button[][] | undefined =
       rec.state === "running"
-        ? [[{ text: "⏹ Остановить", data: `x:${rec.id}:stop` }]]
+        ? [[{ text: m.execStopButton, data: `x:${rec.id}:stop` }]]
         : rec.state === "pending"
-          ? [[{ text: "▶ Запустить", data: `x:${rec.id}:run` }]]
+          ? [[{ text: m.execRunButton, data: `x:${rec.id}:run` }]]
           : undefined;
     const kind = rec.state !== "ended" || rec.end?.kind === "stopped" || (rec.end?.kind === "exit" && rec.end.code === 0)
       ? "info"
       : rec.end?.kind === "exit" ? "error" : "warning";
-    const text = execCardText(rec, tail, this.deps.now(), this.deps.shellNames);
+    const text = execCardText(rec, tail, this.deps.now(), m, this.deps.shellNames);
     if (rec.shell === "rig") {
       if (rec.state === "running") this.rigShown.set(rec.id, { tail, at: this.deps.now() });
       else this.rigShown.delete(rec.id);
@@ -432,8 +442,8 @@ export class Execs {
   }
 }
 
-function mb(bytes: number): string {
-  return `${Math.round(bytes / BYTES_PER_MB)} МБ`;
+function mb(bytes: number, m: Messages): string {
+  return `${Math.round(bytes / BYTES_PER_MB)} ${m.unitMegabyte}`;
 }
 
 // The note, then the last `bytes` of the file, from a character's start.
@@ -513,12 +523,12 @@ function fitsCard(path: string): boolean {
   return lines.length <= EXEC_CARD_LINES && lines.every(l => l.length <= LINE_MAX);
 }
 
-export function duration(ms: number): string {
+export function duration(ms: number, m: Messages): string {
   const s = Math.max(0, Math.floor(ms / MS_PER_SECOND));
-  if (s < SECONDS_PER_MINUTE) return `${s} с`;
-  const m = Math.floor(s / SECONDS_PER_MINUTE);
-  if (m < MINUTES_PER_HOUR) return `${m} мин ${String(s % SECONDS_PER_MINUTE).padStart(2, "0")} с`;
-  return `${Math.floor(m / MINUTES_PER_HOUR)} ч ${String(m % MINUTES_PER_HOUR).padStart(2, "0")} мин`;
+  if (s < SECONDS_PER_MINUTE) return `${s} ${m.unitSecond}`;
+  const minutes = Math.floor(s / SECONDS_PER_MINUTE);
+  if (minutes < MINUTES_PER_HOUR) return `${minutes} ${m.unitMinute} ${String(s % SECONDS_PER_MINUTE).padStart(2, "0")} ${m.unitSecond}`;
+  return `${Math.floor(minutes / MINUTES_PER_HOUR)} ${m.unitHour} ${String(minutes % MINUTES_PER_HOUR).padStart(2, "0")} ${m.unitMinute}`;
 }
 
 function longestRun(text: string, ch: string): number {
@@ -541,23 +551,36 @@ function inlineCode(text: string): string {
   return `${ticks}${pad}${cut}${pad}${ticks}`;
 }
 
-function outcome(rec: ExecRecord): string {
-  const end = rec.end;
-  if (!end) return "";
-  if (end.kind === "stopped") return "⏹ остановлена";
-  if (end.kind === "lost") return `⚠️ прервана: ${end.reason ?? LOST_REASON}`;
-  return end.code === 0 ? "✅ код 0" : `❌ код ${end.code}`;
+// Why a run was lost, in the catalog's language; a reason that is not a known
+// code (a file saved by an older hub holds text) is shown as it is.
+function lostReason(end: NonNullable<ExecRecord["end"]>, m: Messages): string {
+  switch (end.reason) {
+    case undefined:
+    case LOST_PROCESS_GONE: return m.execLostProcessGone;
+    case LOST_NO_RIG_COMMAND: return m.execLostNoRigCommand;
+    case LOST_SAVE_FAILED: return m.execLostSaveFailed;
+    case LOST_START_FAILED: return m.execLostNotStarted({ error: end.detail ?? "" });
+    default: return end.reason;
+  }
 }
 
-export function execCardText(rec: ExecRecord, tail: string, now: number, names = SHELL_NAMES): string {
+function outcome(rec: ExecRecord, m: Messages): string {
+  const end = rec.end;
+  if (!end) return "";
+  if (end.kind === "stopped") return m.execOutcomeStopped;
+  if (end.kind === "lost") return m.execOutcomeLost({ reason: lostReason(end, m) });
+  return end.code === 0 ? m.execOutcomeOk : m.execOutcomeCode({ code: end.code });
+}
+
+export function execCardText(rec: ExecRecord, tail: string, now: number, m: Messages, names = SHELL_NAMES): string {
   let head: string;
   if (rec.state === "pending") {
     const minutes = Math.round((now - (rec.sentAt ?? now)) / MS_PER_MINUTE);
-    head = `⏸ Команда пришла ${minutes} мин назад, пока хаб был выключен`;
+    head = m.execPending({ minutes });
   } else if (rec.state === "running") {
-    head = `▶ ${rec.shell === "rig" ? "rig" : names[rec.shell]} · ${duration(now - (rec.startedAt ?? now))}`;
+    head = `▶ ${rec.shell === "rig" ? "rig" : names[rec.shell]} · ${duration(now - (rec.startedAt ?? now), m)}`;
   } else {
-    head = `${outcome(rec)} · ${duration((rec.end?.at ?? now) - (rec.startedAt ?? now))}`;
+    head = `${outcome(rec, m)} · ${duration((rec.end?.at ?? now) - (rec.startedAt ?? now), m)}`;
   }
   const lines = [head, inlineCode(rec.text)];
   if (tail) {
@@ -567,13 +590,15 @@ export function execCardText(rec: ExecRecord, tail: string, now: number, names =
   return lines.join("\n");
 }
 
+// The report to the agent: always English, whatever the hub's language.
 export function execReportText(rec: ExecRecord, tail: string, logPath: string, names = SHELL_NAMES): string {
-  const took = duration((rec.end?.at ?? 0) - (rec.startedAt ?? rec.end?.at ?? 0));
+  const m = catalogOf("en");
+  const took = duration((rec.end?.at ?? 0) - (rec.startedAt ?? rec.end?.at ?? 0), m);
   return [
-    `Команда из топика закончилась: ${outcome(rec)} за ${took}.`,
-    `Оболочка: ${rec.shell === "rig" ? "rig" : names[rec.shell]}, папка: ${rec.cwd}`,
-    `Команда: ${rec.text}`,
-    `Полный лог: ${logPath}`,
-    tail ? `Последние ${EXEC_AGENT_LINES} строк:\n${tail}` : "Вывода не было.",
+    `The topic command has ended: ${outcome(rec, m)} in ${took}.`,
+    `Shell: ${rec.shell === "rig" ? "rig" : names[rec.shell]}, folder: ${rec.cwd}`,
+    `Command: ${rec.text}`,
+    `Full log: ${logPath}`,
+    tail ? `Last ${EXEC_AGENT_LINES} lines:\n${tail}` : "There was no output.",
   ].join("\n");
 }

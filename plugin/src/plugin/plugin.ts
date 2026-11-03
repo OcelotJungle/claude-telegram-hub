@@ -1,5 +1,6 @@
 import type { ChimeKind } from "../shared/chime.ts";
 import type { Logger } from "../shared/log.ts";
+import type { Language, Messages } from "../shared/i18n/index.ts";
 import type { ChannelMeta, HubToPlugin, PermissionBehavior } from "../shared/protocol.ts";
 import type { TranscriptEvent } from "../transcript/parse.ts";
 import type { Outgoing } from "../transcript/relay.ts";
@@ -12,10 +13,10 @@ import { basename, dirname, join, resolve } from "path";
 import { playChime } from "../shared/chime.ts";
 import { PLATFORM } from "../shared/platform.ts";
 import { isInside, loadConfig } from "../shared/config.ts";
+import { catalogOf, DEFAULT_LANGUAGE } from "../shared/i18n/index.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { BYTES_PER_MB, MAX_CAPTION, MAX_UPLOAD } from "../shared/media.ts";
 import { notifies } from "../shared/notification.ts";
-import { plural } from "../shared/plural.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { enableResult } from "../shared/protocol-schema.ts";
 import { transcriptPathFor } from "../transcript/locate.ts";
@@ -34,10 +35,9 @@ export const CONTINUE_PROMPT =
 // Cuts in a row, with no turn ending normally in between, before it stops
 // and calls the person: the network may be down for good.
 export const MAX_AUTO_CONTINUES = 10;
-export function cutLimitNote(n: number): string {
-  return `⚠️ Сбой связи с API ${n} ${plural(n, "раз", "раза", "раз")} подряд, агент остановился.`;
+export function cutLimitNote(m: Messages): string {
+  return m.apiFailure({ count: MAX_AUTO_CONTINUES });
 }
-export const CUT_LIMIT_NOTE = cutLimitNote(MAX_AUTO_CONTINUES);
 // Telegram refused files after tg_send_file returned: the agent fixes it, the
 // topic is not told.
 export function filesRejectedPrompt(error: string): string {
@@ -169,6 +169,12 @@ export class PluginCore {
   // Topic messages reach the session one after another, in the order they came.
   private inbound = Promise.resolve();
   enabled = false;
+  // The hub's language; English until its first "language" message arrives.
+  private language: Language = DEFAULT_LANGUAGE;
+
+  private messages(): Messages {
+    return catalogOf(this.language);
+  }
 
   constructor(private opts: PluginOptions) {
     this.sessionId = opts.sessionId;
@@ -343,6 +349,7 @@ export class PluginCore {
       sendEveryMs: this.opts.cardEveryMs,
       log: this.log,
       versions: this.versions,
+      messages: () => this.messages(),
     });
     this.subagents.start();
   }
@@ -422,7 +429,7 @@ export class PluginCore {
     // The error text ended the turn: it goes before the note.
     this.flush(this.relay.endTurn());
     if (before >= MAX_AUTO_CONTINUES) {
-      if (before === MAX_AUTO_CONTINUES) this.client.enqueue(this.sessionId, CUT_LIMIT_NOTE, notifies("warning"));
+      if (before === MAX_AUTO_CONTINUES) this.client.enqueue(this.sessionId, cutLimitNote(this.messages()), notifies("warning"));
       return;
     }
     this.opts.emitChannel(CONTINUE_PROMPT, { user: "telegram-hub", reason: "response_cut" });
@@ -490,6 +497,9 @@ export class PluginCore {
         this.tailer?.pollNow();
         this.flush(this.relay.textBeforeToolCall());
         this.client.send({ type: "caughtUp", id: m.id });
+        return;
+      case "language":
+        this.language = m.language;
         return;
       case "terminate":
         this.log.info(`session ${this.sessionId}: /stop from the topic, ending Claude Code`);

@@ -11,7 +11,10 @@ import { z } from "zod";
 // pending: came while the hub was off, waits for its button. chatId and
 // messageId: the command message's. sentAt: the
 // command message's date. pid: the runner's. stopping: the stop button was
-// pressed. end.reason: why a lost run was lost. reported: the agent has it.
+// pressed. end.reason: why a lost run was lost, a code (process-gone,
+// no-rig-command, save-failed, start-failed) with end.detail for the last; a
+// file saved by an older hub holds the reason as text, shown as it is.
+// reported: the agent has it.
 export type ExecRecord = {
   id: string;
   sessionId?: string;
@@ -27,7 +30,7 @@ export type ExecRecord = {
   startedAt?: number;
   pid?: number;
   stopping?: boolean;
-  end?: { kind: "exit" | "stopped" | "lost"; code?: number; at: number; reason?: string };
+  end?: { kind: "exit" | "stopped" | "lost"; code?: number; at: number; reason?: string; detail?: string };
   reported: boolean;
 };
 
@@ -48,7 +51,7 @@ const fileSchema: z.ZodType<ExecRecord[]> = z.array(
     pid: z.number().optional(),
     stopping: z.boolean().optional(),
     end: z
-      .object({ kind: z.enum(["exit", "stopped", "lost"]), code: z.number().optional(), at: z.number(), reason: z.string().optional() })
+      .object({ kind: z.enum(["exit", "stopped", "lost"]), code: z.number().optional(), at: z.number(), reason: z.string().optional(), detail: z.string().optional() })
       .optional(),
     reported: z.boolean(),
   }).refine(record => record.shell === "rig" ? record.destination !== undefined && record.invocation !== undefined : record.sessionId !== undefined),

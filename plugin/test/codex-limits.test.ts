@@ -65,7 +65,7 @@ describe("Codex limits", () => {
   });
 
   test("reads before a large tail, tolerates partial lines, and invalidates cached files on append", async () => {
-    const path = await rollout("large", `${event()}\n${JSON.stringify({ text: "я".repeat(LARGE_LINE_BYTES) })}\n{partial`);
+    const path = await rollout("large", `${event()}\n${JSON.stringify({ text: "\u044f".repeat(LARGE_LINE_BYTES) })}\n{partial`);
     const reader = new CodexLimits(dir);
     expect((await reader.read())?.rateLimits[0]?.percentUsed).toBe(41);
     expect((await reader.read())?.rateLimits[0]?.percentUsed).toBe(41);

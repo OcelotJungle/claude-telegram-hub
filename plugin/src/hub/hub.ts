@@ -3,6 +3,7 @@ import type { Config } from "../shared/config.ts";
 import type { Logger } from "../shared/log.ts";
 import type { Entity, Formatted } from "../shared/markdown.ts";
 import type { OutFile } from "../shared/media.ts";
+import type { Language, Messages } from "../shared/i18n/index.ts";
 import type { AskQuestion, ChannelMeta, EnableResult, HookBody, HubToPlugin, LimitsReading, PermissionBehavior, PluginToHub, QuestionDecision, ResolutionKind, TopicCommand } from "../shared/protocol.ts";
 import type { PermissionMode } from "./launch.ts";
 import type { OutItem, Piece } from "./outbox.ts";
@@ -28,6 +29,7 @@ import { chunk } from "../shared/chunk.ts";
 import { notifies } from "../shared/notification.ts";
 import { isInside } from "../shared/config.ts";
 import { field } from "../shared/guards.ts";
+import { catalogOf, DEFAULT_LANGUAGE } from "../shared/i18n/index.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
@@ -45,27 +47,25 @@ import { accountOf, SessionStore, topicName } from "./sessions.ts";
 import { isThreadNotFound, TelegramError } from "./telegram.ts";
 import { media, richPhotos, richToMarkdown } from "./rich.ts";
 import { withContext } from "./reply-context.ts";
-import { answerLine, CANCEL_REASON, CANCELLED, checkedLabels, CUSTOM_HINT, parsePollPress, PICK_ONE, POLL_PREFIX, questionButtons, questionText, STALE_POLL, TO_TERMINAL, withOutcome } from "./questions.ts";
+import { answerLine, CANCEL_REASON, checkedLabels, parsePollPress, POLL_PREFIX, questionButtons, questionText, withOutcome } from "./questions.ts";
 import { richPieces } from "./rich-out.ts";
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath } from "./video.ts";
 import { EXEC_CARD_MS, EXEC_CHECK_MS, EXEC_MAX_AGE_MS, Execs } from "./exec.ts";
 import { freshEnv } from "./exec-env.ts";
 import { isAlive, killTree, spawnRunner } from "./exec-runner.ts";
 import { findPowershell } from "./exec-shell.ts";
-import { cleanTranscript } from "./skill-cleanup.ts";
+import { cleanTranscript, CleanupError } from "./skill-cleanup.ts";
 import { formatPermission } from "./format-permission.ts";
 import { exitGate } from "./exit-gate.ts";
 import { MAX_RECONNECT_PAUSE_MS } from "../shared/reconnect.ts";
 import { PLATFORM } from "../shared/platform.ts";
-import { featureText, findRig, Rig, RIG_MISSING, rigAction, runRig, statusText } from "./rig.ts";
+import { featureText, findRig, Rig, rigAction, rigErrorText, runRig, statusText } from "./rig.ts";
 import { confirmationPromptId, MachineOutbox } from "./machine-outbox.ts";
 import { RigEvents, RIG_POLL_MS } from "./rig-events.ts";
 import { hubCommit, RigLifecycle, startedCommit } from "./rig-lifecycle.ts";
 
-const INACTIVE_TEXT = "сессия сейчас не активна";
 // The queue id prefix of the start notice, "starting the session".
 const LAUNCH_NOTICE = "launch-";
-const LAUNCHED_TEXT = "✅ Сессия запущена";
 // CLAUDE_CODE_ENTRYPOINT of a window started in the terminal; such a window is on by default.
 const CLI_ENTRYPOINT = "cli";
 // After a launched session says hello, Claude Code still registers the
@@ -92,7 +92,6 @@ const INTERRUPT_PREFIX = "!";
 const INTERRUPT_MARK = /^\s*!\s*/;
 // The outbox id of a poll's question: poll:<key>:<index>#<piece>.
 const POLL_ITEM = /^poll:([0-9a-f]+):(\d+)#/;
-const CLEANUP_BUSY = "⏳ Уборка уже идёт";
 const MS_PER_SECOND = 1000;
 const MS_PER_MINUTE = 60_000;
 const HOOK_TTL_MS = 60_000;
@@ -112,7 +111,6 @@ const MAX_PREVIEW_CHARS = 1500;
 // Permission prompts the hub remembers for the buttons under them.
 const MAX_PERMISSIONS = 200;
 const PERMISSION_KEY_CHARS = 8;
-const PERMISSION_ANSWERS: Record<PermissionBehavior, string> = { allow: "✅ Разрешено", deny: "❌ Отклонено" };
 // A subagent card is edited at most this often; versions in between are skipped.
 const CARD_EDIT_MS = 5000;
 // Edits of all cards together go at most this often. Telegram lets a group
@@ -142,22 +140,24 @@ const MAX_BATCH_IDS = 200;
 // Telegram shows "typing…" for up to 5 s; it is renewed this often while the
 // agent works.
 const TYPING_EVERY_MS = 4000;
-const BOT_COMMANDS = [
-  { command: "info", description: "Лимиты и контекст сессии" },
-  { command: "compact", description: "Сжать контекст; /compact <указания> — с указаниями; /compact N — окно автокомпакта" },
-  { command: "rename", description: "Переименовать сессию и её тему; /rename <имя> — новое имя" },
-  { command: "run", description: "Запустить сессию; /run N — на аккаунте N" },
-  { command: "stop", description: "Завершить сессию" },
-  { command: "cleanup", description: "Сжать контекст, убрать накопившиеся скиллы и завершить сессию" },
-  { command: "mode", description: "Показать или сменить режим разрешений" },
-  { command: "pwsh", description: "Команда в PowerShell в папке сессии" },
-  { command: "cmd", description: "Команда в cmd в папке сессии" },
-  { command: "bash", description: "Команда в Git Bash в папке сессии" },
-  { command: "feature", description: "Фичи машины; /feature <name> enable|disable" },
-  { command: "rig", description: "Состояние и обновление машины: /rig status|update" },
-];
-const EXEC_NOT_SET = "⚠️ Команды оболочки в этом хабе не настроены";
-const RIG_RECOVERY_TEXT = "Включить Telegram обратно на сервере: `rig feature telegram enable`";
+
+// The bot's command menu in the hub's language; bashName is the platform's name for the bash shell.
+function botCommands(m: Messages, bashName: string): { command: string; description: string }[] {
+  return [
+    { command: "info", description: m.commandInfo },
+    { command: "compact", description: m.commandCompact },
+    { command: "rename", description: m.commandRename },
+    { command: "run", description: m.commandRun },
+    { command: "stop", description: m.commandStop },
+    { command: "cleanup", description: m.commandCleanup },
+    { command: "mode", description: m.commandMode },
+    { command: "pwsh", description: m.commandPwsh },
+    { command: "cmd", description: m.commandCmd },
+    { command: "bash", description: m.commandBash({ shell: bashName }) },
+    { command: "feature", description: m.commandFeature },
+    { command: "rig", description: m.commandRig },
+  ];
+}
 
 // exitingPid: the Claude Code process the plugin said it is ending.
 type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; entrypoint?: string; busy?: boolean; reportsSeen?: boolean; exitingPid?: number; attachedOffset?: number; launchedMode?: PermissionMode };
@@ -343,6 +343,10 @@ export class Hub {
   private volunteerLimits: VolunteerLimits;
   private botUsername: string | undefined;
   private botId: number | undefined;
+  // The language of every text sent to Telegram: rig holds it, the hub reads it at start and when rig says it changed.
+  private lang: Language = DEFAULT_LANGUAGE;
+  private languageReads = 0;
+  private languageApplied = 0;
   private registeredCommands: string | undefined;
   private registeringCommands: Promise<void> | undefined;
   // Permission prompts sent to topics, by the key in their buttons' data.
@@ -448,7 +452,7 @@ export class Hub {
     this.outbox = new Outbox(opts.outboxFile, opts.log);
     this.rig = new Rig({ find: opts.findRig ?? (() => opts.rigDir ? findRig(opts.platform ?? PLATFORM) : undefined), platform: opts.platform ?? PLATFORM,
       run: opts.runRig ?? runRig, warn: text => this.log.warn(text),
-      setTimer: (fn, ms) => this.setTimer(fn, ms), clearTimer: timer => this.clearTimer(timer) });
+      setTimer: (fn, ms) => this.setTimer(fn, ms), clearTimer: timer => this.clearTimer(timer), messages: () => this.m() });
     this.machineOutbox = new MachineOutbox(join(dirname(opts.outboxFile), "machine-outbox.json"), text => this.log.warn(text));
     this.disableConfirmations = new Map(this.machineOutbox.confirmations());
     if (opts.rigDir) {
@@ -460,7 +464,7 @@ export class Hub {
         notice: (id, text) => { const group = opts.config().groupId; if (group) this.machineOutbox.post(id, { chatId: group }, text); },
         // Stopping first hands waiting answers and open polls back and flushes batches; the exit happens even if that fails.
         exit: code => { void this.stop().catch(error => this.log.warn(`stop before restart: ${String(error)}`)).then(() => opts.onExit(code)); },
-        warn: text => this.log.warn(text) });
+        warn: text => this.log.warn(text), messages: () => this.m() });
       this.rigEvents = new RigEvents({ dir: opts.rigDir, stateDir: dirname(opts.outboxFile), running: () => this.running,
         available: () => this.running && this.botReady && Boolean(opts.config().groupId),
         send: async (event, sent, accepted) => {
@@ -473,7 +477,7 @@ export class Hub {
             accepted(index + 1);
           }
           return true;
-        }, features: () => this.refreshFeatures(), restart: () => this.rigLifecycle?.request(), warn: text => this.log.warn(text) });
+        }, features: () => this.refreshFeatures(), language: () => this.onLanguageChanged(), restart: () => this.rigLifecycle?.request(), warn: text => this.log.warn(text) });
     }
     // A card's edits go on after a restart; one not yet shown gets its next
     // version as an edit, a "not modified" answer being no error.
@@ -513,6 +517,7 @@ export class Hub {
         hasWindow: sid => this.connOf(sid) !== undefined,
         graceMs: opts.execGraceMs ?? EXEC_GRACE_MS,
         log: opts.log,
+        messages: () => this.m(),
         unavailable: shell => shell === "powershell" ? this.rig.unavailable("pwsh") : shell === "cmd" ? this.rig.unavailable("cmd") : undefined,
         machineCard: (record, text, final, kind, buttons) => {
           if (record.destination) this.machineOutbox.post(`rig-${record.id}`, record.destination, text, !notifies(kind), buttons, true);
@@ -561,7 +566,9 @@ export class Hub {
     }, this.opts.typingEveryMs ?? TYPING_EVERY_MS);
     // Before armIdle: commands still running keep the hub up.
     this.execs?.start();
-    void this.refreshFeatures();
+    // The language first: the features and the menu are registered in it.
+    this.machineQueries++;
+    void this.readLanguage().then(() => this.refreshFeatures()).finally(() => this.endMachineQuery());
     void this.rigTick();
     this.armIdle();
     if (this.opts.api) void this.pollLoop(this.opts.api);
@@ -585,7 +592,7 @@ export class Hub {
     }
     this.batchIds.clear();
     // Open polls go back to the terminal, which the next hub cannot answer.
-    await Promise.allSettled([...this.polls.values()].map(p => this.finishPoll(p, { decision: "none" }, TO_TERMINAL)));
+    await Promise.allSettled([...this.polls.values()].map(p => this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal)));
     // A question still being sent shows the outcome right after its send.
     await Promise.allSettled([...this.questionSends]);
     if (this.idleTimer) this.clearTimer(this.idleTimer);
@@ -660,6 +667,7 @@ export class Hub {
       this.limits.set(sessionId, { ...reading, ...(account ? { account } : {}) });
       return new Response("ok");
     }
+    if (url.pathname === "/language" && req.method === "GET") return Response.json({ language: this.lang });
     if (url.pathname === "/limits" && req.method === "GET") return Response.json(this.freshestLimits(url.searchParams.get("session") ?? "") ?? null);
     if (url.pathname === "/codex-limits" && req.method === "GET") return Response.json(await this.codexLimits.read() ?? null);
     if (url.pathname === "/volunteer-limits" && req.method === "GET") return Response.json(await this.volunteerLimits.read());
@@ -703,7 +711,7 @@ export class Hub {
         return;
       }
       if (cmd.name === "cleanup" && this.cleanups.get(sessionId)?.id === cmd.id) this.dropCleanup(sessionId);
-      this.enqueue(sessionId, `cmd-${cmd.id}-lost`, `⚠️ /${cmd.name} не выполнена: окно не забрало её за ${ms / MS_PER_SECOND} с.`, notifies("error"), false);
+      this.enqueue(sessionId, `cmd-${cmd.id}-lost`, this.m().commandLost({ name: cmd.name, seconds: ms / MS_PER_SECOND }), notifies("error"), false);
     }, ms);
     this.commands.set(sessionId, [...(this.commands.get(sessionId) ?? []), { cmd, timer }]);
     this.log.info(`/${cmd.name} for session ${sessionId}`);
@@ -735,24 +743,54 @@ export class Hub {
     if (left.length) this.commands.set(sessionId, left);
     else this.commands.delete(sessionId);
     for (const e of taken) this.clearTimer(e.timer);
-    return taken.map(e => e.cmd);
+    return taken.map(e => ({ ...e.cmd, language: this.lang }));
   }
 
+  private m(): Messages {
+    return catalogOf(this.lang);
+  }
+
+  // Reads rig's language (English when rig cannot say) and sends a change to every window.
+  // Reads can overlap (the start read and an event read); an answer older than one already applied is dropped.
+  private async readLanguage(): Promise<void> {
+    const ticket = ++this.languageReads;
+    const language = await this.rig.language();
+    if (!this.running || ticket < this.languageApplied) return;
+    this.languageApplied = ticket;
+    if (language === this.lang) return;
+    this.lang = language;
+    for (const ws of this.conns) this.send(ws, { type: "language", language });
+  }
+
+  // `language-changed` from rig: the language, then the features (their descriptions are in it), then the menu.
+  private async onLanguageChanged(): Promise<void> {
+    await this.readLanguage();
+    await this.refreshFeatures();
+  }
+
+  private wantedCommands(): { commands: { command: string; description: string }[]; signature: string } {
+    const platform = this.opts.platform ?? PLATFORM;
+    const commands = botCommands(this.m(), platform.bashName).filter(c => c.command !== "pwsh" && c.command !== "cmd" || !this.rig.unavailable(c.command));
+    return { commands, signature: JSON.stringify(commands) };
+  }
+
+  // A registration in flight keeps going until the menu matches what is wanted at that moment, so a language
+  // change during it is not left to a later tick.
   private registerCommands(api: TelegramApi): Promise<void> {
     if (this.registeringCommands) return this.registeringCommands;
-    const platform = this.opts.platform ?? PLATFORM;
-    const commands = BOT_COMMANDS.filter(c => c.command !== "pwsh" && c.command !== "cmd" || !this.rig.unavailable(c.command))
-      .map(c => c.command === "bash" ? { ...c, description: `Команда в ${platform.bashName} в папке сессии` } : c);
-    const signature = JSON.stringify(commands);
-    if (signature === this.registeredCommands) return Promise.resolve();
+    if (this.wantedCommands().signature === this.registeredCommands) return Promise.resolve();
     this.registeringCommands = (async () => {
       try {
-        await api.setMyCommands(commands, this.abort.signal);
-        this.registeredCommands = signature;
+        for (let wanted = this.wantedCommands(); wanted.signature !== this.registeredCommands; wanted = this.wantedCommands()) {
+          await api.setMyCommands(wanted.commands, this.abort.signal);
+          this.registeredCommands = wanted.signature;
+        }
       } catch (error) {
         if (this.running) this.log.warn(`registering bot commands failed: ${String(error)}`);
+      } finally {
+        this.registeringCommands = undefined;
       }
-    })().finally(() => { this.registeringCommands = undefined; });
+    })();
     return this.registeringCommands;
   }
 
@@ -772,7 +810,7 @@ export class Hub {
       if (ws.data.exitingPid !== undefined || this.stops.has(sid) || this.modeRestarts.has(sid) || this.dyingHeld.has(sid)) this.gateExit(sid, ws.data.exitingPid);
       this.stopping.delete(sid);
       // Without its window the session cannot take an answer any more.
-      for (const p of this.polls.values()) if (p.sessionId === sid) void this.finishPoll(p, { decision: "none" }, TO_TERMINAL);
+      for (const p of this.polls.values()) if (p.sessionId === sid) void this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal);
     }
     const cleanup = sid ? this.cleanups.get(sid) : undefined;
     if (sid && cleanup && !this.connOf(sid)) {
@@ -784,7 +822,7 @@ export class Hub {
         void this.finishCleanup(sid, cleanup, ws.data.exitingPid);
       } else {
         this.log.info(`window for session ${sid} closed while compacting for /cleanup; /cleanup dropped`);
-        this.cleanupOutcome(sid, cleanup, "⚠️ Уборка не выполнена: окно закрылось до конца компакта", "warning", "warning");
+        this.cleanupOutcome(sid, cleanup, this.m().cleanupWindowClosed, "warning", "warning");
         this.dropCleanup(sid);
       }
     }
@@ -795,8 +833,8 @@ export class Hub {
       const stopId = this.stopIds.get(sid);
       this.stopIds.delete(sid);
       if (!this.modeRestarts.has(sid) || this.modeRestarts.get(sid)?.cancelled) {
-        if (stopId) this.enqueue(sid, `hub-${randomUUID()}`, "⏹ Сессия завершена", notifies("info"), false, { id: `${stopId}.0`, kind: "success" });
-        else this.notice(sid, "⏹ Сессия завершена", "info");
+        if (stopId) this.enqueue(sid, `hub-${randomUUID()}`, this.m().sessionEnded, notifies("info"), false, { id: `${stopId}.0`, kind: "success" });
+        else this.notice(sid, this.m().sessionEnded, "info");
       }
     }
     const restart = sid && !this.connOf(sid) ? this.modeRestarts.get(sid) : undefined;
@@ -904,6 +942,8 @@ export class Hub {
       case "hello": {
         if (msg.v !== PROTOCOL_VERSION) this.log.warn(`plugin protocol v${msg.v}, hub v${PROTOCOL_VERSION}`);
         ws.data = { ...ws.data, windowKey: msg.windowKey, busy: msg.busy, reportsSeen: msg.reportsSeen };
+        // First, so nothing the window renders afterwards is in the wrong language.
+        this.send(ws, { type: "language", language: this.lang });
         this.attachSession(ws, msg);
         this.log.info(`window ${msg.windowKey} connected, session ${msg.sessionId}, entrypoint ${msg.entrypoint ?? "not given"}, account ${ws.data.account ?? "not named"}`);
         this.askDefaultAccount(ws, msg.configDir);
@@ -1047,14 +1087,14 @@ ${msg.text}`);
       const created = existing.topicId === undefined;
       if (created) await this.createTopic(api, groupId, sessionId);
       this.setEnabled(sessionId, true);
-      return { topicTitle: topicName(existing.project, title || existing.title), created };
+      return { topicTitle: topicName(existing.project, title || existing.title, this.m()), created };
     }
     const project = projectName(cwd);
-    const topic = await api.createForumTopic(groupId, topicName(project, title));
+    const topic = await api.createForumTopic(groupId, topicName(project, title, this.m()));
     this.store.set(sessionId, { topicId: topic.message_thread_id, title, project, enabled: true, ...(cwd ? { cwd } : {}), ...(account ? { account } : {}) });
     this.log.info(`created topic ${topic.message_thread_id} "${topic.name}" for session ${sessionId}`);
     this.pushState(sessionId);
-    return { topicTitle: topicName(project, title), created: true };
+    return { topicTitle: topicName(project, title, this.m()), created: true };
   }
 
   private async retitle(sessionId: string, title: string): Promise<void> {
@@ -1076,7 +1116,7 @@ ${msg.text}`);
   }
 
   private async renameTopic(api: TelegramApi, groupId: string, sessionId: string, rec: SessionRecord, title: string): Promise<void> {
-    if (rec.topicId !== undefined) await api.editForumTopic(groupId, rec.topicId, topicName(rec.project, title));
+    if (rec.topicId !== undefined) await api.editForumTopic(groupId, rec.topicId, topicName(rec.project, title, this.m()));
     this.store.setTitle(sessionId, title);
   }
 
@@ -1084,7 +1124,7 @@ ${msg.text}`);
   private async createTopic(api: TelegramApi, groupId: string, sessionId: string): Promise<number> {
     const rec = this.store.get(sessionId);
     if (!rec) throw new Error(`session ${sessionId} is not known`);
-    const topic = await api.createForumTopic(groupId, topicName(rec.project, rec.title));
+    const topic = await api.createForumTopic(groupId, topicName(rec.project, rec.title, this.m()));
     this.store.setTopicId(sessionId, topic.message_thread_id);
     this.log.info(`created topic ${topic.message_thread_id} "${topic.name}" for session ${sessionId}`);
     return topic.message_thread_id;
@@ -1121,7 +1161,7 @@ ${msg.text}`);
     this.store.setEnabled(sessionId, on, byUser);
     this.pushState(sessionId);
     // With the mode off the user answers in the terminal, as on a timeout.
-    if (!on) for (const p of this.polls.values()) if (p.sessionId === sessionId) void this.finishPoll(p, { decision: "none" }, TO_TERMINAL);
+    if (!on) for (const p of this.polls.values()) if (p.sessionId === sessionId) void this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal);
     return on;
   }
 
@@ -1129,14 +1169,14 @@ ${msg.text}`);
     const ws = this.connOf(sessionId);
     if (!ws) return;
     const rec = this.store.get(sessionId);
-    this.send(ws, { type: "state", enabled: rec?.enabled ?? false, ...(rec ? { topicTitle: topicName(rec.project, rec.title) } : {}) });
+    this.send(ws, { type: "state", enabled: rec?.enabled ?? false, ...(rec ? { topicTitle: topicName(rec.project, rec.title, this.m()) } : {}) });
   }
 
   // --- permissions ----------------------------------------------------------
 
   // A prompt with a request id gets buttons; call details go below the head.
   private askPermission(sessionId: string, msg: Extract<PluginToHub, { type: "permission" }>): void {
-    const f: Formatted = formatPermission(msg.toolName, msg.inputPreview, MAX_PREVIEW_CHARS);
+    const f: Formatted = formatPermission(this.m(), msg.toolName, msg.inputPreview, MAX_PREVIEW_CHARS);
     if (!msg.requestId) return this.enqueue(sessionId, `perm-${randomUUID()}`, f.text, notifies("action"), false);
     const key = randomUUID().replaceAll("-", "").slice(0, PERMISSION_KEY_CHARS);
     this.permissions.set(key, { sessionId, requestId: msg.requestId, ...f });
@@ -1146,8 +1186,8 @@ ${msg.text}`);
     }
     const buttons = [
       [
-        { text: "✅ Разрешить", data: `p:${key}:allow` },
-        { text: "❌ Отклонить", data: `p:${key}:deny` },
+        { text: this.m().permissionAllow, data: `p:${key}:allow` },
+        { text: this.m().permissionDeny, data: `p:${key}:deny` },
       ],
     ];
     if (this.outbox.add(`perm-${key}`, sessionId, [{ text: f.text, silent: !notifies("action"), buttons, ...(f.entities.length ? { entities: f.entities } : {}) }])) void this.pump(sessionId);
@@ -1160,12 +1200,12 @@ ${msg.text}`);
     const behavior = m?.[2] === "allow" || m?.[2] === "deny" ? m[2] : undefined;
     const p = m?.[1] ? this.permissions.get(m[1]) : undefined;
     if (!m?.[1] || !behavior || !p) {
-      await api.answerCallbackQuery(press.id, "Запрос устарел").catch(e => this.log.warn(`answering a button press failed: ${e}`));
+      await api.answerCallbackQuery(press.id, this.m().permissionStale).catch(e => this.log.warn(`answering a button press failed: ${e}`));
       await api.removeKeyboard(groupId, press.messageId).catch(e => this.log.warn(`removing the buttons failed: ${e}`));
       return;
     }
     const ws = this.connOf(p.sessionId);
-    const outcome = ws ? PERMISSION_ANSWERS[behavior] : "⚠️ Сессия не активна, ответ не доставлен";
+    const outcome = ws ? (behavior === "allow" ? this.m().permissionAllowed : this.m().permissionDenied) : this.m().permissionNotDelivered;
     if (ws) {
       this.permissions.delete(m[1]);
       this.send(ws, { type: "permissionReply", requestId: p.requestId, behavior });
@@ -1183,16 +1223,16 @@ ${msg.text}`);
   // the window left, the hub stops). A newer poll of the session ends the old one.
   private askQuestion(sessionId: string, questions: AskQuestion[], signal: AbortSignal): Promise<QuestionDecision> {
     if (this.isStarting(sessionId) || this.dyingHeld.has(sessionId)) return Promise.resolve({ decision: "none" });
-    for (const old of this.polls.values()) if (old.sessionId === sessionId) void this.finishPoll(old, { decision: "none" }, TO_TERMINAL);
+    for (const old of this.polls.values()) if (old.sessionId === sessionId) void this.finishPoll(old, { decision: "none" }, this.m().pollMovedToTerminal);
     const key = randomUUID().replaceAll("-", "").slice(0, PERMISSION_KEY_CHARS);
     return new Promise(resolve => {
       const p: Poll = { key, sessionId, questions, answers: {}, index: 0, checked: new Set(), messageIds: [], outcomes: [], taken: [], done: false, resolve };
       this.polls.set(key, p);
       if (signal.aborted) {
-        void this.finishPoll(p, { decision: "none" }, TO_TERMINAL);
+        void this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal);
         return;
       }
-      signal.addEventListener("abort", () => void this.finishPoll(p, { decision: "none" }, TO_TERMINAL), { once: true });
+      signal.addEventListener("abort", () => void this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal), { once: true });
       this.log.info(`question poll ${key} for session ${sessionId}: ${questions.length} question(s)`);
       void this.catchUp(sessionId, key).then(() => {
         if (!p.done) this.queueQuestion(p);
@@ -1220,8 +1260,8 @@ ${msg.text}`);
   }
 
   private queueQuestion(p: Poll): void {
-    const f = questionText(p.questions, p.index);
-    const piece = { text: f.text, silent: !notifies("action"), buttons: questionButtons(p), ...(f.entities.length ? { entities: f.entities } : {}) };
+    const f = questionText(this.m(), p.questions, p.index);
+    const piece = { text: f.text, silent: !notifies("action"), buttons: questionButtons(this.m(), p), ...(f.entities.length ? { entities: f.entities } : {}) };
     if (this.outbox.add(`poll:${p.key}:${p.index}`, p.sessionId, [piece])) void this.pump(p.sessionId);
   }
 
@@ -1245,7 +1285,7 @@ ${msg.text}`);
     const api = this.opts.api;
     const groupId = this.opts.config().groupId;
     if (id === undefined || outcome === undefined || !api || !groupId) return;
-    const f = withOutcome(questionText(p.questions, i), outcome);
+    const f = withOutcome(questionText(this.m(), p.questions, i), outcome);
     await api.editMessageText(groupId, id, f.text, f.entities).catch(e => this.log.warn(`editing a question message failed: ${e}`));
   }
 
@@ -1273,31 +1313,31 @@ ${msg.text}`);
     const known = parsed ? this.polls.get(parsed.key) : undefined;
     // Nobody is left to take the answer: the question moves to the terminal and the button is stale.
     const closed = known && !this.connOf(known.sessionId);
-    if (known && closed) void this.finishPoll(known, { decision: "none" }, TO_TERMINAL);
+    if (known && closed) void this.finishPoll(known, { decision: "none" }, this.m().pollMovedToTerminal);
     const p = closed ? undefined : known;
     const q = p?.questions[p.index];
     const action = parsed?.action;
     const valid = p && q && parsed?.index === p.index && action !== undefined && (typeof action === "number" ? action >= 1 && action <= q.options.length : action !== "done" || q.multiSelect);
     if (!valid || !p || !q || action === undefined) {
-      await ack(STALE_POLL);
+      await ack(this.m().pollStale);
       await api.removeKeyboard(groupId, press.messageId).catch(warn("removing the buttons"));
       return;
     }
     if (action === "cancel") {
       this.log.info(`question poll ${p.key} cancelled by ${press.fromId}`);
-      const done = this.finishPoll(p, { decision: "deny", reason: CANCEL_REASON }, CANCELLED);
+      const done = this.finishPoll(p, { decision: "deny", reason: CANCEL_REASON }, this.m().pollCancelled);
       await ack();
       await done;
       return;
     }
     if (action === "custom") {
-      this.enqueue(p.sessionId, `qhint-${p.key}-${p.index}-${randomUUID()}`, CUSTOM_HINT, notifies("info"), false);
+      this.enqueue(p.sessionId, `qhint-${p.key}-${p.index}-${randomUUID()}`, this.m().pollCustomHint, notifies("info"), false);
       await ack();
       return;
     }
     if (action === "done") {
       if (!p.checked.size) {
-        await ack(PICK_ONE);
+        await ack(this.m().pollPickOne);
         return;
       }
       const done = this.answerPoll(p, checkedLabels(q, p.checked));
@@ -1313,8 +1353,8 @@ ${msg.text}`);
     }
     if (p.checked.has(action)) p.checked.delete(action);
     else p.checked.add(action);
-    const f = questionText(p.questions, p.index);
-    const buttons = questionButtons(p);
+    const f = questionText(this.m(), p.questions, p.index);
+    const buttons = questionButtons(this.m(), p);
     await ack();
     await api.editMessageText(groupId, press.messageId, f.text, f.entities, buttons).catch(warn("editing a question message"));
   }
@@ -1330,7 +1370,7 @@ ${msg.text}`);
       return;
     }
     const { text } = item;
-    const buttons = outcome === undefined ? questionButtons(p) : undefined;
+    const buttons = outcome === undefined ? questionButtons(this.m(), p) : undefined;
     const body = outcome === undefined ? text : `${text}\n\n${outcome}`;
     const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, body, item.silent, item.entities, buttons));
     p.messageIds[i] = sent.message_id;
@@ -1709,11 +1749,11 @@ ${msg.text}`);
     // A question the topic cannot show is asked in the terminal.
     const pollKey = item.notice ? undefined : POLL_ITEM.exec(item.id)?.[1];
     const poll = pollKey ? this.polls.get(pollKey) : undefined;
-    if (poll) void this.finishPoll(poll, { decision: "none" }, TO_TERMINAL);
+    if (poll) void this.finishPoll(poll, { decision: "none" }, this.m().pollMovedToTerminal);
     if (item.notice) {
       this.outbox.remove(item.id);
       this.settled(item);
-    } else this.outbox.replaceWithNotice(item.id, `⚠️ Telegram не принял сообщение: ${reason}. Текст в hub.log.`);
+    } else this.outbox.replaceWithNotice(item.id, this.m().telegramRejected({ reason }));
   }
 
   private sleep(ms: number): Promise<void> {
@@ -1927,7 +1967,7 @@ ${msg.text}`);
     const role = pollRole(m, this.botUsername);
     if (role === "pass") return m;
     if (role === "cancel") {
-      void this.finishPoll(p, { decision: "deny", reason: CANCEL_REASON }, CANCELLED);
+      void this.finishPoll(p, { decision: "deny", reason: CANCEL_REASON }, this.m().pollCancelled);
       // Answer messages still waiting reach the agent before this one.
       await this.takeAnswer(p.key);
       const plain = withoutInterrupt(m);
@@ -1990,7 +2030,7 @@ ${msg.text}`);
     if (!rest.length) return;
     const cfg = this.opts.config();
     if (cfg.launch) return this.launch(sessionId, undefined, rest.map(m => ({ message: m })));
-    const text = cfg.launchError ? `${INACTIVE_TEXT}; автозапуск не работает: секция launch в config.json с ошибкой` : INACTIVE_TEXT;
+    const text = cfg.launchError ? this.m().sessionInactiveLaunchBroken : this.m().sessionInactive;
     const topicId = this.store.get(sessionId)?.topicId;
     if (!cfg.groupId || topicId === undefined) return;
     await api.sendMessage(cfg.groupId, topicId, text, false).catch(e => this.log.warn(`inactive notice failed: ${e}`));
@@ -2224,10 +2264,10 @@ ${msg.text}`);
   private onHubCommand(sessionId: string, cmd: HubCommand, m: Message): void {
     if (cmd.name === "pwsh" || cmd.name === "cmd" || cmd.name === "bash") return this.onExecCommand(sessionId, cmd.name, cmd.args, m);
     if (cmd.name === "run") {
-      if (cmd.args && !this.hasAccounts()) return this.notice(sessionId, "На этой машине нет аккаунтов cswap. Используй /run без номера.", "warning");
-      if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, "info");
-      if (this.isStarting(sessionId)) return this.notice(sessionId, "Сессия уже запускается", "info");
-      if (this.connOf(sessionId)) return this.notice(sessionId, "Сессия уже работает", "info");
+      if (cmd.args && !this.hasAccounts()) return this.notice(sessionId, this.m().noAccounts, "warning");
+      if (this.cleanups.has(sessionId)) return this.notice(sessionId, this.m().cleanupBusy, "info");
+      if (this.isStarting(sessionId)) return this.notice(sessionId, this.m().sessionAlreadyStarting, "info");
+      if (this.connOf(sessionId)) return this.notice(sessionId, this.m().sessionAlreadyRunning, "info");
       return this.launch(sessionId, cmd.args || undefined, []);
     }
     if (cmd.name === "cleanup") return this.startCleanup(sessionId, cmd.args);
@@ -2245,10 +2285,10 @@ ${msg.text}`);
     if (launching) {
       launching.cancelled = true;
       this.clearTimer(launching.timer);
-      return this.notice(sessionId, "⏹ Запуск отменён; подключившееся окно будет завершено", "info");
+      return this.notice(sessionId, this.m().launchCancelledWindowEnds, "info");
     }
-    if (!this.connOf(sessionId)) return this.notice(sessionId, gated ? "⏹ Запуск отменён; ожидаю завершения Claude Code" : this.exitGates.has(sessionId) ? "⏳ Сессия уже завершается" : "Сессия не запущена", "info");
-    if (this.stops.has(sessionId)) return this.notice(sessionId, "⏳ Сессия уже завершается", "info");
+    if (!this.connOf(sessionId)) return this.notice(sessionId, gated ? this.m().launchCancelledWaitingExit : this.exitGates.has(sessionId) ? this.m().sessionAlreadyEnding : this.m().sessionNotRunning, "info");
+    if (this.stops.has(sessionId)) return this.notice(sessionId, this.m().sessionAlreadyEnding, "info");
     this.dyingHeld.set(sessionId, this.dyingHeld.get(sessionId) ?? []);
     this.capturePending(sessionId);
     if (this.stopping.has(sessionId)) {
@@ -2260,34 +2300,32 @@ ${msg.text}`);
   }
 
   private onModeCommand(sessionId: string, args: string): void {
-    if (this.isStarting(sessionId)) return this.notice(sessionId, "Сессия уже запускается", "info");
+    const msg = this.m();
+    if (this.isStarting(sessionId)) return this.notice(sessionId, msg.sessionAlreadyStarting, "info");
     const requested = PERMISSION_MODES.find(mode => mode.toLowerCase() === args.toLowerCase());
-    if (args && !requested) return this.notice(sessionId, `Режимы: ${PERMISSION_MODES.join(", ")}`, "info");
+    if (args && !requested) return this.notice(sessionId, msg.modeList({ modes: PERMISSION_MODES.join(", ") }), "info");
     if (!requested) return void this.showModes(sessionId);
     const current = this.knownMode(sessionId);
-    if (current === requested) return this.notice(sessionId, `Режим уже ${requested}`, "info");
+    if (current === requested) return this.notice(sessionId, msg.modeAlready({ mode: requested }), "info");
     const cfg = this.opts.config();
-    if (!cfg.launch) {
-      const why = cfg.launchError ? `секция launch в config.json с ошибкой: ${cfg.launchError}` : "в config.json нет секции launch";
-      return this.notice(sessionId, `⚠️ Автозапуск не настроен: ${why}`, "warning");
-    }
-    if (!hasModePlaceholder(cfg.launch)) return this.notice(sessionId, "⚠️ Добавь {mode} в launch.command в config.json; окно оставлено открытым", "warning");
+    if (!cfg.launch) return this.notice(sessionId, msg.autolaunchNotConfigured({ launchError: cfg.launchError }), "warning");
+    if (!hasModePlaceholder(cfg.launch)) return this.notice(sessionId, msg.addModePlaceholder, "warning");
     const location = this.launchLocation(sessionId, this.connOf(sessionId)?.data.account);
-    if ("error" in location) return this.notice(sessionId, location.error === "account" ? "⚠️ Аккаунт сессии неизвестен, используй /run N." : "⚠️ Не знаю, в какой директории запустить сессию.", "warning");
+    if ("error" in location) return this.notice(sessionId, location.error === "account" ? msg.accountUnknown : msg.directoryUnknown, "warning");
     const { account, cwd } = location;
     try {
       launchCommand(cfg.launch, { cwd, account, session: sessionId, mode: requested }, this.opts.platform ?? PLATFORM);
     } catch (e) {
-      const why = e instanceof LaunchError ? e.message : String(e);
-      return this.notice(sessionId, `⚠️ Не могу подготовить перезапуск: ${why}`, "warning");
+      const why = e instanceof LaunchError ? e.render(msg) : String(e);
+      return this.notice(sessionId, msg.restartPrepareFailed({ why }), "warning");
     }
-    if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, "info");
-    if (this.stops.has(sessionId) || this.stopping.has(sessionId)) return this.notice(sessionId, "⏳ Сессия уже завершается", "info");
-    if (this.launches.has(sessionId) || this.modeRestarts.has(sessionId)) return this.notice(sessionId, "Сессия уже запускается", "info");
+    if (this.cleanups.has(sessionId)) return this.notice(sessionId, msg.cleanupBusy, "info");
+    if (this.stops.has(sessionId) || this.stopping.has(sessionId)) return this.notice(sessionId, msg.sessionAlreadyEnding, "info");
+    if (this.launches.has(sessionId) || this.modeRestarts.has(sessionId)) return this.notice(sessionId, msg.sessionAlreadyStarting, "info");
     const ws = this.connOf(sessionId);
     if (!ws) return this.launch(sessionId, account, [], true, requested);
     this.modeRestarts.set(sessionId, { mode: requested, held: [] });
-    this.notice(sessionId, `🔁 Перезапускаю сессию в режиме ${requested}…`, "info");
+    this.notice(sessionId, msg.restartingInMode({ mode: requested }), "info");
     this.terminate(sessionId);
   }
 
@@ -2328,9 +2366,10 @@ ${msg.text}`);
     if (!api || !cfg.groupId || rec?.topicId === undefined) return;
     const known = this.knownMode(sessionId);
     const current = known ?? this.currentMode(sessionId);
-    const label = current === undefined ? "режим неизвестен" : current;
+    const msg = this.m();
+    const label = current === undefined ? msg.modeUnknown : current;
     const buttons = PERMISSION_MODES.map(mode => [{ text: `${current === mode ? "✅ " : ""}${mode}`, data: `m:${sessionId}:${mode}` }]);
-    const text = `${known === undefined && current !== undefined ? "Последний известный режим" : "Текущий режим"}: ${label}`;
+    const text = known === undefined && current !== undefined ? msg.modeLastKnown({ mode: label }) : msg.modeCurrent({ mode: label });
     if (this.outbox.add(`modes-${randomUUID()}`, sessionId, [{ text, silent: true, buttons }])) void this.pump(sessionId);
   }
 
@@ -2369,7 +2408,7 @@ ${msg.text}`);
           this.log.warn(`session ${sessionId} did not end for /cleanup; /cleanup dropped`);
           this.dropCleanup(sessionId);
         }
-        this.notice(sessionId, `⚠️ Не удалось завершить сессию за ${ms / MS_PER_SECOND} с`, "warning");
+        this.notice(sessionId, this.m().couldNotEnd({ seconds: ms / MS_PER_SECOND }), "warning");
       }, ms),
     );
   }
@@ -2379,15 +2418,15 @@ ${msg.text}`);
   // The module compacts the session, the window ends, the hub empties the
   // skills Claude Code remembers in the transcript; the session stays ended.
   private startCleanup(sessionId: string, args: string): void {
-    if (this.cleanups.has(sessionId)) return this.notice(sessionId, CLEANUP_BUSY, "info");
-    if (!this.connOf(sessionId)) return this.notice(sessionId, "Сессия не запущена", "info");
-    if (this.stops.has(sessionId) || this.stopping.has(sessionId)) return this.notice(sessionId, "⏳ Сессия уже завершается", "info");
+    if (this.cleanups.has(sessionId)) return this.notice(sessionId, this.m().cleanupBusy, "info");
+    if (!this.connOf(sessionId)) return this.notice(sessionId, this.m().sessionNotRunning, "info");
+    if (this.stops.has(sessionId) || this.stopping.has(sessionId)) return this.notice(sessionId, this.m().sessionAlreadyEnding, "info");
     const c: Cleanup = { id: this.queueCommand(sessionId, { name: "cleanup", args }), phase: "compacting", held: [] };
     const ms = this.opts.cleanupCompactMs ?? CLEANUP_COMPACT_MS;
     c.compactTimer = this.setTimer(() => {
       if (this.cleanups.get(sessionId) !== c || c.phase !== "compacting") return;
       this.log.warn(`/cleanup of session ${sessionId}: no compact report in ${ms} ms; /cleanup dropped`);
-      this.cleanupOutcome(sessionId, c, `⚠️ Уборка не выполнена: компакт не закончился за ${ms / MS_PER_MINUTE} мин`, "warning", "warning");
+      this.cleanupOutcome(sessionId, c, this.m().cleanupCompactTimeout({ minutes: ms / MS_PER_MINUTE }), "warning", "warning");
       this.dropCleanup(sessionId);
     }, ms);
     this.cleanups.set(sessionId, c);
@@ -2414,7 +2453,7 @@ ${msg.text}`);
     if (c.phase === "compacting") {
       this.dyingHeld.set(sessionId, this.dyingHeld.get(sessionId) ?? []);
       this.log.info(`/stop during the /cleanup compact of session ${sessionId}: ending the window, the transcript untouched`);
-      this.cleanupOutcome(sessionId, c, "⏹ Уборка отменена", "info", "warning");
+      this.cleanupOutcome(sessionId, c, this.m().cleanupCancelled, "info", "warning");
       this.dropCleanup(sessionId, true);
       this.capturePending(sessionId);
     }
@@ -2454,7 +2493,7 @@ ${msg.text}`);
     this.clearTimer(c.compactTimer);
     if (error !== undefined) {
       this.log.warn(`/cleanup of session ${sessionId}: the compact failed: ${error}`);
-      this.cleanupOutcome(sessionId, c, `⚠️ Уборка не выполнена: компакт не удался: ${error}`, "error", "warning");
+      this.cleanupOutcome(sessionId, c, this.m().cleanupCompactFailed({ error }), "error", "warning");
       return this.dropCleanup(sessionId);
     }
     this.log.info(`/cleanup of session ${sessionId}: compacted${before === undefined ? "" : ` from ${before} tokens`}; ending the window`);
@@ -2474,13 +2513,13 @@ ${msg.text}`);
     if (this.connOf(sessionId)) {
       this.cleanups.delete(sessionId);
       this.log.warn(`/cleanup of session ${sessionId}: a window of the session connected again; the transcript untouched, ${c.held.length} held message(s) go to it`);
-      this.cleanupOutcome(sessionId, c, "⚠️ Уборка не выполнена: сессия снова открыта", "warning", "warning");
+      this.cleanupOutcome(sessionId, c, this.m().cleanupReopened, "warning", "warning");
       return this.releaseHeld(sessionId, c.held);
     }
     if (outcome === "deadline") {
       this.cleanups.delete(sessionId);
       this.log.warn(`/cleanup of session ${sessionId}: Claude Code ${pid} did not exit; the transcript untouched, ${c.held.length} held message(s) go the way of new topic messages`);
-      this.cleanupOutcome(sessionId, c, "⚠️ Уборка не выполнена: Claude Code не завершился", "error", "warning");
+      this.cleanupOutcome(sessionId, c, this.m().cleanupNoExit, "error", "warning");
       return this.releaseHeld(sessionId, c.held);
     }
     const path = this.transcriptOf(sessionId);
@@ -2491,20 +2530,20 @@ ${msg.text}`);
       this.log.warn(`/cleanup of session ${sessionId}: no transcript found`);
       kind = "warning";
       outcomeKind = "warning";
-      text = "⚠️ Уборка не выполнена: транскрипт не найден";
+      text = this.m().cleanupNoTranscript;
     } else {
       try {
         const result = await (this.opts.cleanTranscript ?? cleanTranscript)(path, Date.now());
         this.log.info(`/cleanup of session ${sessionId}: ${path}: ${result.kind}${result.kind === "cleaned" ? `, ${result.records} record(s), backup ${result.backup}` : ""}`);
         if (result.kind === "format") kind = "warning";
-        text = cleanupSummary(result);
+        text = cleanupSummary(result, this.m());
         outcomeKind = result.kind === "format" ? "warning" : "success";
       } catch (e) {
         const why = e instanceof Error ? e.message : String(e);
         this.log.warn(`/cleanup of session ${sessionId}: emptying the skills in ${path} failed: ${why}`);
         kind = "error";
         outcomeKind = "warning";
-        text = `⚠️ Уборка не выполнена: ${why}`;
+        text = this.m().cleanupFailed({ why: e instanceof CleanupError ? e.render(this.m()) : why });
       }
     }
     if (!current()) return;
@@ -2521,7 +2560,7 @@ ${msg.text}`);
     this.cleanupOutcome(sessionId, c, text, kind, outcomeKind);
     if (relaunch) this.releaseHeld(sessionId, c.held);
     else {
-      this.notice(sessionId, "⏹ Сессия завершена", "info");
+      this.notice(sessionId, this.m().sessionEnded, "info");
       this.log.info(`/cleanup of session ${sessionId}: done; the session stays ended`);
     }
   }
@@ -2551,7 +2590,7 @@ ${msg.text}`);
     if (gate) {
       if (gate.expired && mode) {
         mode = undefined;
-        if (!held.length) return this.notice(sessionId, "Смена режима отменена: Claude Code ещё завершается", "info");
+        if (!held.length) return this.notice(sessionId, this.m().modeChangeCancelled, "info");
       }
       this.gatedLaunches.set(sessionId, { account, held, announce, mode });
       return;
@@ -2568,13 +2607,12 @@ ${msg.text}`);
     }
     if (!cfg.launch) {
       this.retainHeld(sessionId, held);
-      const why = cfg.launchError ? `секция launch в config.json с ошибкой: ${cfg.launchError}` : "в config.json нет секции launch";
-      return this.notice(sessionId, `⚠️ Автозапуск не настроен: ${why}`, "warning");
+      return this.notice(sessionId, this.m().autolaunchNotConfigured({ launchError: cfg.launchError }), "warning");
     }
     const location = this.launchLocation(sessionId, account);
     if ("error" in location) {
       this.retainHeld(sessionId, held);
-      return this.notice(sessionId, location.error === "account" ? "⚠️ Аккаунт сессии неизвестен, используй /run N." : "⚠️ Не знаю, в какой директории запустить сессию.", "warning");
+      return this.notice(sessionId, location.error === "account" ? this.m().accountUnknown : this.m().directoryUnknown, "warning");
     }
     const { account: acc, cwd } = location;
     let command: string[];
@@ -2591,10 +2629,11 @@ ${msg.text}`);
         clearTimer: timer => this.clearTimer(timer),
       });
     } catch (e) {
-      const why = e instanceof LaunchError ? e.message : `команда не запустилась (${e instanceof Error ? e.message : e})`;
-      this.log.warn(`starting session ${sessionId} failed: ${why}`);
+      const failure = e instanceof LaunchError ? e.message : catalogOf("en").launchCommandFailed({ error: e instanceof Error ? e.message : String(e) });
+      this.log.warn(`starting session ${sessionId} failed: ${failure}`);
       this.retainHeld(sessionId, held);
-      return this.notice(sessionId, `⚠️ Не могу запустить сессию: ${why}`, "error");
+      const why = e instanceof LaunchError ? e.render(this.m()) : this.m().launchCommandFailed({ error: e instanceof Error ? e.message : String(e) });
+      return this.notice(sessionId, this.m().cannotLaunch({ why }), "error");
     }
     const sec = cfg.launch.timeoutSec;
     const timer = this.setTimer(() => {
@@ -2603,14 +2642,14 @@ ${msg.text}`);
       this.log.warn(`session ${sessionId} did not connect in ${sec} s; ${l?.held.length ?? 0} held item(s) retained`);
       this.retainHeld(sessionId, l?.held ?? []);
       this.launchEnded(sessionId, "failed");
-      const waiting = isTmuxCommand(command) ? `. Возможно, она ждёт подтверждения в tmux: ${tmuxAttachHint(command)}` : "";
-      this.notice(sessionId, `⚠️ Сессия не запустилась за ${sec} с${waiting}`, "error");
+      const tmuxHint = isTmuxCommand(command) ? tmuxAttachHint(command, this.m()) : undefined;
+      this.notice(sessionId, this.m().sessionDidNotStart({ seconds: sec, tmuxHint }), "error");
     }, sec * MS_PER_SECOND);
     this.launches.set(sessionId, { account: acc, held, timer, mode });
     this.launchEnds.delete(sessionId);
     const started = () => {
       this.store.setLaunchedMode(sessionId, mode, modeOffset);
-      if (announce) this.launchNotice(sessionId, acc ? `🚀 Запускаю сессию (аккаунт ${acc})…` : "🚀 Запускаю сессию…");
+      if (announce) this.launchNotice(sessionId, this.m().launching({ account: acc || undefined }));
     };
     if (spawned) void spawned.then(started, e => {
       const l = this.launches.get(sessionId);
@@ -2619,7 +2658,7 @@ ${msg.text}`);
       this.launches.delete(sessionId);
       this.retainHeld(sessionId, l.held);
       this.launchEnded(sessionId, "failed");
-      this.notice(sessionId, launchFailure(e), "error");
+      this.notice(sessionId, launchFailure(e, this.m()), "error");
     });
     else started();
   }
@@ -2872,18 +2911,18 @@ ${msg.text}`);
   private async onMachineCommand(command: MachineCommand, message: Message, destination: MachineDestination): Promise<void> {
     const id = `machine-${destination.chatId}-${message.message_id}`;
     const answer = (text: string, error = false) => this.machineOutbox.post(id, destination, text, !error);
-    const action = rigAction(command);
+    const action = rigAction(command, this.m());
     if (!action.ok) answer(action.error, true);
     else if (action.value.kind === "features" || action.value.kind === "status") {
       this.machineQueries++;
       try {
         if (action.value.kind === "features") {
           const result = await this.rig.refresh();
-          answer(result.ok ? featureText(result.value) : result.error, !result.ok);
+          answer(result.ok ? featureText(result.value, this.m()) : rigErrorText(result.error, this.m()), !result.ok);
           if (this.opts.api) await this.registerCommands(this.opts.api);
         } else {
           const result = await this.rig.status();
-          answer(result.ok ? statusText(result.value) : result.error, !result.ok);
+          answer(result.ok ? statusText(result.value, this.m()) : rigErrorText(result.error, this.m()), !result.ok);
         }
       } finally { this.endMachineQuery(); }
     } else if (this.machineOutbox.handled(id)) return;
@@ -2903,7 +2942,7 @@ ${msg.text}`);
 
   private rigInvocationError(args: string[]): string {
     const invocation = this.rig.invocation(args);
-    return invocation.ok ? RIG_MISSING : invocation.error;
+    return invocation.ok ? this.m().rigMissing : rigErrorText(invocation.error, this.m());
   }
 
   // `sentAt` (ms) is set for a command run straight from the user's message; a confirmed one was age-checked at the press.
@@ -2912,7 +2951,7 @@ ${msg.text}`);
     if (this.machineOutbox.handled(id)) return;
     const invocation = this.rig.invocation(args);
     if (!invocation.ok || !this.execs) {
-      this.machineOutbox.post(`rig-error-${destination.chatId}-${message.message_id}`, destination, invocation.ok ? EXEC_NOT_SET : invocation.error, false);
+      this.machineOutbox.post(`rig-error-${destination.chatId}-${message.message_id}`, destination, invocation.ok ? this.m().execNotSet : rigErrorText(invocation.error, this.m()), false);
       return;
     }
     this.execs.machine(invocation.value, `rig ${args.join(" ")}`, this.opts.repository ?? join(import.meta.dir, "..", "..", ".."), destination, message.message_id, sentAt);
@@ -2920,16 +2959,16 @@ ${msg.text}`);
   }
 
   private queueRigConfirmation(key: string, confirmation: RigConfirmation): void {
-    if (confirmation.recovery) this.machineOutbox.post(confirmation.recovery, confirmation.destination, RIG_RECOVERY_TEXT);
+    if (confirmation.recovery) this.machineOutbox.post(confirmation.recovery, confirmation.destination, this.m().rigRecovery);
     else this.machineOutbox.post(confirmationPromptId(confirmation), confirmation.destination,
-      "Выключить Telegram на этой машине?", false, [[{ text: "Выключить Telegram", data: `rig-disable:${key}` }]]);
+      this.m().rigDisableAsk, false, [[{ text: this.m().rigDisableButton, data: `rig-disable:${key}` }]]);
   }
 
   private async onRigDisablePress(api: TelegramApi, press: { id: string; data: string; messageId: number; fromId: string }): Promise<void> {
     const key = press.data.slice("rig-disable:".length);
     const confirmation = this.disableConfirmations.get(key);
     if (!confirmation || confirmation.recovery) {
-      await api.answerCallbackQuery(press.id, "Подтверждение уже обработано или устарело");
+      await api.answerCallbackQuery(press.id, this.m().rigConfirmHandled);
       return;
     }
     // Same age limit as /bash: an old button must not switch Telegram off. A confirmation without a time is from an older hub.
@@ -2937,14 +2976,14 @@ ${msg.text}`);
     if (confirmation.sentAt === undefined || now() - confirmation.sentAt > (this.opts.execMaxAgeMs ?? EXEC_MAX_AGE_MS)) {
       this.disableConfirmations.delete(key);
       this.machineOutbox.deleteConfirmation(key);
-      await api.answerCallbackQuery(press.id, "Подтверждение устарело, отправь команду заново").catch(error => this.log.warn(`rig confirmation: ${String(error)}`));
+      await api.answerCallbackQuery(press.id, this.m().rigConfirmOutdated).catch(error => this.log.warn(`rig confirmation: ${String(error)}`));
       return;
     }
     const recovery = `rig-recovery-${key}`;
     confirmation.recovery = recovery;
     this.machineOutbox.saveConfirmation(key, confirmation);
     this.queueRigConfirmation(key, confirmation);
-    await api.answerCallbackQuery(press.id, "Подтверждено").catch(error => this.log.warn(`rig confirmation: ${String(error)}`));
+    await api.answerCallbackQuery(press.id, this.m().rigConfirmed).catch(error => this.log.warn(`rig confirmation: ${String(error)}`));
     await this.machineOutbox.flush(api);
     // Starting rig is deferred until the recovery message is accepted by Telegram.
     if (this.machineOutbox.delivered(recovery)) {
@@ -2966,20 +3005,20 @@ ${msg.text}`);
   // without its window.
   private onExecCommand(sessionId: string, name: "pwsh" | "cmd" | "bash", text: string, m: Message): void {
     const platform = this.opts.platform ?? PLATFORM;
-    if (name !== "bash" && !platform.windows) return this.notice(sessionId, `/${name} недоступна на этой платформе`, "warning");
+    if (name !== "bash" && !platform.windows) return this.notice(sessionId, this.m().commandUnavailable({ name }), "warning");
     if (name !== "bash") {
       const why = this.rig.unavailable(name);
       if (why) return this.notice(sessionId, why, "warning");
     }
-    if (!this.execs) return this.notice(sessionId, EXEC_NOT_SET, "error");
-    if (!text) return this.enqueue(sessionId, `hub-${randomUUID()}`, `Напиши команду: \`/${name} npm run migrate\``, notifies("info"));
+    if (!this.execs) return this.notice(sessionId, this.m().execNotSet, "error");
+    if (!text) return this.enqueue(sessionId, `hub-${randomUUID()}`, this.m().execUsage({ name }), notifies("info"));
     // cmd /c runs only up to the first line break.
-    if (name === "cmd" && /[\r\n]/.test(text)) return this.notice(sessionId, "/cmd выполняет одну строку. Для нескольких — /pwsh или /bash", "error");
+    if (name === "cmd" && /[\r\n]/.test(text)) return this.notice(sessionId, this.m().execCmdOneLine, "error");
     const bash = this.bashPath();
-    if (name === "bash" && !Bun.which(bash)) return this.notice(sessionId, `${platform.bashName} не найден: ${bash}. Укажи exec.bash в config.json`, "error");
+    if (name === "bash" && !Bun.which(bash)) return this.notice(sessionId, this.m().execShellNotFound({ shell: platform.bashName, path: bash }), "error");
     const rec = this.store.get(sessionId);
     const cwd = rec?.cwd ?? (this.opts.projectsDir ? sessionCwd(sessionId, this.opts.projectsDir) : undefined);
-    if (!cwd) return this.notice(sessionId, "⚠️ Не знаю, в какой папке запускать команду: её нет ни в записи хаба, ни в транскрипте", "warning");
+    if (!cwd) return this.notice(sessionId, this.m().execNoCwd, "warning");
     const shell: ExecShell = name === "pwsh" ? "powershell" : name;
     this.log.info(`/${name} for session ${sessionId}, message ${m.message_id}`);
     this.execs.command(sessionId, shell, text, cwd, { chatId: String(m.chat.id), messageId: m.message_id, date: m.date });
@@ -2988,7 +3027,7 @@ ${msg.text}`);
   private async onExecPress(api: TelegramApi, press: { id: string; data: string; fromId: string }): Promise<void> {
     const m = press.data.match(/^x:(\w+):(stop|run)$/);
     const action = m?.[2] === "stop" || m?.[2] === "run" ? m[2] : undefined;
-    const answer = !m?.[1] || !action ? "Запуск не найден" : this.execs ? this.execs.press(m[1], action) : EXEC_NOT_SET;
+    const answer = !m?.[1] || !action ? this.m().execNotFound : this.execs ? this.execs.press(m[1], action) : this.m().execNotSet;
     if (m?.[1] && action) this.log.info(`exec ${m[1]}: ${action} pressed by ${press.fromId}: ${answer}`);
     await api.answerCallbackQuery(press.id, answer).catch(e => this.log.warn(`answering a button press failed: ${e}`));
   }
@@ -3024,7 +3063,7 @@ ${msg.text}`);
       if (!this.keepForCleanup(sessionId, { inbound })) this.deliverInbound(sessionId, inbound);
     } else if (this.opts.config().launch) this.launch(sessionId, undefined, [{ inbound }]);
     else {
-      this.notice(sessionId, "⚠️ Сессия не запущена: результат команды агенту не доставлен", "warning");
+      this.notice(sessionId, this.m().resultNotDelivered, "warning");
       this.retainHeld(sessionId, [{ inbound }]);
     }
     // The last command ended: the hub may go idle again.
@@ -3065,12 +3104,12 @@ ${msg.text}`);
     for (const h of held) this.keepInOrder(saved, h);
     if (!saved.length) return;
     this.retained.set(sessionId, saved);
-    this.notice(sessionId, `⏳ Ожидают доставки: ${saved.length}. Сообщения сохранены до следующего запуска`, "warning");
+    this.notice(sessionId, this.m().pendingDelivery({ count: saved.length }), "warning");
   }
 
   private capturePending(sessionId: string): void {
     for (const p of this.polls.values()) if (p.sessionId === sessionId) {
-      void this.finishPoll(p, { decision: "none" }, TO_TERMINAL);
+      void this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal);
       void this.takeAnswer(p.key);
     }
     for (const entry of this.batchItems.get(sessionId) ?? []) {
@@ -3116,9 +3155,9 @@ ${msg.text}`);
       if (outcome === "deadline" && pending?.mode) {
         pending.mode = undefined;
         if (!pending.held.length) this.gatedLaunches.delete(sessionId);
-        this.notice(sessionId, "⚠️ Режим не сменён: Claude Code не завершился", "warning");
+        this.notice(sessionId, this.m().modeNotChangedExit, "warning");
       } else if (outcome === "deadline" && !this.cleanups.has(sessionId)) {
-        this.notice(sessionId, "⚠️ Claude Code не завершился; запуск ждёт выхода процесса", "warning");
+        this.notice(sessionId, this.m().launchWaitsForExit, "warning");
       }
     });
     void gate.done.then(outcome => {
@@ -3129,7 +3168,7 @@ ${msg.text}`);
       this.gatedLaunches.delete(sessionId);
       if (!pending) return;
       if (outcome === "reconnected") {
-        if (pending.mode) this.notice(sessionId, "⚠️ Режим не сменён: сессия снова открыта", "warning");
+        if (pending.mode) this.notice(sessionId, this.m().modeNotChangedReopened, "warning");
         this.releaseHeld(sessionId, pending.held);
       } else this.launch(sessionId, pending.account, pending.held, pending.announce, pending.mode);
     });
@@ -3182,7 +3221,7 @@ ${msg.text}`);
   private launchEnded(sessionId: string, end: "started" | "failed"): void {
     this.launchEnds.set(sessionId, end);
     for (const item of this.outbox.items().filter(i => i.sessionId === sessionId && i.id.startsWith(LAUNCH_NOTICE))) {
-      if (end === "started") this.outbox.setText(item.id, LAUNCHED_TEXT);
+      if (end === "started") this.outbox.setText(item.id, this.m().sessionLaunched);
       else this.outbox.remove(item.id);
     }
     if (end === "failed") return this.dropLaunchNotices(sessionId);
@@ -3192,9 +3231,10 @@ ${msg.text}`);
   private editLaunchNotice(notice: { id: number; text: string }): void {
     const api = this.opts.api;
     const groupId = this.opts.config().groupId;
-    if (notice.text === LAUNCHED_TEXT || !api || !groupId) return;
-    notice.text = LAUNCHED_TEXT;
-    api.editMessageText(groupId, notice.id, LAUNCHED_TEXT).catch(e => this.log.warn(`editing start notice ${notice.id} failed: ${e}`));
+    const launched = this.m().sessionLaunched;
+    if (notice.text === launched || !api || !groupId) return;
+    notice.text = launched;
+    api.editMessageText(groupId, notice.id, launched).catch(e => this.log.warn(`editing start notice ${notice.id} failed: ${e}`));
   }
 
   private dropLaunchNotices(sessionId: string): void {
@@ -3289,22 +3329,19 @@ const TMUX_DUPLICATE_SESSION = /duplicate session: (\S+)/;
 // What the topic is told when the launch command failed. A tmux session of the
 // same name means an earlier launch is alive, usually at a dialog: it is not
 // launched again.
-function launchFailure(e: unknown): string {
+function launchFailure(e: unknown, m: Messages): string {
   if (e instanceof LaunchExitError) {
     const name = TMUX_DUPLICATE_SESSION.exec(e.stderr)?.[1];
-    if (name) return `⚠️ Сессия уже запущена в tmux (${name}), скорее всего ждёт ответа в диалоге, например подтверждения канала. Подключись: tmux attach -t ${name}`;
+    if (name) return m.tmuxSessionAlive({ name });
   }
-  return `⚠️ Не могу запустить сессию: ${e instanceof Error ? e.message : String(e)}`;
+  return m.cannotLaunch({ why: e instanceof LaunchError ? e.render(m) : e instanceof Error ? e.message : String(e) });
 }
 
 // The /cleanup summary in the topic: what came of the skills.
-export function cleanupSummary(r: CleanupResult): string {
-  if (r.kind === "format") {
-    const version = r.version ? ` (Claude Code ${r.version})` : "";
-    return `⚠️ Уборка не выполнена: формат транскрипта изменился${version}`;
-  }
-  if (r.kind === "nothing" || !r.skills.length) return "🧹 Уборка выполнена.";
-  return `🧹 Уборка выполнена, убраны скиллы: ${r.skills.map(s => s.name).join(", ")}.`;
+export function cleanupSummary(r: CleanupResult, m: Messages): string {
+  if (r.kind === "format") return m.cleanupFormatChanged({ version: r.version });
+  if (r.kind === "nothing" || !r.skills.length) return m.cleanupDone;
+  return m.cleanupDoneSkills({ skills: r.skills.map(s => s.name).join(", ") });
 }
 
 // Queue item ids are `<plugin message id>#<n>`, replacements add `.<m>`.

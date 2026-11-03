@@ -7,10 +7,10 @@ import { join } from "path";
 import { Hub } from "../src/hub/hub.ts";
 import { runnerSpecSchema } from "../src/hub/exec-runner.ts";
 import { EXEC_MAX_AGE_MS, HEARTBEAT_STALE_MS } from "../src/hub/exec.ts";
-import { STALE_POLL } from "../src/hub/questions.ts";
 import { buttonPress, topicMsg } from "./fake-telegram.ts";
 import { memLogger, must, offlineApi, tempDir } from "./helpers.ts";
 import { manualClock, turn } from "./manual-clock.ts";
+import { en } from "../src/shared/i18n/en.ts";
 import { platformFor } from "../src/shared/platform.ts";
 
 // Synthetic ids. No real rig, child process, Telegram connection or wall clock.
@@ -85,7 +85,7 @@ test("General routes only allowed machine commands and preserves a session topic
   await f.update("/cmd echo forbidden");
   expect(f.texts).toEqual([]);
   await f.update("/feature");
-  expect(f.texts[0]).toEqual({ text: "Список фич пуст", topic: undefined, silent: true });
+  expect(f.texts[0]).toEqual({ text: en.featuresEmpty, topic: undefined, silent: true });
   await f.update("/feature", USER, 1);
   expect(f.texts.at(-1)?.topic).toBeUndefined();
   await f.update("/rig update", USER, TOPIC);
@@ -99,7 +99,7 @@ test("missing rig answers commands, keeps them in the menu and preserves legacy 
   const f = fixture({ findRig: () => undefined });
   await f.update("/feature");
   await f.update("/rig update");
-  expect(f.texts.every(message => message.text.includes("rig не установлен"))).toBe(true);
+  expect(f.texts.every(message => message.text.includes(en.rigMissing))).toBe(true);
   await f.hub["registerCommands"](f.api);
   expect(f.menus[0]).toContain("feature");
   expect(f.menus[0]).toContain("rig");
@@ -109,7 +109,7 @@ test("a rig that cannot be launched answers with its own reason, not a fixed tex
   const f = fixture({ platform: platformFor("win32"), findRig: () => "C:\\50%\\rig.cmd" });
   await f.update("/rig update");
   await f.hub["machineOutbox"].flush(f.api);
-  expect(f.texts.map(message => message.text).join("\n")).toContain("«%»");
+  expect(f.texts.map(message => message.text).join("\n")).toContain("\"%\"");
 });
 
 test("a slow JSON query neither delays the next update nor escapes the idle gate", async () => {
@@ -175,14 +175,14 @@ test("rig wait output streams normally, has no timeout, and code 1 is visible af
   resumed["running"] = true;
   must(resumed["execs"]).restore();
   await resumed["machineOutbox"].flush(f.api);
-  expect(f.texts.some(message => message.text.includes("код 1"))).toBe(true);
+  expect(f.texts.some(message => message.text.includes(en.execOutcomeCode({ code: 1 })))).toBe(true);
   expect(must(resumed["execs"]).running()).toBe(0);
   expect(f.spawned).toHaveLength(1);
   resumed["running"] = false;
 });
 
 test("a rig busy line reaches the topic while the command runs and is not a failure", async () => {
-  const busy = "Другая команда rig работает, жду её конца.";
+  const busy = "Another rig command is running, waiting for it to end.";
   const f = fixture({
     spawnRunner: file => {
       const spec = runnerSpecSchema.parse(JSON.parse(readFileSync(file, "utf8")));
@@ -204,14 +204,14 @@ test("a rig busy line reaches the topic while the command runs and is not a fail
   // A running card is silent (edits carry no flag): the line is no failure alert.
   expect(f.texts.every(message => message.silent !== false)).toBe(true);
   expect(manager.running()).toBe(1);
-  writeFileSync(spec.log, `${busy}\nобновлено\n`);
+  writeFileSync(spec.log, `${busy}\nupdated\n`);
   writeFileSync(spec.exit, JSON.stringify({ code: 0, endedAt: f.clock.now() }));
   await f.clock.advance(1);
   manager["check"]();
   await f.hub["machineOutbox"].flush(f.api);
   expect(manager.running()).toBe(0);
-  expect(f.texts.some(message => message.text.startsWith("✅ код 0"))).toBe(true);
-  expect(f.texts.some(message => message.text.includes("❌") || message.text.includes("прервана"))).toBe(false);
+  expect(f.texts.some(message => message.text.startsWith(en.execOutcomeOk))).toBe(true);
+  expect(f.texts.some(message => message.text.includes("❌") || message.text.includes("interrupted"))).toBe(false);
 });
 
 test("telegram disable rejects a stranger and starts only after recovery instructions arrive", async () => {
@@ -245,7 +245,7 @@ test("status uses JSON contract fields rather than parsing the human output", as
   const f = fixture();
   f.output({ code: 0, stderr: "", stdout: JSON.stringify({ schemaVersion: 1, mode: "server", versions: { rig: "rig-commit", hub: "hub-commit" }, releases: { rig: null, hub: "1.0.1" }, features: [], lastUpdate: null, pendingHubRestart: null, errors: [] }) });
   await f.update("/rig status");
-  expect(f.texts[0]?.text).toContain("Режим: server");
+  expect(f.texts[0]?.text).toContain(en.statusMode({ mode: "server" }));
   expect(f.texts[0]?.text).toContain("hub: 1.0.1 (hub-commit)");
 });
 
@@ -338,7 +338,7 @@ test("a question button of a closed window is stale: the question goes to the te
   f.api.answerCallbackQuery = async (_id, text) => { answers.push(text); return true; };
   await hub["onPollPress"](f.api, GROUP, { id: "1", data: "q:ab12:0:1", messageId: 5, fromId: USER });
   expect(hub["polls"].size).toBe(0);
-  expect(answers).toEqual([STALE_POLL]);
+  expect(answers).toEqual([en.pollStale]);
   expect(f.removed).toEqual([5]);
   expect(hub["rigIdle"]()).toBe(true);
 });
@@ -529,7 +529,7 @@ test("a stale disable confirmation button does not start rig", async () => {
   const key = must([...f.hub["disableConfirmations"].keys()][0]);
   await f.clock.advance(EXEC_MAX_AGE_MS + 1);
   await f.hub["handleUpdate"](f.api, buttonPress({ chatId: GROUP, fromId: USER, messageId: 1, data: `rig-disable:${key}` }));
-  expect(f.answers.at(-1)).toContain("устарело");
+  expect(f.answers.at(-1)).toContain(en.rigConfirmOutdated);
   expect(f.spawned).toEqual([]);
   expect(f.hub["disableConfirmations"].size).toBe(0);
   expect(f.hub["machineOutbox"].confirmations()).toEqual([]);

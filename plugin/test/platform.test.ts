@@ -5,6 +5,7 @@ import { rmSync } from "fs";
 import { join } from "path";
 import { Hub } from "../src/hub/hub.ts";
 import { defaultTurnEndChime, playChime } from "../src/shared/chime.ts";
+import { en } from "../src/shared/i18n/en.ts";
 import { platformFor } from "../src/shared/platform.ts";
 import { playConfiguredChime } from "../src/plugin/plugin.ts";
 import { memLogger, tempDir } from "./helpers.ts";
@@ -54,7 +55,7 @@ test("without cswap /run uses plain launch and /run 2 explains missing accounts"
   hub["notice"] = (_sid, text) => { notices.push(text); };
   const message: Message = { message_id: MESSAGE, date: 0, chat: { id: CHAT, type: "supergroup", title: "Test" }, from: { id: USER, is_bot: false, first_name: "Tester" } };
   hub["onHubCommand"]("session", { name: "run", args: "2" }, message);
-  expect(notices).toEqual(["На этой машине нет аккаунтов cswap. Используй /run без номера."]);
+  expect(notices).toEqual([en.noAccounts]);
   expect(hub["launchLocation"]("session", undefined)).toEqual({ account: "", cwd: dir });
 });
 
@@ -72,5 +73,5 @@ test("Linux shell commands stay unavailable even with no exec manager", () => {
   const message: Message = { message_id: MESSAGE, date: 0, chat: { id: CHAT, type: "supergroup", title: "Test" } };
   hub["onExecCommand"]("session", "pwsh", "echo hello", message);
   hub["onExecCommand"]("session", "cmd", "echo hello", message);
-  expect(notices).toEqual(["/pwsh недоступна на этой платформе", "/cmd недоступна на этой платформе"]);
+  expect(notices).toEqual([en.commandUnavailable({ name: "pwsh" }), en.commandUnavailable({ name: "cmd" })]);
 });

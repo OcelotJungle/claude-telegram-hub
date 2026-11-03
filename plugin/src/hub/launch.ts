@@ -1,4 +1,5 @@
 import type { Launch } from "../shared/config.ts";
+import type { Messages } from "../shared/i18n/index.ts";
 import type { Platform } from "../shared/platform.ts";
 
 import { spawn } from "child_process";
@@ -6,6 +7,7 @@ import { closeSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, 
 import { tmpdir } from "os";
 import { basename, join } from "path";
 import { field } from "../shared/guards.ts";
+import { catalogOf } from "../shared/i18n/index.ts";
 import { PLATFORM } from "../shared/platform.ts";
 
 // A launch command that ends within this time with a non-zero code failed to
@@ -29,20 +31,27 @@ const ACCOUNT = /^[\w.@-]+$/;
 // The command goes through cmd.exe, which acts on these even in a path.
 const CMD_SPECIAL = /["%&|<>^]/;
 
-// Why a session cannot be started, as the topic is told.
-export class LaunchError extends Error {}
+// Why a session cannot be started. `message` is English for the log; `render` is the text the topic is told, in the hub's language.
+export class LaunchError extends Error {
+  constructor(readonly render: (m: Messages) => string) {
+    super(render(catalogOf("en")));
+  }
+}
 
 // The configured command with {cwd}, {account}, {session} and {mode} put in. Every
 // value is checked first, so nothing from outside can change what runs.
 export function launchCommand(launch: Launch, v: { cwd: string; account: string; session: string; mode?: string }, platform: Platform = PLATFORM): string[] {
-  if (!SESSION_ID.test(v.session)) throw new LaunchError(`странный id сессии: ${v.session}`);
-  if (v.account !== "" && !ACCOUNT.test(v.account)) throw new LaunchError(`странный аккаунт: ${v.account}`);
-  if (v.mode !== undefined && !isPermissionMode(v.mode)) throw new LaunchError(`неизвестный режим разрешений: ${v.mode}`);
-  if (v.mode !== undefined && !hasModePlaceholder(launch)) throw new LaunchError("добавь {mode} в launch.command в config.json");
+  if (!SESSION_ID.test(v.session)) throw new LaunchError(m => m.launchBadSession({ session: v.session }));
+  if (v.account !== "" && !ACCOUNT.test(v.account)) throw new LaunchError(m => m.launchBadAccount({ account: v.account }));
+  if (v.mode !== undefined && !isPermissionMode(v.mode)) {
+    const mode = v.mode;
+    throw new LaunchError(m => m.launchBadMode({ mode }));
+  }
+  if (v.mode !== undefined && !hasModePlaceholder(launch)) throw new LaunchError(m => m.launchNeedModePlaceholder);
   // On Windows cmd may sit anywhere in the template (wt.exe starts it), so the check always applies;
   // on Linux the command runs without a shell.
-  if (platform.windows && CMD_SPECIAL.test(v.cwd)) throw new LaunchError(`в пути папки сессии есть символы, опасные для cmd.exe: ${v.cwd}`);
-  if (!isDir(v.cwd)) throw new LaunchError(`папки сессии нет: ${v.cwd}`);
+  if (platform.windows && CMD_SPECIAL.test(v.cwd)) throw new LaunchError(m => m.launchUnsafeCwd({ cwd: v.cwd }));
+  if (!isDir(v.cwd)) throw new LaunchError(m => m.launchNoDirectory({ cwd: v.cwd }));
   const mode = v.mode === undefined ? "" : `--permission-mode ${v.mode}`;
   return launch.command.flatMap(part => {
     if (part === "{mode}") return mode ? ["--permission-mode", v.mode ?? ""] : [];
@@ -52,9 +61,9 @@ export function launchCommand(launch: Launch, v: { cwd: string; account: string;
 }
 
 // A launch command that ended with a failure soon after it started.
-export class LaunchExitError extends Error {
+export class LaunchExitError extends LaunchError {
   constructor(readonly code: number | null, readonly stderr: string) {
-    super(`команда запуска завершилась ${code === null ? "аварийно" : `с кодом ${code}`}${stderr ? `: ${stderr}` : ""}`);
+    super(m => m.launchExited({ code, stderr }));
   }
 }
 
@@ -70,7 +79,7 @@ export type SpawnTimers = {
 // long-lived command never meets a closed pipe.
 export function spawnDetached(command: string[], timers: SpawnTimers = { graceMs: LAUNCH_EXIT_GRACE_MS, setTimer: setTimeout, clearTimer: clearTimeout }): Promise<void> {
   const [exe, ...args] = command;
-  if (!exe) throw new LaunchError("пустая команда запуска");
+  if (!exe) throw new LaunchError(m => m.launchEmptyCommand);
   const dir = mkdtempSync(join(tmpdir(), "hub-launch-"));
   const errPath = join(dir, "stderr");
   const errFd = openSync(errPath, "w");
@@ -123,9 +132,9 @@ export function tmuxSession(command: string[]): string | undefined {
 }
 
 // Where to look at a tmux session the user must answer in.
-export function tmuxAttachHint(command: string[]): string {
+export function tmuxAttachHint(command: string[], m: Messages): string {
   const session = tmuxSession(command);
-  return session ? `tmux attach -t ${session}` : "tmux ls покажет сессию, tmux attach -t <имя> подключит к ней";
+  return session ? `tmux attach -t ${session}` : m.tmuxGenericHint;
 }
 
 export function isPermissionMode(mode: string): mode is PermissionMode {

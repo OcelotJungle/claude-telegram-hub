@@ -179,12 +179,12 @@ test("the messages of a confirmation that waits for a press stay remembered howe
   const destination = { chatId: GROUP };
   const confirmation = { message: { message_id: 7 }, destination };
   queue.saveConfirmation("key", confirmation);
-  queue.post(confirmationPromptId(confirmation), destination, "Выключить Telegram на этой машине?", false);
+  queue.post(confirmationPromptId(confirmation), destination, "\u0412\u044b\u043a\u043b\u044e\u0447\u0438\u0442\u044c Telegram \u043d\u0430 \u044d\u0442\u043e\u0439 \u043c\u0430\u0448\u0438\u043d\u0435?", false);
   await queue.flush(api);
   for (let index = 0; index < REMEMBERED * 2; index++) queue.post(`reply-${index}`, destination, "text");
   await queue.flush(api);
   // The hub posts the prompt again on every tick; it must not reach the chat a second time.
-  queue.post(confirmationPromptId(confirmation), destination, "Выключить Telegram на этой машине?", false);
+  queue.post(confirmationPromptId(confirmation), destination, "\u0412\u044b\u043a\u043b\u044e\u0447\u0438\u0442\u044c Telegram \u043d\u0430 \u044d\u0442\u043e\u0439 \u043c\u0430\u0448\u0438\u043d\u0435?", false);
   expect(queue.size).toBe(0);
   expect(id).toBe(REMEMBERED * 2 + 1);
   // Once it is answered, its ids are forgotten like any others.

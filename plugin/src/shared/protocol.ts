@@ -13,7 +13,13 @@ export const DEFAULT_PORT = 47613;
 // module that asks with &cleanup=1; it compacts with the args and reports
 // with POST /cleanup: the context sizes before and after, or the error. rename
 // goes to any module with the new name as args; it runs the session's /rename.
-export type TopicCommand = { id: string; name: "info" | "compact" | "stop" | "cleanup" | "rename"; args: string };
+// The language of the texts a person reads in Telegram; rig stores it, the hub passes it on.
+// language on a command is the hub's current one: the module renders its texts with it
+// and uses English when it is absent.
+// The one list of languages; every other place derives from it.
+export const LANGUAGES = ["en", "ru"] as const;
+export type Language = (typeof LANGUAGES)[number];
+export type TopicCommand = { id: string; name: "info" | "compact" | "stop" | "cleanup" | "rename"; args: string; language?: Language };
 export type ResolutionKind = "success" | "warning" | "progress";
 export type CommandReply = { sessionId: string; id: string; text: string; notify: boolean; replaces?: { id: string; kind: ResolutionKind }; awaitsResult?: true };
 export type TerminateRequest = { sessionId: string; id: string };
@@ -96,7 +102,10 @@ export type HubToPlugin =
   | { type: "turnEnd"; final: boolean; kind?: TurnEndKind }
   // The hub is about to show a question: relay the text the agent wrote
   // before the tool call, then answer caughtUp with the same id.
-  | { type: "catchUp"; id: string };
+  | { type: "catchUp"; id: string }
+  // The hub's language: sent on connect and on every change. A plugin uses English
+  // until the first one arrives. Older plugins log it as an unknown message.
+  | { type: "language"; language: Language };
 
 export type PermissionBehavior = "allow" | "deny";
 export type TurnEndKind = "ask" | "done";

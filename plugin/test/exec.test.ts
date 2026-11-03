@@ -3,6 +3,7 @@ import type { ExecRecord } from "../src/hub/exec-store.ts";
 import type { RunnerSpec } from "../src/hub/exec-runner.ts";
 import type { Button } from "../src/hub/telegram.ts";
 import type { ChannelMeta } from "../src/shared/protocol.ts";
+import type { Messages } from "../src/shared/i18n/index.ts";
 import type { MessageKind } from "../src/shared/notification.ts";
 
 import { afterEach, describe, expect, test } from "bun:test";
@@ -11,6 +12,8 @@ import { join } from "path";
 import { Execs, execCardText, HEARTBEAT_STALE_MS, logTail, MAX_EXECS } from "../src/hub/exec.ts";
 import { loadExecs, saveExecs } from "../src/hub/exec-store.ts";
 import { HEARTBEAT_MS, runnerSpecSchema } from "../src/hub/exec-runner.ts";
+import { en } from "../src/shared/i18n/en.ts";
+import { ru } from "../src/shared/i18n/ru.ts";
 import { notifies } from "../src/shared/notification.ts";
 import { platformFor } from "../src/shared/platform.ts";
 import { memLogger, must, tempDir, waitFor } from "./helpers.ts";
@@ -30,6 +33,8 @@ const RUN_1_05_MS = 65_000;
 const LOG_LINES = 40;
 const FILE_LIMIT = 200;
 const BIG_LINE_CHARS = 500;
+// One two-byte UTF-8 character (Cyrillic ya).
+const YA = "\u044f";
 const MS_PER_S = 1000;
 const CHECKS_PER_STEP = 3;
 // A start's grace no test outlasts, and one a test waits out.
@@ -57,7 +62,7 @@ afterEach(() => {
 // writing the log and the exit file itself.
 // alive: runner pids alive from the start, for a manager that finds runs on disk.
 // windows: sessions with a window; graceMs: the start's grace, none by default.
-function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; alive?: number[]; windows?: string[]; graceMs?: number } = {}) {
+function setup(o: { messages?: () => Messages; dir?: string; sendOnSent?: boolean; fileLimit?: number; alive?: number[]; windows?: string[]; graceMs?: number } = {}) {
   const dir = o.dir ?? tempDir("telegramhub-exec-");
   if (o.dir === undefined) dirs.push(dir);
   const specs: RunnerSpec[] = [];
@@ -72,6 +77,7 @@ function setup(o: { dir?: string; sendOnSent?: boolean; fileLimit?: number; aliv
   const clock = { now: NOW };
   const log = memLogger();
   const deps: ExecDeps = {
+    messages: o.messages ?? (() => en),
     dir,
     file: join(dir, "execs.json"),
     shells: () => ({ powershell: "powershell.exe", bash: "bash.exe" }),
@@ -139,14 +145,14 @@ describe("Execs", () => {
     expect(first.markdown).toStartWith("▶ cmd");
     expect(first.kind).toBe("info");
     expect(first.markdown).toContain("`npm run x`");
-    expect(first.buttons).toEqual([[{ text: "⏹ Остановить", data: `x:${idOf(first.cardId)}:stop` }]]);
+    expect(first.buttons).toEqual([[{ text: en.execStopButton, data: `x:${idOf(first.cardId)}:stop` }]]);
     expect(t.execs.running()).toBe(1);
     appendFileSync(t.spec().log, "a\nb\n");
     await waitFor(() => t.cards.find(c => c.markdown.includes("b") && !c.final), WAIT_MS, "card with b");
     t.clock.now += RUN_1_05_MS;
     t.finish(0, 0);
     const last = await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
-    expect(last.markdown).toStartWith("✅ код 0 · 1 мин 05 с");
+    expect(last.markdown).toStartWith(`${en.execOutcomeOk} · 1 min 05 s`);
     expect(last.kind).toBe("info");
     expect(last.buttons).toBeUndefined();
     await Bun.sleep(SETTLE_MS);
@@ -164,13 +170,13 @@ describe("Execs", () => {
     appendFileSync(t.spec().log, Array.from({ length: LOG_LINES }, (_, i) => `line ${i + 1}`).join("\n") + "\n");
     t.finish(0, 2);
     const report = await waitFor(() => t.reports[0], WAIT_MS, "report");
-    expect(t.lastCard().markdown).toStartWith("❌ код 2");
+    expect(t.lastCard().markdown).toStartWith(en.execOutcomeCode({ code: 2 }));
     expect(t.lastCard().kind).toBe("error");
     expect(t.files).toEqual([{ path: t.spec().log, name: `${report.meta.exec_id}.log`, loud: true }]);
-    expect(report.content).toStartWith("Команда из топика закончилась: ❌ код 2 за 0 с.");
-    expect(report.content).toContain("Оболочка: PowerShell, папка: C:\\proj");
-    expect(report.content).toContain("Команда: npm run x");
-    expect(report.content).toContain(`Полный лог: ${t.spec().log}`);
+    expect(report.content).toStartWith(`The topic command has ended: ${en.execOutcomeCode({ code: 2 })} in 0 s.`);
+    expect(report.content).toContain("Shell: PowerShell, folder: C:\\proj");
+    expect(report.content).toContain("Command: npm run x");
+    expect(report.content).toContain(`Full log: ${t.spec().log}`);
     expect(report.content).toContain("line 11\n");
     expect(report.content).toContain(`line ${LOG_LINES}`);
     expect(report.content).not.toContain("line 10\n");
@@ -180,9 +186,10 @@ describe("Execs", () => {
   test("a log over the file limit goes as its last bytes, whole characters, with a note", async () => {
     const t = setup({ fileLimit: FILE_LIMIT });
     // One byte apart, so one of the two cuts falls inside a character.
-    for (const [n, last] of ["конец\n", "конец!\n"].entries()) {
+    // "\u043a\u043e\u043d\u0435\u0446" spells "end" in Russian.
+    for (const [n, last] of ["\u043a\u043e\u043d\u0435\u0446\n", "\u043a\u043e\u043d\u0435\u0446!\n"].entries()) {
       t.execs.command(SID, "cmd", "x", "C:\\proj", msg(n + 1));
-      appendFileSync(t.spec(n).log, `${"я".repeat(BIG_LINE_CHARS)}\n${last}`);
+      appendFileSync(t.spec(n).log, `${YA.repeat(BIG_LINE_CHARS)}\n${last}`);
       t.finish(n, 1);
       const sent = await waitFor(() => t.files[n], WAIT_MS, "sent file");
       expect(sent.path).not.toBe(t.spec(n).log);
@@ -190,9 +197,9 @@ describe("Execs", () => {
       const bytes = readFileSync(sent.path);
       expect(bytes.length).toBeLessThanOrEqual(FILE_LIMIT);
       const text = bytes.toString("utf8");
-      expect(text).toStartWith("[лог обрезан");
+      expect(text).toStartWith("[log trimmed");
       expect(text).not.toContain("\uFFFD");
-      expect(text).toEndWith(`я\n${last}`);
+      expect(text).toEndWith(`${YA}\n${last}`);
     }
   });
 
@@ -215,10 +222,10 @@ describe("Execs", () => {
     const t = setup();
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     const id = idOf(t.lastCard().cardId);
-    expect(t.execs.press(id, "stop")).toBe("Останавливаю");
+    expect(t.execs.press(id, "stop")).toBe(en.execStopping);
     t.finish(0, 0);
     await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
-    expect(t.lastCard().markdown).toStartWith("✅ код 0");
+    expect(t.lastCard().markdown).toStartWith(en.execOutcomeOk);
   });
 
   test("stop after the exit file is there kills nothing and shows the code", () => {
@@ -226,9 +233,9 @@ describe("Execs", () => {
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     const id = idOf(t.lastCard().cardId);
     t.finish(0, 2);
-    expect(t.execs.press(id, "stop")).toBe("Команда уже закончилась");
+    expect(t.execs.press(id, "stop")).toBe(en.execAlreadyEnded);
     expect(t.killed).toEqual([]);
-    expect(t.lastCard().markdown).toStartWith("❌ код 2");
+    expect(t.lastCard().markdown).toStartWith(en.execOutcomeCode({ code: 2 }));
   });
 
   test("an old command waits for the button", () => {
@@ -236,28 +243,28 @@ describe("Execs", () => {
     t.execs.command(SID, "cmd", "npm run migrate", "C:\\proj", msg(1, 3 * MIN_MS));
     expect(t.specs).toHaveLength(0);
     const card = t.lastCard();
-    expect(card.markdown).toStartWith("⏸ Команда пришла 3 мин назад, пока хаб был выключен");
+    expect(card.markdown).toStartWith(en.execPending({ minutes: 3 }));
     const id = idOf(card.cardId);
-    expect(card.buttons).toEqual([[{ text: "▶ Запустить", data: `x:${id}:run` }]]);
-    expect(t.execs.press(id, "run")).toBe("Запускаю");
+    expect(card.buttons).toEqual([[{ text: en.execRunButton, data: `x:${id}:run` }]]);
+    expect(t.execs.press(id, "run")).toBe(en.execStarting);
     expect(t.specs).toHaveLength(1);
     expect(t.lastCard().markdown).toStartWith("▶ cmd");
-    expect(t.execs.press(id, "run")).toBe("Команда уже запущена");
+    expect(t.execs.press(id, "run")).toBe(en.execAlreadyRunning);
     expect(t.specs).toHaveLength(1);
-    expect(t.execs.press("nope", "run")).toBe("Запуск не найден");
+    expect(t.execs.press("nope", "run")).toBe(en.execNotFound);
   });
 
   test("stop kills the process and ends as stopped", async () => {
     const t = setup();
     t.execs.command(SID, "cmd", "ping", "C:\\proj", msg(1));
     const id = idOf(t.lastCard().cardId);
-    expect(t.execs.press(id, "stop")).toBe("Останавливаю");
+    expect(t.execs.press(id, "stop")).toBe(en.execStopping);
     expect(t.killed).toEqual([FIRST_PID + 1]);
     t.alive.clear();
     await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
-    expect(t.lastCard().markdown).toStartWith("⏹ остановлена");
-    expect(t.execs.press(id, "stop")).toBe("Команда уже закончилась");
-    expect(t.execs.press(id, "run")).toBe("Команда уже закончилась");
+    expect(t.lastCard().markdown).toStartWith(en.execOutcomeStopped);
+    expect(t.execs.press(id, "stop")).toBe(en.execAlreadyEnded);
+    expect(t.execs.press(id, "run")).toBe(en.execAlreadyEnded);
   });
 
   test("a vanished process ends as lost", async () => {
@@ -265,9 +272,9 @@ describe("Execs", () => {
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     t.alive.clear();
     await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
-    expect(t.lastCard().markdown).toStartWith("⚠️ прервана: процесс исчез");
+    expect(t.lastCard().markdown).toStartWith(en.execOutcomeLost({ reason: en.execLostProcessGone }));
     const report = await waitFor(() => t.reports[0], WAIT_MS, "report");
-    expect(report.content).toContain("⚠️ прервана: процесс исчез");
+    expect(report.content).toContain(en.execOutcomeLost({ reason: en.execLostProcessGone }));
     expect(report.meta.exit_code).toBeUndefined();
   });
 
@@ -276,7 +283,18 @@ describe("Execs", () => {
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     t.finish(0, null, "spawn ENOENT");
     await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
-    expect(t.lastCard().markdown).toStartWith("⚠️ прервана: не запустилось: spawn ENOENT");
+    expect(t.lastCard().markdown).toStartWith(en.execOutcomeLost({ reason: en.execLostNotStarted({ error: "spawn ENOENT" }) }));
+  });
+
+  test("a command that could not start is worded in the language current when it ends", async () => {
+    let current: Messages = en;
+    const t = setup({ messages: () => current });
+    t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
+    current = ru;
+    t.finish(0, null, "spawn ENOENT");
+    await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
+    expect(t.lastCard().markdown).toStartWith(ru.execOutcomeLost({ reason: ru.execLostNotStarted({ error: "spawn ENOENT" }) }));
+    expect(t.lastCard().markdown).not.toContain("did not start");
   });
 
   test("a restarted manager goes on", async () => {
@@ -289,7 +307,7 @@ describe("Execs", () => {
     await Bun.sleep(SETTLE_MS);
     expect(t2.reports).toHaveLength(1);
     expect(t.reports).toHaveLength(0);
-    expect(t2.lastCard().markdown).toStartWith("✅ код 0");
+    expect(t2.lastCard().markdown).toStartWith(en.execOutcomeOk);
   });
 
   test("a launch gives the runner its heartbeat file", () => {
@@ -317,8 +335,8 @@ describe("Execs", () => {
     utimesSync(join(dir, "abcd1234.alive"), (NOW - LONG_AGO_MS) / MS_PER_S, (NOW - LONG_AGO_MS) / MS_PER_S);
     const t = setup({ dir, alive: [4242] });
     await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
-    expect(t.lastCard().markdown).toStartWith("⚠️ прервана: процесс исчез");
-    expect(t.execs.press("abcd1234", "stop")).toBe("Команда уже закончилась");
+    expect(t.lastCard().markdown).toStartWith(en.execOutcomeLost({ reason: en.execLostProcessGone }));
+    expect(t.execs.press("abcd1234", "stop")).toBe(en.execAlreadyEnded);
     expect(t.killed).toEqual([]);
   });
 
@@ -327,9 +345,9 @@ describe("Execs", () => {
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     const id = idOf(t.lastCard().cardId);
     t.beat(0, NOW - LONG_AGO_MS);
-    expect(t.execs.press(id, "stop")).toBe("Команда уже закончилась");
+    expect(t.execs.press(id, "stop")).toBe(en.execAlreadyEnded);
     expect(t.killed).toEqual([]);
-    expect(t.lastCard().markdown).toStartWith("⚠️ прервана: процесс исчез");
+    expect(t.lastCard().markdown).toStartWith(en.execOutcomeLost({ reason: en.execLostProcessGone }));
   });
 
   test("a run the hub slept through waits for its next heartbeat", async () => {
@@ -345,7 +363,7 @@ describe("Execs", () => {
     // No beat for the whole grace: the runner is gone.
     await walk(t.clock, HEARTBEAT_STALE_MS);
     await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
-    expect(t.lastCard().markdown).toStartWith("⚠️ прервана: процесс исчез");
+    expect(t.lastCard().markdown).toStartWith(en.execOutcomeLost({ reason: en.execLostProcessGone }));
   });
 
   test("a run that ended while no manager watched waits for its window, then for the sweep", async () => {
@@ -509,8 +527,8 @@ describe("exec texts", () => {
       startedAt: NOW,
       reported: false,
     };
-    expect(execCardText(rec, "", NOW + 42_000, platformFor("win32").shellNames)).toBe("▶ Git Bash · 42 с\n`make`");
-    expect(execCardText(rec, "", NOW + 3 * MIN_MS + 12_000, platformFor("win32").shellNames)).toBe("▶ Git Bash · 3 мин 12 с\n`make`");
-    expect(execCardText(rec, "", NOW + 42_000, platformFor("linux").shellNames)).toBe("▶ bash · 42 с\n`make`");
+    expect(execCardText(rec, "", NOW + 42_000, en, platformFor("win32").shellNames)).toBe("▶ Git Bash · 42 s\n`make`");
+    expect(execCardText(rec, "", NOW + 3 * MIN_MS + 12_000, en, platformFor("win32").shellNames)).toBe("▶ Git Bash · 3 min 12 s\n`make`");
+    expect(execCardText(rec, "", NOW + 42_000, en, platformFor("linux").shellNames)).toBe("▶ bash · 42 s\n`make`");
   });
 });

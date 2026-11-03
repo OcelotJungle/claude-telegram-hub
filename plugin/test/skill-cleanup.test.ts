@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, statSync
 import { rename } from "fs/promises";
 import { join } from "path";
 import { cleanTranscript, KEEP_BACKUPS, restoreCleanup } from "../src/hub/skill-cleanup.ts";
+import { en } from "../src/shared/i18n/en.ts";
 import { field } from "../src/shared/guards.ts";
 import { tempDir } from "./helpers.ts";
 
@@ -259,7 +260,7 @@ describe("cleanTranscript", () => {
         return statSync(p).size;
       },
     };
-    await expect(cleanTranscript(path, NOW, io)).rejects.toThrow("транскрипт дописывается — сессия уже открыта?");
+    await expect(cleanTranscript(path, NOW, io)).rejects.toThrow(en.cleanupGrowing);
     expect(readFileSync(path).equals(Buffer.concat([input, Buffer.from(more)]))).toBe(true);
     expect(readdirSync(d)).toEqual([`${SID}.jsonl`]);
   });

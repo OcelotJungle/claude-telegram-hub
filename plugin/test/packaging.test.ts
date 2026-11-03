@@ -115,12 +115,12 @@ describe("Stop hook", () => {
     hub.start();
     const c = await wsClient(port, { type: "hello", v: PROTOCOL_VERSION, windowKey: "pipe-S", sessionId: "s", cwd: "C:\\p" });
     clients.push(c);
-    const r = await runStop(port, { session_id: "s", hook_event_name: "Stop", last_assistant_message: "Готово. Дальше?", background_tasks: [{ id: "t" }] }, dir);
+    const r = await runStop(port, { session_id: "s", hook_event_name: "Stop", last_assistant_message: "\u0413\u043e\u0442\u043e\u0432\u043e. \u0414\u0430\u043b\u044c\u0448\u0435?", background_tasks: [{ id: "t" }] }, dir);
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("");
     expect(await c.next("turnEnd")).toEqual({ type: "turnEnd", final: true, kind: "ask" });
     // A hook with no hub to tell chimes; by then a chime of the first would be heard too.
-    expect((await runStop(await freePort(), { session_id: "s", last_assistant_message: "Готово." }, dir)).status).toBe(0);
+    expect((await runStop(await freePort(), { session_id: "s", last_assistant_message: "\u0413\u043e\u0442\u043e\u0432\u043e." }, dir)).status).toBe(0);
     if (!PLATFORM.sound) {
       expect(chimes()).toEqual([]);
       return;
@@ -132,9 +132,9 @@ describe("Stop hook", () => {
   test("with no hub a final turn plays the chime itself, an intermediate one does not", async () => {
     const port = await freePort();
     const { dir, chimes } = chimeSetup();
-    const quiet = await runStop(port, { session_id: "s", last_assistant_message: "Жду.", background_tasks: [{ id: "t" }] }, dir);
+    const quiet = await runStop(port, { session_id: "s", last_assistant_message: "\u0416\u0434\u0443.", background_tasks: [{ id: "t" }] }, dir);
     expect(quiet.status).toBe(0);
-    const loud = await runStop(port, { session_id: "s", last_assistant_message: "Готово." }, dir);
+    const loud = await runStop(port, { session_id: "s", last_assistant_message: "\u0413\u043e\u0442\u043e\u0432\u043e." }, dir);
     expect(loud.status).toBe(0);
     expect(loud.stdout).toBe("");
     if (!PLATFORM.sound) {
@@ -154,7 +154,7 @@ describe("Stop hook", () => {
 });
 
 describe("AskUserQuestion hook", () => {
-  const QUESTIONS = [{ question: "Какой цвет?", header: "Цвет", options: [{ label: "Синий", description: "" }, { label: "Красный", description: "" }], multiSelect: false }];
+  const QUESTIONS = [{ question: "\u041a\u0430\u043a\u043e\u0439 \u0446\u0432\u0435\u0442?", header: "\u0426\u0432\u0435\u0442", options: [{ label: "\u0421\u0438\u043d\u0438\u0439", description: "" }, { label: "\u041a\u0440\u0430\u0441\u043d\u044b\u0439", description: "" }], multiSelect: false }];
   const INPUT = { session_id: "s", hook_event_name: "PreToolUse", tool_name: "AskUserQuestion", tool_input: { questions: QUESTIONS } };
   let server: { stop(force?: boolean): void } | undefined;
   let hub: Hub | undefined;
@@ -261,7 +261,7 @@ describe("AskUserQuestion hook", () => {
   });
 
   test("an answer from the topic allows the tool with the questions and the answers", async () => {
-    const { port, bodies } = await fakeHub({ decision: "allow", answers: { "Какой цвет?": "Синий" } });
+    const { port, bodies } = await fakeHub({ decision: "allow", answers: { "\u041a\u0430\u043a\u043e\u0439 \u0446\u0432\u0435\u0442?": "\u0421\u0438\u043d\u0438\u0439" } });
     const r = await runQuestion(port, INPUT);
     expect(r.status).toBe(0);
     expect(bodies).toEqual([{ messagingSocket: "pipe-Q", session_id: "s", tool_input: { questions: QUESTIONS } }]);
@@ -270,22 +270,22 @@ describe("AskUserQuestion hook", () => {
         hookEventName: "PreToolUse",
         permissionDecision: "allow",
         permissionDecisionReason: "Answered in Telegram",
-        updatedInput: { questions: QUESTIONS, answers: { "Какой цвет?": "Синий" } },
+        updatedInput: { questions: QUESTIONS, answers: { "\u041a\u0430\u043a\u043e\u0439 \u0446\u0432\u0435\u0442?": "\u0421\u0438\u043d\u0438\u0439" } },
       },
     });
   });
 
   test("the allowed input keeps every field of the original tool input", async () => {
-    const { port, bodies } = await fakeHub({ decision: "allow", answers: { "Какой цвет?": "Синий" } });
+    const { port, bodies } = await fakeHub({ decision: "allow", answers: { "\u041a\u0430\u043a\u043e\u0439 \u0446\u0432\u0435\u0442?": "\u0421\u0438\u043d\u0438\u0439" } });
     const toolInput = { questions: QUESTIONS, metadata: { source: "x" } };
     const r = await runQuestion(port, { ...INPUT, tool_input: toolInput });
     expect(bodies).toEqual([{ messagingSocket: "pipe-Q", session_id: "s", tool_input: toolInput }]);
-    expect(JSON.parse(r.stdout).hookSpecificOutput.updatedInput).toEqual({ ...toolInput, answers: { "Какой цвет?": "Синий" } });
+    expect(JSON.parse(r.stdout).hookSpecificOutput.updatedInput).toEqual({ ...toolInput, answers: { "\u041a\u0430\u043a\u043e\u0439 \u0446\u0432\u0435\u0442?": "\u0421\u0438\u043d\u0438\u0439" } });
   });
 
   test("a large answer reaches stdout whole before the hook exits", async () => {
-    const big = "ж".repeat(2_000_000);
-    const { port } = await fakeHub({ decision: "allow", answers: { "Какой цвет?": big } });
+    const big = "\u0436".repeat(2_000_000);
+    const { port } = await fakeHub({ decision: "allow", answers: { "\u041a\u0430\u043a\u043e\u0439 \u0446\u0432\u0435\u0442?": big } });
     const proc = Bun.spawn([process.execPath, QUESTION_HOOK], {
       stdin: new Blob([JSON.stringify(INPUT)]),
       stdout: "pipe",
@@ -296,7 +296,7 @@ describe("AskUserQuestion hook", () => {
     await Bun.sleep(SLOW_READER_MS);
     const stdout = await new Response(proc.stdout).text();
     await proc.exited;
-    expect(JSON.parse(stdout).hookSpecificOutput.updatedInput.answers["Какой цвет?"]).toBe(big);
+    expect(JSON.parse(stdout).hookSpecificOutput.updatedInput.answers["\u041a\u0430\u043a\u043e\u0439 \u0446\u0432\u0435\u0442?"]).toBe(big);
   });
 
   test("a cancel in the topic denies the tool with the hub's reason", async () => {
@@ -368,7 +368,7 @@ describe("plugin packaging", () => {
     // The questions hook waits as long as a poll may stay open: 24 hours.
     const question = hooks.hooks.PreToolUse[0];
     expect(question.matcher).toBe("AskUserQuestion");
-    expect(question.hooks[0]).toMatchObject({ type: "command", timeout: 86400, statusMessage: "Жду ответа в Телеграме" });
+    expect(question.hooks[0]).toMatchObject({ type: "command", timeout: 86400, statusMessage: "Waiting for an answer in Telegram" });
     expect(question.hooks[0].command).toContain("src/hook/question.ts");
     expect(existsSync(QUESTION_HOOK)).toBe(true);
     // The function hooks module that runs commands from the topic.

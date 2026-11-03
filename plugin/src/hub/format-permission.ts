@@ -1,3 +1,4 @@
+import type { Messages } from "../shared/i18n/index.ts";
 import type { Entity, Formatted } from "../shared/markdown.ts";
 
 const JSON_STRING = /"(?:\\.|[^"\\])*"/y;
@@ -53,8 +54,8 @@ function previewParts(inputPreview: string): ParsedPreview {
   }
 }
 
-export function formatPermission(toolName: string, inputPreview: string | undefined, maxPreviewChars: number): Formatted {
-  const head = `🔐 Нужно подтверждение: ${toolName}`;
+export function formatPermission(m: Messages, toolName: string, inputPreview: string | undefined, maxPreviewChars: number): Formatted {
+  const head = m.permissionNeeded({ toolName });
   if (!inputPreview) return { text: head, entities: [] };
   // Parsed whole, then cut: cutting first would break JSON that parses.
   const parts = previewParts(inputPreview);

@@ -4,6 +4,7 @@
 import type { AskQuestion, CleanupReport, CommandReply, EnableResult, HookBody, HubToPlugin, LimitsPost, PluginToHub, QuestionBody, QuestionDecision, QueuedFile, RateLimit, TerminateRequest, TurnEndBody } from "./protocol.ts";
 
 import { z } from "zod";
+import { LANGUAGES } from "./protocol.ts";
 
 const queuedFile: z.ZodType<QueuedFile> = z.object({ path: z.string(), name: z.string(), size: z.number() });
 
@@ -47,6 +48,7 @@ export const hubToPlugin: z.ZodType<HubToPlugin> = z.union([
   z.object({ type: z.literal("terminate") }),
   z.object({ type: z.literal("turnEnd"), final: z.boolean(), kind: z.enum(["ask", "done"]).optional() }),
   z.object({ type: z.literal("catchUp"), id: z.string() }),
+  z.object({ type: z.literal("language"), language: z.enum(LANGUAGES) }),
 ]);
 
 export const enableResult: z.ZodType<EnableResult> = z.object({ topicTitle: z.string(), created: z.boolean() });

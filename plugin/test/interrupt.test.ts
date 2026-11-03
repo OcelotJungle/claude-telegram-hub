@@ -36,15 +36,15 @@ describe("sendInterrupt", () => {
     const path = socketPath();
     const got: unknown[][] = [];
     await inbox(path, got);
-    await sendInterrupt(path, "tok-1", "стой");
+    await sendInterrupt(path, "tok-1", "\u0441\u0442\u043e\u0439");
     await waitFor(() => got.length === 1, 3000, "the note");
     expect(got[0]).toEqual([
       { type: "auth", token: "tok-1" },
-      { type: "user", message: { role: "user", content: "стой" }, priority: "now", from_plugin: "telegram-hub" },
+      { type: "user", message: { role: "user", content: "\u0441\u0442\u043e\u0439" }, priority: "now", from_plugin: "telegram-hub" },
     ]);
   });
 
   test("fails when nobody listens", async () => {
-    await expect(sendInterrupt(socketPath(), "tok-1", "стой")).rejects.toThrow();
+    await expect(sendInterrupt(socketPath(), "tok-1", "\u0441\u0442\u043e\u0439")).rejects.toThrow();
   });
 });

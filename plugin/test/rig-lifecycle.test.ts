@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { RigLifecycle, RIG_RESTART_EXIT, startedCommit } from "../src/hub/rig-lifecycle.ts";
+import { en } from "../src/shared/i18n/en.ts";
 import { tempDir } from "./helpers.ts";
 
 // Full SHA-1 commit lengths, synthetic time, never the real repository's commits.
@@ -22,7 +23,7 @@ function fixture(commitKnown = true) {
   const notices: { id: string; text: string }[] = [];
   const warnings: string[] = [];
   const lifecycle = new RigLifecycle({ dir, head: () => head, started: () => started, idle: () => idle, now: () => now,
-    exit: code => { exits.push(code); }, notice: (id, text) => { notices.push({ id, text }); }, warn: text => { warnings.push(text); } });
+    messages: () => en, exit: code => { exits.push(code); }, notice: (id, text) => { notices.push({ id, text }); }, warn: text => { warnings.push(text); } });
   return { dir, lifecycle, exits, notices, warnings,
     head: (next: string | undefined) => { head = next; }, started: (next: string | undefined) => { started = next; },
     idle: (next: boolean) => { idle = next; }, now: (next: number) => { now = next; } };
@@ -100,7 +101,7 @@ test("a failed hub-restarting.json write is tried again: the hub exits only once
 test("machines without rig get no rig directory even after getMe", () => {
   const f = fixture();
   const missing = join(f.dir, "missing");
-  const lifecycle = new RigLifecycle({ dir: missing, head: () => COMMIT, started: () => COMMIT, now: () => START, idle: () => true, notice() {}, exit() {}, warn() {} });
+  const lifecycle = new RigLifecycle({ dir: missing, head: () => COMMIT, started: () => COMMIT, now: () => START, idle: () => true, messages: () => en, notice() {}, exit() {}, warn() {} });
   lifecycle.ready();
   expect(existsSync(missing)).toBe(false);
 });
@@ -145,8 +146,8 @@ test("a hand restart on another commit is announced once under an id built from 
   expect(f.notices).toHaveLength(1);
   expect(f.notices[0]?.id).toContain(NEW_COMMIT);
   expect(f.notices[0]?.id).toContain(COMMIT);
-  expect(f.notices[0]?.text).toContain("другим кодом");
-  expect(f.notices[0]?.text).not.toMatch(/обновлён/);
+  expect(f.notices[0]?.text).toBe(en.codeChanged);
+  expect(f.notices[0]?.text).not.toMatch(/updated/i);
 });
 
 test("a marker older than the last readiness belongs to an earlier restart: a hand restart is still announced", () => {

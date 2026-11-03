@@ -1,9 +1,12 @@
+import type { Messages } from "../src/shared/i18n/index.ts";
 import type { Card } from "../src/transcript/subagents.ts";
 
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { field, isObject } from "../src/shared/guards.ts";
+import { en } from "../src/shared/i18n/en.ts";
+import { ru } from "../src/shared/i18n/ru.ts";
 import { discoverExecutorJob, EXECUTORS } from "../src/transcript/codex-job.ts";
 import { MAX_CARD_TEXT, SETTLE_MS, SubagentWatcher } from "../src/transcript/subagents.ts";
 import { tempDir } from "./helpers.ts";
@@ -26,8 +29,8 @@ const CONTINUING_EVENTS = [
   { type: "item.completed", item: { type: "reasoning", text: "Next reasoning" } },
   { type: "item.completed", item: { type: "command_execution", id: "next", command: "next command" } },
 ];
-const PLURAL_CASES = [[0, "действий"], [1, "действие"], [2, "действия"], [5, "действий"], [11, "действий"], [12, "действий"], [21, "действие"], [22, "действия"], [25, "действий"]] as const;
-const TERMINAL_CASES = [["question", "❓ Codex ждёт ответа"], ["failed", "❌ "], ["orphaned", "❌ "], ["limit", "❌ "], ["cancelled", "⏹ "]] as const;
+const PLURAL_CASES = [[0, "actions"], [1, "action"], [2, "actions"], [5, "actions"], [11, "actions"], [12, "actions"], [21, "actions"], [22, "actions"], [25, "actions"]] as const;
+const TERMINAL_CASES = [["question", "❓ Codex is waiting for an answer"], ["failed", "❌ "], ["orphaned", "❌ "], ["limit", "❌ "], ["cancelled", "⏹ "]] as const;
 
 const line = (record: object) => `${JSON.stringify(record)}\n`;
 const text = (value: string) => ({ type: "text", text: value });
@@ -56,7 +59,8 @@ describe("Executor cards", () => {
     mkdirSync(dir);
     const cards: Card[] = [];
     let now = START;
-    const watcher = new SubagentWatcher({ dir, codexJobsDir: codexJobs, volunteerJobsDir: volunteerJobs, onCard: card => cards.push(card), canStart: () => true, now: () => now });
+    let messages: Messages = en;
+    const watcher = new SubagentWatcher({ dir, codexJobsDir: codexJobs, volunteerJobsDir: volunteerJobs, onCard: card => cards.push(card), canStart: () => true, now: () => now, messages: () => messages });
     cleanups.push(() => watcher.stop());
     watcher.start();
     const agent = join(dir, "agent-a1.jsonl");
@@ -65,6 +69,7 @@ describe("Executor cards", () => {
     if (meta) writeMeta();
     return {
       watcher, cards, writeMeta,
+      setMessages(next: Messages) { messages = next; },
       worker(id: string, prompt?: string | ReturnType<typeof text>[], hasMeta = true, workerExecutor = executor) {
         const path = join(dir, `agent-${id}.jsonl`);
         writeFileSync(path, prompt === undefined ? "" : line({ type: "user", message: { content: prompt } }));
@@ -120,7 +125,7 @@ describe("Executor cards", () => {
     expect(s.last()).toStartWith([
       "🤖 **codex** · sol · high",
       "Review the parser",
-      "⏳ 0 с · 0 действий · событие 12:00",
+      "⏳ 0 s · 0 actions · event 12:00",
       "`git status`",
     ].join("\n"));
   });
@@ -147,7 +152,7 @@ describe("Executor cards", () => {
     s.state();
     s.events(message("Reply progress") + command("reply", "reply command"));
     s.tick(REPLY_RUN_MS);
-    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nContinue the fix\n⏳ 12 мин · 2 действия");
+    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nContinue the fix\n⏳ 12 min · 2 actions");
     expect(s.last()).toContain("Earlier Codex progress");
     expect(s.last()).toContain("Earlier worker question");
     expect(s.last()).toContain("Reply progress");
@@ -156,7 +161,7 @@ describe("Executor cards", () => {
     write(assistant("reply-final", "Reply final", "end_turn"));
     s.tick();
     s.tick(SETTLE_MS);
-    expect(s.last()).toContain("✅ 12 мин · 2 действия");
+    expect(s.last()).toContain("✅ 12 min · 2 actions");
     expect(s.last()).toContain("Reply final");
     expect(s.cards.at(-1)?.final).toBe(true);
   });
@@ -179,7 +184,7 @@ describe("Executor cards", () => {
     expect(s.cards.slice(boundary).every(card => card.id === "a1-0" && card.reopen && !card.final && card.replyTo === undefined)).toBe(true);
     expect(s.last()).toContain("Earlier worker text");
     expect(s.last()).toContain("Attached progress");
-    expect(s.last()).toContain("2 действия");
+    expect(s.last()).toContain("2 actions");
     expect(s.last()).not.toContain("Old owner must stay silent");
   });
 
@@ -193,7 +198,7 @@ describe("Executor cards", () => {
     expect(s.cards.at(-1)?.reopen).toBeUndefined();
     expect(s.cards.at(-1)?.replyTo).toBeUndefined();
     expect(s.last()).not.toContain("Unseen old progress");
-    expect(s.last()).toContain("0 действий");
+    expect(s.last()).toContain("0 actions");
   });
 
   test("a plugin restart forgets the earlier owner and a continuation gets a new card", () => {
@@ -267,14 +272,14 @@ describe("Executor cards", () => {
     write(assistant("long-3", "c".repeat(MAX_CARD_TEXT)));
     s.events(command("reply", "reply command"));
     s.tick(MINUTE);
-    expect(s.cards.some(card => card.id === "a1-0" && card.final && card.reopen && card.text.includes("⬇️ продолжение ниже"))).toBe(true);
+    expect(s.cards.some(card => card.id === "a1-0" && card.final && card.reopen && card.text.includes("⬇️ continued below"))).toBe(true);
     expect(s.cards.at(-1)).toMatchObject({ id: "a1-1", final: false });
     expect(s.cards.at(-1)?.reopen).toBeUndefined();
     s.worker("a3", `attach: ${JOB}`);
     s.tick();
     expect(s.cards.at(-1)).toMatchObject({ id: "a1-1", reopen: true });
     expect(s.last()).toContain("c".repeat(MAX_CARD_TEXT));
-    expect(s.last()).toContain("1 мин · 2 действия");
+    expect(s.last()).toContain("1 min · 2 actions");
   });
 
   test("start result reads history and agent messages wait for a continuing event", () => {
@@ -284,7 +289,7 @@ describe("Executor cards", () => {
     s.start();
     s.write(assistant("m1", "codex job running"));
     s.tick();
-    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nFix tests\n⏳ 0 с · 0 действий · событие 12:00");
+    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nFix tests\n⏳ 0 s · 0 actions · event 12:00");
     expect(s.last()).not.toContain("haiku");
     expect(s.last()).not.toContain("Inspecting the parser");
     expect(s.last()).not.toContain("codex job running");
@@ -292,7 +297,7 @@ describe("Executor cards", () => {
     s.tick(MINUTE);
     expect(s.last()).toContain("`[12:00]` Inspecting the parser");
     expect(s.last()).toContain("`[12:01]` Checking the boundary");
-    expect(s.last()).toContain("событие 12:01");
+    expect(s.last()).toContain("event 12:01");
   });
 
   test("reasoning stays hidden, releases a held agent_message and updates event time", () => {
@@ -302,14 +307,14 @@ describe("Executor cards", () => {
     s.events(reasoning("Hidden reasoning before message"));
     s.tick();
     expect(s.last()).not.toContain("Hidden reasoning before message");
-    expect(s.last()).toContain("событие 12:00");
+    expect(s.last()).toContain("event 12:00");
     s.events(message("Visible progress"));
     s.tick();
     expect(s.last()).not.toContain("Visible progress");
     s.events(reasoning("Hidden reasoning after message"));
     s.tick(MINUTE);
     expect(s.last()).toContain("`[12:00]` Visible progress");
-    expect(s.last()).toContain("событие 12:01");
+    expect(s.last()).toContain("event 12:01");
     expect(s.cards.every(card => !card.text.includes("Hidden reasoning"))).toBe(true);
   });
 
@@ -327,7 +332,7 @@ describe("Executor cards", () => {
     expect(s.last()).not.toContain("old restart");
     expect(s.last()).toContain("New output");
     expect(s.last()).toContain("More output");
-    expect(s.last()).toContain("1 действие");
+    expect(s.last()).toContain("1 action");
     expect(s.last()).toContain("`[12:01]` 🔁 restart 1/3: new attempt");
   });
 
@@ -438,12 +443,12 @@ describe("Executor cards", () => {
     s.tick();
     expect(s.last()).toContain("New event");
     expect(s.last()).toContain("sol · high");
-    expect(s.last()).toContain("1 действие");
+    expect(s.last()).toContain("1 action");
     expect(s.last()).toContain("old restart");
     expect(s.last()).not.toContain("codex job restored");
     s.attach("wait");
     s.tick();
-    expect(s.last()).toContain("1 действие");
+    expect(s.last()).toContain("1 action");
   });
 
   test("many long interim summaries are discarded without filling or splitting the Codex card", () => {
@@ -488,7 +493,7 @@ describe("Executor cards", () => {
     expect(render).toHaveBeenCalledTimes(2);
     s.events(command("a", "new command"));
     s.tick();
-    expect(s.last()).toContain("1 действие");
+    expect(s.last()).toContain("1 action");
     render.mockClear();
     s.tick();
     expect(render).not.toHaveBeenCalled();
@@ -516,7 +521,7 @@ describe("Executor cards", () => {
     s.tick();
     expect(s.last()).toContain("codex job final report");
     expect(s.last()).toContain("More final details");
-    expect(s.last()).toMatch(/✅ \d+ с · /);
+    expect(s.last()).toMatch(/✅ \d+ s · /);
     s.tick(SETTLE_MS);
     expect(s.cards.at(-1)?.final).toBe(true);
     // The closed card still tells which Codex model did the work.
@@ -532,23 +537,37 @@ describe("Executor cards", () => {
     expect(s.last()).toContain(` · ${count} ${form}`);
   });
 
+  test("the card changes language at its next update", () => {
+    const s = setup();
+    s.state();
+    s.start();
+    s.events(command("a", "echo ok"));
+    s.tick();
+    expect(s.last()).toContain(`⏳ 0 ${en.unitSecond} · ${en.subagentActions({ count: 1 })}`);
+    s.setMessages(ru);
+    s.events(command("b", "echo ok"));
+    s.tick();
+    expect(s.last()).toContain(`⏳ 3 ${ru.unitSecond} · ${ru.subagentActions({ count: 2 })} · ${ru.subagentEventAt({ clock: "12:00" })}`);
+    expect(s.last()).not.toContain(en.subagentActions({ count: 2 }));
+  });
+
   test("the status tracks the newest unfinished command by id, first line, length and event time", () => {
     const s = setup();
     s.state();
     s.start();
     s.tick();
-    expect(s.last()).not.toContain("событие");
+    expect(s.last()).not.toContain("event");
     const long = "x".repeat(COMMAND_LIMIT + 1);
     s.events(command("a", "older command", "item.started") + command("b", `${long}\nsecret second line`, "item.started"));
     s.tick(MINUTE);
-    expect(s.last()).toContain(` · событие 12:01\n\`${long.slice(0, COMMAND_LIMIT)}…\``);
+    expect(s.last()).toContain(` · event 12:01\n\`${long.slice(0, COMMAND_LIMIT)}…\``);
     expect(s.last()).not.toContain("secret second line");
     s.events(command("b", long));
     s.tick();
-    expect(s.last()).toContain("1 действие · событие 12:01\n`older command`");
+    expect(s.last()).toContain("1 action · event 12:01\n`older command`");
     s.events(command("a", "older command"));
     s.tick();
-    expect(s.last()).toContain("2 действия · событие 12:01");
+    expect(s.last()).toContain("2 actions · event 12:01");
     expect(s.last()).not.toContain("older command");
   });
 
@@ -563,7 +582,7 @@ describe("Executor cards", () => {
     expect(s.last()).toContain(expected);
     expect(s.cards.at(-1)?.final).toBe(false);
     if (status !== "question") {
-      expect(s.last()).toContain("1 действие");
+      expect(s.last()).toContain("1 action");
       expect(s.last().split("❌ Runner explanation")).toHaveLength(2);
     } else expect(s.last()).not.toContain("❌ Runner explanation");
     s.write(assistant("final", "Final worker answer", "end_turn"));
@@ -584,7 +603,7 @@ describe("Executor cards", () => {
     expect(s.cards.at(-1)?.final).toBe(false);
     s.state({ status: "cancelled", error: null });
     s.tick();
-    expect(s.last()).toMatch(/⏹ \d+ с · /);
+    expect(s.last()).toMatch(/⏹ \d+ s · /);
     expect(s.last()).not.toContain("❌");
   });
 
@@ -607,12 +626,12 @@ describe("Executor cards", () => {
     s.attach();
     s.write(assistant("summary", "codex job fallback"));
     s.tick();
-    expect(s.last()).toContain("1 действие");
+    expect(s.last()).toContain("1 action");
     expect(s.last()).toContain("codex job fallback");
     expect(s.last()).not.toContain("sol · high");
     s.write(assistant("final", "Fallback final", "end_turn"));
     s.tick();
-    expect(s.last()).toMatch(/✅ \d+ (?:с|мин) · \d+ действи(?:е|я|й)/);
+    expect(s.last()).toMatch(/✅ \d+ (?:s|min) · \d+ actions?/);
     expect(s.last()).toContain("Fallback final");
   });
 
@@ -672,10 +691,10 @@ describe("Executor cards", () => {
     s.attach();
     s.tick();
     expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: false, reopen: true });
-    expect(s.last()).toContain("1 действие");
+    expect(s.last()).toContain("1 action");
     s.events(command("new", "new command"));
     s.tick();
-    expect(s.last()).toContain("2 действия");
+    expect(s.last()).toContain("2 actions");
   });
 
   test.each([
@@ -789,7 +808,7 @@ describe("Executor cards", () => {
     s.state({ status: "question" });
     s.start();
     s.tick();
-    expect(s.last()).toContain("❓ volunteer ждёт ответа");
+    expect(s.last()).toContain("❓ volunteer is waiting for an answer");
   });
 
   test.each(["reply", "attach"])("volunteer %s reuses the existing card", verb => {

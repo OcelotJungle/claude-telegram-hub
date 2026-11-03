@@ -74,29 +74,30 @@ const textOf = (path: string) => (existsSync(path) ? readFileSync(path, "utf8") 
 
 describe("exec runner", () => {
   test("the runner logs the output and writes the exit code", async () => {
-    const { file, spec } = hostSpec("echo один && echo два 1>&2 && exit /b 5", "echo один; echo два 1>&2; exit 5");
+    const { file, spec } = hostSpec("echo one && echo two 1>&2 && exit /b 5", "echo one; echo two 1>&2; exit 5");
     expect(start(file)).toBeGreaterThan(0);
     await waitFor(() => existsSync(spec.exit), EXIT_WAIT_MS, "exit file");
     expect(readExit(spec.exit).code).toBe(5);
     const log = readFileSync(spec.log, "utf8");
-    expect(log).toContain("один");
-    expect(log).toContain("два");
+    expect(log).toContain("one");
+    expect(log).toContain("two");
   });
 
   test("a command that cannot start leaves an error exit", async () => {
     const { file, spec } = cmdSpec("rem");
-    writeFileSync(file, JSON.stringify({ ...spec, argv: ["нет-такой-программы.exe"], verbatim: false }));
+    writeFileSync(file, JSON.stringify({ ...spec, argv: ["no-such-program.exe"], verbatim: false }));
     start(file);
     await waitFor(() => existsSync(spec.exit), EXIT_WAIT_MS, "exit file");
     const info = readExit(spec.exit);
     expect(info.code).toBeNull();
     expect(info.error).toBeTruthy();
-    expect(readFileSync(spec.log, "utf8")).toContain("не запустилось");
+    // The reason reaches the user through the hub's card, in the language of the moment; the runner writes no text of its own.
+    expect(readFileSync(spec.log, "utf8")).not.toContain("did not start");
   });
 
   test("a runner that cannot start throws instead of giving a pid", () => {
     const { file } = cmdSpec("rem");
-    expect(() => spawnRunner(file, join(dirs[0] ?? "", "нет-такого-bun.exe"))).toThrow();
+    expect(() => spawnRunner(file, join(dirs[0] ?? "", "no-such-bun.exe"))).toThrow();
   });
 
   test("the runner outlives a killed parent", async () => {
@@ -150,12 +151,15 @@ describe("exec runner", () => {
 
   // Windows PowerShell and its console code page exist only there.
   test.skipIf(!PLATFORM.windows)("PowerShell Cyrillic reaches the log through the runner", async () => {
-    const { file, spec } = shellSpec("powershell", "echo привет; cmd /c echo мир");
+    // Russian "hi" and "world", written as \u escapes.
+    const HI = "\u043f\u0440\u0438\u0432\u0435\u0442";
+    const WORLD = "\u043c\u0438\u0440";
+    const { file, spec } = shellSpec("powershell", `echo ${HI}; cmd /c echo ${WORLD}`);
     start(file);
     await waitFor(() => existsSync(spec.exit), PING_WAIT_MS, "exit file");
     expect(readExit(spec.exit).code).toBe(0);
     const log = readFileSync(spec.log, "utf8");
-    expect(log).toContain("привет");
-    expect(log).toContain("мир");
+    expect(log).toContain(HI);
+    expect(log).toContain(WORLD);
   }, PING_WAIT_MS);
 });

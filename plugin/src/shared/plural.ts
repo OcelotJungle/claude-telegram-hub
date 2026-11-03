@@ -1,8 +1,11 @@
-// Russian plural forms: 1 действие, 2 действия, 5 действий.
-export function plural(n: number, one: string, few: string, many: string): string {
-  const d = n % 10;
-  const dd = n % 100;
-  if (d === 1 && dd !== 11) return one;
-  if (d >= 2 && d <= 4 && (dd < 12 || dd > 14)) return few;
-  return many;
+import type { Language } from "./protocol.ts";
+
+// The forms of a counted noun by plural category (CLDR); `other` is required and
+// stands in for any category the language has but the caller left out.
+export type PluralForms = { other: string } & Partial<Record<Intl.LDMLPluralRule, string>>;
+
+// The category comes from Intl.PluralRules for the language, so no grammar is
+// coded by hand: en has one/other, ru has one/few/many/other.
+export function plural(language: Language, n: number, forms: PluralForms): string {
+  return forms[new Intl.PluralRules(language).select(n)] ?? forms.other;
 }

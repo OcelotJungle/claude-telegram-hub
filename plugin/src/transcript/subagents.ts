@@ -1,3 +1,4 @@
+import type { Messages } from "../shared/i18n/index.ts";
 import type { Logger } from "../shared/log.ts";
 import type { ExecutorConfig, ExecutorDiscovery, ExecutorType } from "./codex-job.ts";
 import type { Model } from "./model-versions.ts";
@@ -10,7 +11,7 @@ import { z } from "zod";
 import { field } from "../shared/guards.ts";
 import { nullLogger } from "../shared/log.ts";
 import { toTelegram } from "../shared/markdown.ts";
-import { plural } from "../shared/plural.ts";
+import { catalogOf, DEFAULT_LANGUAGE } from "../shared/i18n/index.ts";
 import { discoverExecutorJob, isExecutorWorkerSummary, ExecutorJob, EXECUTORS } from "./codex-job.ts";
 import { codexModel, ModelVersions, recordModel, volunteerModelLabel } from "./model-versions.ts";
 import { parseAgentRecord } from "./parse.ts";
@@ -37,7 +38,6 @@ const SECONDS_PER_MINUTE = 60;
 const AGENT_FILE = /^agent-(.+)\.jsonl$/;
 // Markdown specials in names the card shows as they are.
 const MD_SPECIAL = /[\\`*_[\]()#+\-.!|~>]/g;
-const CONTINUED = "⬇️ продолжение ниже";
 // A text that starts with a Markdown block (heading, list, quote, code)
 // gets its time on a line of its own, so the block stays one.
 const STARTS_WITH_BLOCK = /^(#{1,6} |[-*+] |\d+[.)] |>|```)/;
@@ -72,6 +72,9 @@ type Env = {
   executorJobsDirs: Map<ExecutorType, string>;
   versions: ModelVersions;
   jobs: Map<string, Agent>;
+  // The catalog of the hub's current language, read at each render so a card
+  // changes language at its next update.
+  messages(): Messages;
 };
 
 // One subagent: its status and texts, in cards of at most one message each.
@@ -406,7 +409,7 @@ class Agent {
     const entry = { at, text: trimmed.length > MAX_CARD_TEXT ? `${trimmed.slice(0, MAX_CARD_TEXT)}…` : trimmed };
     if (this.texts.length && toTelegram(this.render([...this.texts, entry], this.statusLine())).text.length > MAX_CARD) {
       const previousCardId = this.cardId();
-      if (this.shown) this.send(this.render(this.texts, CONTINUED), true);
+      if (this.shown) this.send(this.render(this.texts, this.env.messages().subagentContinued), true);
       this.part++;
       // A replayed part was shown in the hub before the restart.
       this.replyTo = this.shown || this.replaying ? previousCardId : undefined;
@@ -476,7 +479,7 @@ class Agent {
       const effort = this.model?.effort ?? "";
       model = [modelLabel, effort].filter((s): s is string => s !== "");
     }
-    const head = [`🤖 **${escapeMd(this.executor?.displayName ?? m?.agentType ?? "Субагент")}**`, ...model.map(escapeMd)].join(" · ");
+    const head = [`🤖 **${escapeMd(this.executor?.displayName ?? m?.agentType ?? this.env.messages().subagentName)}**`, ...model.map(escapeMd)].join(" · ");
     const task = m?.description ? `${escapeMd(m.description)}\n` : "";
     return [`${head}\n${task}${status}`, ...texts.map(e => `\`[${clock(e.at)}]\`${STARTS_WITH_BLOCK.test(e.text) ? "\n" : " "}${e.text}`)].join("\n\n");
   }
@@ -486,15 +489,16 @@ class Agent {
   }
 
   private statusLine(): string {
-    const took = duration(this.workMs());
+    const m = this.env.messages();
+    const took = duration(m, this.workMs());
     const job = this.getExecutorJob();
     if (job?.state) {
       const commands = this.baseCommands + job.commands;
-      const acts = `${commands} ${plural(commands, "действие", "действия", "действий")}`;
+      const acts = m.subagentActions({ count: commands });
       const displayName = this.executor?.statusName ?? "Codex";
       switch (job.state.status) {
         case "question":
-          return `❓ ${displayName} ждёт ответа`;
+          return m.subagentAsking({ name: displayName });
         case "failed":
         case "orphaned":
         case "limit":
@@ -505,7 +509,7 @@ class Agent {
       if (this.status === "running" || this.isWaiting()) {
         const first = job.currentCommand?.trim().split("\n")[0];
         const command = first && first.length > MAX_COMMAND_CHARS ? `${first.slice(0, MAX_COMMAND_CHARS)}…` : first;
-        return `⏳ ${took} · ${acts}${job.eventAt === undefined ? "" : ` · событие ${clock(job.eventAt)}`}${command ? `\n\`${command.replaceAll("`", "'")}\`` : ""}`;
+        return `⏳ ${took} · ${acts}${job.eventAt === undefined ? "" : ` · ${m.subagentEventAt({ clock: clock(job.eventAt) })}`}${command ? `\n\`${command.replaceAll("`", "'")}\`` : ""}`;
       }
       switch (this.status) {
         case "done":
@@ -516,8 +520,8 @@ class Agent {
           return `⏹ ${took} · ${acts}`;
       }
     }
-    const acts = `${this.tools} ${plural(this.tools, "действие", "действия", "действий")}`;
-    if (this.isWaiting()) return `⏸ ${took} · ${acts} · ждёт фоновую задачу ${duration(this.env.now() - (this.ended ?? this.env.now()))}`;
+    const acts = m.subagentActions({ count: this.tools });
+    if (this.isWaiting()) return `⏸ ${took} · ${acts} · ${m.subagentWaitingForJob({ duration: duration(m, this.env.now() - (this.ended ?? this.env.now())) })}`;
     switch (this.status) {
       case "running":
         return `⏳ ${took} · ${acts}${this.lastTool ? `\n\`${this.lastTool.replaceAll("`", "'")}\`` : ""}`;
@@ -563,6 +567,8 @@ export class SubagentWatcher {
       codexJobsDir?: string;
       volunteerJobsDir?: string;
       versions?: ModelVersions;
+      // English until given.
+      messages?(): Messages;
     },
   ) {
     this.env = {
@@ -577,6 +583,7 @@ export class SubagentWatcher {
       ]),
       versions: opts.versions ?? new ModelVersions(),
       jobs: new Map(),
+      messages: () => opts.messages?.() ?? catalogOf(DEFAULT_LANGUAGE),
     };
   }
 
@@ -635,7 +642,7 @@ function escapeMd(s: string): string {
   return s.replace(MD_SPECIAL, c => `\\${c}`);
 }
 
-function duration(ms: number): string {
+function duration(m: Messages, ms: number): string {
   const s = Math.max(0, Math.round(ms / MS_PER_SECOND));
-  return s < SECONDS_PER_MINUTE ? `${s} с` : `${Math.floor(s / SECONDS_PER_MINUTE)} мин`;
+  return s < SECONDS_PER_MINUTE ? `${s} ${m.unitSecond}` : `${Math.floor(s / SECONDS_PER_MINUTE)} ${m.unitMinute}`;
 }

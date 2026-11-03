@@ -1,5 +1,6 @@
 // An AskUserQuestion poll in a topic: the message text and buttons of each
 // question, and the callback data the buttons carry.
+import type { Messages } from "../shared/i18n/index.ts";
 import type { Entity, Formatted } from "../shared/markdown.ts";
 import type { AskQuestion, QuestionDecision } from "../shared/protocol.ts";
 import type { Button } from "./telegram.ts";
@@ -16,11 +17,7 @@ const BUTTON_CHARS = 64;
 const ELLIPSIS = "…";
 
 export const POLL_PREFIX = "q:";
-export const CUSTOM_HINT = "Напиши ответ следующим сообщением";
-export const STALE_POLL = "Опрос устарел";
-export const PICK_ONE = "Отметь хотя бы один вариант";
-export const CANCELLED = "✖️ Опрос отменён";
-export const TO_TERMINAL = "⌛ Опрос перенесён в терминал";
+// Goes to the agent, so always English.
 export const CANCEL_REASON = "The user cancelled the question in Telegram. Do not ask it again; end your turn and wait for their message.";
 
 // An open poll. Questions go one at a time: index is the one shown now.
@@ -46,16 +43,16 @@ export type PollPress = { key: string; index: number; action: PollAction };
 
 // The text of question i: its header in bold (numbered when there are
 // several), the question, then the numbered options with their previews.
-export function questionText(questions: AskQuestion[], i: number): Formatted {
-  const full = build(questions, i, true);
-  return full.text.length > TEXT_LIMIT ? cutText(build(questions, i, false), TEXT_LIMIT) : full;
+export function questionText(m: Messages, questions: AskQuestion[], i: number): Formatted {
+  const full = build(m, questions, i, true);
+  return full.text.length > TEXT_LIMIT ? cutText(build(m, questions, i, false), TEXT_LIMIT) : full;
 }
 
-function build(questions: AskQuestion[], i: number, previews: boolean): Formatted {
+function build(m: Messages, questions: AskQuestion[], i: number, previews: boolean): Formatted {
   const q = questions[i];
   const entities: Entity[] = [];
   let text = "";
-  const head = questions.length > 1 ? `Вопрос ${i + 1} из ${questions.length}${q.header ? `: ${q.header}` : ""}` : q.header;
+  const head = m.pollHead({ index: i + 1, total: questions.length, header: q.header });
   if (head) {
     entities.push({ type: "bold", offset: 0, length: head.length });
     text = `${head}\n`;
@@ -86,14 +83,14 @@ function cutText(f: Formatted, max: number): Formatted {
   return { text: `${head.text}${ELLIPSIS}`, entities: head.entities };
 }
 
-export function questionButtons(p: Poll): Button[][] {
+export function questionButtons(m: Messages, p: Poll): Button[][] {
   const q = p.questions[p.index];
   const data = (a: PollAction) => `${POLL_PREFIX}${p.key}:${p.index}:${a}`;
   const rows = q.options.map((o, n) => [{ text: cut(`${p.checked.has(n + 1) ? "☑️ " : ""}${n + 1}. ${o.label}`, BUTTON_CHARS), data: data(n + 1) }]);
-  if (q.multiSelect) rows.push([{ text: "✅ Готово", data: data("done") }]);
+  if (q.multiSelect) rows.push([{ text: m.pollDone, data: data("done") }]);
   rows.push([
-    { text: "✏️ Свой вариант", data: data("custom") },
-    { text: "✖️ Отменить", data: data("cancel") },
+    { text: m.pollCustom, data: data("custom") },
+    { text: m.pollCancel, data: data("cancel") },
   ]);
   return rows;
 }

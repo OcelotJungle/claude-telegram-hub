@@ -110,7 +110,7 @@ test("a window talks to Telegram through a hub it started itself", async () => {
 
   appendFileSync(
     transcript,
-    JSON.stringify({ type: "assistant", message: { id: "m1", role: "assistant", content: [{ type: "text", text: "Готово!" }], stop_reason: "end_turn" } }) + "\n",
+    JSON.stringify({ type: "assistant", message: { id: "m1", role: "assistant", content: [{ type: "text", text: "\u0413\u043e\u0442\u043e\u0432\u043e!" }], stop_reason: "end_turn" } }) + "\n",
   );
   // What the Stop hook reports when the turn ends; then Claude Code closes the turn.
   const turnEnd = await fetch(`http://127.0.0.1:${port}/turn-end`, {
@@ -120,22 +120,22 @@ test("a window talks to Telegram through a hub it started itself", async () => {
   expect(turnEnd.status).toBe(200);
   appendFileSync(transcript, JSON.stringify({ type: "system", subtype: "turn_duration", durationMs: 1000 }) + "\n");
   await waitFor(() => fake.texts().length === 1, 5000, "final message");
-  expect(fake.texts()[0]).toMatchObject({ message_thread_id: 100, text: "Готово!", disable_notification: false });
+  expect(fake.texts()[0]).toMatchObject({ message_thread_id: 100, text: "\u0413\u043e\u0442\u043e\u0432\u043e!", disable_notification: false });
 
   await client.notification({
     method: "notifications/claude/channel/permission_request",
     params: { request_id: "abcde", tool_name: "Bash", description: "rm build", input_preview: "{}" },
   });
   await waitFor(() => fake.texts().length === 2, 5000, "permission message");
-  expect(fake.texts()[1]).toMatchObject({ text: "🔐 Нужно подтверждение: Bash", disable_notification: false });
+  expect(fake.texts()[1]).toMatchObject({ text: "🔐 Confirmation needed: Bash", disable_notification: false });
   const allow = arr(arr(field(field(fake.callsOf("sendMessage")[1], "reply_markup"), "inline_keyboard"))[0])[0];
   fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data: String(field(allow, "callback_data")) }));
   await waitFor(() => permissionAnswers.length === 1, 5000, "permission answer");
   expect(permissionAnswers).toEqual([{ request_id: "abcde", behavior: "allow" }]);
 
-  fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "ответ с телефона" }));
+  fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "\u043e\u0442\u0432\u0435\u0442 \u0441 \u0442\u0435\u043b\u0435\u0444\u043e\u043d\u0430" }));
   await waitFor(() => channel.length === 1, 5000, "channel notification");
-  expect(channel[0]).toMatchObject({ content: "ответ с телефона", meta: { chat_id: GROUP, user_id: ME } });
+  expect(channel[0]).toMatchObject({ content: "\u043e\u0442\u0432\u0435\u0442 \u0441 \u0442\u0435\u043b\u0435\u0444\u043e\u043d\u0430", meta: { chat_id: GROUP, user_id: ME } });
 
   const hubPid = must(await health()).pid;
   expect(hubPid).not.toBe(process.pid);

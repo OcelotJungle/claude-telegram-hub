@@ -2,9 +2,11 @@
 // The module runs inside Claude Code with no Node: everything outside comes
 // in as Deps (the engine's `$` calls), so this file imports only types and
 // plain helpers from shared/ that need nothing at run time.
-import type { CleanupReport, LimitsReading, RateLimit, ResolutionKind, TopicCommand, VolunteerLimitsResult } from "../shared/protocol.ts";
+import type { CleanupReport, Language, LimitsReading, RateLimit, ResolutionKind, TopicCommand, VolunteerLimitsResult } from "../shared/protocol.ts";
 import type { MessageKind } from "../shared/notification.ts";
+import type { Messages } from "../shared/i18n/index.ts";
 
+import { catalogOf, DEFAULT_LANGUAGE, isLanguage } from "../shared/i18n/index.ts";
 import { notifies } from "../shared/notification.ts";
 import { MILLION, THOUSAND, tokens } from "../shared/tokens.ts";
 
@@ -32,7 +34,6 @@ function isVolunteerLimitsResult(v: unknown): v is VolunteerLimitsResult {
 // /stop of a session with more context than this compacts it first, so a
 // resume does not cache all of it again.
 const STOP_COMPACT_TOKENS = 120_000;
-const LIMIT_NAMES: Record<string, string> = { five_hour: "5 часов", seven_day: "Неделя" };
 // The order of the limits in /info; others go after these.
 const LIMIT_ORDER = ["five_hour", "seven_day"];
 const MS_PER_MINUTE = 60_000;
@@ -43,11 +44,6 @@ const STALE_LIMITS_MS = 300_000;
 // Polls in a row on which the compaction failed with no turn running before
 // the failure is reported: a turn may start just as it is tried.
 const COMPACT_TRIES = 3;
-// The answer to /rename without a name, and the notice queued while a rename waits.
-const RENAME_HINT = "Напиши имя: /rename новое имя";
-const RENAME_STARTED = "🏷 Переименование на очереди.";
-const COMPACT_RUNNING = "🗜 Компакт выполняется…";
-const CLEANUP_RUNNING = "🧹 Уборка выполняется…";
 
 // The part of the engine's SessionUsage that /info shows.
 export type Usage = {
@@ -88,13 +84,17 @@ export class Runner {
   // turn runs; `failed` counts the tries that failed with none running.
   // `report` hands the outcome on: a reply to /compact, a report to the hub
   // for /cleanup.
-  private compactions: { args: string; failed: number; report: (o: Outcome) => Promise<void>; done: () => void; show?: (running: boolean) => void; shown: boolean }[] = [];
+  private compactions: { args: string; failed: number; report: (o: Outcome) => Promise<void>; done: () => void; show?: (running: boolean) => Promise<void>; shown: boolean }[] = [];
   private compacting = false;
   // Whether a main-loop turn runs, from the module's turn hooks.
   private turnRuns = false;
   // Compact commands still running; a /stop waits for them.
   private running = new Set<Promise<void>>();
   private replies = new Map<string, number>();
+  // The language of the topic as last known; a command brings it, and later texts ask the hub again.
+  private language: Language = DEFAULT_LANGUAGE;
+  private languageAsked = 0;
+  private languageSeen = 0;
 
   constructor(
     private base: string,
@@ -137,8 +137,33 @@ export class Runner {
     this.turnRuns = runs;
   }
 
+  // The catalog for the language the topic has now. The language can change while a command is still running
+  // (a compaction waits for the turn), so each text made later asks the hub; if it cannot be asked, the last known stands.
+  private async messages(): Promise<Messages> {
+    const ticket = ++this.languageAsked;
+    try {
+      const res = await this.deps.http(`${this.base}/language`);
+      if (res.status === 200) {
+        const value: unknown = JSON.parse(res.text);
+        const language = typeof value === "object" && value !== null && "language" in value ? value.language : undefined;
+        // An answer older than one already used is dropped.
+        if (isLanguage(language) && ticket > this.languageSeen) {
+          this.languageSeen = ticket;
+          this.language = language;
+        }
+      }
+    } catch {
+      // The hub is down or restarting: the last known language stands.
+    }
+    return catalogOf(this.language);
+  }
+
   private async execute(sessionId: string, cmd: TopicCommand): Promise<void> {
     const to = { sessionId, id: cmd.id };
+    // The hub sends the language with each command; English until it does.
+    this.language = cmd.language ?? DEFAULT_LANGUAGE;
+    this.languageSeen = this.languageAsked;
+    const m = catalogOf(this.language);
     if (cmd.name === "info") {
       try {
         const usage = await this.deps.usage();
@@ -149,42 +174,45 @@ export class Runner {
         ]);
         await this.reply(
           to,
-          infoText(shared ? { ...usage, rateLimits: shared.rateLimits } : usage, this.deps.now(), shared?.at, codex, volunteer),
+          infoText(shared ? { ...usage, rateLimits: shared.rateLimits } : usage, this.deps.now(), m, shared?.at, codex, volunteer),
           "info"
         );
       } catch (e) {
-        await this.reply(to, `⚠️ /info не выполнена: ${message(e)}`, "error");
+        await this.reply(to, m.commandFailed({ command: "/info", error: message(e) }), "error");
       }
       return;
     }
-    if (cmd.name === "stop") return this.stop(to);
-    if (cmd.name === "cleanup") return this.cleanup(to, cmd.args);
-    if (cmd.name === "rename") return this.rename(to, cmd.args);
+    if (cmd.name === "stop") return this.stop(to, m);
+    if (cmd.name === "cleanup") return this.cleanup(to, cmd.args, m);
+    if (cmd.name === "rename") return this.rename(to, cmd.args, m);
     const window = autocompactArg(cmd.args);
     if (window !== undefined) {
+      const command = `/autocompact ${window}`;
       try {
         const res = await this.deps.run("autocompact", window);
-        await this.reply(to, res.text?.trim() || `✅ /autocompact ${window} выполнена.`, "info");
+        await this.reply(to, res.text?.trim() || m.commandDone({ command }), "info");
       } catch (e) {
-        await this.reply(to, `⚠️ /autocompact ${window} не выполнена: ${message(e)}`, "error");
+        await this.reply(to, m.commandFailed({ command, error: message(e) }), "error");
       }
       return;
     }
-    await this.compact(to, cmd.args, "🗜 Компакт на очереди.", COMPACT_RUNNING);
+    await this.compact(to, cmd.args, m, messages => messages.compactQueued, messages => messages.compactRunning);
   }
 
   // Resolves once the compaction is over and its result is handed to the hub.
-  private async compact(to: Target, args: string, started: string, running: string): Promise<void> {
+  private async compact(to: Target, args: string, m: Messages, started: (m: Messages) => string, running: (m: Messages) => string): Promise<void> {
     const run = (async () => {
-      const startedId = await this.reply(to, started, "info", undefined, true);
-      const show = (isRunning: boolean) => {
-        void this.reply(to, isRunning ? running : started, "info", { id: startedId, kind: "progress" });
+      const startedId = await this.reply(to, started(m), "info", undefined, true);
+      const show = async (isRunning: boolean) => {
+        const now = await this.messages();
+        await this.reply(to, isRunning ? running(now) : started(now), "info", { id: startedId, kind: "progress" });
       };
       const report = async (o: Outcome): Promise<void> => {
         const success = "ok" in o && o.ok.skip === undefined;
+        const now = await this.messages();
         await this.reply(
           to,
-          "ok" in o ? compactionText(o.ok) : `⚠️ Компакт не выполнен: ${o.error}`,
+          "ok" in o ? compactionText(o.ok, now) : now.compactFailed({ error: o.error }),
           "error" in o ? "error" : o.ok.skip !== undefined ? "warning" : "info",
           { id: startedId, kind: success ? "success" : "warning" },
         );
@@ -199,11 +227,11 @@ export class Runner {
   // /cleanup: compacts after the compactions already asked for, then tells
   // the hub the sizes or the error. The hub ends the window and empties the
   // remembered skills.
-  private async cleanup(to: Target, args: string): Promise<void> {
-    const started = "🧹 Уборка на очереди.";
-    const startedId = await this.reply(to, started, "info", undefined, true);
-    const show = (isRunning: boolean) => {
-      void this.reply(to, isRunning ? CLEANUP_RUNNING : started, "info", { id: startedId, kind: "progress" });
+  private async cleanup(to: Target, args: string, m: Messages): Promise<void> {
+    const startedId = await this.reply(to, m.cleanupQueued, "info", undefined, true);
+    const show = async (isRunning: boolean) => {
+      const now = await this.messages();
+      await this.reply(to, isRunning ? now.cleanupRunning : now.cleanupQueued, "info", { id: startedId, kind: "progress" });
     };
     await Promise.all(this.running);
     const report = async (o: Outcome) => {
@@ -222,18 +250,19 @@ export class Runner {
 
   // /rename <name> runs the session's own /rename once the session is idle;
   // the topic follows the new title through the hub's retitle, not here.
-  private async rename(to: Target, name: string): Promise<void> {
+  private async rename(to: Target, name: string, m: Messages): Promise<void> {
     const normalizedName = name.replace(/\s+/g, " ").trim();
     if (!normalizedName) {
-      await this.reply(to, RENAME_HINT, "info");
+      await this.reply(to, m.renameHint, "info");
       return;
     }
-    const startedId = await this.reply(to, RENAME_STARTED, "info", undefined, true);
+    const command = `/rename ${normalizedName}`;
+    const startedId = await this.reply(to, m.renameQueued, "info", undefined, true);
     try {
       await this.deps.run("rename", normalizedName);
-      await this.reply(to, `✅ /rename ${normalizedName} выполнена.`, "info", { id: startedId, kind: "success" });
+      await this.reply(to, (await this.messages()).commandDone({ command }), "info", { id: startedId, kind: "success" });
     } catch (e) {
-      await this.reply(to, `⚠️ /rename ${normalizedName} не выполнена: ${message(e)}`, "warning", { id: startedId, kind: "warning" });
+      await this.reply(to, (await this.messages()).commandFailed({ command, error: message(e) }), "warning", { id: startedId, kind: "warning" });
     }
   }
 
@@ -247,14 +276,14 @@ export class Runner {
       // A try that lost to a starting turn waits again, and says so.
       if (head.shown) {
         head.shown = false;
-        head.show?.(false);
+        await head.show?.(false);
       }
       return;
     }
     this.compacting = true;
     if (!head.shown) {
       head.shown = true;
-      head.show?.(true);
+      await head.show?.(true);
     }
     let outcome: Outcome | undefined;
     try {
@@ -273,14 +302,14 @@ export class Runner {
 
   // The window ends once the compactions asked for are over; with much
   // context, after one more. A second /stop in the topic does not wait.
-  private async stop(to: { sessionId: string; id: string }): Promise<void> {
+  private async stop(to: { sessionId: string; id: string }, m: Messages): Promise<void> {
     if (this.running.size) {
-      await this.reply(to, "⏳ После компакта завершу сессию. Повторный /stop завершит сразу.", "info", undefined, true);
+      await this.reply(to, m.stopAfterCompact, "info", undefined, true);
       await Promise.all(this.running);
     }
     const used = await this.contextTokens();
     if (used !== undefined && used > STOP_COMPACT_TOKENS) {
-      await this.compact(to, "", "🗜 Сожму контекст и завершу сессию. Повторный /stop завершит сразу.", "🗜 Сжимаю контекст и завершу сессию. Повторный /stop завершит сразу.");
+      await this.compact(to, "", m, messages => messages.stopCompactQueued, messages => messages.stopCompactRunning);
     }
     this.unsent.push({ path: "/terminate", body: JSON.stringify({ sessionId: to.sessionId, id: to.id }) });
     await this.flush();
@@ -365,56 +394,59 @@ export class Runner {
 export function infoText(
   u: Usage,
   now: number,
+  m: Messages,
   limitsAt?: number,
   codex?: LimitsReading,
   volunteer?: VolunteerLimitsResult
 ): string {
   const lines: string[] = [];
-  if (!u.rateLimits.length) lines.push("Лимиты Claude: нет данных — появятся после первого ответа модели");
+  const staleAge = (age: number) => (age >= STALE_LIMITS_MS ? duration(age, m) : undefined);
+  const resetIn = (left: number) => (left > 0 ? duration(left, m) : undefined);
+  if (!u.rateLimits.length) lines.push(m.infoClaudeNoData);
   else {
     const age = limitsAt === undefined ? 0 : now - limitsAt;
-    lines.push(age >= STALE_LIMITS_MS ? `**Лимиты Claude** (данные ${duration(age)} назад)` : "**Лимиты Claude**");
+    lines.push(m.infoClaudeLimits({ age: staleAge(age) }));
     const order = (kind: string) => (LIMIT_ORDER.includes(kind) ? LIMIT_ORDER.indexOf(kind) : LIMIT_ORDER.length);
     for (const l of [...u.rateLimits].sort((a, b) => order(a.kind) - order(b.kind))) {
       const left = l.resetsAt ? Date.parse(l.resetsAt) - now : NaN;
-      lines.push(`${LIMIT_NAMES[l.kind] ?? l.kind}: ${l.percentUsed}%${left > 0 ? ` (сброс через ${duration(left)})` : ""}`);
+      lines.push(m.infoLimitLine({ name: limitName(l.kind, m), percent: l.percentUsed, resetIn: resetIn(left) }));
     }
   }
   if (codex) {
     const age = now - codex.at;
-    lines.push("", age >= STALE_LIMITS_MS ? `**Лимиты Codex** (данные ${duration(age)} назад)` : "**Лимиты Codex**");
+    lines.push("", m.infoCodexLimits({ age: staleAge(age) }));
     const order = (kind: string) => (LIMIT_ORDER.includes(kind) ? LIMIT_ORDER.indexOf(kind) : LIMIT_ORDER.length);
     for (const limit of [...codex.rateLimits].sort((a, b) => order(a.kind) - order(b.kind))) {
       const left = limit.resetsAt ? Date.parse(limit.resetsAt) - now : NaN;
       const percent = left <= 0 ? 0 : Math.round(limit.percentUsed);
-      lines.push(`${LIMIT_NAMES[limit.kind] ?? limit.kind}: ${percent}%${left > 0 ? ` (сброс через ${duration(left)})` : ""}`);
+      lines.push(m.infoLimitLine({ name: limitName(limit.kind, m), percent, resetIn: resetIn(left) }));
     }
   }
   if (volunteer) {
     if (volunteer.kind === "ok") {
       const age = now - volunteer.at;
-      lines.push("", age >= STALE_LIMITS_MS ? `**Лимиты волонтёров** (данные ${duration(age)} назад)` : "**Лимиты волонтёров**");
+      lines.push("", m.infoVolunteerLimits({ age: staleAge(age) }));
       const resetsLeft = volunteer.resetsAt ? volunteer.resetsAt - now : NaN;
       if (resetsLeft > 0) {
-        lines.push(`День: ${Math.round(volunteer.dayPercent)}% (сброс через ${duration(resetsLeft)})`);
+        lines.push(m.infoVolunteerDay({ percent: Math.round(volunteer.dayPercent), resetIn: duration(resetsLeft, m) }));
       } else {
-        lines.push("День: 0%");
+        lines.push(m.infoVolunteerDay({ percent: 0, resetIn: undefined }));
       }
       for (const p of volunteer.providers) {
         lines.push(`${p.name}: ${p.used}/${p.cap}`);
       }
     } else if (volunteer.kind === "error") {
-      lines.push("", `Лимиты волонтёров: нет данных — ${volunteer.reason}`);
+      lines.push("", m.infoVolunteerNoData({ reason: volunteer.reason }));
     }
     // kind === "none" produces no block
   }
-  lines.push("", "**Контекст**");
+  lines.push("", m.infoContext);
   const b = u.context.breakdown;
   // The status line's figure; after a compaction it is gone until the next
   // model response, and the local estimate stands in.
   const used = u.context.tokens ?? b?.totalTokens;
   const estimate = u.context.tokens === undefined && used !== undefined;
-  if (used === undefined) lines.push("нет данных");
+  if (used === undefined) lines.push(m.infoNoData);
   else if (b?.isAutoCompactEnabled && b.autoCompactThreshold !== undefined) {
     const current = Math.round(used / THOUSAND);
     const threshold = Math.round(b.autoCompactThreshold / THOUSAND);
@@ -423,9 +455,9 @@ export function infoText(
   return lines.join("\n");
 }
 
-export function compactionText(c: Compaction): string {
-  if (c.skip !== undefined) return `⚠️ Компакт пропущен: ${c.skip}`;
-  return "✅ Компакт выполнен.";
+export function compactionText(c: Compaction, m: Messages): string {
+  if (c.skip !== undefined) return m.compactSkipped({ reason: c.skip });
+  return m.compactDone;
 }
 
 // `/compact <N>` with a token count (333000, 333k, 1.5m) or `auto` sets the
@@ -439,14 +471,24 @@ export function autocompactArg(args: string): string | undefined {
   return String(Math.round(Number(m[1]) * (m[2] === "k" ? THOUSAND : m[2] === "m" ? MILLION : 1)));
 }
 
-function duration(ms: number): string {
-  const min = Math.max(1, Math.round(ms / MS_PER_MINUTE));
-  if (min < MINUTES_PER_HOUR) return `${min} мин`;
-  const h = Math.floor(min / MINUTES_PER_HOUR);
-  const m = min % MINUTES_PER_HOUR;
-  if (h < HOURS_PER_DAY) return m ? `${h} ч ${m} мин` : `${h} ч`;
+function duration(ms: number, m: Messages): string {
+  const total = Math.max(1, Math.round(ms / MS_PER_MINUTE));
+  if (total < MINUTES_PER_HOUR) return `${total} ${m.unitMinute}`;
+  const h = Math.floor(total / MINUTES_PER_HOUR);
+  const min = total % MINUTES_PER_HOUR;
+  if (h < HOURS_PER_DAY) return min ? `${h} ${m.unitHour} ${min} ${m.unitMinute}` : `${h} ${m.unitHour}`;
   const d = Math.floor(h / HOURS_PER_DAY);
-  return h % HOURS_PER_DAY ? `${d} д ${h % HOURS_PER_DAY} ч` : `${d} д`;
+  return h % HOURS_PER_DAY ? `${d} ${m.unitDay} ${h % HOURS_PER_DAY} ${m.unitHour}` : `${d} ${m.unitDay}`;
+}
+
+// Limits of other lengths are named by the minutes in the kind ("90m", from the Codex reader).
+const MINUTES_KIND = /^(\d+)m$/;
+
+function limitName(kind: string, m: Messages): string {
+  if (kind === "five_hour") return m.limitFiveHour;
+  if (kind === "seven_day") return m.limitSevenDay;
+  const minutes = MINUTES_KIND.exec(kind)?.[1];
+  return minutes === undefined ? kind : duration(Number(minutes) * MS_PER_MINUTE, m);
 }
 
 function message(e: unknown): string {
@@ -473,5 +515,7 @@ function isRateLimit(v: unknown): v is RateLimit {
 function isTopicCommand(v: unknown): v is TopicCommand {
   if (typeof v !== "object" || v === null) return false;
   const name = "name" in v ? v.name : undefined;
+  const language = "language" in v ? v.language : undefined;
+  if (language !== undefined && !isLanguage(language)) return false;
   return "id" in v && typeof v.id === "string" && (name === "info" || name === "compact" || name === "stop" || name === "cleanup" || name === "rename") && "args" in v && typeof v.args === "string";
 }

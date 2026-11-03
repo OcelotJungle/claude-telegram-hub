@@ -52,13 +52,13 @@ describe("TranscriptTailer", () => {
     writeFileSync(path, "");
     const { t, recs } = make(path);
     t.start();
-    const bytes = Buffer.from(line({ text: "Привет" }), "utf8");
-    const cut = bytes.indexOf(Buffer.from("р", "utf8")) + 1; // middle of a 2-byte char
+    const bytes = Buffer.from(line({ text: "\u041f\u0440\u0438\u0432\u0435\u0442" }), "utf8");
+    const cut = bytes.indexOf(Buffer.from("\u0440", "utf8")) + 1; // middle of a 2-byte char
     appendFileSync(path, bytes.subarray(0, cut));
     t.pollNow();
     appendFileSync(path, bytes.subarray(cut));
     t.pollNow();
-    expect(recs).toEqual([{ text: "Привет" }]);
+    expect(recs).toEqual([{ text: "\u041f\u0440\u0438\u0432\u0435\u0442" }]);
   });
 
   test("fromStart reads an existing file from its start, open() polls only on demand", () => {

@@ -29,7 +29,7 @@ const BEFORE_QUESTION_REPLY = "Now call AskUserQuestion.";
 const INSTRUCTIONS = [
   "telegram-hub connects this session to a Telegram topic, so the user can follow and answer from the phone.",
   "",
-  'Call tg_enable when the user asks to be written to in Telegram ("пиши мне в Телеграм", "переходи в телегу", etc.). The mode turns off only when the user asks: call tg_disable when they ask to stop; typing in the terminal does not turn it off. A message in the topic turns it on automatically.',
+  'Call tg_enable when the user asks to be written to in Telegram ("write to me in Telegram", "switch to Telegram", etc., in any language). The mode turns off only when the user asks: call tg_disable when they ask to stop; typing in the terminal does not turn it off. A message in the topic turns it on automatically.',
   "",
   "While the mode is on, your text output is relayed to the topic automatically — there is no reply tool, just write as usual. Text before a tool call reaches the topic too, only without a notification; the last text of a turn goes when the turn ends. Tool calls, tool output and hidden thinking are never relayed.",
   "",

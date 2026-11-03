@@ -114,7 +114,7 @@ describe("commandOf", () => {
 
   test("/rename with the new name, bare /rename with none", () => {
     expect(commandOf("/rename new name", "test_bot")).toEqual({ name: "rename", args: "new name" });
-    expect(commandOf("/rename  Спринт 3 ", "test_bot")).toEqual({ name: "rename", args: "Спринт 3" });
+    expect(commandOf("/rename  \u0421\u043f\u0440\u0438\u043d\u0442 3 ", "test_bot")).toEqual({ name: "rename", args: "\u0421\u043f\u0440\u0438\u043d\u0442 3" });
     expect(commandOf("/rename", "test_bot")).toEqual({ name: "rename", args: "" });
   });
 

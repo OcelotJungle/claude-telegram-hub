@@ -3,6 +3,7 @@ import { existsSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { accountOf, SessionStore, topicName } from "../src/hub/sessions.ts";
 import { tempDir } from "./helpers.ts";
+import { en } from "../src/shared/i18n/en.ts";
 import { platformFor } from "../src/shared/platform.ts";
 
 const rec = { topicId: 101, title: "Fix login", project: "app", enabled: true };
@@ -119,15 +120,15 @@ describe("SessionStore", () => {
 
 describe("topicName", () => {
   test('is "<project> · <title>"', () => {
-    expect(topicName("project", "Реализация хаба")).toBe("project · Реализация хаба");
+    expect(topicName("project", "Hub work", en)).toBe("project · Hub work");
   });
 
   test("empty title falls back to a placeholder", () => {
-    expect(topicName("app", "  ")).toBe("app · без названия");
+    expect(topicName("app", "  ", en)).toBe(`app · ${en.untitledTopic}`);
   });
 
   test("is cut to 128 characters by shortening the title", () => {
-    const name = topicName("app", "x".repeat(300));
+    const name = topicName("app", "x".repeat(300), en);
     expect(name.length).toBe(128);
     expect(name.startsWith("app · xxx")).toBe(true);
     expect(name.endsWith("…")).toBe(true);

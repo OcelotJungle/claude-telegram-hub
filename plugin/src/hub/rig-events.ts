@@ -9,6 +9,7 @@ const READ_CHUNK_BYTES = 64 * 1024;
 // A rig event is a short notice; a longer line is treated as a broken one rather than held in memory.
 const MAX_LINE_BYTES = 1024 * 1024;
 const STATE_FILE = "rig-events.json";
+const LANGUAGE_EVENT = "language-changed";
 const eventSchema = z.object({ id: z.string(), time: z.string(), level: z.enum(["info", "warn", "error"]), type: z.string(), text: z.string() });
 const firstLineSchema = z.object({ id: z.string() });
 // The hub's own memory, kept in its state dir: rig's directory is rig's.
@@ -30,6 +31,8 @@ export class RigEvents {
   constructor(private deps: {
     dir: string; stateDir: string; running(): boolean; available(): boolean; send: RigEventSend;
     features(): Promise<void>; restart(): void; warn(text: string): void;
+    // Re-reads the language, then the features, then sets the command menu again.
+    language(): Promise<void>;
   }) {}
 
   async poll(): Promise<void> {
@@ -55,7 +58,7 @@ export class RigEvents {
         if (reset) writeRigFile(this.deps.dir, "events.offset", "0");
         if (reset || state.firstId === undefined) this.save({ ...state, firstId: identity, ...(reset ? { partial: undefined } : {}) });
       }
-      const done = { features: false, restart: false };
+      const done = { features: false, restart: false, language: false };
       let scan = offset;
       let line: Line | undefined;
       while ((line = readLine(fd, scan, size))) {
@@ -68,7 +71,7 @@ export class RigEvents {
         if (delivering && !this.deps.available()) delivering = false;
         if (!delivering) continue;
         if (!this.deps.running()) return;
-        if (event && !service && !(await this.deliver(event, line.start))) { delivering = false; continue; }
+        if (event && (!service || isAlsoText(event.type)) && !(await this.deliver(event, line.start))) { delivering = false; continue; }
         // The service events behind a stuck one are still handled above; the offset waits for the stuck one.
         if (!this.deps.running()) return;
         writeRigFile(this.deps.dir, "events.offset", String(line.next));
@@ -92,8 +95,14 @@ export class RigEvents {
     return undefined;
   }
 
-  private async handle(type: string, done: { features: boolean; restart: boolean }): Promise<void> {
-    if (type === "features-changed") {
+  private async handle(type: string, done: { features: boolean; restart: boolean; language: boolean }): Promise<void> {
+    if (type === LANGUAGE_EVENT) {
+      // One re-read per poll, however many language events it holds; it also reads the features.
+      if (done.language) return;
+      done.language = true;
+      done.features = true;
+      try { await this.deps.language(); } catch (error) { this.deps.warn(`rig events: ${String(error)}`); }
+    } else if (type === "features-changed") {
       if (done.features) return;
       done.features = true;
       try { await this.deps.features(); } catch (error) { this.deps.warn(`rig events: ${String(error)}`); }
@@ -142,7 +151,12 @@ export class RigEvents {
 }
 
 function isService(type: string): boolean {
-  return type === "features-changed" || type === "hub-restart-pending";
+  return type === "features-changed" || type === "hub-restart-pending" || type === LANGUAGE_EVENT;
+}
+
+// A service event that is also a notice for the user: it is handled and delivered as text.
+function isAlsoText(type: string): boolean {
+  return type === LANGUAGE_EVENT;
 }
 
 // The complete line starting at `from`; a line still being written (no newline yet) is not one.

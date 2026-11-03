@@ -5,6 +5,7 @@
 // as bytes: a line is decoded only when it mentions "invoked_skills", and
 // every other byte is copied as it is.
 import type { FileHandle } from "fs/promises";
+import type { Messages } from "../shared/i18n/index.ts";
 
 import { open, readdir, readFile, rename, stat, unlink, writeFile } from "fs/promises";
 import { basename, dirname, join } from "path";
@@ -18,11 +19,20 @@ const CHUNK_BYTES = 1024 * 1024;
 const RENAME_TRIES = 10;
 const RENAME_RETRY_MS = 200;
 const BUSY_CODES: readonly unknown[] = ["EPERM", "EBUSY", "EACCES"];
-const GROWING = "транскрипт дописывается — сессия уже открыта?";
 const LF = 0x0a;
 const CR = 0x0d;
 const SKILLS_MARK = Buffer.from('"invoked_skills"');
 const VERSION_MARK = Buffer.from('"version"');
+
+// A failure the user is told about: `message` is English for the log, `render` is the text for Telegram in the hub's language.
+export class CleanupError extends Error {
+  constructor(message: string, readonly render: (m: Messages) => string) {
+    super(message);
+  }
+}
+
+const growing = () => new CleanupError("the transcript is still being written: is the session open?", m => m.cleanupGrowing);
+const shrank = () => new CleanupError("the transcript got shorter while it was being rewritten", m => m.cleanupShrank);
 
 export type SkillInfo = { name: string; chars: number };
 // cleaned: the skills of the last invoked_skills record (the one in the
@@ -124,10 +134,14 @@ export async function restoreCleanup(path: string, backup: string, opts: Cleanup
     if (!e) continue;
     const body = withoutCr(line.bytes);
     const uuid = str(field(parse(body.toString("utf8")), "uuid")) ?? null;
-    if (uuid !== e.uuid) throw new Error(`строка ${e.line}: uuid ${uuid} вместо ${e.uuid}`);
+    if (uuid !== e.uuid) {
+      throw new CleanupError(`line ${e.line}: uuid ${uuid} instead of ${e.uuid}`, m => m.cleanupLinesMismatch({ line: e.line, uuid: String(uuid), expected: String(e.uuid) }));
+    }
     edits.push({ start: line.start, end: line.start + body.length, bytes: Buffer.from(e.text) });
   }
-  if (edits.length !== entries.size) throw new Error(`в транскрипте меньше строк, чем в ${basename(backup)}`);
+  if (edits.length !== entries.size) {
+    throw new CleanupError(`the transcript has fewer lines than ${basename(backup)}`, m => m.cleanupFewerLines({ backup: basename(backup) }));
+  }
   await splice(path, edits, size, io);
 }
 
@@ -223,8 +237,8 @@ async function splice(path: string, edits: Splice[], size: number, io: Io): Prom
       await src.close();
     }
     const now = await io.size(path);
-    if (now > size) throw new Error(GROWING);
-    if (now < size) throw new Error("транскрипт стал короче, пока его переписывали");
+    if (now > size) throw growing();
+    if (now < size) throw shrank();
     await replace(tmp, path, io);
     placed = true;
   } finally {
@@ -248,7 +262,7 @@ async function copy(src: FileHandle, out: FileHandle, from: number, to: number, 
   const buf = Buffer.allocUnsafe(chunkBytes);
   for (let pos = from; pos < to; ) {
     const { bytesRead } = await src.read(buf, 0, Math.min(chunkBytes, to - pos), pos);
-    if (!bytesRead) throw new Error("транскрипт стал короче, пока его переписывали");
+    if (!bytesRead) throw shrank();
     await out.write(buf.subarray(0, bytesRead));
     pos += bytesRead;
   }

@@ -123,7 +123,7 @@ export function loadConfig(): Config {
   const cfg: Config = { allowFrom: arr(field(raw, "allowFrom")).map(String), turnEndChime: defaultTurnEndChime() };
   const chime = field(raw, "turnEndChime");
   if (typeof chime === "string") cfg.turnEndChime = chime;
-  else if (chime !== undefined) cfg.turnEndChimeError = "turnEndChime в config.json должен быть строкой";
+  else if (chime !== undefined) cfg.turnEndChimeError = "turnEndChime in config.json must be a string";
   if (groupId != null && groupId !== "") cfg.groupId = String(groupId);
   const launch = field(raw, "launch");
   if (launch !== undefined) {

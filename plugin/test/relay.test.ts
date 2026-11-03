@@ -123,10 +123,10 @@ describe("relay: closing a turn", () => {
 
   test("an intermediate turn end sends its text silently and is not reported", () => {
     const { r, finals } = makeRelay();
-    r.feed(text("жду монитор", "m1"));
+    r.feed(text("\u0436\u0434\u0443 \u043c\u043e\u043d\u0438\u0442\u043e\u0440", "m1"));
     r.feed(end("m1"));
     r.decide(PAUSE);
-    expect(r.feed(CLOSED)).toEqual([{ text: "жду монитор", notify: false }]);
+    expect(r.feed(CLOSED)).toEqual([{ text: "\u0436\u0434\u0443 \u043c\u043e\u043d\u0438\u0442\u043e\u0440", notify: false }]);
     expect(finals).toEqual([]);
   });
 
@@ -377,19 +377,19 @@ describe("relay: the mode", () => {
 describe("relay: forced closes", () => {
   test("endTurn after a turn end closes by the decision, nothing reported", () => {
     const { r, finals } = makeRelay();
-    r.feed(text("итог", "m1"));
+    r.feed(text("\u0438\u0442\u043e\u0433", "m1"));
     r.feed(end("m1"));
     r.decide(ASK);
-    expect(r.endTurn()).toEqual([{ text: "итог", notify: true }]);
+    expect(r.endTurn()).toEqual([{ text: "\u0438\u0442\u043e\u0433", notify: true }]);
     expect(r.endTurn()).toEqual([]);
     expect(finals).toEqual([]);
   });
 
   test("endTurn after a turn end without a decision closes silently", () => {
     const { r } = makeRelay();
-    r.feed(text("итог", "m1"));
+    r.feed(text("\u0438\u0442\u043e\u0433", "m1"));
     r.feed(end("m1"));
-    expect(r.endTurn()).toEqual([{ text: "итог", notify: false }]);
+    expect(r.endTurn()).toEqual([{ text: "\u0438\u0442\u043e\u0433", notify: false }]);
   });
 
   test("endTurn in the middle of a turn sends the text silently, even with a decision", () => {
@@ -415,8 +415,8 @@ describe("relay: forced closes", () => {
 describe("relay: tools of ours", () => {
   test("a tool of ours posting to the topic takes the text written before it", () => {
     const { r } = makeRelay();
-    r.feed(text("вот скрин"));
-    expect(r.textBeforeToolCall()).toEqual([{ text: "вот скрин", notify: false }]);
+    r.feed(text("\u0432\u043e\u0442 \u0441\u043a\u0440\u0438\u043d"));
+    expect(r.textBeforeToolCall()).toEqual([{ text: "\u0432\u043e\u0442 \u0441\u043a\u0440\u0438\u043d", notify: false }]);
     // The tool_use record read later finds nothing left to send.
     expect(r.feed(tool("mcp__plugin_telegram-hub_telegram-hub__tg_send_file"))).toEqual([]);
     expect(r.idle()).toEqual([]);
@@ -424,10 +424,10 @@ describe("relay: tools of ours", () => {
 
   test("a tool call after a turn ended closes that turn silently first", () => {
     const { r } = makeRelay();
-    r.feed(text("итог", "m1"));
+    r.feed(text("\u0438\u0442\u043e\u0433", "m1"));
     r.feed(end("m1"));
     r.decide(DONE);
-    expect(r.textBeforeToolCall()).toEqual([{ text: "итог", notify: false }]);
+    expect(r.textBeforeToolCall()).toEqual([{ text: "\u0438\u0442\u043e\u0433", notify: false }]);
     expect(r.idle()).toEqual([]);
   });
 
