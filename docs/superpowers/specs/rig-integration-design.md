@@ -1,165 +1,169 @@
-# Хаб на двух системах и связь с agent-rig
+# The hub on two systems and the link with agent-rig
 
-## Зачем
+## Why
 
-`agent-rig` — самостоятельное приложение: команда `rig` без постоянного процесса управляет обвязкой Claude Code. Хаб — его
-надстройка для Телеграма: передаёт команды в `rig`, показывает его события, логику `rig` не дублирует. Оба работают и на
-Windows, и на Ubuntu 24.04: оба на одной машине, на рабочей Windows или на сервере.
+`agent-rig` is a standalone application: the `rig` command, with no permanent process, manages the Claude Code harness. The hub is its
+add-on for Telegram: it passes commands to `rig`, shows its events, and does not duplicate the logic of `rig`. Both work on
+Windows and on Ubuntu 24.04: both on one machine, on a working Windows machine or on a server.
 
-Договор между ними — раздел «Связь с хабом» в `agent-rig/docs/superpowers/specs/agent-rig-design.md`. Он общий: менять его можно
-только согласованно для обеих сторон. При расхождении с этим файлом верна спека `rig`.
+The contract between them is the section "Link with the hub" in `agent-rig/docs/superpowers/specs/agent-rig-design.md`. It is shared: it can be changed
+only in agreement for both sides. If it differs from this file, the `rig` spec is right.
 
-Хаб работает и без `rig`: пока `rig` не найден, всё ведёт себя как раньше, кроме ответа `/feature` и `/rig`, что его нет.
+The hub works without `rig` too: while `rig` is not found, everything behaves as before, except that `/feature` and `/rig` answer that it is missing.
 
-## Платформа
+## Platform
 
-Хаб выбирает поведение по платформе в одном месте, остальной код получает готовые значения. На Windows поведение не меняется.
+The hub chooses behavior by platform in one place; the rest of the code gets ready values. On Windows the behavior does not change.
 
-- **`/bash`.** На Windows Git Bash, как сейчас. На Linux `bash` из `PATH`, запуск login-shell, подпись в карточке `bash`. Значение
-  `bash` в конфиге работает на обеих системах.
-- **`/pwsh`, `/cmd`.** Есть только на Windows. На Linux не показываются в меню, а на вызов отвечают, что на этой платформе их нет.
-- **Запуск сессий.** `launch.command` — список аргументов. Проверки значений следуют за тем, кто выполняет команду: на Windows `CMD_SPECIAL`
-  применяется всегда, как раньше, потому что `cmd` может стоять внутри шаблона. На Linux шаблон идёт без оболочки, опасных символов нет.
-  Проверки id сессии, аккаунта, режима и существования папки остаются везде.
-- **tmux.** В README пример `launch` для Linux: одна сессия tmux на одно окно Claude Code, имя `claude-{session}`, запуск
-  `tmux new-session -d`. Аргументы идут отдельно, без строки для оболочки. Сессия живёт после обрыва SSH и после перезапуска хаба.
-- **Итог команды запуска.** Хаб ждёт её окончания не дольше `LAUNCH_EXIT_GRACE_MS` (2 с). Код не 0 за это время — неудачный запуск: тема
-  получает «Не могу запустить сессию» с stderr команды, удержанное сохраняется, «🚀 Запускаю» и ожидания в `timeoutSec` нет. Команда,
-  которая живёт дольше (окно терминала на Windows), считается запущенной без ожидания конца. Для tmux `duplicate session: <имя>`
-  означает, что сессия уже жива и, скорее всего, ждёт ответа в диалоге (например, подтверждения канала): тема называет
-  `tmux attach -t <имя>` и ничего не запускает заново. Если окно не подключилось за `timeoutSec` и команда начинается с `tmux`, сообщение
-  о таймауте добавляет, что сессия, возможно, ждёт подтверждения в tmux, и называет команду подключения.
-- **Диалог подтверждения канала на Linux.** Повторяется ли он при каждом запуске или только при первом, без залогиненного Claude Code
-  неизвестно и уходит в сквозную проверку. Убрать его можно managed settings (`channelsEnabled`, `allowedChannelPlugins`); на Linux файл
-  лежит в `/etc/claude-code/managed-settings.json` (официальная документация Claude Code).
-- **`cswap`.** Необязателен. Без него аккаунта по умолчанию нет, `/run` без номера работает, `/run <номер>` отвечает, что аккаунтов
-  на этой машине нет. Определение аккаунта не запускает `cswap.exe` там, где его нет.
-- **Звук.** На Linux звука завершения хода нет: ни запуска, ни ошибки, ни записи в лог.
-- **Зависимости.** Запуск плагина и службы ставит пакеты с `--frozen-lockfile`. Иначе `bun install` может изменить `bun.lock` в
-  клоне, а любая локальная правка останавливает обновление `rig` целиком.
+- **`/bash`.** On Windows, Git Bash, as now. On Linux, `bash` from `PATH`, started as a login shell, the label in the card is `bash`. The
+  `bash` value in the config works on both systems.
+- **`/pwsh`, `/cmd`.** Only on Windows. On Linux they are not shown in the menu, and a call answers that they are not available on this platform.
+- **Starting sessions.** `launch.command` is a list of arguments. Value checks follow who runs the command: on Windows `CMD_SPECIAL`
+  is always applied, as before, because `cmd` can be inside the template. On Linux the template goes without a shell, so there are no dangerous characters.
+  The checks of the session id, the account, the mode and the existence of the folder stay everywhere.
+- **tmux.** The README has a `launch` example for Linux: one tmux session per Claude Code window, named `claude-{session}`, started with
+  `tmux new-session -d`. The arguments go separately, with no string for a shell. The session lives after an SSH drop and after a hub restart.
+- **Result of the launch command.** The hub waits for it to finish for no longer than `LAUNCH_EXIT_GRACE_MS` (2 s). A non-zero code in that time is a failed launch: the topic
+  gets "⚠️ Cannot start the session: <reason>" with the command's stderr, held messages are kept, and there is no "🚀 Starting the session…" and no wait for `timeoutSec`. A command
+  that lives longer (a terminal window on Windows) counts as started, without waiting for its end. For tmux, `duplicate session: <name>`
+  means the session is already alive and most likely waits for an answer in a dialog (for example, the channel confirmation): the topic names
+  `tmux attach -t <name>` and starts nothing again. If the window did not connect within `timeoutSec` and the command starts with `tmux`, the timeout message
+  adds that the session may be waiting for a confirmation in tmux, and names the attach command.
+- **Channel confirmation dialog on Linux.** Whether it repeats on every launch or only on the first one is unknown without a logged-in Claude Code
+  and goes to the end-to-end check. It can be removed with managed settings (`channelsEnabled`, `allowedChannelPlugins`); on Linux the file
+  is at `/etc/claude-code/managed-settings.json` (official Claude Code documentation).
+- **`cswap`.** Optional. Without it there is no default account, `/run` without a number works, and `/run <number>` answers that there are no accounts
+  on this machine. Account detection does not run `cswap.exe` where it does not exist.
+- **Sound.** On Linux there is no end-of-turn sound: no launch, no error, no log entry.
+- **Dependencies.** Starting the plugin and the service installs packages with `--frozen-lockfile`. Otherwise `bun install` can change `bun.lock` in
+  the clone, and any local edit stops the whole `rig` update.
 
-## Служба на Linux
+## Service on Linux
 
-Скрипты `scripts/install-hub-service.sh` и `scripts/uninstall-hub-service.sh` ставят и снимают службу systemd пользователя
+The scripts `scripts/install-hub-service.sh` and `scripts/uninstall-hub-service.sh` install and remove the user systemd service
 `telegram-hub.service`:
 
-- `Restart=always`, запуск с `--always-on`, перед запуском установка пакетов с `--frozen-lockfile`;
-- `KillMode=process`: служба останавливает только сам хаб. Иначе вместе с ним умрут сервер tmux со всеми сессиями, запущенные
-  `/bash` и `rig`, который обязан пережить хаб при `/feature telegram disable`;
-- `PATH` в службе включает `~/.local/bin` и `~/.bun/bin`: минимальный `PATH` служб их не содержит;
-- linger включается установкой, чтобы хаб поднимался после перезагрузки без входа по SSH; установка дожидается шины пользователя;
-- `RestartSec=2` и `StartLimitIntervalSec=0`: быстрый сбой при запуске, например без сети, не должен оставить службу в `failed` навсегда.
+- `Restart=always`, started with `--always-on`, packages installed with `--frozen-lockfile` before the start;
+- `KillMode=process`: the service stops only the hub itself. Otherwise the tmux server with all sessions, the started
+  `/bash` commands, and `rig`, which must outlive the hub on `/feature telegram disable`, would die with it;
+- `PATH` in the service includes `~/.local/bin` and `~/.bun/bin`: the minimal `PATH` of services does not contain them;
+- linger is enabled by the installation, so the hub comes up after a reboot without an SSH login; the installation waits for the user bus;
+- `RestartSec=2` and `StartLimitIntervalSec=0`: a fast failure at start, for example without network, must not leave the service in `failed` forever.
 
-Хаб обрабатывает SIGTERM чисто: то же завершение, что и `stop()`.
+The hub handles SIGTERM cleanly: the same shutdown as `stop()`.
 
-### Хабом управляет служба
+### The service manages the hub
 
-Скрипты установки службы на Linux и задачи планировщика на Windows создают в каталоге состояния хаба файл `service-managed`, скрипты
-удаления убирают его. Пока файл есть, окна Claude Code не запускают хаб сами, а только ждут его и подключаются. Иначе во время
-перезапуска службы окно занимает порт вперёд неё, а после `/feature telegram disable` поднимает выключенный хаб. Без файла окна
-запускают хаб как раньше. Файл создаётся до запуска службы или задачи: окно, открытое во время установки, не успевает поднять
-свой хаб. Если запуск не удался, скрипт убирает файл обратно (иначе окна ждали бы хаб, которого никто не запускает).
+The service installation scripts on Linux and the scheduler tasks on Windows create the file `service-managed` in the hub's state directory, and the removal scripts
+delete it. While the file exists, Claude Code windows do not start the hub themselves, they only wait for it and connect. Otherwise, during a
+service restart a window takes the port before the service, and after `/feature telegram disable` it brings up the disabled hub. Without the file, windows
+start the hub as before. The file is created before the service or task starts: a window opened during installation does not manage to bring up
+its own hub. If the start fails, the script removes the file again (otherwise windows would wait for a hub that nobody starts).
 
-## Команды машины
+## Machine commands
 
-`/feature`, `/feature <name> enable|disable`, `/rig status`, `/rig update` выполняет сам хаб, только от пользователей из `allowFrom`,
-мимо агента. Они работают в общей теме группы и в любой теме сессии, ответ приходит туда же. Остальные команды остаются в темах сессий.
+`/feature`, `/feature <name> enable|disable`, `/rig status`, `/rig update`, `/rig language` and `/rig language en|ru` are executed by the hub itself, only for users from `allowFrom`,
+bypassing the agent (`/rig language` follows the same access and output rules as `/rig status|update`; details in `language-design.md`). They work in the shared topic of the group and in any session topic, and the answer comes to the same place. The other commands stay in session topics.
 
-- `rig` ищется в `PATH`, затем в `~/.local/bin`. На Windows это `rig.cmd`, он запускается через `cmd.exe`. Имя фичи проверяется по
-  белому шаблону до запуска, аргументы идут отдельно.
-- `/feature` показывает список из `rig feature --json`. Разбираются поля договора, текст не разбирается.
-- `/rig status` берёт версии из полей `releases` и `versions` в `rig status --json` и показывает их как `0.2.0 (<коммит>)`. Если
-  в `releases` `null`, показывается только коммит.
-- Изменяющие команды запускаются отдельным процессом с записью вывода в файл, как `/bash`, и показывают вывод по мере появления.
-  Если `rig` занят обновлением, он печатает об этом строку, хаб показывает её как обычный вывод. Ожидание не сбой, ограничения по
-  времени нет. Сбой — только ненулевой код выхода.
-  Карточка запущенной команды `rig` проверяется раз в секунду, но перерисовывается сразу, только когда изменился вывод (строка об
-  ожидании блокировки появляется в момент начала ожидания); без нового вывода счётчик секунд обновляет её раз в `EXEC_CARD_MS`.
-- Запросы `rig feature --json` и `rig status --json` блокировку не берут, поэтому имеют предел времени 30 секунд и не задерживают
-  приём сообщений. Превышение считается сбоем запроса.
-- Запущенная команда переживает перезапуск хаба, её результат приходит после старта целиком, с полным журналом.
-- Устаревшая команда и устаревшая кнопка подтверждения не выполняются, предел тот же, что у `/bash`. Кнопка запуска `/pwsh` и `/cmd`
-  заново проверяет состояние фичи в момент нажатия.
-- Постоянная ошибка Telegram при ответе команды не держит очередь: карточка, которую нельзя изменить, отправляется заново, а ответ,
-  который нельзя доставить, отбрасывается с записью в лог.
-- `/feature telegram disable`: кнопка подтверждения, затем сообщение с командой включения обратно (`rig feature telegram enable`
-  на сервере), затем запуск `rig`. Подтвердить может только пользователь из `allowFrom`. Пока подтверждение ждёт нажатия, очередь
-  не забывает номера его сообщений (кнопки и текста с командой включения), сколько бы других сообщений ни ушло после них: хаб
-  ставит их в очередь на каждом такте, и забытый номер дал бы второе такое же сообщение с устаревшей кнопкой. После ответа
-  номера забываются как обычные.
-- Если `rig` не найден, команды отвечают, что `rig` не установлен, и остаются в меню.
+- `rig` is looked up in `PATH`, then in `~/.local/bin`. On Windows it is `rig.cmd`, started through `cmd.exe`. The feature name is checked against a
+  whitelist pattern before the start, and the arguments go separately.
+- `/feature` shows the list from `rig feature --json`. The fields of the contract are parsed; the text is not parsed.
+- `/rig status` takes versions from the `releases` and `versions` fields in `rig status --json` and shows them as `0.2.0 (<commit>)`. If
+  `releases` is `null`, only the commit is shown.
+- Changing commands are started as a separate process with the output written to a file, like `/bash`, and show the output as it appears.
+  If `rig` is busy updating, it prints a line about it, and the hub shows it as normal output. Waiting is not a failure, and there is no time
+  limit. A failure is only a non-zero exit code.
+  The card of a running `rig` command is checked once a second, but redrawn at once only when the output changed (the line about
+  waiting for the lock appears at the moment the wait starts); without new output the seconds counter updates it once per `EXEC_CARD_MS`.
+- The requests `rig feature --json` and `rig status --json` take no lock, so they have a time limit of 30 seconds and do not delay
+  receiving messages. Exceeding it counts as a request failure.
+- A running command survives a hub restart, and its result arrives after the start in full, with the complete log.
+- A stale command and a stale confirmation button are not executed; the limit is the same as for `/bash`. The `/pwsh` and `/cmd` launch button
+  checks the feature state again at the moment of the press.
+- A permanent Telegram error when answering a command does not hold the queue: a card that cannot be edited is sent again, and an answer
+  that cannot be delivered is dropped with a log entry.
+- `/feature telegram disable`: a confirmation button, then a message with the command to enable it back (`rig feature telegram enable`
+  on the server), then the `rig` launch. Only a user from `allowFrom` can confirm. While the confirmation waits for a press, the queue
+  does not forget the numbers of its messages (the button and the text with the enable command), however many other messages go after them: the hub
+  puts them in the queue on every tick, and a forgotten number would give a second identical message with a stale button. After the answer
+  the numbers are forgotten as usual.
+- If `rig` is not found, the commands answer that `rig` is not installed, and stay in the menu.
 
-### Состояние фич
+### Feature state
 
-Хаб берёт его из `rig feature --json` при старте и по событию `features-changed`. Свою конфигурацию он не меняет. Меню бота
-обновляется при смене состояния.
+The hub takes it from `rig feature --json` at start and on the `features-changed` event. It does not change its own configuration. The bot menu
+is updated when the state changes.
 
-| Состояние `rig` | `/pwsh`, `/cmd` на Windows |
+| `rig` state | `/pwsh`, `/cmd` on Windows |
 | --- | --- |
-| не найден | работают как раньше |
-| ответил | работают, если фича включена и разрешена на платформе; иначе отвечают, как включить, и скрыты в меню |
-| сбой при старте хаба | закрыты, отвечают причиной сбоя, скрыты в меню |
-| сбой на работающем хабе | остаётся последнее известное состояние, сбой пишется в лог |
+| not found | work as before |
+| answered | work if the feature is enabled and allowed on the platform; otherwise they answer how to enable it, and are hidden in the menu |
+| failure at hub start | closed, answer with the failure reason, hidden in the menu |
+| failure on a running hub | the last known state stays, the failure is written to the log |
 
-`/bash` входит в фичу `telegram` и не зависит от этой таблицы.
+`/bash` is part of the `telegram` feature and does not depend on this table.
 
-## События
+## Events
 
-Хаб читает `~/.agent-rig/events.jsonl` с места из `~/.agent-rig/events.offset` (десятичное число байт) и опрашивает файл раз в 5
-секунд: это разумная задержка для уведомлений, а наблюдение за файлом ненадёжно на разных системах.
+The hub reads `~/.agent-rig/events.jsonl` from the position in `~/.agent-rig/events.offset` (a decimal number of bytes) and polls the file every 5
+seconds: this is a reasonable delay for notifications, and watching a file is unreliable across systems.
 
-- Берётся только законченная строка, с переводом строки в конце. Незаконченная ждёт следующего опроса.
-- `text` уходит в общую тему группы: `info` без звука, `warn` и `error` со звуком.
-- Смещение записывается после того, как Telegram принял сообщение. Сбой между отправкой и записью даёт повтор, а не потерю. Части
-  длинного события, уже принятые Telegram, заново не отправляются. Событие, которое Telegram отвергает, ждёт, пока причина не исчезнет.
-- `features-changed` и `hub-restart-pending` хаб обрабатывает сам и в тему не пишет. Неизвестный тип с `text` показывается. Служебные
-  события обрабатываются сразу, даже если доставка стоит: застрявшее сообщение не должно задерживать обновление.
-- Битая строка пропускается с записью в лог: одна испорченная строка не должна остановить доставку навсегда.
-- Файла нет — читать нечего. Смещение больше размера файла значит, что `rig` его сократил: чтение с начала. Сокращённый и снова
-  выросший файл виден по первой строке: хаб помнит её `id` в своём каталоге состояния, и другой `id` тоже значит чтение с начала.
-- Пока Telegram не отвечает или `groupId` не задан, смещение стоит на месте.
+- Only a complete line is taken, with a newline at the end. An incomplete one waits for the next poll.
+- `text` goes to the shared topic of the group: `info` without a sound, `warn` and `error` with a sound.
+- The offset is written after Telegram has accepted the message. A failure between sending and writing gives a repeat, not a loss. Parts
+  of a long event already accepted by Telegram are not sent again. An event that Telegram rejects waits until the cause is gone.
+- The hub handles `features-changed` and `hub-restart-pending` itself and does not write them to the topic. `language-changed` is delivered as a text event (like any text event, to the shared topic) and is also handled as a service event: the hub re-reads the language, then the features, then the bot command menu; see `language-design.md`. An unknown type with `text` is shown. Service
+  events are handled at once, even if delivery is stuck: a stuck message must not delay an update.
+- A broken line is skipped with a log entry: one corrupted line must not stop delivery forever.
+- No file means nothing to read. An offset larger than the file size means `rig` truncated it: reading starts from the beginning. A truncated and
+  regrown file is visible by its first line: the hub remembers its `id` in its state directory, and a different `id` also means reading from the beginning.
+- While Telegram does not answer or `groupId` is not set, the offset stays in place.
 
-Файлы в `~/.agent-rig` хаб пишет атомарно, только `events.offset`, `hub-restarting.json` и `hub-ready.json`, и только если каталог уже
-есть: на машине без `rig` хаб его не создаёт.
+The hub writes files in `~/.agent-rig` atomically, only `events.offset`, `hub-restarting.json` and `hub-ready.json`, and only if the directory
+already exists: on a machine without `rig` the hub does not create it.
 
-## Перезапуск при обновлении
+## Restart on update
 
-Хаб запоминает коммит своего кода при старте (`git rev-parse HEAD` в своём репозитории). Скрипт службы определяет его до запуска `bun`,
-чтобы коммит точно соответствовал загруженному коду. Если коммит узнать нельзя, событие не считается обработанным: хаб повторяет
-попытку и один раз пишет о сбое в общую тему.
+The hub remembers the commit of its code at start (`git rev-parse HEAD` in its own repository). The service script determines it before starting `bun`,
+so the commit matches the loaded code exactly. If the commit cannot be found, the event is not considered handled: the hub retries
+and writes about the failure once to the shared topic.
 
-1. На `hub-restart-pending` хаб сравнивает свой коммит с текущим `HEAD`. Если они совпали, код уже новый: он заново пишет
-   `hub-ready.json` и не выходит. Иначе `rig` будет ждать вечно: готовность старше момента обновления он не засчитывает.
-2. Хаб ждёт простоя без ограничения по времени и ничего не прерывает. Простой — это одновременно: ни в одной сессии не идёт ход, нет
-   неотвеченных вопросов и запросов разрешения, нет выполняющихся `/bash`, `/pwsh`, `/cmd` и команд `rig`, нет идущего
-   перезапуска окна и удержанных сообщений, нет команд, ещё не забранных окном, очередь на отправку пуста. Команда `/bash`, ждущая
-   нажатия кнопки запуска, простою не мешает. Вопрос или запрос разрешения от закрытого окна не считается: ответить на него уже некому.
-   Очередь считается по тому, что можно доставить: части, ждущие настройки, простою не мешают.
-3. В момент простоя хаб пишет `~/.agent-rig/hub-restarting.json` (`{"time":"ISO 8601"}`) и завершается с кодом 75. Проверка простоя и
-   выход идут без паузы между ними, чтобы новый ход не попал в зазор.
-4. После старта, когда `getMe` прошёл, хаб читает прежний `hub-ready.json` и пишет новый (`{"commit":"<полный хеш>","time":"ISO 8601"}`).
-   Неудачная запись повторяется. После перезапуска по обновлению своего сообщения нет: обновление описывает событие `update-ok` с
-   версиями, откат — событие `rollback`.
-5. Если коммит изменился без участия `rig` (код сменили руками), хаб один раз сообщает в общую тему, что запущен с другим кодом и окна
-   подхватят его при следующем запуске. Участие `rig` видно по двум признакам: `hub-restarting.json` новее прежнего `hub-ready.json`
-   (`rig` этот файл не удаляет, поэтому старый файл ничего не значит) или непрочитанное событие `hub-restart-pending`, которое
-   доходит сразу после старта; для него сообщение ждёт первого чтения событий. Откат возвращает коммит из прежнего `hub-ready.json`,
-   поэтому сообщения не даёт. Если прежнего файла нет, сообщения нет.
+1. On `hub-restart-pending` the hub compares its commit with the current `HEAD`. If they match, the code is already new: it writes
+   `hub-ready.json` again and does not exit. Otherwise `rig` would wait forever: it does not count a readiness older than the moment of the update.
+2. The hub waits for idle with no time limit and interrupts nothing. Idle means all of these at once: no turn is running in any session, there are no
+   unanswered questions or permission requests, no running `/bash`, `/pwsh`, `/cmd` and `rig` commands, no window
+   restart in progress and no held messages, no commands not yet picked up by a window, and the send queue is empty. A `/bash` command waiting for a
+   press of the launch button does not prevent idle. A question or permission request from a closed window does not count: there is nobody left to answer it.
+   The queue is counted by what can be delivered: parts waiting for settings do not prevent idle.
+3. At the moment of idle the hub writes `~/.agent-rig/hub-restarting.json` (`{"time":"ISO 8601"}`) and exits with code 75. The idle check and
+   the exit go with no pause between them, so that a new turn does not slip into the gap.
+4. After the start, when `getMe` has passed, the hub reads the previous `hub-ready.json` and writes a new one (`{"commit":"<full hash>","time":"ISO 8601"}`).
+   A failed write is retried. After a restart for an update there is no message of its own: the update is described by the `update-ok` event with
+   the versions, a rollback by the `rollback` event.
+5. If the commit changed without `rig` taking part (the code was changed by hand), the hub reports once to the shared topic that it runs with different code and windows
+   will pick it up on their next launch. The participation of `rig` is seen by two signs: `hub-restarting.json` is newer than the previous `hub-ready.json`
+   (`rig` does not delete this file, so an old file means nothing) or an unread `hub-restart-pending` event, which
+   arrives right after the start; for it the message waits for the first read of events. A rollback returns the commit from the previous `hub-ready.json`,
+   so it gives no message. If there is no previous file, there is no message.
 
-Откатом занимается `rig`. Если Telegram недоступен в момент перезапуска, готовности нет, и `rig` через 5 минут откатит обновление: так
-договор считает неподнявшийся хаб сбоем.
+`rig` handles the rollback. If Telegram is unavailable at the moment of the restart, there is no readiness, and `rig` rolls the update back after 5 minutes: this is how
+the contract treats a hub that did not come up as a failure.
 
-## Проверка
+## Checks
 
-- Все тесты хаба проходят на Windows и в контейнере Ubuntu 24.04 (`docker/ubuntu-24.04`, `scripts/test-linux.sh`). Тесты `/pwsh` и `/cmd`
-  на Linux не запускаются: этих команд там нет.
-- Команды, события и перезапуск проверяются на поддельном Telegram и поддельном `rig`, без настоящих ожиданий.
-- Службу проверяет контейнер с systemd: после остановки службы живы tmux и `rig`, после падения хаба служба поднимается сама, после
-  выхода с кодом 75 при подключённом окне служба сохраняет порт, после остановки службы подключённое окно хаб не поднимает.
-- Внутренние механизмы Claude Code (сокет, флаг каналов, пути транскриптов, диалог подтверждения при запуске в tmux) проверяются в контейнере
-  настоящим Claude Code без входа в аккаунт. Что без входа проверить нельзя, называется поимённо и уходит в сквозную проверку.
-- Сквозная проверка с настоящим Claude и тестовым ботом выполняется отдельно, вместе с `rig`.
+- All hub tests pass on Windows and in an Ubuntu 24.04 container (`docker/ubuntu-24.04`, `scripts/test-linux.sh`). The `/pwsh` and `/cmd` tests
+  are not run on Linux: those commands do not exist there.
+- Commands, events and restart are checked on a fake Telegram and a fake `rig`, with no real waits.
+- The service is checked by a container with systemd: after the service stops, tmux and `rig` are alive; after the hub crashes, the service comes up by itself; after
+  an exit with code 75 with a connected window, the service keeps the port; after the service stops, a connected window does not bring up the hub.
+- Internal mechanisms of Claude Code (the socket, the channels flag, transcript paths, the confirmation dialog on launch in tmux) are checked in a container
+  with a real Claude Code without logging in to an account. What cannot be checked without logging in is named explicitly and goes to the end-to-end check.
+- The end-to-end check with a real Claude and a test bot is done separately, together with `rig`.
 
-## Не входит
+## Out of scope
 
-Логика `rig`, сборка настроек и обновление репозиториев.
+The logic of `rig`, building settings, and updating repositories.
+
+## Language of hub texts
+
+The texts the hub shows in Telegram are English by default and Russian when rig's language is `ru`, see `language-design.md`.

@@ -1,172 +1,174 @@
-# telegram-hub, итерация 2: rich по делу, разрешения из Telegram, субагенты, автозапуск
+# telegram-hub, iteration 2: rich where it fits, permissions from Telegram, subagents, autostart
 
-Основа: `telegram-hub-design.md`. Этот документ меняет его требования 6
-(разрешения) и 9 (никаких постоянных служб).
+Basis: `telegram-hub-design.md`. This document changes its requirements 6
+(permissions) and 9 (no permanent services).
 
-## Требования
+Hub texts quoted below are English by default and Russian when rig's language is ru, see `language-design.md`.
 
-1. **Субагенты.** Видеть, что делает каждый субагент, но не засорять топик: одно сообщение на
-   субагента, в нём статус и история его текстов (не меньше десятка последних). Когда место в
-   сообщении кончается, начинается новое.
-2. **Обычный текст или rich.** Без разметки — обычное сообщение. С несложной разметкой и не длиннее
-   пяти строк — обычное сообщение с форматированием. Длиннее пяти строк с разметкой, и любые таблицы —
+## Requirements
+
+1. **Subagents.** See what each subagent is doing without cluttering the topic: one message per
+   subagent, with its status and the history of its texts (at least the last ten). When the space in the
+   message runs out, a new one starts.
+2. **Plain text or rich.** No markup: an ordinary message. With simple markup and no longer than
+   five lines: an ordinary message with formatting. Longer than five lines with markup, and any tables:
    rich.
-3. **Разрешения из Telegram.** Запрос разрешения приходит в топик с кнопками «Разрешить» и «Отклонить».
-4. **Автозапуск.** Сообщение в топик сессии, у которой нет окна, запускает Claude Code на нужном
-   аккаунте (`cswap run N`) в нужной папке с `--resume`, и сообщение доходит до агента. Команда,
-   которой нужно окно, также запускает сессию и выполняется после подключения окна. Хаб работает
-   всегда. Ручка, чтобы запустить топик на любом аккаунте, и ручка, чтобы завершить сессию. Команда
-   запуска — в конфиге. Двойной запуск одной сессии исключён.
+3. **Permissions from Telegram.** A permission request arrives in the topic with the buttons "✅ Allow" and "❌ Deny".
+4. **Autostart.** A message to the topic of a session that has no window starts Claude Code on the right
+   account (`cswap run N`) in the right folder with `--resume`, and the message reaches the agent. A command
+   that needs a window also starts the session and runs after the window connects. The hub runs
+   always. A handle to start a topic on any account, and a handle to end a session. The launch command is
+   in the config. Double launch of one session is excluded.
 
-## 1. Обычный текст или rich (`hub/message-kind.ts`)
+## 1. Plain text or rich (`hub/message-kind.ts`)
 
-Текст агента (Markdown) классифицируется так:
+The agent's text (Markdown) is classified like this:
 
-- есть таблица → rich;
-- после `toTelegram` нет ни одного entity и в Markdown нет списков, заголовков, цитат, линий →
-  обычный текст (режется на куски, как раньше);
-- иначе считаются экранные строки отформатированного текста: каждая строка занимает
-  `max(1, ceil(длина / CHARS_PER_LINE))`, `CHARS_PER_LINE = 40` (ширина пузыря на телефоне);
-  не больше `MAX_PLAIN_LINES = 5` → обычный текст с entities, больше → rich.
+- there is a table → rich;
+- after `toTelegram` there is not a single entity, and the Markdown has no lists, headings, quotes, rules →
+  plain text (split into chunks, as before);
+- otherwise the screen lines of the formatted text are counted: each line takes
+  `max(1, ceil(length / CHARS_PER_LINE))`, `CHARS_PER_LINE = 40` (the bubble width on a phone);
+  no more than `MAX_PLAIN_LINES = 5` → plain text with entities, more → rich.
 
-## 2. Разрешения из Telegram
+## 2. Permissions from Telegram
 
-Протокол Claude Code: запрос — `notifications/claude/channel/permission_request`
-с `request_id`, `tool_name`, `description`, `input_preview`; ответ — уведомление
-`notifications/claude/channel/permission` с `{request_id, behavior: "allow" | "deny"}`. Ответ по
-устаревшему `request_id` Claude Code молча игнорирует. Варианта «разрешить всегда» нет.
+The Claude Code protocol: the request is `notifications/claude/channel/permission_request`
+with `request_id`, `tool_name`, `description`, `input_preview`; the answer is the notification
+`notifications/claude/channel/permission` with `{request_id, behavior: "allow" | "deny"}`. An answer with a
+stale `request_id` is silently ignored by Claude Code. There is no "allow always" option.
 
-- Плагин шлёт хабу `permission {requestId, toolName, description, inputPreview}`, пока режим включён.
-- Хаб ставит в очередь сессии сообщение со звуком: `🔐 Нужно подтверждение: <tool>`, затем описание
-  конкретного вызова (если оно есть), затем аргументы без ключа `description` блоком кода.
-  Общая характеристика инструмента из `description` не показывается. Строковые аргументы выводятся
-  без JSON-кавычек, многострочные строки сохраняют переносы, остальные значения — компактным JSON.
-  Неразбираемый (в том числе усечённый) preview показывается как текст; законченное строковое поле
-  `description` извлекается отдельно. Preview ограничен `MAX_PREVIEW_CHARS`. Кнопки —
-  `✅ Разрешить` / `❌ Отклонить`. `callback_data` —
-  `p:<ключ>:a|d`, ключ — короткий id, который хаб помнит в памяти (ключ → сессия, request_id,
+- The plugin sends the hub `permission {requestId, toolName, description, inputPreview}` while the mode is on.
+- The hub puts a message with sound in the session queue: `🔐 Confirmation needed: <tool>`, then the description of the
+  specific call (if there is one), then the arguments without the `description` key as a code block.
+  The general characteristic of the tool from `description` is not shown. String arguments are printed
+  without JSON quotes, multi-line strings keep their line breaks, other values are compact JSON.
+  A preview that cannot be parsed (a truncated one included) is shown as text; a complete string field
+  `description` is extracted separately. The preview is limited to `MAX_PREVIEW_CHARS`. The buttons are
+  `✅ Allow` / `❌ Deny`. `callback_data` is
+  `p:<key>:a|d`, the key is a short id that the hub keeps in memory (key → session, request_id,
   message_id).
-- `getUpdates` получает `callback_query`. Принимается нажатие только из группы `groupId` и только от
-  пользователя из `allowFrom`; иначе — `answerCallbackQuery` с отказом.
-- Хаб пересылает плагину сессии `permissionReply {requestId, behavior}`, плагин шлёт уведомление
-  Claude Code. Сообщение в топике редактируется: кнопки убираются, дописывается «✅ разрешено» или
-  «❌ отклонено». Нет окна сессии — «⚠️ сессия не активна», кнопки убираются.
-- Если в терминале ответили раньше, кнопка ничего не сломает: Claude Code проигнорирует ответ.
+- `getUpdates` receives `callback_query`. A press is accepted only from the group `groupId` and only from a
+  user in `allowFrom`; otherwise `answerCallbackQuery` with a refusal.
+- The hub forwards `permissionReply {requestId, behavior}` to the session's plugin, and the plugin sends the notification to
+  Claude Code. The message in the topic is edited: the buttons are removed, "✅ Allowed" or
+  "❌ Denied" is appended. No session window: "⚠️ The session is not active, the answer was not delivered", the buttons are removed.
+- If the terminal answered earlier, the button breaks nothing: Claude Code ignores the answer.
 
-## 3. Субагенты
+## 3. Subagents
 
-Claude Code пишет субагента в `<папка транскрипта>/<sessionId>/subagents/agent-<id>.jsonl`, рядом
-`agent-<id>.meta.json` (`agentType`, `description`, `model`, `toolUseId`). Все записи там —
-`isSidechain: true`. Окончание: у синхронного и фонового — запись `assistant` с `stop_reason` не
-`tool_use` в его файле; у фонового ещё `task-notification` в основном транскрипте со `<status>`
-(`completed` / `failed` / `killed`) и `<task-id>` = id агента.
+Claude Code writes a subagent to `<transcript folder>/<sessionId>/subagents/agent-<id>.jsonl`, next to it
+`agent-<id>.meta.json` (`agentType`, `description`, `model`, `toolUseId`). All records there are
+`isSidechain: true`. The end: for a synchronous and a background one, an `assistant` record with `stop_reason` other than
+`tool_use` in its file; for a background one also a `task-notification` in the main transcript with `<status>`
+(`completed` / `failed` / `killed`) and `<task-id>` = the agent id.
 
-- Плагин (`transcript/subagents.ts`) раз в секунду смотрит папку `subagents/` текущей сессии,
-  тейлит новые файлы (с начала: файл появляется вместе с агентом) и строит **карточку** агента:
+- The plugin (`transcript/subagents.ts`) looks at the `subagents/` folder of the current session once a second,
+  tails new files (from the start: the file appears together with the agent) and builds the agent's **card**:
 
   ```
   🤖 Explore · sonnet · medium
   Explore code
-  ⏳ 2 мин · 37 действий
+  ⏳ 2 min · 37 actions
   Read app.ts
   ────
-  [17:02] <текст 1>
-  [18:39] <текст 2>
+  [17:02] <text 1>
+  [18:39] <text 2>
   ```
 
-  Шапка — четыре строки: агент, модель и effort; задача; статус; текущее действие. Строки без
-  данных нет: без задачи нет второй, а четвёртая есть, только пока агент работает и уже вызвал
-  инструмент. Модель в первой строке — модель и effort последнего ответа агента (`message.model` и `effort` записи
-  `assistant`; другое имя — как есть, `<synthetic>` пропускается). До первого ответа там псевдоним
-  из запуска (`model` в meta), если он есть. Карточка codex — см. `codex-card-design.md`.
+  The header is four lines: agent, model and effort; the task; the status; the current action. A line with no
+  data is absent: without a task there is no second line, and the fourth exists only while the agent works and has already called a
+  tool. The model in the first line is the model and effort of the agent's last reply (`message.model` and `effort` of the
+  `assistant` record; another name as is, `<synthetic>` is skipped). Before the first reply it is the alias
+  from the launch (`model` in meta), if there is one. The codex card: see `codex-card-design.md`.
 
-  **Версия модели** (`transcript/model-versions.ts`). Имя Claude делится на линейку и версию:
-  `claude-opus-5-5` → `opus` и `5.5`; имя Codex так же: `gpt-6.1-sol` → `sol` и `6.1`. Плагин помнит
-  самую новую виденную версию каждой линейки в `<stateDir>/model-versions.json`, общем для всех
-  окон (ключи `claude:opus`, `codex:sol`). Версии он видит в ответах субагентов, основной сессии и в
-  `state.json` задач Codex. Карточка пишет только линейку, если версия самая новая из виденных
-  (`opus`), и линейку с версией, если плагин уже видел более новую (`haiku 4.5`). Файл перечитывается,
-  когда его изменило другое окно; запись идёт через временный файл и сливается с тем, что в файле
-  уже есть (по каждой линейке берётся большая версия). Битый файл начинается заново.
+  **Model version** (`transcript/model-versions.ts`). A Claude name is split into a line and a version:
+  `claude-opus-5-5` → `opus` and `5.5`; a Codex name the same way: `gpt-6.1-sol` → `sol` and `6.1`. The plugin remembers
+  the newest seen version of each line in `<stateDir>/model-versions.json`, shared by all
+  windows (keys `claude:opus`, `codex:sol`). It sees versions in replies of subagents, of the main session and in the
+  `state.json` of Codex tasks. The card writes only the line if the version is the newest seen
+  (`opus`), and the line with the version if the plugin has already seen a newer one (`haiku 4.5`). The file is re-read
+  when another window changed it; the write goes through a temporary file and is merged with what the file
+  already has (for each line the greater version is taken). A corrupt file starts over.
 
-  Статус: `⏳` идёт (время, число вызовов инструментов; последний инструмент — следующей строкой), `✅ N мин`,
-  `❌ N мин` (ошибка), `⏹ N мин` (остановлен). Тексты — его text-блоки и narration по порядку, каждый до
-  `MAX_CARD_TEXT = 1500` символов. Перед каждым — местное время его записи в транскрипте
-  (`timestamp`, `[ЧЧ:ММ]`), чтобы было видно, как давно он это написал; текст, который начинается с
-  блока Markdown (заголовок, список, цитата, код), получает время отдельной строкой.
-  Карточка — Markdown, хаб превращает её в текст с entities.
-- Карточка не длиннее одного сообщения (`MAX_CARD = 3800` символов после форматирования). Не влезает
-  новый текст — текущая карточка замораживается (статус «продолжение ниже»), начинается следующая
-  с тем же заголовком.
-- Конец хода в файле агента — ещё не конец агента. Claude Code пишет туда запись «API Error: The
-  response stopped arriving» с `stop_reason: stop_sequence`, когда оборвался лишь ответ
-  классификатора auto mode на вызов инструмента, и агент идёт дальше; стоп-хук тоже может отправить
-  его дальше. Поэтому карточка сразу показывает «✅ …», но закрывается (`final`) только через
-  `SETTLE_MS = 120000` без новых записей. Агент пошёл дальше раньше — та же карточка снова `⏳`,
-  время и действия считаются дальше. Так же и агент, чья карточка уже закрыта и которому написали
-  (SendMessage): один агент — одна карточка, она правится на месте (`reopen`, без `replyTo`),
-  прежние тексты остаются, время и действия продолжаются без паузы между запусками. Сообщение
-  координатора (запись `origin.kind = coordinator`: `user` у простаивающего агента, `attachment`
-  `queued_command` у работающего; первый запрос агента — не оно) добавляет в карточку запись
-  `↪ первая строка` со временем, обрезанную до `MAX_COORDINATOR_TEXT`, и сразу будит карточку.
-  Переполнившаяся карточка делится как обычно. `task-notification` закрывает карточку сразу: такой
-  агент дальше не пойдёт. Исключение — уведомление с `<note>This agent stopped with background work
-  of its own still running…</note>`: Claude Code шлёт его со `<status>completed</status>` каждый раз,
-  когда фоновый агент кончает ход при живой своей задаче; агент пойдёт дальше, такое уведомление не
-  конец.
-- Перезапуск плагина не теряет карточки агентов, которые уже были в транскрипте при старте. Такой агент
-  «спит»: плагин помнит только размер его файла и ничего не отправляет, пока файл не вырос. Тогда история
-  до запомненного размера перечитывается молча, без отправки, и карточка восстанавливается как была: тексты
-  (`shown`, те же части при переполнении), время (старт — время первой записи истории, конец — время записи,
-  закрывшей запуск) и число инструментов. Части до перезапуска считаются показанными в теме, поэтому новая
-  часть отвечает на предыдущую. Если история кончилась после закрытого запуска, агент запечатан, и следующая
-  запись (в том числе сообщение координатора) идёт через продолжение на месте (`reopen`, строка `↪`), как в
-  живом пути. Если история кончилась посреди запуска, карточка продолжается на месте. После восстановления
-  карточка всегда продолжаемая (`reopen`). Для исполнителей `codex` и `volunteer` после восстановления один
-  раз молча опрашивается их задача. Агенты, появившиеся после старта плагина, читаются с начала файла, как
-  и раньше.
-- Агент, закончив ход, может ждать собственную фоновую задачу: плагин ведёт её id из его записей
-  (`toolUseResult.backgroundTaskId` у Bash в фоне, `toolUseResult.taskId` у Monitor, `toolUseResult.agentId` при `isAsync: true` у агента в
-  фоне), задача
-  кончается `<task-notification>` с `<status>` (любым; уведомление Monitor «Monitor event» без
-  `<status>` не конец) или результатом `TaskStop`. Конец хода при живой задаче не закрывает
-  карточку и не пишет «✅»: статус `⏸ <время работы> · <действия> · ждёт фоновую задачу <время ожидания>` (время ожидания, обновляется как у
-  `⏳`). Запись агента (его разбудили) — та же карточка снова `⏳`. Ждёт не дольше
-  `WAIT_MAX_MS = 3600000`, потом карточка закрывается как обычно, а следующая запись откроет новую.
-  Когда кончилась последняя задача, отсчёт `SETTLE_MS` идёт заново. `task-notification` самого
-  агента закрывает карточку сразу, задачи или нет.
-- Плагин шлёт хабу `card {id, sessionId, text, final}` при каждом изменении, не чаще раза в
-  `CARD_EVERY_MS = 3000` на карточку (последнее состояние не теряется; `final` — как только
-  дочитан файл).
-- Хаб: первая версия карточки встаёт в очередь сессии как обычный кусок (так она стоит
-  на своём месте среди текстов) и запоминает `message_id`; следующие версии — `editMessageText`,
-  не чаще раза в `CARD_EDIT_MS = 5000`, промежуточные схлопываются. Пока карточка ещё в очереди,
-  новая версия подменяет текст в очереди. Ошибка «message is not modified» — не ошибка.
-- Карточки хаб держит и на диске, `cards.json` рядом с `outbox.json` (последние `MAX_CARDS = 200`:
-  `text`, `done`, `message_id`), и пишет его, когда карточка появилась, ушла в тему и закончилась —
-  не на каждую правку: промежуточный текст плагин и так пришлёт заново. Перезапущенный хаб правит те
-  же сообщения дальше, а не шлёт карточки заново; законченная остаётся законченной.
-- Карточки шлются, только пока режим включён (как и текст агента).
+  Status: `⏳` running (time, number of tool calls; the last tool on the next line), `✅ <time> · <actions>`,
+  `❌ <time> · <actions>` (error), `⏹ <time> · <actions>` (stopped). The texts are its text blocks and narration in order, each up to
+  `MAX_CARD_TEXT = 1500` characters. Before each one is the local time of its record in the transcript
+  (`timestamp`, `[HH:MM]`), so it is visible how long ago it wrote that; a text that starts with a
+  Markdown block (heading, list, quote, code) gets the time on a separate line.
+  The card is Markdown; the hub turns it into text with entities.
+- A card is no longer than one message (`MAX_CARD = 3800` characters after formatting). If new text does not fit, the current card
+  is frozen (status "⬇️ continued below"), and the next one starts
+  with the same header.
+- The end of a turn in the agent's file is not yet the end of the agent. Claude Code writes an "API Error: The
+  response stopped arriving" record there with `stop_reason: stop_sequence` when only the auto mode classifier's
+  answer on a tool call broke off, and the agent goes on; a stop hook can also send
+  it on. So the card shows "✅ …" at once, but is closed (`final`) only after
+  `SETTLE_MS = 120000` without new records. If the agent went on earlier, the same card is `⏳` again,
+  and time and actions keep counting. The same for an agent whose card is already closed and who was written to
+  (SendMessage): one agent, one card, and it is edited in place (`reopen`, without `replyTo`),
+  the previous texts stay, time and actions continue with no gap between runs. A coordinator
+  message (a record with `origin.kind = coordinator`: `user` for an idle agent, `attachment`
+  `queued_command` for a working one; the agent's first request is not it) adds to the card an entry
+  `↪ first line` with the time, cut to `MAX_COORDINATOR_TEXT`, and wakes the card at once.
+  An overflowing card is split as usual. A `task-notification` closes the card at once: such an
+  agent will not go on. The exception is a notification with `<note>This agent stopped with background work
+  of its own still running…</note>`: Claude Code sends it with `<status>completed</status>` every time
+  a background agent ends a turn while its own task is alive; the agent will go on, so such a notification is not
+  the end.
+- A plugin restart does not lose the cards of agents that were already in the transcript at start. Such an agent
+  "sleeps": the plugin remembers only the size of its file and sends nothing until the file has grown. Then the history
+  up to the remembered size is re-read silently, without sending, and the card is restored as it was: texts
+  (`shown`, the same parts on overflow), time (start is the time of the first history record, end is the time of the record
+  that closed the run) and the number of tools. Parts from before the restart count as shown in the topic, so a new
+  part replies to the previous one. If the history ended after a closed run, the agent is sealed, and the next
+  record (a coordinator message included) goes through continuation in place (`reopen`, the `↪` line), as in the
+  live path. If the history ended in the middle of a run, the card continues in place. After restoring,
+  the card is always continuable (`reopen`). For `codex` and `volunteer` executors, after restoring their task
+  is polled once, silently. Agents that appeared after the plugin start are read from the start of the file, as
+  before.
+- An agent that has ended a turn may wait for its own background task: the plugin tracks its id from the agent's records
+  (`toolUseResult.backgroundTaskId` for a background Bash, `toolUseResult.taskId` for Monitor, `toolUseResult.agentId` with `isAsync: true` for a background
+  agent), and the task
+  ends with a `<task-notification>` with `<status>` (any; a Monitor "Monitor event" notification without
+  `<status>` is not an end) or with a `TaskStop` result. The end of a turn with a live task does not close the
+  card and does not write "✅": the status is `⏸ <run time> · <actions> · waiting for a background task <wait time>` (the wait time is updated like
+  `⏳`). A record from the agent (it was woken) makes the same card `⏳` again. It waits no longer than
+  `WAIT_MAX_MS = 3600000`, then the card is closed as usual, and the next record opens a new one.
+  When the last task ends, the `SETTLE_MS` countdown starts anew. The agent's own `task-notification`
+  closes the card at once, task or no task.
+- The plugin sends the hub `card {id, sessionId, text, final}` on every change, no more often than once per
+  `CARD_EVERY_MS = 3000` per card (the latest state is not lost; `final` as soon as
+  the file is read to the end).
+- Hub: the first version of the card goes into the session queue as an ordinary chunk (so it stands
+  in its place among the texts) and remembers the `message_id`; the next versions are `editMessageText`,
+  no more often than once per `CARD_EDIT_MS = 5000`, intermediate ones collapse. While the card is still in the queue,
+  a new version replaces the text in the queue. The error "message is not modified" is not an error.
+- The hub keeps cards on disk too, in `cards.json` next to `outbox.json` (the last `MAX_CARDS = 200`:
+  `text`, `done`, `message_id`), and writes it when a card appeared, went to the topic and finished,
+  not on every edit: the plugin will resend the intermediate text anyway. A restarted hub edits the
+  same messages further instead of sending the cards again; a finished one stays finished.
+- Cards are sent only while the mode is on (like the agent's text).
 
-## 4. Автозапуск и управление сессиями
+## 4. Autostart and session control
 
-### Хаб работает всегда
+### The hub runs always
 
-- `TELEGRAM_HUB_IDLE_MS=0` (или `"alwaysOn": true` в `config.json`) — хаб не выключается по простою.
-- `scripts/install-hub-task.ps1` регистрирует задачу Планировщика «при входе пользователя»
-  (только в интерактивной сессии, иначе окна сессий не видны), скрытое окно, перезапуск при сбое;
-  задача запускает `bun plugin/src/hub/main.ts` из репозитория с `TELEGRAM_HUB_IDLE_MS=0`.
-  `scripts/uninstall-hub-task.ps1` удаляет. Ставит пользователь сам.
-- Окна, как и раньше, сами поднимают хаб, если его нет.
+- `TELEGRAM_HUB_IDLE_MS=0` (or `"alwaysOn": true` in `config.json`): the hub does not shut down on idle.
+- `scripts/install-hub-task.ps1` registers a Task Scheduler task "at user logon"
+  (only in an interactive session, otherwise the session windows are not visible), a hidden window, restart on failure;
+  the task runs `bun plugin/src/hub/main.ts` from the repository with `TELEGRAM_HUB_IDLE_MS=0`.
+  `scripts/uninstall-hub-task.ps1` removes it. The user installs it himself.
+- The windows, as before, start the hub themselves if it is not running.
 
-### Что хаб помнит о сессии
+### What the hub remembers about a session
 
-`SessionRecord` получает `cwd` и `account`. Плагин в `hello`/`session` сообщает `cwd` и
-`configDir`; аккаунт — номер в начале имени папки профиля cswap (`…\sessions\1-user_example.com`
-→ `1`), иначе не задан. Запоминается последнее значение. У старых записей без `cwd` хаб берёт
-`cwd` из транскрипта сессии (поле `cwd` записей) в `~/.claude/projects/*/<id>.jsonl`.
+`SessionRecord` gets `cwd` and `account`. The plugin reports `cwd` and
+`configDir` in `hello`/`session`; the account is the number at the start of the cswap profile folder name (`…\sessions\1-user_example.com`
+→ `1`), otherwise not set. The last value is remembered. For old records without `cwd` the hub takes
+`cwd` from the session transcript (the `cwd` field of the records) in `~/.claude/projects/*/<id>.jsonl`.
 
-### Запуск
+### Launch
 
 `config.json`:
 
@@ -178,52 +180,52 @@ Claude Code пишет субагента в `<папка транскрипта
 }
 ```
 
-Подстановки: `{cwd}`, `{account}`, `{session}` — в каждом элементе. Значения проверяются:
-`session` — UUID, `account` — `[\w.@-]+`, `cwd` — существующая папка. Текст сообщений в команду не
-попадает никогда. `& exit /b 0` закрывает вкладку и после `/stop`.
+Substitutions: `{cwd}`, `{account}`, `{session}` in every element. The values are checked:
+`session` is a UUID, `account` is `[\w.@-]+`, `cwd` is an existing folder. The message text never
+goes into the command. `& exit /b 0` closes the tab after `/stop` too.
 
-- Сообщение (или файл) в топик сессии без окна: нет `launch` в конфиге — как раньше, «сессия сейчас
-  не активна». Есть — хаб отвечает «🚀 Запускаю сессию (аккаунт N)…», запускает команду, сообщение
-  ждёт в памяти. Подключилась сессия — хаб доставляет ждущие сообщения (через `READY_DELAY_MS =
-  1500` после hello, чтобы Claude Code успел зарегистрировать канал) и пишет «✅ Сессия запущена».
-  Не подключилась за `timeoutSec` — «⚠️ Сессия не запустилась за N с», ждущие сообщения
-  выбрасываются (в логе — их число).
-- Блокировка: пока сессия запускается, повторный запуск не делается, новые сообщения ждут вместе с
-  первым. Окно сессии подключено — запуска нет.
-- Аккаунт: `/run N` → N; иначе последний известный; иначе сессия не запускается, в теме —
-  «аккаунт неизвестен» с подсказкой `/run N`. Аккаунта по умолчанию нет.
+- A message (or file) to the topic of a session without a window: no `launch` in the config: as before, "the session is
+  not active right now". With it, the hub answers "🚀 Starting the session (account N)…", runs the command, and the message
+  waits in memory. When the session connects, the hub delivers the waiting messages (after `READY_DELAY_MS =
+  1500` from hello, so Claude Code has time to register the channel) and writes "✅ Session started".
+  If it did not connect within `timeoutSec`: "⚠️ The session did not start within N s", the waiting messages
+  are dropped (the log has their count).
+- Lock: while a session is starting, no second launch is made, and new messages wait together with the
+  first. A session window is connected: no launch.
+- Account: `/run N` → N; otherwise the last known; otherwise the session is not started, and the topic gets
+  "⚠️ The session's account is unknown, use /run N.". There is no default account.
 
-### Команды в топике (обрабатывает хаб)
+### Commands in the topic (handled by the hub)
 
-- `/run [N]` — запустить сессию топика (на аккаунте N). Уже запущена — «уже работает».
-- `/stop` — завершить сессию: хаб шлёт плагину `terminate`, плагин завершает процесс Claude Code
-  (`CLAUDE_PID` или родитель процесса `bun run`, с проверкой имени `claude.exe`). Окно отключилось —
-  «⏹ Сессия завершена»; нет за `STOP_TIMEOUT_MS = 15000` — «⚠️ не удалось завершить».
-- `/cleanup [указания]` — компакт, остановка, очистка `invoked_skills` в транскрипте и запуск той же
-  сессии. Описана в `cleanup-design.md`.
-- `/cleanup` требует окна: если сессия закрыта и настроен `launch`, хаб запускает её обычным путём,
-  показывает обычные уведомления запуска и ставит cleanup после подключения окна. Без `launch`
-  сохраняется ответ «Сессия не запущена». Закрытая сессия для `/stop` не запускается: команда
-  отвечает «Сессия не запущена».
+- `/run [N]` — start the topic's session (on account N). Already running: "Session is already running".
+- `/stop` — end the session: the hub sends `terminate` to the plugin, and the plugin ends the Claude Code process
+  (`CLAUDE_PID` or the parent of the `bun run` process, checking the name `claude.exe`). The window disconnected:
+  "⏹ Session ended"; not within `STOP_TIMEOUT_MS = 15000`: "⚠️ Could not end the session within N s".
+- `/cleanup [instructions]` — compact, stop, clean `invoked_skills` in the transcript and start the same
+  session. Described in `cleanup-design.md`.
+- `/cleanup` needs a window: if the session is closed and `launch` is configured, the hub starts it the usual way,
+  shows the usual launch notices and queues cleanup after the window connects. Without `launch`
+  the answer "Session is not running" stays. A closed session is not started for `/stop`: the command
+  answers "Session is not running".
 
-Команды добавляются в меню бота.
+The commands are added to the bot menu.
 
-### Без диалога доверия каналу
+### Without the channel trust dialog
 
-`--dangerously-load-development-channels` спрашивает подтверждение при каждом запуске, автозапуск
-на нём встанет. Пользователь один раз кладёт в managed settings
-(`C:\Program Files\ClaudeCode\managed-settings.json`, нужны права администратора):
+`--dangerously-load-development-channels` asks for confirmation on every launch, and autostart
+would stall on it. The user puts this once into managed settings
+(`C:\Program Files\ClaudeCode\managed-settings.json`, administrator rights needed):
 
 ```json
 { "channelsEnabled": true, "allowedChannelPlugins": [{ "plugin": "telegram-hub", "marketplace": "telegram-hub" }] }
 ```
 
-и запускает с `--channels plugin:telegram-hub@telegram-hub` (в шаблоне и в `telegram-hub-profile.ps1`).
+and launches with `--channels plugin:telegram-hub@telegram-hub` (in the template and in `telegram-hub-profile.ps1`).
 
-## Безопасность
+## Security
 
-- Кнопки разрешений, `/run`, `/stop` и автозапуск принимаются только от `allowFrom` в группе
-  `groupId` — тот же фильтр, что и для сообщений.
-- Команда запуска — только из конфига, подстановки проверяются, текст пользователя в неё не идёт.
-- Разрешение из Telegram — осознанное ослабление: кто пишет в топик от имени пользователя, может
-  одобрять команды. Этот риск принят.
+- Permission buttons, `/run`, `/stop` and autostart are accepted only from `allowFrom` in the group
+  `groupId`, the same filter as for messages.
+- The launch command comes only from the config, substitutions are checked, and user text does not go into it.
+- A permission from Telegram is a deliberate weakening: whoever writes to the topic as the user can
+  approve commands. This risk is accepted.

@@ -1,248 +1,248 @@
-# telegram-hub: команды оболочки из топика (`/pwsh`, `/cmd`, `/bash`)
+# telegram-hub: shell commands from a topic (`/pwsh`, `/cmd`, `/bash`)
 
-Основа: `hub-iteration-2-design.md` (хаб, автозапуск, карточки субагентов).
+Basis: `hub-iteration-2-design.md` (hub, autostart, subagent cards).
 
-Звук служебных сообщений: информационные сообщения бота, команды и успешные результаты идут без звука;
-предупреждения и ошибки — со звуком. Запросы разрешения и опросы, которым нужен ответ пользователя,
-тоже идут со звуком. Это правило не меняет звук текста агента и завершения его хода.
+Sound of service messages: informational bot messages, commands and successful results are silent;
+warnings and errors make a sound. Permission requests and polls that need a user's answer also make
+a sound. This rule does not change the sound of agent text or of the end of its turn.
 
-## Зачем
+## Why
 
-В папке сессии нередко нужно запустить миграцию, ручной прогон и подобное. Когда компьютера нет
-рядом, это выглядит так: подключиться удалённо, ввести команду, отключиться, ждать, вернуться,
-проверить, не упало ли, и написать агенту результат. Нужно запускать команду прямо из топика
-сессии. Пользователь видит, как она идёт, а агент сам узнаёт результат и сам за него берётся.
+In the session's folder you often need to run a migration, a manual run and the like. When the computer is not
+nearby, it looks like this: connect remotely, type the command, disconnect, wait, come back,
+check whether it failed, and write the result to the agent. The command should run right from the session's
+topic. The user sees how it goes, and the agent learns the result itself and takes it up itself.
 
-## Цели
+## Goals
 
-1. Команда из топика запускается в папке сессии: cmd, PowerShell или Git Bash.
-2. Пока команда идёт, в топике видно, что она жива и что выводит. Без потока сообщений.
-3. Когда команда закончилась, агент **сам просыпается** с результатом: команда, код выхода, время,
-   хвост вывода и путь к полному логу.
-4. Команду можно остановить из топика.
+1. A command from the topic runs in the session's folder: cmd, PowerShell or Git Bash.
+2. While the command runs, the topic shows that it is alive and what it prints. No stream of messages.
+3. When the command finishes, the agent **wakes up by itself** with the result: the command, exit code, time,
+   the tail of the output and the path to the full log.
+4. The command can be stopped from the topic.
 
-## Не цели
+## Non-goals
 
-- Интерактивные команды. stdin закрыт с самого начала; команда, которая ждёт ввода, висит, пока её не
-  остановят.
-- Стриминг каждой строки в чат или агенту.
-- Запуск команд агентом через этот механизм. У агента для этого свой Bash.
+- Interactive commands. stdin is closed from the start; a command that waits for input hangs until it is
+  stopped.
+- Streaming every line to the chat or to the agent.
+- Running commands by the agent through this mechanism. The agent has its own Bash for that.
 
-## Антицели
+## Anti-goals
 
-- Перезапуск хаба убивает идущую миграцию. Недопустимо: процесс переживает перезапуск хаба, а
-  результат после перезапуска доходит так же, как без него.
-- Агент получает вывод построчно или по кускам и реагирует на каждый.
-- Кто-то, кроме `allowFrom`, может запустить команду.
+- A hub restart kills a running migration. Not acceptable: the process survives a hub restart, and the
+  result after the restart arrives the same way as without it.
+- The agent gets output line by line or in chunks and reacts to each.
+- Anyone outside `allowFrom` can run a command.
 
-## Как это выглядит пользователю
+## What the user sees
 
-### Команды (обрабатывает хаб, как `/run` и `/stop`)
+### Commands (handled by the hub, like `/run` and `/stop`)
 
-| Команда | Оболочка |
+| Command | Shell |
 |---|---|
-| `/pwsh <текст>` | PowerShell: `pwsh`, если он есть в PATH, иначе `powershell.exe` |
-| `/cmd <текст>` | `cmd.exe /s /c` |
-| `/bash <текст>` | Git Bash, `bash -lc`. Путь — `exec.bash` в `config.json`, по умолчанию `C:\Program Files\Git\bin\bash.exe` |
+| `/pwsh <text>` | PowerShell: `pwsh` if it is in PATH, otherwise `powershell.exe` |
+| `/cmd <text>` | `cmd.exe /s /c` |
+| `/bash <text>` | Git Bash, `bash -lc`. The path is `exec.bash` in `config.json`, by default `C:\Program Files\Git\bin\bash.exe` |
 
-Текст после команды передаётся оболочке как есть. У `/pwsh` и `/bash` он может быть многострочным. У
-`/cmd` — только одна строка: cmd.exe с `/c` выполняет текст только до первого перевода строки, а
-`.cmd`-файл ведёт себя не так, как строки, набранные в окне. На многострочный `/cmd` хаб отвечает
-отказом и советует `/pwsh` или `/bash`. Пустой текст → ответ в топик «`/pwsh npm run migrate`». Нет файла Git Bash → «Git Bash не найден: <путь>. Укажи exec.bash в
-config.json». Все три команды добавляются в меню бота рядом с `/info`.
+The text after the command is passed to the shell as is. For `/pwsh` and `/bash` it can be multi-line. For
+`/cmd` it is a single line only: cmd.exe with `/c` executes the text only up to the first newline, and a
+`.cmd` file behaves differently from lines typed in a window. For a multi-line `/cmd` the hub replies with
+a refusal and advises `/pwsh` or `/bash`. Empty text → a reply to the topic "`/pwsh npm run migrate`". No Git Bash file → "Git Bash not found: <path>. Set exec.bash in
+config.json". All three commands are added to the bot menu next to `/info`.
 
-### Окружение — как в новом окне терминала
+### Environment — as in a new terminal window
 
-Команда должна вести себя так же, как набранная в свежем окне терминала. Поэтому:
+The command must behave the same as if typed in a fresh terminal window. Therefore:
 
-- `PATH` и остальные переменные собираются заново, как при входе в систему: машинные из реестра,
-  затем `HKCU\Volatile Environment`, затем пользовательские; `Path` — машинный плюс пользовательский.
-  От хаба берётся только фиксированный список системных переменных, которых в этих ключах нет
+- `PATH` and the other variables are built anew, as at login: machine ones from the registry,
+  then `HKCU\Volatile Environment`, then user ones; `Path` is machine plus user.
+  From the hub only a fixed list of system variables is taken that are not in these keys
   (`SystemRoot`, `windir`, `USERPROFILE`, `APPDATA`, `ProgramFiles*`, `PROCESSOR_*`, `PATHEXT`,
-  `ComSpec` и подобные), и больше ничего. Окружение хаба может быть старым, с момента входа в систему,
-  или нести переменные окна Claude Code: `CLAUDE_CONFIG_DIR`, перенаправленный `TEMP`/`TMPDIR` и
-  подобные. Если реестр не читается, команда получает окружение хаба без переменных Claude Code и хаба.
-- Профили грузятся так же, как в интерактивном окне: `$PROFILE` у PowerShell, login-профиль у Git
-  Bash, AutoRun у cmd (без `/d`).
+  `ComSpec` and similar), and nothing else. The hub's environment may be old, from the time of
+  login, or carry variables of the Claude Code window: `CLAUDE_CONFIG_DIR`, a redirected `TEMP`/`TMPDIR` and
+  similar. If the registry cannot be read, the command gets the hub's environment without the Claude Code and hub variables.
+- Profiles are loaded as in an interactive window: `$PROFILE` for PowerShell, the login profile for Git
+  Bash, AutoRun for cmd (without `/d`).
 
-### Падение — на первой ошибке
+### Fail on the first error
 
-Цепочка команд останавливается на первой упавшей, и итоговый код выхода — её код. Иначе
-`npm run build; npm run migrate` после упавшего build даст «✅ код 0», и агент поверит в успех.
+A chain of commands stops at the first failed one, and the final exit code is its code. Otherwise
+`npm run build; npm run migrate` after a failed build would give "✅ code 0", and the agent would believe in success.
 
-- PowerShell: `$ErrorActionPreference = 'Stop'`. После каждой внешней команды с ненулевым
-  `$LASTEXITCODE` выполнение прерывается с этим кодом. Windows PowerShell 5.1 так сам не умеет, поэтому
-  обёртка переписывает скрипт: после каждой инструкции в любом блоке, вложенные (циклы, `if`, функции)
-  тоже, идёт проверка `$LASTEXITCODE`, и переписанный скрипт выполняется целиком, так что `using`,
-  `param`, функции и области видимости работают как написаны. В pwsh 7.3+ та же проверка заменяет
-  `$PSNativeCommandUseErrorActionPreference`, которая превратила бы код команды в ошибку с кодом 1.
-  Если внешние команды не падали, а упал командлет, код 1. Вывод внешней команды в stderr падением не
-  считается: инструкция, которая перенаправляет stderr (`2>&1`, `2>$null`), выполняется с
-  `'Continue'`, потому что 5.1 с `'Stop'` прерывает её на первой строке stderr; для неё считается только
-  код выхода, а после неё возвращается то значение предпочтения, которое было до неё (в том числе
-  выставленное самим пользователем). Блоки `begin`/`process`/`end` работают как написаны. Инструкции
-  внутри `data { }` не проверяются: ограниченный язык этого блока не допускает вставок. Чтобы пройти
-  мимо ожидаемого ненулевого кода (robocopy, `git diff --quiet`), команду оборачивают:
+- PowerShell: `$ErrorActionPreference = 'Stop'`. After each external command with a non-zero
+  `$LASTEXITCODE`, execution is aborted with that code. Windows PowerShell 5.1 cannot do this by itself, so the
+  wrapper rewrites the script: after each statement in any block, nested ones (loops, `if`, functions)
+  too, a `$LASTEXITCODE` check is inserted, and the rewritten script runs as a whole, so `using`,
+  `param`, functions and scopes work as written. In pwsh 7.3+ the same check replaces
+  `$PSNativeCommandUseErrorActionPreference`, which would turn a command's code into an error with code 1.
+  If external commands did not fail but a cmdlet did, the code is 1. Output of an external command to stderr is not
+  counted as a failure: a statement that redirects stderr (`2>&1`, `2>$null`) runs with
+  `'Continue'`, because 5.1 with `'Stop'` aborts it on the first stderr line; for it only the
+  exit code counts, and after it the preference value that was before it is restored (including one
+  set by the user). The `begin`/`process`/`end` blocks work as written. Statements
+  inside `data { }` are not checked: the restricted language of that block does not allow insertions. To get
+  past an expected non-zero code (robocopy, `git diff --quiet`), the command is wrapped:
   `cmd /c "… & exit /b 0"`.
-- Git Bash: `set -eo pipefail` перед текстом пользователя.
-- cmd: одна строка, поэтому код — код этой строки; `&&` и `||` пользователь пишет сам.
+- Git Bash: `set -eo pipefail` before the user's text.
+- cmd: one line, so the code is the code of that line; `&&` and `||` are written by the user.
 
-Требование для тестов: `false-команда; echo дальше` (в каждой оболочке своя) не печатает «дальше» и
-кончается кодом упавшей команды.
+Test requirement: `false-command; echo next` (its own in each shell) does not print "next" and
+ends with the code of the failed command.
 
-### Старые и повторные команды
+### Old and repeated commands
 
-Хаб хранит offset `getUpdates` в `poll-offset.json`, но команда, которую хаб не успел отметить обработанной, и
-команды, пришедшие пока он был выключен, приходят после старта из очереди Telegram, где лежат до 24 ч. Одна и
-та же команда может прийти дважды.
+The hub keeps the `getUpdates` offset in `poll-offset.json`, but a command the hub did not manage to mark as handled, and
+commands that arrived while it was off, come after start from the Telegram queue, where they stay for up to 24 h. The same
+command can arrive twice.
 
-- Каждый запуск записывается в `execs.json` с чатом и `message_id` команды. Если это сообщение уже
-  записано, второй раз команда не запускается, а в лог хаба пишется, что повтор пропущен.
-- Команда старше `EXEC_MAX_AGE = 2 мин` (по `date` сообщения) сама не запускается. В топик приходит
-  карточка «⏸ Команда пришла N мин назад, пока хаб был выключен» с кнопкой «▶ Запустить». Нажатие
-  запускает её как обычно.
+- Every launch is recorded in `execs.json` with the chat and the command's `message_id`. If this message is already
+  recorded, the command is not run a second time, and the hub log notes that a repeat was skipped.
+- A command older than `EXEC_MAX_AGE = 2 min` (by the message's `date`) does not run by itself. A card
+  "⏸ The command arrived N min ago while the hub was off" with a "▶ Run" button arrives in the topic. Pressing it
+  runs it as usual.
 
-Правила те же, что у остальных команд топика: только группа из конфига, только отправители из
-`allowFrom` (`router.ts`), только топик, у которого есть сессия. Папка — `cwd` из записи сессии; если
-её нет, то из транскрипта, как при автозапуске; если нет и там — отказ в топик. Окно сессии для запуска
-не нужно: команда идёт и тогда, когда сессия остановлена.
+The rules are the same as for the other topic commands: only the group from the config, only senders from
+`allowFrom` (`router.ts`), only a topic that has a session. The folder is `cwd` from the session record; if
+it is missing, then from the transcript, as at autostart; if it is missing there too, a refusal to the topic. A session window is
+not needed to run: the command runs even when the session is stopped.
 
-Одновременно может идти несколько команд, у каждой своя карточка. Таймаута нет.
+Several commands can run at the same time, each with its own card. There is no timeout.
 
-### Карточка в топике
+### Card in the topic
 
-Одно сообщение на запуск. Хаб правит его не чаще раза в минуту и только когда что-то
-изменилось:
+One message per launch. The hub edits it no more than once a minute and only when something
+changed:
 
 ```
-▶ PowerShell · 3 мин 12 с
+▶ PowerShell · 3 min 12 s
 `npm run migrate`
-‹последние 10 строк вывода, блоком кода›
-[⏹ Остановить]
+‹last 10 lines of output, as a code block›
+[⏹ Stop]
 ```
 
-Когда команда закончилась, карточка правится сразу, кнопка снимается:
+When the command finishes, the card is edited at once, the button is removed:
 
 ```
-✅ код 0 · 4 мин 05 с          (❌ код 1 …; ⏹ остановлена …; ⚠️ прервана: <причина>)
+✅ code 0 · 4 min 05 s          (❌ code 1 …; ⏹ stopped …; ⚠️ interrupted: <reason>)
 `npm run migrate`
-‹последние 10 строк›
+‹last 10 lines›
 ```
 
-Если лог длиннее хвоста в карточке, следом приходит файлом (`<id>.log`). Telegram не принимает файлы больше 50 МБ, поэтому из такого лога уходят последние 50 МБ с
-пометкой об этом.
+If the log is longer than the tail in the card, it follows as a file (`<id>.log`). Telegram does not accept files over 50 MB, so from such a log the last 50 MB are sent, with a
+note about it.
 
-Кнопка «Остановить» убивает дерево процессов (`taskkill /T /F /PID` на Windows). Нажать её могут
-только отправители из `allowFrom` (`routeCallback`). Команда, которая успела закончиться до нажатия,
-не убивается и показывает свой код. «⏹ остановлена» — когда после нажатия раннер исчез без
-`.exit.json` или записал ненулевой код (скорее всего, от самого убийства); код 0 после нажатия
-показывается как «✅ код 0».
+The "Stop" button kills the process tree (`taskkill /T /F /PID` on Windows). Only senders from `allowFrom`
+(`routeCallback`) can press it. A command that managed to finish before the press
+is not killed and shows its code. "⏹ stopped" is shown when after the press the runner disappeared without
+`.exit.json` or wrote a non-zero code (most likely from the kill itself); code 0 after the press is
+shown as "✅ code 0".
 
-### Что получает агент
+### What the agent gets
 
-Когда команда закончилась, хаб доставляет сессии запись `inbound`, так же как сообщение из топика:
-агент просыпается, а если ход идёт, получает её в этом ходе.
+When the command finishes, the hub delivers an `inbound` record to the session, the same way as a message from the topic:
+the agent wakes up, and if a turn is running, it gets the record in that turn.
 
 ```
-Команда из топика закончилась: ❌ код 1 за 4 мин 05 с.
-Оболочка: PowerShell, папка: C:\code\app
-Команда: npm run migrate
-Полный лог: <домашняя папка>\.claude\channels\telegram-hub\exec\<id>.log
-Последние 30 строк:
+A command from the topic finished: ❌ code 1 in 4 min 05 s.
+Shell: PowerShell, folder: C:\code\app
+Command: npm run migrate
+Full log: <home folder>\.claude\channels\telegram-hub\exec\<id>.log
+Last 30 lines:
 ‹…›
 ```
 
-В `meta` — `source: "exec"`, `exec_id`, `exit_code`, чтобы это не путалось с текстом пользователя. О
-старте команды агенту не сообщается.
+`meta` has `source: "exec"`, `exec_id`, `exit_code`, so that it is not confused with user text. The agent is
+not told about the start of a command.
 
-Если окна у сессии нет, результат будит её, как сообщение: при настроенном `launch` хаб запускает
-сессию и придерживает результат до подключения (механизм `held`). Без `launch` результат остаётся
-только в карточке, плюс уведомление в топик «сессия не запущена, агенту не доставлено».
+If the session has no window, the result wakes it like a message: with `launch` configured, the hub starts the
+session and holds the result until it connects (the `held` mechanism). Without `launch`, the result stays
+only in the card, plus a notification to the topic "⚠️ The session is not running: the command result was not delivered to the agent".
 
-## Как это устроено
+## How it works
 
-### Процесс не зависит от хаба
+### The process does not depend on the hub
 
-Хаб не держит дочерний процесс у себя. Он запускает отсоединённый маленький раннер
-(`bun hub/exec-runner.ts <id>`). Раннер:
+The hub does not keep the child process itself. It starts a detached small runner
+(`bun hub/exec-runner.ts <id>`). The runner:
 
-1. запускает оболочку в нужной папке, stdin закрыт;
-2. пишет stdout и stderr в `exec/<id>.log` по мере поступления, в порядке поступления;
-3. пока жив, раз в 10 с обновляет время файла `exec/<id>.alive` (пульс);
-4. по завершении атомарно пишет `exec/<id>.exit.json`: `{code, endedAt}`.
+1. starts the shell in the needed folder, stdin closed;
+2. writes stdout and stderr to `exec/<id>.log` as they arrive, in arrival order;
+3. while alive, every 10 s updates the modification time of the file `exec/<id>.alive` (the heartbeat);
+4. on completion, atomically writes `exec/<id>.exit.json`: `{code, endedAt}`.
 
-Хаб узнаёт состояние **только по файлам**: размер и хвост лога, пульс, появился ли `.exit.json`. Поэтому
-обычный случай и случай «хаб перезапустился, пока команда шла» — один и тот же код. Список запусков
-хаб держит в `execs.json` в папке состояния (по образцу `cards.json`): `id`, `sessionId`, id
-сообщения с командой, оболочка, текст, `cwd`, `pid` раннера, `startedAt`, чем кончилось, доставлен ли
-результат агенту. Карточка запуска живёт в `cards.json` вместе с кнопками. Перезапущенный хаб читает
-`execs.json` и продолжает следить за незаконченными запусками. «Остановить» убивает дерево процессов
-раннера: в нём оболочка и всё, что она запустила.
+The hub learns the state **only from files**: the log size and tail, the heartbeat, whether `.exit.json` appeared. So
+the usual case and the case "the hub restarted while the command was running" are the same code. The list of launches
+the hub keeps in `execs.json` in the state folder (modeled on `cards.json`): `id`, `sessionId`, id of the
+message with the command, the shell, the text, `cwd`, the runner's `pid`, `startedAt`, how it ended, whether the
+result was delivered to the agent. The launch card lives in `cards.json` together with the buttons. A restarted hub reads
+`execs.json` and goes on watching unfinished launches. "Stop" kills the runner's process tree:
+in it are the shell and everything it started.
 
-Результат, который агенту не дошёл (сессия запускалась, а запуск не удался; хаб упал между концом
-команды и доставкой), уходит снова, когда сессия подключится.
+A result that did not reach the agent (the session was starting and the start failed; the hub crashed between the end of the
+command and the delivery) is sent again when the session connects.
 
-Команда, которая закончилась, пока хаба не было, при старте хаба получает итоговую карточку и лог
-сразу, а агенту её результат сразу не уходит: окна сессий в этот момент как раз переподключаются, и
-запуск второй копии сессии или «не доставлено» были бы ошибкой. Результат получает окно, когда
-подключится. Так же ждёт результат команды, которая закончилась в первые 10 с после старта хаба, если
-у её сессии в этот момент нет окна; с окном он уходит сразу. Через 10 с после старта (пауза переподключения окна плюс задержка готовности) результаты
-сессий, у которых окна так и нет, идут обычным путём: запуск сессии при настроенном `launch`, иначе
-уведомление «не доставлено».
+A command that finished while the hub was down gets the final card and the log at hub start
+at once, but its result does not go to the agent at once: session windows are just reconnecting at that moment, and
+starting a second copy of the session or "not delivered" would be a mistake. The window gets the result when it
+connects. A command that finished in the first 10 s after the hub start waits the same way if
+its session has no window at that moment; with a window it goes at once. After 10 s from the start (the window's reconnect pause plus the readiness delay) the results
+of sessions that still have no window go the normal way: a session launch if `launch` is configured, otherwise the
+"not delivered" notification.
 
-Процесс пропал, а `.exit.json` нет (машину перезагрузили, раннер убили) → карточка «⚠️ прервана:
-процесс исчез», агенту уходит то же с хвостом лога. Живым раннер считается, только пока жив его pid
-**и** пульс свежее 30 с: после перезагрузки, выхода из системы или выключения с Fast Startup тот же pid
-может достаться чужому процессу, и такой запуск кончается как «процесс исчез», а не висит вечно.
-«Остановить» убивает дерево только при свежем пульсе; без него, и если `.exit.json` уже есть, ничего
-не убивается. Если хаб сам заметил разрыв в своих проверках больше 10 с (машина спала вместе с
-раннерами), старый пульс прощается ещё 30 с, пока раннер не обновит его.
+The process vanished and there is no `.exit.json` (the machine was rebooted, the runner was killed) → card "⚠️ interrupted:
+the process disappeared", and the agent gets the same with the log tail. The runner counts as alive only while its pid is alive
+**and** the heartbeat is fresher than 30 s: after a reboot, a logout or a shutdown with Fast Startup the same pid
+may go to a foreign process, and such a launch ends as "the process disappeared" instead of hanging forever.
+"⏹ Stop" kills the tree only with a fresh heartbeat; without it, and if `.exit.json` already exists, nothing
+is killed. If the hub itself noticed a gap in its checks of more than 10 s (the machine slept together with the
+runners), the old heartbeat is forgiven for another 30 s until the runner updates it.
 
-### Кодировка
+### Encoding
 
-Вывод в лог и в Telegram — UTF-8. cmd и Windows PowerShell 5.1 на русской Windows по умолчанию пишут
-в OEM-кодировке (cp866). Раннер включает UTF-8 перед командой пользователя. Для PowerShell это
-`[Console]::OutputEncoding = [Text.Encoding]::UTF8` в обёртке. cmd читает кодовую страницу один раз на
-строку, поэтому `chcp 65001 & echo привет` в одной строке всё равно печатает «??????». Внешний cmd
-переключает консоль на UTF-8 и запускает cmd пользователя, а текст получает через переменную окружения
-(`!TG_EXEC_LINE!`), так что сам его не разбирает. Требование: кириллица в выводе `dotnet ef`, `npm` и
-`echo привет` читается в карточке.
+Output to the log and to Telegram is UTF-8. cmd and Windows PowerShell 5.1 on a Russian Windows write
+in the OEM encoding (cp866) by default. The runner turns on UTF-8 before the user's command. For PowerShell this is
+`[Console]::OutputEncoding = [Text.Encoding]::UTF8` in the wrapper. cmd reads the code page once per
+line, so `chcp 65001 & echo <Russian word>` in one line still prints "??????". The outer cmd
+switches the console to UTF-8 and starts the user's cmd, and gives it the text through an environment variable
+(`!TG_EXEC_LINE!`), so it does not parse it itself. Requirement: Cyrillic in the output of `dotnet ef`, `npm` and
+`echo <Russian word>` reads correctly in the card.
 
-### Карточка
+### Card
 
-Использует ту же очередь сообщений и логику правок, что карточки субагентов (outbox, троттлинг, «not
-modified» — не ошибка, `cards.json`). Хвост — последние строки лога, обрезанные по длине так, чтобы
-карточка влезла в сообщение. Возвраты каретки (прогресс-бары) схлопываются: от строки остаётся то, что
-после последнего `\r`.
+Uses the same message queue and edit logic as subagent cards (outbox, throttling, "not
+modified" is not an error, `cards.json`). The tail is the last lines of the log, trimmed by length so that the
+card fits in a message. Carriage returns (progress bars) are collapsed: of a line, what is
+after the last `\r` remains.
 
-### Логи
+### Logs
 
-`exec/` в папке состояния. Хранятся последние 50 запусков; старые удаляются вместе с записью в
-`execs.json`, когда начинается новый.
+`exec/` in the state folder. The last 50 launches are kept; older ones are deleted together with their entry in
+`execs.json` when a new one starts.
 
-## Безопасность
+## Security
 
-`/pwsh` — выполнение произвольных команд на машине в обход режима разрешений Claude Code. Граница —
-та же, что для сообщений и кнопок: группа из конфига плюс `allowFrom`. Новых способов это обойти нет;
-README говорит прямо, что попасть в `allowFrom` теперь значит получить shell. Текст команды никогда
-не подставляется в шаблон с кавычками: он передаётся оболочке отдельным аргументом.
+`/pwsh` is execution of arbitrary commands on the machine, bypassing Claude Code's permission mode. The boundary is
+the same as for messages and buttons: the group from the config plus `allowFrom`. This adds no new way around it;
+the README says plainly that getting into `allowFrom` now means getting a shell. The command text is never
+substituted into a quoted template: it is passed to the shell as a separate argument.
 
-## Принятые решения
+## Decisions made
 
-- Процесс запускает хаб через отсоединённый раннер, а не модуль сессии: модуль убивает свои процессы
-  при перезагрузке, а перезагрузка бывает на каждую правку плагина.
-- Три команды вместо флага выбора оболочки: каждую видно в меню, и не нужно разбирать префикс.
-- PowerShell — оболочка по умолчанию (`/pwsh`): он выполняет и то, что обычно пишут в cmd.
-- Таймаута нет; несколько команд одновременно можно.
-- Правка карточки раз в минуту, 10 строк в карточке, 30 строк агенту, хранится 50 логов.
-- Агенту — только итог, о старте он не узнаёт.
-- Многострочный `/cmd` не выполняется, хаб советует `/pwsh` или `/bash`.
-- Окружение как в новом окне: переменные из реестра, профили грузятся.
-- Падение на первой ошибке в PowerShell и Git Bash (надёжнее: ложный успех опаснее остановки).
-- Команда старше 2 минут сама не запускается, только по кнопке; повтор того же сообщения не запускается.
+- The hub starts the process through a detached runner, not the session module: the module kills its processes
+  on reload, and a reload happens on every plugin edit.
+- Three commands instead of a shell-choice flag: each is visible in the menu, and no prefix needs parsing.
+- PowerShell is the default shell (`/pwsh`): it also runs what is usually written for cmd.
+- No timeout; several commands can run at the same time.
+- Card edit once a minute, 10 lines in the card, 30 lines to the agent, 50 logs kept.
+- The agent gets only the result, it does not learn about the start.
+- A multi-line `/cmd` is not run, the hub advises `/pwsh` or `/bash`.
+- Environment as in a new window: variables from the registry, profiles are loaded.
+- Fail on the first error in PowerShell and Git Bash (more reliable: a false success is more dangerous than a stop).
+- A command older than 2 minutes does not run by itself, only by the button; a repeat of the same message is not run.
 
-## Детали реализации
+## Implementation details
 
-- Как устроен раннер и как он отсоединяется от хаба на Windows.
-- Как искать `pwsh` и проверять путь к Git Bash; текст ошибки, если оболочки нет.
-- Названия модулей.
+- How the runner is built and how it detaches from the hub on Windows.
+- How to find `pwsh` and check the path to Git Bash; the error text if the shell is missing.
+- Module names.

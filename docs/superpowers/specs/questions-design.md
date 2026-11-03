@@ -1,139 +1,141 @@
-# telegram-hub: опросы агента в Telegram
+# telegram-hub: agent polls in Telegram
 
-Основа: `telegram-hub-design.md` (потоки данных, запросы разрешений) и
-`hub-iteration-2-design.md` (кнопки, `callback_query`).
+Basis: `telegram-hub-design.md` (data flows, permission requests) and
+`hub-iteration-2-design.md` (buttons, `callback_query`).
 
-## Зачем
+Hub texts quoted below are English by default and Russian when rig's language is ru, see `language-design.md`.
 
-Когда агент вызывает встроенный инструмент `AskUserQuestion`, диалог с вариантами появляется только в
-терминале. Пользователь в Telegram его не видит и ответить не может: сессия просто стоит. Обходной путь
-(сообщение с «!») прерывает ход и теряет сам вопрос.
+## Why
 
-Опрос приходит в тему сообщением с кнопками: варианты ответа, «Свой вариант», «Отменить».
+When an agent calls the built-in `AskUserQuestion` tool, the dialog with options appears only in the
+terminal. The user in Telegram does not see it and cannot answer: the session just stands still. The workaround
+(a message with "!") interrupts the turn and loses the question itself.
 
-## Как Claude Code позволяет ответить
+The poll arrives in the topic as a message with buttons: the answer options, "✏️ Own option", "✖️ Cancel".
 
-Документировано (code.claude.com/docs/en/hooks.md, «Tools that require user interaction»): хук
-`PreToolUse` на `AskUserQuestion` может сам собрать ответы и вернуть
-`permissionDecision: "allow"` вместе с `updatedInput`. `updatedInput` заменяет вход инструмента
-целиком, поэтому в нём идёт весь исходный `tool_input` (массив `questions` и любые другие поля) и
-добавленный объект `answers`: текст вопроса → подпись выбранного варианта; при множественном выборе
-подписи через запятую. Тогда диалог в терминале не показывается, а агент получает ответы как результат
-инструмента. `"allow"` без `updatedInput` для этого инструмента не работает.
+## How Claude Code lets you answer
 
-Держать опрос живым и в терминале, и в Telegram одновременно Claude Code не умеет (ретрансляция
-разрешений каналов на `AskUserQuestion` не распространяется). Поэтому опрос живёт в одном месте.
+Documented (code.claude.com/docs/en/hooks.md, "Tools that require user interaction"): a
+`PreToolUse` hook on `AskUserQuestion` can collect the answers itself and return
+`permissionDecision: "allow"` together with `updatedInput`. `updatedInput` replaces the tool input
+as a whole, so it carries the whole original `tool_input` (the `questions` array and any other fields) and an
+added `answers` object: question text → label of the chosen option; with multiple choice the
+labels are separated by commas. Then the dialog is not shown in the terminal, and the agent gets the answers as the result of the
+tool. `"allow"` without `updatedInput` does not work for this tool.
 
-Если хук не уложился в свой `timeout`, Claude Code отбрасывает его вывод и продолжает обычным путём,
-то есть показывает диалог в терминале. На этом держатся все «запасные» случаи ниже.
+Claude Code cannot keep a poll alive in the terminal and in Telegram at the same time (relaying channel
+permissions does not apply to `AskUserQuestion`). So the poll lives in one place.
 
-## Поведение
+If the hook did not finish within its `timeout`, Claude Code discards its output and goes on the usual way,
+that is, shows the dialog in the terminal. All the "fallback" cases below rely on this.
 
-**Где опрос.** Режим Telegram включён — опрос только в теме; в терминале на время ожидания строка
-хука «Жду ответа в Телеграме» (`statusMessage`). Режим выключен — хук ничего не решает, диалог в
-терминале, как раньше. Если режим выключается, пока опрос открыт (`tg_disable`), опрос закрывается, как по сроку: диалог открывается в терминале, сообщение в теме
-помечается «⌛ Опрос перенесён в терминал».
+## Behavior
 
-**Срок.** Опрос ждёт ответа 24 часа (`timeout` хука 86400 с). По истечении опрос открывается в
-терминале, сообщение в теме помечается «⌛ Опрос перенесён в терминал», кнопки снимаются. Если окно или
-хаб перезапустились, пока опрос открыт, он тоже оказывается в терминале (хук завершился без ответа);
-нажатие на кнопку такого опроса отвечает «Опрос устарел» и снимает кнопки, как у разрешений.
+**Where the poll is.** Telegram mode is on: the poll is only in the topic; in the terminal, while waiting, the hook's
+status line "Waiting for an answer in Telegram" (`statusMessage`). Mode is off: the hook decides nothing, the dialog is in the
+terminal, as before. If the mode is switched off while a poll is open (`tg_disable`), the poll is closed as if it timed out: the dialog opens in the terminal, and the message in the topic
+is marked "⌛ The poll was moved to the terminal".
 
-**Несколько вопросов.** В одном вызове бывает до 4 вопросов. Они приходят по одному: следующий —
-после ответа на предыдущий. Агент получает ответы разом, когда отвечены все.
+**Time limit.** The poll waits for an answer for 24 hours (hook `timeout` 86400 s). When it expires, the poll opens in the
+terminal, the message in the topic is marked "⌛ The poll was moved to the terminal", and the buttons are removed. If the window or the
+hub restarted while the poll was open, it also ends up in the terminal (the hook ended without an answer);
+pressing a button of such a poll answers "The poll is outdated" and removes the buttons, as with permissions.
 
-**Сообщение.** Со звуком. Текст: заголовок вопроса (`header`), сам вопрос, ниже пронумерованные
-варианты с описаниями. Если у варианта есть `preview` (пример кода, макет), он идёт под вариантом
-блоком кода, обрезанный до 700 символов. Сообщение — всегда одно, в пределах лимита Telegram (4096
-символов) с запасом под строку итога: если текст длиннее 3700 символов, превью опускаются, а если и
-без них длиннее — текст обрезается с «…». Отредактированное сообщение со строкой итога тоже не выходит
-за 4096. При нескольких вопросах в заголовке номер: «Вопрос 2 из 3». Кнопки: по одной на вариант,
-«номер. подпись», каждая в своей строке; затем строка «✏️ Свой вариант» и «✖️ Отменить».
+**Several questions.** One call can have up to 4 questions. They arrive one by one: the next one comes
+after the previous one is answered. The agent gets all the answers at once, when all are answered.
 
-**Одиночный выбор.** Нажатие на вариант — это ответ.
+**Message.** With sound. Text: the question header (`header`), the question itself, below it the numbered
+options with descriptions. If an option has a `preview` (a code sample, a mockup), it goes under the option
+as a code block, cut to 700 characters. The message is always one, within the Telegram limit (4096
+characters) with room for the result line: if the text is longer than 3700 characters, previews are dropped, and if it is still
+longer without them, the text is cut with "…". The edited message with the result line also stays
+within 4096. With several questions the header has a number: "Question 2 of 3". Buttons: one per option,
+"number. label", each in its own row; then a row "✏️ Own option" and "✖️ Cancel".
 
-**Множественный выбор** (`multiSelect`). Нажатие переключает вариант, отмеченный показывается с «☑️»
-в начале подписи. Добавляется кнопка «✅ Готово»; без отмеченных вариантов она отвечает подсказкой
-«Отметь хотя бы один вариант» и ничего не отправляет.
+**Single choice.** Pressing an option is the answer.
 
-**Свой вариант.** Кнопка «✏️ Свой вариант» отвечает в теме «Напиши ответ следующим сообщением».
-Следующее сообщение пользователя в теме становится ответом на текущий вопрос. Так же считается и
-сообщение, отправленное без нажатия кнопки, пока опрос открыт: агент его всё равно не прочтёт, пока
-ждёт ответа. Это любое сообщение, и с медиа тоже: в `answers` уходит текст или подпись и те же
-пометки файлов, что во входящих пачках («(photo: path)», «(kind: name, file_id: X)»). Ответом
-считается только сообщение, отправленное после сообщения вопроса (его `message_id` больше);
-сообщение старше вопроса или отправленное, пока вопрос ещё не показан, уходит агенту обычным
-входящим. Несколько сообщений, отправленных вместе (альбом, пара строк подряд), — один ответ: хаб
-собирает их тем же окном тишины, что и входящие пачки. Сообщение-ответ получает ту же реакцию ✍
-«ещё не прочитано», что и обычное входящее; когда агент получает ответы, хаб её снимает. Если опрос
-кончился без ответов агенту (отмена, перенос в терминал), ✍ остаётся: агент это сообщение не прочёл.
-Команды (`/info`, `/compact`, `/pwsh` и т. п.) ответом не считаются, работают как обычно и опрос не
-закрывают; `/stop` завершает сессию, и её опрос устаревает.
+**Multiple choice** (`multiSelect`). Pressing toggles the option; a selected one is shown with "☑️"
+at the start of the label. A button "✅ Done" is added; with no options selected it answers with the hint
+"Pick at least one option" and sends nothing.
 
-**Отмена.** «✖️ Отменить» закрывает опрос: хук отвечает `permissionDecision: "deny"` с причиной
-«The user cancelled the question in Telegram. Do not ask it again; end your turn and wait for their
-message.» Агент заканчивает ход.
+**Custom answer.** The button "✏️ Own option" answers in the topic "Write the answer in the next message".
+The user's next message in the topic becomes the answer to the current question. A message
+sent without pressing the button while the poll is open counts the same way: the agent will not read it anyway while it
+waits for the answer. This is any message, with media too: `answers` gets the text or caption and the same
+file marks as in incoming batches ("(photo: path)", "(kind: name, file_id: X)"). Only a message sent after the question message
+counts as an answer (its `message_id` is greater);
+a message older than the question or sent while the question is not yet shown goes to the agent as an ordinary
+incoming message. Several messages sent together (an album, a couple of lines in a row) are one answer: the hub
+collects them with the same quiet window as incoming batches. The answer message gets the same ✍
+"not yet read" reaction as an ordinary incoming message; when the agent gets the answers, the hub removes it. If the poll
+ended without answers to the agent (cancel, move to the terminal), the ✍ stays: the agent did not read that message.
+Commands (`/info`, `/compact`, `/pwsh` and so on) do not count as an answer, work as usual and do not
+close the poll; `/stop` ends the session, and its poll becomes outdated.
 
-**Сообщение с «!» при открытом опросе.** Закрывает опрос так же, как отмена, а само сообщение
-уходит агенту обычным входящим: без «!» и без прерывания (агент ждёт ответа, прерывать нечего, а
-прерывание сорвало бы ход, который начнётся с отказа). Одинокий «!» только закрывает опрос, агенту
-ничего не уходит.
+**Cancel.** "✖️ Cancel" closes the poll: the hook answers `permissionDecision: "deny"` with the reason
+"The user cancelled the question in Telegram. Do not ask it again; end your turn and wait for their
+message." The agent ends the turn.
 
-**После ответа.** Сообщение вопроса редактируется: кнопки снимаются, внизу «✅ <ответ>» (при
-множественном выборе — подписи через запятую, для своего варианта — его текст, обрезанный как цитата в
-контексте ответа), «✖️ Опрос отменён» или «⌛ Опрос перенесён в терминал».
+**A message with "!" while a poll is open.** It closes the poll the same way as cancel, and the message itself
+goes to the agent as an ordinary incoming message: without "!" and without an interrupt (the agent is waiting for the answer, there is nothing to interrupt, and
+an interrupt would break the turn that starts with the denial). A lone "!" only closes the poll and sends the agent
+nothing.
 
-**Один опрос на сессию.** Агент не может вызвать второй `AskUserQuestion`, пока ждёт первого. Если
-новый опрос всё же пришёл (старый хук умер), старый закрывается как устаревший.
+**After the answer.** The question message is edited: the buttons are removed, at the bottom "✅ <answer>" (with
+multiple choice, the labels separated by commas; for a custom answer, its text, cut like a quote in the
+reply context), "✖️ Poll cancelled" or "⌛ The poll was moved to the terminal".
 
-## Как устроено
+**One poll per session.** The agent cannot call a second `AskUserQuestion` while it waits for the first. If a
+new poll still arrives (the old hook died), the old one is closed as outdated.
 
-**Хук.** `command`-хук `PreToolUse` с `matcher: "AskUserQuestion"` (`src/hook/question.ts`, `timeout`
-86400, `statusMessage`). Хук читает `session_id` и `tool_input` со stdin (документировано), шлёт
-`POST /question` хабу `{messagingSocket, session_id, tool_input}` и ждёт ответа (`fetch` с
-`timeout: false`, иначе Bun рвёт простаивающий запрос через 5 минут). Ожидание кончается само в двух
-случаях, даже если Claude Code хук так и не убил: на собственном сроке хука, на минуту меньше `timeout`
-(`src/hook/question-limits.ts`), и когда пропал родительский процесс (проверка раз в 2 с сигналом
-`kill(pid, 0)`, без запуска процессов). Тогда хук обрывает запрос и молча выходит. Хаб отвечает
-`{decision: "allow", answers}`, `{decision: "deny", reason}` или `{decision: "none"}`. Хук печатает
-решение только для allow и deny (дожидается конца записи в stdout перед выходом, чтобы длинный ответ не
-обрезался); при none, ошибке или недоступном хабе он молчит, и диалог открывается в
-терминале. `mcp_tool`-хук не взят: ожидание упиралось бы в тайм-ауты MCP-запроса, а у `command`-хука
-единственный срок — его `timeout`.
+## How it works
 
-**Сессия.** Хаб ищет сессию по окну с этим `messagingSocket`, иначе по `session_id`. Режим выключен
-или сессии нет — none. Хаб снимает с запроса свой тайм-аут простоя и держит его открытым, пока опрос не
-закончится.
+**Hook.** A `command` hook `PreToolUse` with `matcher: "AskUserQuestion"` (`src/hook/question.ts`, `timeout`
+86400, `statusMessage`). The hook reads `session_id` and `tool_input` from stdin (documented), sends
+`POST /question` to the hub with `{messagingSocket, session_id, tool_input}` and waits for the answer (`fetch` with
+`timeout: false`, otherwise Bun drops an idle request after 5 minutes). The wait ends by itself in two
+cases, even if Claude Code never killed the hook: at the hook's own limit, one minute less than `timeout`
+(`src/hook/question-limits.ts`), and when the parent process is gone (checked every 2 s with the signal
+`kill(pid, 0)`, without starting processes). Then the hook aborts the request and exits silently. The hub answers
+`{decision: "allow", answers}`, `{decision: "deny", reason}` or `{decision: "none"}`. The hook prints the
+decision only for allow and deny (it waits for the stdout write to finish before exiting, so a long answer is not
+cut); on none, an error or an unreachable hub it stays silent, and the dialog opens in the
+terminal. An `mcp_tool` hook was not chosen: the wait would run into MCP request timeouts, while a `command` hook
+has a single limit, its `timeout`.
 
-**Текст перед вопросом.** Claude Code пишет шаг агента (текст и вызов `AskUserQuestion`) в транскрипт
-только после того, как PreToolUse-хук закончился, то есть после ответа пользователя. Поэтому текст,
-написанный в одном шаге с вопросом, доходит до темы уже после опроса, и никакое ожидание в окне этого
-не исправит. Чтобы объяснение пришло над опросом, у агента есть инструмент-разделитель
-`tg_before_question`: без аргументов, ничего не делает и отвечает «Now call AskUserQuestion.». Агент
-пишет объяснение, вызывает `tg_before_question` и только следующим шагом (не параллельно в том же)
-вызывает `AskUserQuestion`. Шаг с разделителем Claude Code пишет в транскрипт сразу, и пересылка
-отправляет текст перед ним, как перед любым вызовом инструмента. Об этом говорят инструкции MCP-сервера
-и описание самого инструмента. Перед показом вопроса хаб всё равно шлёт окну сессии `catchUp`: окно
-сразу дочитывает транскрипт, отправляет хабу ещё не отправленный текст перед вызовом (как перед
-`tg_send_file`) и отвечает `caughtUp`. Хаб ждёт ответа до 1 с (старое окно `catchUp` не знает и не
-отвечает — тогда опрос просто идёт после паузы) и ставит вопрос в очередь отправки за уже стоящими там
-сообщениями, так что текст разделителя, если окно прочитало его поздно, всё равно оказывается над
-опросом. Опрос, закрытый за время ожидания, не показывается.
+**Session.** The hub finds the session by the window with this `messagingSocket`, otherwise by `session_id`. Mode off
+or no session: none. The hub removes its idle timeout from the request and keeps it open until the poll
+ends.
 
-**Ответы.** `answers`: текст вопроса → подпись варианта; при множественном выборе подписи в порядке
-вариантов через «, »; свой вариант — текст сообщения (или подпись) и пометки файлов через пробел; несколько сообщений
-одного ответа — через пустую строку, в порядке отправки.
+**Text before the question.** Claude Code writes the agent's step (the text and the `AskUserQuestion` call) to the transcript
+only after the PreToolUse hook has finished, that is, after the user's answer. So text
+written in the same step as the question reaches the topic only after the poll, and no waiting in the window
+can fix that. To make the explanation arrive above the poll, the agent has a separator tool,
+`tg_before_question`: no arguments, does nothing and answers "Now call AskUserQuestion.". The agent
+writes the explanation, calls `tg_before_question` and only in the next step (not in parallel in the same one)
+calls `AskUserQuestion`. Claude Code writes the separator step to the transcript at once, and the relay
+sends the text before it, as before any tool call. The MCP server instructions and the description of the tool
+itself say so. Before showing the question the hub still sends the session window a `catchUp`: the window
+reads the transcript to the end at once, sends the hub the not yet sent text before the call (as before
+`tg_send_file`) and answers `caughtUp`. The hub waits for the answer up to 1 s (an old window does not know `catchUp` and
+does not answer, then the poll simply goes after the pause) and puts the question in the send queue behind the
+messages already there, so the separator text, if the window read it late, still ends up above the
+poll. A poll closed during the wait is not shown.
 
-**Конец ожидания без ответа.** Хук убит (истёк `timeout`, окно закрылось, вероятно Esc — не
-проверено) — запрос к хабу обрывается, опрос закрывается с «⌛ Опрос перенесён в терминал». Так же
-закрываются: старый опрос сессии при новом, опросы при остановке хаба, опросы сессии, у которой не
-осталось подключённых окон, опросы сессии, у которой выключился режим Telegram, и опрос, сообщение
-которого Telegram не принял. Нажатие на кнопку
-закрытого опроса отвечает «Опрос устарел» и снимает кнопки.
+**Answers.** `answers`: question text → option label; with multiple choice the labels in option order
+separated by ", "; a custom answer is the message text (or caption) and file marks separated by a space; several messages
+of one answer are separated by a blank line, in the order sent.
 
-**Кнопки.** Подписи обрезаются до 64 символов; `callback_data` —
-`q:<ключ>:<номер вопроса>:<действие>`, ключ — 8 hex-символов, как у разрешений. Нажатие на кнопку не
-текущего вопроса считается устаревшим.
+**End of the wait without an answer.** The hook is killed (`timeout` expired, the window closed, probably Esc, not
+verified): the request to the hub is aborted, and the poll is closed with "⌛ The poll was moved to the terminal". The following
+are closed the same way: the old poll of a session when a new one comes, polls when the hub stops, polls of a session that has no
+connected windows left, polls of a session whose Telegram mode was switched off, and a poll whose message
+Telegram did not accept. Pressing a button of a
+closed poll answers "The poll is outdated" and removes the buttons.
 
-**Состояние.** Открытые опросы хаб держит в памяти; при перезапуске хаба запрос обрывается, и опрос
-открывается в терминале.
+**Buttons.** Labels are cut to 64 characters; `callback_data` is
+`q:<key>:<question number>:<action>`, the key is 8 hex characters, as with permissions. Pressing a button of a
+question that is not the current one counts as outdated.
+
+**State.** The hub keeps open polls in memory; when the hub restarts, the request is aborted and the poll
+opens in the terminal.

@@ -1,97 +1,98 @@
-# Карточки исполнителей: Codex и volunteer
+# Executor cards: Codex and volunteer
 
-## Зачем
+## Why
 
-Claude может передать исполнительскую работу Codex или volunteer через одноимённого субагента.
-Воркеры запускают `~/.claude/tools/codex-run.py` и `~/.claude/tools/volunteer-run.py`, а затем
-периодически пересказывают сводку. Карточка читает файлы задачи напрямую и показывает ход работы
-без задержки до очередного пересказа.
+Claude can hand executor work to Codex or volunteer through a subagent of the same name.
+The workers run `~/.claude/tools/codex-run.py` and `~/.claude/tools/volunteer-run.py`, and then
+periodically retell a summary. The card reads the job files directly and shows the progress
+without waiting for the next retelling.
 
-| Исполнитель | Каталог задач | Скрипт | Префикс сводки | Префикс промпта |
+| Executor | Job directory | Script | Summary prefix | Prompt prefix |
 | --- | --- | --- | --- | --- |
 | `codex` | `~/.claude/codex-jobs/<JOB>/` | `codex-run.py` | `codex job ` | `reply:` |
 | `volunteer` | `~/.claude/volunteer-jobs/<JOB>/` | `volunteer-run.py` | `volunteer job ` | `reply:` |
 
-Для обоих исполнителей JOB имеет вид `YYYYMMDD-HHMMSS-<hex>`. Каталоги задач и файлы состояния
-можно подменить в тестах через параметры `SubagentWatcher`.
+For both executors JOB has the form `YYYYMMDD-HHMMSS-<hex>`. Tests can replace the job directories
+and state files through the `SubagentWatcher` parameters.
 
-## Файлы задачи
+## Job files
 
-В каталоге JOB лежат `state.json` и `events.jsonl`. В `volunteer-jobs` рядом с каталогами задач
-также могут находиться `models.json`, `proxy.log` и `proxy-token`; это служебные файлы, не задачи.
+The JOB directory holds `state.json` and `events.jsonl`. In `volunteer-jobs`, next to the job directories,
+there can also be `models.json`, `proxy.log` and `proxy-token`; these are service files, not jobs.
 
-- `state.json` задаёт `status`, `slug`, `effort`, `notes` и `error`. Возможные состояния включают
-  `starting`, `running`, `done`, `question`, `failed`, `cancelled`, `orphaned` и `limit`.
-  У Codex `slug` и `effort` задают модель и уровень усилий. У volunteer `slug` — модель,
-  которая работает сейчас, а `effort` равен `-`. При переключении модели volunteer дописывает
-  заметку `HH:MM ...; switching to ...` и меняет `slug`.
-- `events.jsonl` содержит события прогона. `item.completed` с `item.type = agent_message` — реплика;
-  `reasoning` скрывается; `command_execution` задаёт команды; `turn.completed` завершает прогон.
-  Время события — момент, когда хаб прочитал строку. OpenCode сообщает команду после её завершения,
-  поэтому у volunteer текущей считается последняя известная команда.
+- `state.json` sets `status`, `slug`, `effort`, `notes` and `error`. The possible states include
+  `starting`, `running`, `done`, `question`, `failed`, `cancelled`, `orphaned` and `limit`.
+  For Codex, `slug` and `effort` set the model and the effort level. For volunteer, `slug` is the model
+  that is working now, and `effort` is `-`. When the model switches, volunteer appends
+  the note `HH:MM ...; switching to ...` and changes `slug`.
+- `events.jsonl` holds the events of the run. `item.completed` with `item.type = agent_message` is a message;
+  `reasoning` is hidden; `command_execution` sets the commands; `turn.completed` ends the run.
+  The event time is the moment the hub read the line. OpenCode reports a command after it finishes,
+  so for volunteer the current command is the last known command.
 
-## Как карточка находит задачу
+## How the card finds a job
 
-Тип воркера определяется по `agentType` в `agent-<id>.meta.json`.
+The worker type is determined by `agentType` in `agent-<id>.meta.json`.
 
-- `start` обнаруживается по `tool_result` со строкой `job <JOB> started: ...`; события читаются с начала.
-- `reply <JOB>`, `attach <JOB>` и `wait <JOB>` обнаруживаются в Bash-команде с соответствующим
-  скриптом исполнителя. События читаются с текущего конца, поскольку прежние прогоны уже показаны.
-- Строка `reply: <JOB>` или `attach: <JOB>` в пользовательском промпте открывает задачу до запуска
-  скрипта. Промпт может быть строкой или набором текстовых блоков. Уже существующие события и заметки
-  при продолжении пропускаются.
-- Если файл состояния ещё не появился, карточка использует обычное отображение субагента. До первого
-  состояния модель в шапке не показывается.
+- `start` is detected by a `tool_result` with the line `job <JOB> started: ...`; events are read from the beginning.
+- `reply <JOB>`, `attach <JOB>` and `wait <JOB>` are detected in a Bash command with the matching
+  executor script. Events are read from the current end, because earlier runs are already shown.
+- A `reply: <JOB>` or `attach: <JOB>` line in the user prompt opens the job before the script
+  starts. The prompt can be a string or a set of text blocks. Events and notes that already exist
+  are skipped when a job is continued.
+- If the state file has not appeared yet, the card uses the usual subagent display. Until the first
+  state, the model is not shown in the header.
 
-До обнаружения задачи карточка остаётся обычной карточкой субагента.
+Until a job is detected, the card stays an ordinary subagent card.
 
-## Одна карточка на задачу в сессии
+## One card per job in a session
 
-`SubagentWatcher` хранит соответствие «исполнитель и JOB → владелец карточки». Если новый воркер
-нашёл задачу из реестра до показа собственной карточки, он продолжает последнюю часть карточки прежнего
-владельца с тем же id. Реестр разделяет исполнителей, поэтому одинаковый JOB у Codex и volunteer
-не приводит к объединению карточек. Тексты и время сохраняются, описание задачи обновляется.
+`SubagentWatcher` keeps a mapping "executor and JOB -> card owner". If a new worker
+finds a job from the registry before showing its own card, it continues the last part of the previous
+owner's card with the same id. The registry separates executors, so the same JOB for Codex and volunteer
+does not merge the cards. Texts and times are kept, the job description is updated.
 
-Счётчик складывает завершённые команды всех принятых прогонов. Рабочее время суммирует время самих
-прогонов, не включая ожидание ответа между ними. После передачи прежний воркер больше не меняет карточку.
-Заполненная карточка продолжается отдельной частью; следующий воркер принимает последнюю часть.
-Новая часть отвечает на предыдущую карточку в теме, если она была показана; передача задачи,
-которая обновляет ту же карточку, не создаёт отдельного ответа.
+The counter adds up the completed commands of all accepted runs. The work time sums the time of the runs
+themselves, not counting the wait for a reply between them. After the handover the previous worker no longer changes the card.
+A full card is continued by a separate part; the next worker takes the last part.
+A new part replies to the previous card in the topic, if it was shown; a job handover
+that updates the same card does not create a separate reply.
 
-Реестр действует только в текущей сессии и очищается при остановке наблюдателя. После перезапуска
-плагина или для задачи из другой сессии создаётся новая карточка. Если новый воркер уже показал свою
-карточку, передачи нет.
+The registry lives only in the current session and is cleared when the watcher stops. After a restart of the
+plugin, or for a job from another session, a new card is created. If the new worker has already shown its own
+card, there is no handover.
 
-## Что показывает карточка
+## What the card shows
 
-Шапка, описание задачи, статус и текущая команда идут в таком порядке. Имя исполнителя — `codex` или
-`volunteer`; модель воркера Claude Code (`haiku`) не показывается.
+The header, the job description, the status and the current command go in this order. The executor name is `codex` or
+`volunteer`; the model of the Claude Code worker (`haiku`) is not shown.
 
-- Для Codex шапка сохраняет формат `🤖 **codex** · <модель> · <effort>`. Модель форматируется
-  так же, как модели Claude (например, `sol`, либо версия, если она известна).
-- Для volunteer шапка берёт модель из `state.slug`: первый сегмент становится провайдером,
-  последний — названием модели, суффикс `:free` убирается. Например,
-  `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` отображается как
-  `🤖 **volunteer** · openrouter · nemotron-3-ultra-550b-a55b`; `groq/openai/gpt-oss-120b` —
-  как `groq · gpt-oss-120b`. Для одночастного slug он показывается как есть. Уровень усилий `-`
-  в шапке не выводится. При смене slug шапка обновляется.
+- For Codex the header keeps the format `🤖 **codex** · <model> · <effort>`. The model is formatted
+  the same way as Claude models (for example, `sol`, or the version if it is known).
+- For volunteer the header takes the model from `state.slug`: the first segment becomes the provider,
+  the last one the model name, and the `:free` suffix is removed. For example,
+  `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free` is shown as
+  `🤖 **volunteer** · openrouter · nemotron-3-ultra-550b-a55b`; `groq/openai/gpt-oss-120b` as
+  `groq · gpt-oss-120b`. A one-part slug is shown as is. The effort level `-`
+  is not printed in the header. When the slug changes, the header is updated.
 
-В историю попадают сообщения исполнителя и новые строки `notes` в виде `🔁 <текст>` с временем из
-самой заметки. Сообщение `agent_message`, за которым непосредственно следует `turn.completed`,
-удерживается и отбрасывается как итоговый отчёт: он остаётся в финальном ответе воркера. `error` из
-состояния при сбое добавляется отдельной записью `❌ <текст>`.
+The history gets the executor's messages and new `notes` lines in the form `🔁 <text>` with the time from
+the note itself. An `agent_message` immediately followed by `turn.completed`
+is held back and dropped as the final report: it stays in the worker's final answer. On a failure, the `error` from
+the state is added as a separate entry `❌ <text>`.
 
-Промежуточные сводки (строка начинается с `codex job ` или `volunteer job `) и строки запуска
-(`job <JOB> started…`, `job <JOB> resumed with the reply`) не попадают в историю, поскольку данные
-задачи уже отображаются напрямую. Финальный отчёт воркера, включая STATUS, Summary и список изменённых
-файлов, остаётся видимым. Если файлы задачи отсутствуют, текст воркера показывается как обычно.
+Intermediate summaries (a line starting with `codex job ` or `volunteer job `) and start lines
+(`job <JOB> started…`, `job <JOB> resumed with the reply`) do not go into the history, because the job data
+is already shown directly. The worker's final report, including STATUS, Summary and the list of changed
+files, stays visible. If the job files are missing, the worker's text is shown as usual.
 
-Строка состояния во время работы содержит время, число завершённых команд, время последнего события
-и текущую команду, если она известна. Вопрос, сбой, отмена и завершение отображаются отдельными
-статусами. Для вопроса используется имя исполнителя: `❓ Codex ждёт ответа` или
-`❓ Volunteer ждёт ответа`.
+While the job runs, the status line holds the time, the number of completed commands, the time of the last event
+and the current command, if it is known. A question, a failure, a cancellation and a completion are shown as separate
+statuses. For a question the executor name is used: `❓ Codex is waiting for an answer` or
+`❓ Volunteer is waiting for an answer`. These texts are English by default and Russian when rig's language is
+`ru`, see `language-design.md`.
 
-## Что не входит
+## Out of scope
 
-- Прямые запуски скриптов, которые не принадлежат субагенту соответствующего типа, карточек не получают.
-- `file_change` и служебные файлы каталога задач не отображаются.
+- Direct script runs that do not belong to a subagent of the matching type get no cards.
+- `file_change` and the service files of the job directory are not shown.

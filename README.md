@@ -2,15 +2,15 @@
 
 ### Linux (Ubuntu 24.04)
 
-Нужны Bun, Git, bash и tmux; зависимости плагина ставятся из lock-файла:
+You need Bun, Git, bash and tmux. Install the plugin dependencies from the lock file:
 
 ```bash
 cd ~/claude-telegram-hub/plugin
 bun install --frozen-lockfile
 ```
 
-Настрой бота и группу в `~/.claude/channels/telegram-hub/`, как описано ниже. Для запуска
-без окна и после перезагрузки установи службу от своего обычного пользователя:
+Set up the bot and the group in `~/.claude/channels/telegram-hub/`, as described below. To run the hub
+without a window and after a reboot, install the service as your normal user:
 
 ```bash
 cd ~/claude-telegram-hub
@@ -19,16 +19,16 @@ systemctl --user status telegram-hub.service
 journalctl --user -u telegram-hub.service -n 50
 ```
 
-Установка включает linger через `loginctl enable-linger`: если политика сервера требует
-администратора, администратор выполняет `sudo loginctl enable-linger "$(id -un)"`.
-Служба устанавливает зависимости с `--frozen-lockfile`, запускает хаб с `--always-on`
-и сохраняет tmux и отдельные команды при остановке (`KillMode=process`).
-Удаление: `bash scripts/uninstall-hub-service.sh`; linger остаётся для других служб пользователя.
-Установка кладёт в `~/.claude/channels/telegram-hub/` файл `service-managed`: пока он есть, окна Claude Code
-только ждут хаб и подключаются к нему, сами хаб не запускают (его держит и перезапускает служба).
-Уже установленную службу переустанови этим же скриптом, иначе файла не будет.
+The install turns on linger with `loginctl enable-linger`. If the server policy requires an
+administrator, the administrator runs `sudo loginctl enable-linger "$(id -un)"`.
+The service installs dependencies with `--frozen-lockfile`, starts the hub with `--always-on`
+and keeps tmux and separate commands alive when it stops (`KillMode=process`).
+To remove it, run `bash scripts/uninstall-hub-service.sh`. Linger stays on for the user's other services.
+The install puts a `service-managed` file in `~/.claude/channels/telegram-hub/`. While the file exists, Claude Code windows
+only wait for the hub and connect to it. They do not start the hub themselves (the service keeps it running and restarts it).
+If the service is already installed, reinstall it with the same script. Otherwise the file will not exist.
 
-Пример `launch` в `config.json` для обычного Claude без cswap:
+Example `launch` in `config.json` for plain Claude without cswap:
 
 ```json
 {
@@ -39,294 +39,297 @@ journalctl --user -u telegram-hub.service -n 50
 }
 ```
 
-Добавь эту секцию в существующий конфиг с `groupId` и `allowFrom`. Одна сессия tmux
-соответствует одному окну Claude и живёт после обрыва SSH или перезапуска хаба.
-Имя для подключения — `claude-<id сессии>` (`tmux attach -t claude-<id сессии>`).
-Claude может спросить подтверждение канала прямо в tmux. Повторяется ли вопрос при каждом запуске
-или только при первом, на Linux не проверено (нужна проверка с залогиненным Claude). Пока сессия
-ждёт ответа, она не подключится к хабу: через `timeoutSec` тема напишет, что сессия, возможно, ждёт
-подтверждения в tmux, и назовёт команду `tmux attach -t claude-<id сессии>`. Ответь на вопрос там.
-Убрать вопрос совсем можно через managed settings (раздел «Необязательно: убрать вопрос о канале
-при запуске» ниже).
-Если команда запуска завершилась с ошибкой в первые две секунды, это неудачный запуск: тема получает
-«Не могу запустить сессию» с текстом ошибки команды, удержанное сохраняется, ожидания в
-`timeoutSec` нет. Если tmux ответил `duplicate session`, сессия уже жива в tmux (скорее всего
-ждёт ответа в диалоге), и тема просит подключиться через `tmux attach -t claude-<id сессии>`.
-Аккаунты cswap необязательны: без cswap используй `/run` без номера.
-`/bash` использует `bash` из PATH как login-shell; `/pwsh` и `/cmd` на Linux недоступны,
-звук завершения хода в терминале выключен.
+Add this section to the existing config that has `groupId` and `allowFrom`. One tmux session
+matches one Claude window and stays alive after an SSH disconnect or a hub restart.
+The name to attach to is `claude-<session id>` (`tmux attach -t claude-<session id>`).
+Claude may ask you to confirm the channel right in tmux. It is not verified on Linux whether the question repeats on every start
+or only on the first one (this needs a check with a logged-in Claude). While the session
+waits for an answer, it does not connect to the hub. After `timeoutSec`, the topic says that the session may be waiting
+for confirmation in tmux and names the command `tmux attach -t claude-<session id>`. Answer the question there.
+You can remove the question completely with managed settings (see the section "Optional: remove the channel question
+at start" below).
+If the launch command fails in the first two seconds, the launch counts as failed. The topic gets
+"⚠️ Cannot start the session: <reason>" with the command's error text, held messages are kept, and the hub does not wait for
+`timeoutSec`. If tmux answers `duplicate session`, the session is already alive in tmux (most likely
+it waits for an answer in a dialog), and the topic asks you to attach with `tmux attach -t claude-<session id>`.
+cswap accounts are optional. Without cswap, use `/run` without a number.
+`/bash` uses `bash` from PATH as a login shell. `/pwsh` and `/cmd` are not available on Linux.
+The end-of-turn sound in the terminal is off.
 
-Файлы контейнера и оставшиеся проверки: [docker/ubuntu-24.04](docker/ubuntu-24.04/README.md).
+Container files and the remaining checks: [docker/ubuntu-24.04](docker/ubuntu-24.04/README.md).
 
-### Команды rig
+### rig commands
 
-Хаб работает полностью и без rig. `/feature` и `/rig` остаются в меню и отвечают,
-что rig не установлен; оболочки Windows в этом случае работают как раньше.
-Хаб ищет `rig` в PATH и `~/.local/bin` (`rig.cmd` на Windows).
+The hub works fully without rig. `/feature` and `/rig` stay in the menu and answer
+that rig is not installed. Windows shells work as before in this case.
+The hub looks for `rig` in PATH and `~/.local/bin` (`rig.cmd` on Windows).
 
-- `/feature` — список фич из JSON-контракта rig.
-- `/feature <name> enable|disable` — переключить фичу.
-- `/rig status` — состояние машины из `rig status --json`.
-- `/rig update` — обновить машину.
+- `/feature` — list the features from the rig JSON contract.
+- `/feature <name> enable|disable` — switch a feature on or off.
+- `/rig status` — machine state from `rig status --json`.
+- `/rig update` — update the machine.
+- `/rig language` — show the language.
+- `/rig language en|ru` — switch the language.
 
-Команды доступны только пользователям из `allowFrom`, в General и в темах сессий;
-ответ возвращается в ту же тему. Они не передаются агенту. Вывод изменяющих команд
-обновляется в карточке по мере поступления; ожидание блокировки не считается ошибкой
-и не ограничено таймаутом. Запущенная команда переживает перезапуск хаба.
+These commands are available only to users in `allowFrom`, in General and in session topics.
+The answer goes back to the same topic. They are not passed to the agent. The output of commands that change something
+is updated in the card as it arrives. Waiting for a lock is not an error
+and has no timeout. A running command survives a hub restart.
+`/rig language` and `/rig language en|ru` follow the same access rule as `/rig status` and `/rig update`: only `allowFrom` users.
 
-`/feature telegram disable` требует подтверждения кнопкой от пользователя из `allowFrom`.
-До запуска хаб доставит команду включения обратно: `rig feature telegram enable` на сервере.
-На Windows `/pwsh` и `/cmd` показываются только при включённой и доступной фиче;
-при ошибке чтения фич на старте они закрыты, а при последующей ошибке сохраняется
-последнее известное состояние. `/bash` от этих двух фич не зависит.
+`/feature telegram disable` needs a button confirmation from a user in `allowFrom`.
+Before it runs, the hub delivers the command that turns it back on: `rig feature telegram enable` on the server.
+On Windows, `/pwsh` and `/cmd` are shown only when the feature is on and available.
+If reading the features fails at start, they are closed. If it fails later, the
+last known state is kept. `/bash` does not depend on these two features.
 
-События rig из `~/.agent-rig/events.jsonl` приходят в General после запуска хаба,
-включая накопленные при его остановке. `info` — без звука, `warn` и `error` — со звуком.
-На обновление хаб ждёт полного простоя и пустых очередей, пишет маркер и выходит с кодом 75;
-systemd поднимает его заново. Готовность записывается только после успешного `getMe`.
-Хаб не создаёт `~/.agent-rig`, если rig ещё не установлен.
+rig events from `~/.agent-rig/events.jsonl` arrive in General after the hub starts,
+including those collected while it was stopped. `info` is silent. `warn` and `error` come with a sound.
+For an update, the hub waits for full idle and empty queues, writes a marker and exits with code 75.
+systemd starts it again. Readiness is recorded only after a successful `getMe`.
+The hub does not create `~/.agent-rig` if rig is not installed yet.
 
-Один Telegram-бот на все окна Claude Code на этой машине. У каждой сессии своя тема (topic) в
-супергруппе с темами: текст агента приходит в тему, ответы с телефона уходят обратно в сессию.
-Работает с любым аккаунтом `cswap`. Дизайн: `docs/superpowers/specs/telegram-hub-design.md`.
+One Telegram bot serves all Claude Code windows on this machine. Each session has its own topic in a
+supergroup with topics. The agent's text arrives in the topic, and replies from the phone go back to the session.
+It works with any `cswap` account. Design: `docs/superpowers/specs/telegram-hub-design.md`.
 
 ```
-окно A ─┐                            ┌─ тема «proj · сессия A»
-окно B ─┼─ плагин telegram-hub ─ хаб ─ Bot API ─ супергруппа
-окно C ─┘  (по одному на окно)       └─ тема «proj · сессия B»
+window A ─┐                              ┌─ topic "proj · session A"
+window B ─┼─ telegram-hub plugin ─ hub ─ Bot API ─ supergroup
+window C ─┘  (one per window)            └─ topic "proj · session B"
 ```
 
-- **Плагин** (`plugin/`) запускается в каждом окне как MCP-сервер. Он читает транскрипт сессии и
-  пересылает текст агента, а сообщения из темы передаёт в сессию.
-- **Хаб** — единственный процесс, который опрашивает бота. Его запускает первое окно, которое не
-  нашло работающий хаб. Закрытие любого окна, в том числе запустившего хаб, другим не мешает. Хаб
-  сам выходит через 5 минут после закрытия последнего окна, но не раньше, чем отправит всё, что
-  у него в очереди. Хаб из задачи Планировщика (`scripts/install-hub-task.ps1`), с
-  `TELEGRAM_HUB_IDLE_MS=0` или с секцией `launch` в `config.json` не выходит никогда.
-- Состояние лежит в `~/.claude/channels/telegram-hub/`, одно на все профили `cswap`.
+- The **plugin** (`plugin/`) runs in every window as an MCP server. It reads the session transcript and
+  forwards the agent's text. It passes messages from the topic to the session.
+- The **hub** is the only process that polls the bot. The first window that finds no running hub
+  starts it. Closing any window, including the one that started the hub, does not affect the others. The hub
+  exits by itself 5 minutes after the last window closes, but not before it has sent everything
+  in its queue. A hub started from a Task Scheduler task (`scripts/install-hub-task.ps1`), with
+  `TELEGRAM_HUB_IDLE_MS=0`, or with a `launch` section in `config.json` never exits.
+- State lives in `~/.claude/channels/telegram-hub/`, one for all `cswap` profiles.
 
-## Как пользоваться
+## How to use
 
-Окно Claude Code, запущенное в терминале, пишет в Телеграм само. Тема `<проект> · <имя сессии>`
-появится, когда агент впервые напишет в неё. Скажи в сессии «пиши мне в Телеграм» — агент вызовет
-`tg_enable` и создаст тему сразу. Скажи, что в Телеграм писать не нужно — агент вызовет `tg_disable`:
-окно после этого не включит режим снова само, даже после перезапуска и `--resume`. Включить его снова
-можно «пиши мне в Телеграм» или сообщением в тему. Дальше:
+A Claude Code window started in a terminal writes to Telegram by itself. The topic `<project> · <session name>`
+appears when the agent first writes to it. Say in the session "write to me in Telegram". The agent calls
+`tg_enable` and creates the topic at once. Say that you do not need Telegram: the agent calls `tg_disable`.
+After that, the window does not turn the mode on again by itself, even after a restart and `--resume`. You can turn it on again
+with "write to me in Telegram" or with a message in the topic. Then:
 
-**Звук служебных сообщений:** информационные сообщения бота, команды и успешные результаты идут без звука;
-предупреждения и ошибки — со звуком. Запросы разрешения и опросы, которым нужен твой ответ, тоже идут со звуком.
-Это правило не меняет звук текста агента и завершения его хода.
+**Sound of service messages:** the bot's informational messages, commands and successful results come silently.
+Warnings and errors come with a sound. Permission requests and polls that need your answer also come with a sound.
+This rule does not change the sound of the agent's text or of the end of its turn.
 
-- текст агента перед вызовом инструмента приходит в тему **без звука**;
-- последний текст хода приходит в тему; **со звуком**, если ход финальный, и без звука, если ход
-  промежуточный (см. «Конец хода» ниже);
-- твоё сообщение в теме получает реакцию ✍, если через 3 с после того, как хаб передал его
-  сессии, оно всё ещё не в контексте агента, и теряет её, когда попадёт туда. Висит ✍ — агент
-  занят и ещё не видел сообщения;
-- сообщения, присланные вместе (альбом, пересланные и текст к ним), приходят агенту одним
-  уведомлением: хаб ждёт секунду тишины, но не дольше 10 с после первого. Сообщение на `!`
-  начинает новую пачку;
-- пока агент работает, у бота в теме «печатает…»; пропадает, когда ход кончился, агент ждёт
-  ответа на вопрос или прерван (Esc);
-- сообщение, которое начинается с `!`, прерывает работающего агента, как Esc в терминале, и
-  приходит вместо его хода, уже без `!`: хаб убирает знак и помечает сообщение как прерывание, а
-  плагин кладёт его во входящие окна (сокет
-  `CLAUDE_CODE_MESSAGING_SOCKET`) с приоритетом `now`. В терминале оно выглядит как сообщение от
-  другой сессии с пометкой telegram-hub. Агенту, который ничего не делает, такое сообщение приходит как
-  обычное. После обновления telegram-hub перезапусти и хаб, и окна: старое окно эту пометку не знает;
-- текст приходит обычным сообщением с форматированием Telegram (жирный, курсив, зачёркнутый, код,
-  блоки кода, цитаты, ссылки), каким бы длинным он ни был. Rich-сообщением Telegram он приходит только
-  если в нём есть заголовок, список (любой, с галочками тоже), таблица или разделитель, на любой
-  глубине вложения: только так выглядят настоящие заголовки, списки и таблицы. Причина: Telegram не
-  передаёт боту цитату, когда пользователь отвечает на часть rich-сообщения бота;
-- каждый субагент — одна карточка. Шапка в четыре строки: тип, модель и effort его
-  последнего ответа (`Explore · opus · high`; версия видна, только если плагин уже видел более
-  новую этой линейки: `haiku 4.5`; до первого ответа — псевдоним из запуска); задача;
-  статус (время, число действий); текущее действие, пока он работает. Под шапкой — тексты, которые он пишет, у каждого — время, когда он его написал (`[18:39]`). Карточка правится на месте не чаще раза в 5 с,
-  а все карточки вместе не чаще раза в 6 с и только когда у сессий нет неотправленного текста: у группы
-  в Телеграме лимит около 20 сообщений в минуту, правки тоже считаются. Хаб сам держит этот темп:
-  не больше 20 отправок и правок за любые 60 с, и новое сообщение идёт вперёд ждущих правок. Если
-  Телеграм всё же ответил 429, хаб держит все запросы до конца `retry_after`, а не долбит его дальше. Время в ней идёт, даже когда субагент долго думает и ничего не пишет (после первой минуты —
-  раз в минуту), так что видно, что он жив. Заполнилась — закрывается «⬇️ продолжение ниже», и тексты идут в новой. В конце статус
-  «✅ …», «❌ ошибка» или «⏹ остановлен»; если агент после «✅» всё же пошёл дальше (оборвался
-  ответ классификатора, стоп-хук), та же карточка снова «⏳». Так же и когда ему потом написали
-  (SendMessage), даже если карточка уже закрыта: один агент — одна карточка, она правится на месте,
-  тексты остаются, действия и рабочее время продолжаются (пауза между запусками не считается).
-  Сообщение координатора видно в карточке строкой `↪ первая строка` со временем. Если агент закончил ход, а его фоновая задача
-  (Bash в фоне, Monitor, агент в фоне) ещё идёт, карточка не закрывается: «⏸ <время работы> · <действия> · ждёт фоновую задачу <время ожидания>» (время
-  идёт, как у «⏳»), даже если Claude Code уже сообщил главной сессии «агент completed, ждёт свою
-  фоновую работу»; проснулся — та же карточка снова «⏳». Ждёт не дольше часа, потом закрывается
-  как обычно. Новая часть после переполнения отвечает на предыдущую показанную часть в теме.
-  Новая карточка появляется только при включённой
-  пересылке, начатая обновляется до конца, в том числе после перезапуска хаба;
-- карточки `codex` и `volunteer` показывают работу исполнителя вживую: реплики, текущую команду,
-  число действий, модель и состояние задачи, перезапуски и ошибки. `reply` и `attach` новым воркером
-  продолжают ту же карточку задачи в этой сессии: тексты сохраняются, действия и рабочее время
-  складываются без паузы ожидания ответа, описание задачи обновляется. После перезапуска плагина или если
-  новый воркер уже показал свою карточку, создаётся отдельная карточка;
-- сбой связи с API (оборвался ответ, «Connection lost mid-response», или нет сети, «Can't reach
-  the API server (ENOTFOUND)») — агент продолжает сам, без тебя; 10 сбоев подряд — останавливается
-  и зовёт со звуком. Сбой, после которого Claude Code сам повёл ход дальше (например, оборвался
-  ответ классификатора auto mode), ничего не делает. Лимиты и прочие ошибки API ждут тебя;
-- агент может прислать в тему файлы (`tg_send_file`): скриншот, график, лог. Фото, видео, аудио и
-  гифки показываются как в Telegram, остальное — документом; несколько фото — одним альбомом. До
-  50 МБ на файл и на альбом: тяжёлые файлы расходятся по нескольким альбомам. Видео идёт с превью и длительностью, если установлены `ffmpeg` и `ffprobe`. По
-  просьбе агент шлёт файлы документами, чтобы Telegram не пережимал скриншоты.
-  Работает, даже если пересылка выключена, — достаточно, чтобы у сессии была тема;
-- команды в теме (есть в меню бота; агент их не видит, режим они не меняют):
-  - `/info` — блок «Лимиты Claude»: проценты пятичасового и недельного лимита со временем до сброса
-    (самые свежие из всех сессий того же аккаунта). Затем «Лимиты Codex», если есть показания
-    в rollout-логах `$CODEX_HOME/sessions` (по умолчанию `~/.codex/sessions`): проценты округлены,
-    после сброса — 0% без времени до сброса. Затем «Лимиты волонтёров», если скрипт
-    `~/.claude/tools/volunteer-models.py` вернул данные: процент дневного лимита, время до сброса
-    (после сброса — 0% без суффикса), и провайдеры с известным лимитом (OpenRouter, Requesty, Groq и др.),
-    каждый на своей строке: «Requesty: 182/200»; провайдер без лимита (Zhipu) не показывается. Все три блока показывают возраст данных от 5 минут;
-    затем текущий контекст и порог автокомпакта, например `36/250k`; без известного порога показывается только размер;
-  - `/compact` (можно с указаниями, как в терминале) — тихое сообщение «🗜 Компакт на очереди.» меняется
-    на «🗜 Компакт выполняется…» при старте; при успехе оно редактируется в «✅ Компакт выполнен.»; при пропуске или ошибке оно
-    удаляется, а громкое предупреждение приходит новым сообщением;
-  - `/compact 333k` (или число токенов, или `auto`) — то же, что `/autocompact` в терминале.
-  - `/rename <имя>` — переименовать сессию: пробелы, табы и переносы в имени сводятся к одному пробелу,
-    крайние пробелы удаляются; в её терминале запускается `/rename <имя>`, как только ход
-    закончится. В теме сначала тихое «🏷 Переименование на очереди.», затем оно сменяется на «✅ /rename
-    <имя> выполнена.», а при отказе — на громкое «⚠️ /rename <имя> не выполнена: …». Тема получает
-    новое название, когда Claude Code его запишет, как при любой смене названия сессии. `/rename` без
-    имени отвечает «Напиши имя: /rename новое имя» и ничего не запускает;
-  - `/mode` — показать текущий режим Claude Code и кнопки режимов; `/mode <режим>` сразу перезапускает
-    сессию с `manual`, `auto`, `acceptEdits`, `plan` или `dontAsk` (аргумент без учёта регистра).
-    `bypassPermissions` недоступен. Перезапуск обрывает текущий ход, не запускает модуль и не делает
-    компакт. Режим действует только на этот запуск; следующий обычный `/run` использует конфигурацию
-    команды запуска;
-  - `/info`, `/compact`, `/rename` и `/cleanup` требуют окна сессии. Если окна нет и в `config.json`
-    задан `launch`, хаб запускает сессию обычным способом, показывает обычные уведомления запуска и
-    выполняет команду после подключения окна; для команд модуля она ждёт, пока её заберёт модуль.
-    Без `launch` модульные команды отвечают «сессия сейчас не активна», а `/cleanup` — «Сессия не
-    запущена». `/stop` к закрытой сессии отвечает «Сессия не запущена» и не запускает её. `/run` и
-    команды оболочки не требуют открытого окна и сохраняют своё поведение;
-  Команды выполняет модуль function hooks плагина (API раннего доступа Claude Code): новая версия Claude Code может его сломать. Окно без модуля — через 10 с в теме
-  «⚠️ … не выполнена»;
-- `/run` — запустить сессию темы (см. «Запуск сессий из темы»), `/run N` — на аккаунте `cswap` N;
-  `/stop` — завершить сессию: хаб закрывает процесс Claude Code этого окна, в теме «⏹ Сессия
-  завершена». Сначала модуль плагина дожидается компакта, запущенного из темы; тихое сообщение о
-  начале компакта меняется на «🗜 Компакт выполняется…», затем редактируется в успешный итог, а при пропуске или ошибке удаляется и заменяется
-  громким предупреждением. Уведомление «⏳ После компакта завершу сессию…» превращается в «⏹ Сессия
-  завершена»; иначе «⏹ Сессия завершена» идёт отдельным сообщением. Если в контексте
-  больше 120k токенов — сам сжимает его (после текущего хода), чтобы `/run` потом не кэшировал
-  весь контекст заново. Повторный `/stop` завершает сразу; окно без модуля — через 10 с. Эти две
-  команды выполняет хаб;
-- `/mode [режим]` — показать текущий режим и кнопки либо немедленно закрыть окно и запустить ту же
-  сессию с разрешённым режимом Claude Code: `manual`, `auto`, `acceptEdits`, `plan`, `dontAsk`.
-  Кнопки делают то же. Это обрывает текущий ход и не проходит через модуль. Перед закрытием хаб
-  проверяет команду запуска; в ней должен быть `{mode}`. Новое окно стартует, когда старый процесс
-  Claude Code завершился; если он не завершается, в теме «⚠️ Режим не сменён». Выбор не сохраняется для
-  будущих `/run`.
-- `/cleanup [указания]` — сжать контекст (указания уходят в компакт, как у `/compact`), убрать
-  скиллы, которые Claude Code держит в контексте после каждого компакта, и завершить сессию. Следующий
-  запуск (`/run` или сообщение в тему) — та же сессия: id, тема и история не меняются. Тихое сообщение
-  «🧹 Уборка на очереди.» меняется на «🧹 Уборка выполняется…» при старте; при успехе оно редактируется
-  в «🧹 Уборка выполнена, убраны скиллы: …» (или «🧹 Уборка
-  выполнена.»); при ошибке или отмене оно удаляется, а предупреждение приходит новым сообщением, громким
-  по виду сообщения. Завершение и перезапуск сессии объявляются обычными отдельными уведомлениями. `/stop` во время сжатия отменяет `/cleanup` и сразу завершает окно. Исходные строки транскрипта хаб сохраняет рядом в `<id>.cleanup-<время>.jsonl`. Нужен
-  модуль плагина этой версии. Сообщения, пришедшие во время `/cleanup`, после любого исхода идут обычным
-  путём сообщения в тему остановленной сессии, по порядку, без ограничения числа; хранятся они в памяти хаба. Подробности —
-  `docs/superpowers/specs/cleanup-design.md`;
-- `/pwsh <команда>` — выполнить команду в папке сессии в PowerShell, `/cmd <команда>` — в cmd (одна
-  строка), `/bash <команда>` — в Git Bash. Окно сессии для этого не нужно. Окружение — как в новом
-  окне терминала: переменные из реестра, профили грузятся. Цепочка останавливается на первой
-  упавшей команде, и её код становится итогом. Это касается первого ненулевого кода выхода, в том
-  числе внутри циклов и блоков. Если ненулевой код ожидаем (robocopy, `git diff --quiet`), оберни
-  команду: `cmd /c "… & exit /b 0"`. В теме появляется одна карточка: время,
-  команда, последние 10 строк вывода и кнопка «⏹ Остановить». Хаб правит её раз в минуту. Когда
-  команда закончилась, карточка показывает итог (`✅ код 0`, `❌ код N`, `⏹ остановлена`), а лог
-  длиннее карточки приходит файлом. Агент сам просыпается с итогом, хвостом вывода и путём к полному
-  логу (`exec\<id>.log` в папке хаба). Если окна нет, хаб запускает сессию, когда настроен
-  `launch`; иначе в тему приходит «агенту не доставлено». Перезапуск хаба команду не прерывает.
-  Команду, которая пришла больше 2 минут назад, пока хаб был выключен, хаб сам не запускает:
-  в карточке будет кнопка «▶ Запустить». Команда, которая ждёт ввода, висит, пока её не остановят;
-  таймаута нет;
-- запрос разрешения приходит со звуком: «🔐 Нужно подтверждение: <инструмент>», затем описание этого
-  вызова (если оно есть), затем аргументы вызова блоком кода. Общая характеристика инструмента не
-  показывается. Есть кнопки «✅ Разрешить» / «❌ Отклонить». Ответ уходит в сессию, как если бы
-  ты нажал в терминале; можно ответить и в терминале, тогда кнопки просто ничего не сделают. Кнопки
-  слушаются только тех, кто в `allowFrom`. «Разрешить всегда» Claude Code каналам не даёт;
-- вопрос агента с вариантами (`AskUserQuestion`) при включённом режиме приходит только в тему, с
-  кнопками вариантов, «✏️ Свой вариант» и «✖️ Отменить»; в терминале в это время «Жду ответа
-  в Телеграме». Любое сообщение в теме, пока опрос открыт, — это свой вариант ответа (команды работают
-  как обычно); сообщение с «!» отменяет опрос и уходит агенту. Без ответа за 24 часа опрос
-  переносится в терминал. Текст, написанный в одном шаге с вопросом, Claude Code отдаёт только после
-  ответа, поэтому объяснение агент пишет отдельным шагом и вызывает разделитель `tg_before_question`,
-  а вопрос задаёт следующим — тогда объяснение приходит над опросом. Подробно —
-  `docs/superpowers/specs/questions-design.md`;
-- печать в терминале (в том числе посреди хода) режим не меняет: текст агента всё так же уходит в
-  тему. Пересылка выключается только по просьбе остановить (`tg_disable`). Завершение фоновой задачи
-  и прочие сообщения от самого Claude Code режим не трогают. Если написать в теме, пересылка
-  включается снова;
-- вставленный в Telegram документ (например, Markdown-файл) приходит агенту Markdown-текстом;
-  картинки из него хаб скачивает сам, а остальные файлы агент скачивает по их `file_id`;
-- на сообщение в теме сессии, у которой нет открытого окна, бот ответит «сессия сейчас не активна»,
-  а если настроен запуск сессий из темы — запустит её и передаст сообщение.
+- The agent's text before a tool call arrives in the topic **silently**.
+- The last text of a turn arrives in the topic. It comes **with a sound** if the turn is final and silently if the turn
+  is intermediate (see "End of turn" below).
+- Your message in the topic gets the ✍ reaction if, 3 s after the hub passed it to the
+  session, it is still not in the agent's context. The reaction goes away when the message gets there. If ✍ stays, the agent
+  is busy and has not seen the message yet.
+- Messages sent together (an album, forwarded messages and text for them) reach the agent as one
+  notification. The hub waits for one second of silence, but not longer than 10 s after the first message. A message that starts with `!`
+  starts a new batch.
+- While the agent works, the bot shows "typing…" in the topic. It disappears when the turn ends, the agent waits
+  for an answer to a question, or it is interrupted (Esc).
+- A message that starts with `!` interrupts a working agent, like Esc in the terminal, and
+  arrives instead of its turn, already without the `!`. The hub removes the sign and marks the message as an interruption.
+  The plugin puts it into the window's inbox (socket
+  `CLAUDE_CODE_MESSAGING_SOCKET`) with priority `now`. In the terminal it looks like a message from
+  another session with the telegram-hub label. For an agent that is doing nothing, such a message arrives as a
+  normal one. After you update telegram-hub, restart both the hub and the windows. An old window does not know this label.
+- Text arrives as a normal message with Telegram formatting (bold, italic, strikethrough, code,
+  code blocks, quotes, links), however long it is. It arrives as a Telegram rich message
+  only if it has a heading, a list (any list, with checkmarks too), a table or a divider, at any
+  nesting depth. Only this way real headings, lists and tables look right. The reason: Telegram does not
+  pass the quote to the bot when the user replies to a part of the bot's rich message.
+- Each subagent is one card. The header has four lines: the type, the model and effort of its
+  last answer (`Explore · opus · high`; the version is shown only if the plugin has already seen a
+  newer one of that line: `haiku 4.5`; before the first answer, the alias from the launch); the task;
+  the status (time, number of actions); and the current action while it works. Under the header are the texts it writes, each with the time it wrote it (`[18:39]`). The card is edited in place at most once per 5 s,
+  and all cards together at most once per 6 s, and only when the sessions have no unsent text.
+  A Telegram group has a limit of about 20 messages per minute, and edits count too. The hub keeps this pace itself:
+  no more than 20 sends and edits in any 60 s, and a new message goes ahead of waiting edits. If Telegram
+  still answers 429, the hub holds all requests until the end of `retry_after` and does not hammer it further. The time in the card keeps running even when the subagent thinks for a long time and writes nothing (after the first minute,
+  once a minute), so you can see it is alive. When the card is full, it closes with "⬇️ continued below" and the texts go to a new one. At the end the status is
+  "✅ <time> · <actions>", "❌ <time> · <actions>" (error) or "⏹ <time> · <actions>" (stopped). If the agent goes on after "✅" (the classifier answer
+  was cut off, a stop hook), the same card becomes "⏳" again. The same happens when someone writes to it later
+  (SendMessage), even if the card is already closed: one agent is one card, it is edited in place,
+  the texts stay, and the actions and work time continue (the pause between runs does not count).
+  A coordinator message is shown in the card as a line `↪ first line` with the time. If the agent finished its turn but its background task
+  (Bash in the background, Monitor, an agent in the background) is still running, the card is not closed: "⏸ <work time> · <actions> · waiting for a background task <wait time>" (the time
+  runs like in "⏳"), even if Claude Code has already told the main session "agent completed, waiting for its
+  background work". When it wakes up, the same card becomes "⏳" again. It waits no longer than an hour, then closes
+  as usual. A new part after an overflow replies to the previous shown part in the topic.
+  A new card appears only when forwarding is on.
+  A started card is updated to the end, including after a hub restart.
+- `codex` and `volunteer` cards show the worker's activity live: replies, the current command,
+  the number of actions, the model and the task state, restarts and errors. `reply` and `attach` with a new worker
+  continue the same task card in this session: the texts are kept, the actions and work time
+  add up without the pause spent waiting for the reply, and the task description is updated. After a plugin restart, or if the
+  new worker has already shown its own card, a separate card is created.
+- An API connection failure (the answer was cut off, "Connection lost mid-response", or there is no network, "Can't reach
+  the API server (ENOTFOUND)") — the agent continues by itself, without you. After 10 failures in a row it stops
+  and calls you with a sound. A failure after which Claude Code itself continued the turn (for example, the
+  auto mode classifier answer was cut off) does nothing. Limits and other API errors wait for you.
+- The agent can send files to the topic (`tg_send_file`): a screenshot, a chart, a log. Photos, video, audio and
+  GIFs are shown as in Telegram, the rest as a document. Several photos go as one album. Up to
+  50 MB per file and per album: heavy files are split across several albums. Video goes with a preview and duration if `ffmpeg` and `ffprobe` are installed. On
+  request the agent sends files as documents, so that Telegram does not compress screenshots.
+  It works even if forwarding is off. It is enough that the session has a topic.
+- Commands in the topic (they are in the bot menu; the agent does not see them, and they do not change the mode):
+  - `/info` — the block "Claude limits": the percent of the five-hour and weekly limits with the time until reset
+    (the freshest from all sessions of the same account). Then "Codex limits", if there are readings
+    in the rollout logs in `$CODEX_HOME/sessions` (by default `~/.codex/sessions`): percents are rounded,
+    and after a reset it shows 0% without time until reset. Then "Volunteer limits", if the script
+    `~/.claude/tools/volunteer-models.py` returned data: the percent of the daily limit, the time until reset
+    (after a reset, 0% without a suffix), and the providers with a known limit (OpenRouter, Requesty, Groq and others),
+    each on its own line: "Requesty: 182/200". A provider without a limit (Zhipu) is not shown. All three blocks show the age of the data from 5 minutes.
+    Then the current context and the autocompact threshold, for example `36/250k`. Without a known threshold, only the size is shown.
+  - `/compact` (can take instructions, as in the terminal) — the silent message "🗜 Compaction is queued." changes
+    to "🗜 Compaction is running…" at start. On success it is edited to "✅ Compaction done." On skip or error it is
+    deleted, and a loud warning arrives as a new message.
+  - `/compact 333k` (or a number of tokens, or `auto`) — the same as `/autocompact` in the terminal.
+  - `/rename <name>` — rename the session. Spaces, tabs and line breaks in the name are collapsed to one space,
+    and leading and trailing spaces are removed. `/rename <name>` runs in its terminal as soon as the turn
+    ends. In the topic, first the silent "🏷 Rename is queued.", then it changes to "✅ /rename
+    <name> done.", or on refusal to the loud "⚠️ /rename <name> failed: …". The topic gets the
+    new title when Claude Code writes it, as with any change of the session title. `/rename` without
+    a name answers "Write the name: /rename new name" and runs nothing.
+  - `/mode` — show the current Claude Code mode and the mode buttons. `/mode <mode>` restarts
+    the session at once with `manual`, `auto`, `acceptEdits`, `plan` or `dontAsk` (the argument is case-insensitive).
+    `bypassPermissions` is not available. The restart interrupts the current turn, does not start the module and does not run
+    a compact. The mode applies only to this launch. The next normal `/run` uses the configuration of
+    the launch command.
+  - `/info`, `/compact`, `/rename` and `/cleanup` need the session window. If there is no window and `launch` is
+    set in `config.json`, the hub starts the session in the usual way, shows the usual launch notifications and
+    runs the command after the window connects. For module commands it waits until the module picks the command up.
+    Without `launch`, module commands answer "the session is not active right now", and `/cleanup` answers "Session is not
+    running". `/stop` for a closed session answers "Session is not running" and does not start it. `/run` and
+    shell commands do not need an open window and keep their behavior.
+  The commands are run by the function hooks module of the plugin (an early access API of Claude Code): a new version of Claude Code may break it. A window without the module gets, after 10 s, in the topic
+  "⚠️ /<command> failed: the window did not pick it up within 10 s.".
+- `/run` — start the session of the topic (see "Starting sessions from a topic"), `/run N` — on `cswap` account N.
+  `/stop` — end the session: the hub closes the Claude Code process of this window, and the topic shows "⏹ Session
+  ended". First the plugin module waits for a compact started from the topic. The silent message about the
+  start of the compact changes to "🗜 Compaction is running…", then it is edited to the success result, or on skip or error it is deleted and replaced by a
+  loud warning. The notice "⏳ I will end the session after the compaction. A second /stop ends it right away." turns into "⏹ Session
+  ended". Otherwise "⏹ Session ended" comes as a separate message. If the context has
+  more than 120k tokens, it compacts it by itself (after the current turn), so that `/run` later does not cache
+  the whole context again. A second `/stop` ends it at once. A window without the module ends after 10 s. These two
+  commands are run by the hub.
+- `/mode [mode]` — show the current mode and the buttons, or immediately close the window and start the same
+  session with an allowed Claude Code mode: `manual`, `auto`, `acceptEdits`, `plan`, `dontAsk`.
+  The buttons do the same. This interrupts the current turn and does not go through the module. Before closing, the hub
+  checks the launch command. It must contain `{mode}`. The new window starts when the old Claude Code
+  process has ended. If it does not end, the topic shows "⚠️ Mode not changed". The choice is not saved for
+  future `/run` commands.
+- `/cleanup [instructions]` — compress the context (the instructions go to the compact, as with `/compact`), remove the
+  skills that Claude Code keeps in the context after every compact, and end the session. The next
+  start (`/run` or a message to the topic) is the same session: the id, topic and history do not change. The silent message
+  "🧹 Cleanup is queued." changes to "🧹 Cleanup is running…" at start. On success it is edited
+  to "🧹 Cleanup done, skills removed: …" (or "🧹 Cleanup
+  done."). On error or cancel it is deleted and the warning arrives as a new message, loud
+  by the kind of the message. The end and restart of the session are announced by the usual separate notices. `/stop` during the compression cancels `/cleanup` and ends the window at once. The hub saves the original transcript lines next to it in `<id>.cleanup-<time>.jsonl`. It needs the
+  plugin module of this version. Messages that arrive during `/cleanup` go, after any outcome, the usual
+  way of a message to the topic of a stopped session, in order, with no limit on the number. They are kept in the hub's memory. For details see
+  `docs/superpowers/specs/cleanup-design.md`.
+- `/pwsh <command>` — run a command in the session folder in PowerShell, `/cmd <command>` — in cmd (one
+  line), `/bash <command>` — in Git Bash. This does not need the session window. The environment is the same as in a new
+  terminal window: variables from the registry, profiles are loaded. A chain stops at the first
+  failed command, and its code becomes the result. This means the first non-zero exit code, including
+  inside loops and blocks. If a non-zero code is expected (robocopy, `git diff --quiet`), wrap the
+  command: `cmd /c "… & exit /b 0"`. One card appears in the topic with the time,
+  the command, the last 10 lines of output and the button "⏹ Stop". The hub edits it once a minute. When the
+  command finishes, the card shows the result (`✅ code 0`, `❌ code N`, `⏹ stopped`), and a log
+  longer than the card arrives as a file. The agent wakes up by itself with the result, the tail of the output and the path to the full
+  log (`exec\<id>.log` in the hub folder). If there is no window, the hub starts the session when
+  `launch` is configured. Otherwise the topic gets "⚠️ The session is not running: the command result was not delivered to the agent". A hub restart does not interrupt the command.
+  A command that arrived more than 2 minutes ago while the hub was off is not started by the hub:
+  the card has a "▶ Run" button. A command that waits for input hangs until it is stopped.
+  There is no timeout.
+- A permission request arrives with a sound: "🔐 Confirmation needed: <tool>", then the description of this
+  call (if there is one), then the call arguments in a code block. The general description of the tool is not
+  shown. There are the buttons "✅ Allow" / "❌ Deny". The answer goes to the session as if
+  you pressed it in the terminal. You can also answer in the terminal, and then the buttons do nothing. The buttons
+  obey only users in `allowFrom`. Claude Code does not give channels "Always allow".
+- An agent question with options (`AskUserQuestion`), when the mode is on, arrives only in the topic, with
+  option buttons, "✏️ Own option" and "✖️ Cancel". In the terminal it shows "Waiting for an answer
+  in Telegram" at that time. Any message in the topic while the poll is open is a custom answer (commands work
+  as usual). A message with "!" cancels the poll and goes to the agent. With no answer in 24 hours, the poll
+  moves to the terminal. Claude Code gives the text written in the same step as the question only after the
+  answer. So the agent writes the explanation as a separate step and calls the separator `tg_before_question`,
+  and asks the question in the next step. Then the explanation arrives above the poll. For details see
+  `docs/superpowers/specs/questions-design.md`.
+- Typing in the terminal (including in the middle of a turn) does not change the mode: the agent's text still goes to the
+  topic. Forwarding turns off only on a request to stop (`tg_disable`). The end of a background task
+  and other messages from Claude Code itself do not affect the mode. If you write in the topic, forwarding
+  turns on again.
+- A document pasted into Telegram (for example, a Markdown file) arrives to the agent as Markdown text.
+  The hub downloads the images from it itself, and the agent downloads other files by their `file_id`.
+- For a message in the topic of a session that has no open window, the bot answers "the session is not active right now",
+  or, if starting sessions from a topic is configured, it starts the session and passes the message.
 
-Сообщения не теряются и приходят по порядку. Хаб сначала кладёт текст в очередь на диске
-(`outbox.json`), потом отправляет. Без сети он повторяет попытки, сколько понадобится. Упавший хаб
-продолжает с того же места после перезапуска: и отправку, и приём (позицию в очереди обновлений
-Telegram хаб держит в `poll-offset.json`, поэтому уже обработанные сообщения повторно не приходят).
-Если Telegram отверг конкретное сообщение, вместо
-него в тему со звуком приходит «⚠️ Telegram не принял сообщение: …», а текст остаётся в `hub.log`.
-Файлы идут через ту же очередь (копии лежат в `outbox-files/`, пока не уйдут).
-Если сообщение придёт дважды, значит Telegram принял его, а ответ потерялся по дороге: Bot API
-не даёт отличить такой случай от неудачной отправки.
+Messages are not lost and arrive in order. The hub first puts the text into a queue on disk
+(`outbox.json`), then sends it. Without a network it retries as long as needed. A crashed hub
+continues from the same place after a restart, both sending and receiving (the hub keeps the position in the Telegram update queue in `poll-offset.json`,
+so messages that were already handled do not come again).
+If Telegram rejected a specific message, then instead of it the topic gets, with a sound, "⚠️ Telegram did not accept the message: …",
+and the text stays in `hub.log`.
+Files go through the same queue (copies stay in `outbox-files/` until they are sent).
+If a message arrives twice, Telegram accepted it and the answer got lost on the way: the Bot API
+does not let you tell this case from a failed send.
 
-## Установка (один раз)
+## Install (one time)
 
-### 1. Группа и бот
+### 1. Group and bot
 
-Создай супергруппу и включи в её настройках *Темы* (Topics). Добавь туда бота администратором с
-правом *Управление темами*. Бот тот же, что у официального плагина telegram.
+Create a supergroup and turn on *Topics* in its settings. Add the bot there as an administrator with
+the *Manage topics* right. It is the same bot as in the official telegram plugin.
 
-### 2. Токен и config.json
+### 2. Token and config.json
 
-Скопируй токен официального плагина:
+Copy the token of the official plugin:
 
 ```powershell
 New-Item -ItemType Directory -Force "$HOME\.claude\channels\telegram-hub" | Out-Null
 Copy-Item "$HOME\.claude\channels\telegram\.env" "$HOME\.claude\channels\telegram-hub\.env"
 ```
 
-Создай `~/.claude\channels\telegram-hub\config.json` (`allowFrom` — твой Telegram user id; писать боту
-может только он):
+Create `~/.claude\channels\telegram-hub\config.json` (`allowFrom` is your Telegram user id; only
+that user can write to the bot):
 
 ```json
 { "allowFrom": ["123456789"] }
 ```
 
-`groupId` пока не нужен: его проще узнать после шага 4. Хаб перечитывает `config.json` на каждом
-сообщении, так что перезапускать ничего не придётся.
+You do not need `groupId` yet: it is easier to find out after step 4. The hub rereads `config.json` on every
+message, so you do not need to restart anything.
 
-**Попасть в `allowFrom` значит получить shell на этой машине:** `/pwsh`, `/cmd` и `/bash` выполняют
-любую команду в обход режима разрешений Claude Code.
+**Being in `allowFrom` means having a shell on this machine:** `/pwsh`, `/cmd` and `/bash` run
+any command, bypassing the Claude Code permission mode.
 
-Git Bash для `/bash` хаб ищет в `C:\Program Files\Git\bin\bash.exe`. Если он стоит в другом месте,
-добавь в `config.json` ключ `exec.bash`:
+The hub looks for Git Bash for `/bash` in `C:\Program Files\Git\bin\bash.exe`. If it is installed somewhere else,
+add the key `exec.bash` to `config.json`:
 
 ```json
 "exec": { "bash": "D:\\Tools\\Git\\bin\\bash.exe" }
 ```
 
-Звук терминала в конце хода задаёт ключ `turnEndChime`: команда оболочки, в которой `{kind}`
-заменяется на `ask` или `done`. По умолчанию на Windows играет системный сигнал Windows; заданная
-команда заменяет его, пустая строка отключает звук. Значение не строкой считается ошибкой и
-заменяется умолчанием. Путь в примере — подставь свой:
+The terminal sound at the end of a turn is set by the key `turnEndChime`: a shell command in which `{kind}`
+is replaced with `ask` or `done`. By default, on Windows the system Windows sound plays. A set
+command replaces it, and an empty string turns the sound off. A value that is not a string is treated as an error and
+replaced with the default. The path in the example is a placeholder: use your own:
 
 ```json
 "turnEndChime": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:/path/to/chime.ps1\" -Kind {kind}"
 ```
 
-### 3. Плагин во всех профилях
+### 3. Plugin in all profiles
 
-Каждый профиль Claude Code (`~/.claude` и каждая папка `cswap` в
-`~/.claude-swap-backup\sessions\`) хранит свой список плагинов, поэтому ставить надо в каждый.
-Скрипт ниже проходит по всем профилям: добавляет этот репозиторий как источник плагинов, ставит
-telegram-hub и выключает официальный telegram, чтобы два плагина не дрались за одного бота.
+Every Claude Code profile (`~/.claude` and every `cswap` folder in
+`~/.claude-swap-backup\sessions\`) keeps its own plugin list, so you must install in each one.
+The script below goes through all profiles. It adds this repository as a plugin source, installs
+telegram-hub and disables the official telegram plugin, so that two plugins do not fight over one bot.
 
 ```powershell
 $repo = 'C:\code\claude-telegram-hub'
@@ -340,66 +343,66 @@ foreach ($dir in $profiles) {
 Remove-Item Env:CLAUDE_CONFIG_DIR
 ```
 
-### 4. Запуск с каналом
+### 4. Start with the channel
 
-После шага 3 плагин загружается в каждом окне, и текст агента уже уходит в Telegram. Но **ответы из
-Telegram в сессию не попадут**: Claude Code принимает входящие сообщения только от плагинов, названных
-при запуске. Поэтому запускать надо так:
+After step 3 the plugin loads in every window, and the agent's text already goes to Telegram. But **replies from
+Telegram will not reach the session**: Claude Code accepts incoming messages only from plugins named
+at start. So you must start it like this:
 
 ```powershell
 claude --dangerously-load-development-channels plugin:telegram-hub@telegram-hub
 cswap run 2 -- --dangerously-load-development-channels plugin:telegram-hub@telegram-hub
 ```
 
-При каждом запуске Claude Code спросит, доверяешь ли ты этому каналу; отвечай да. Слово
-«dangerously» тут значит только «канал не из официального списка».
+On every start Claude Code asks whether you trust this channel. Answer yes. The word
+"dangerously" here only means "the channel is not from the official list".
 
-Чтобы не набирать флаг руками, добавь обёртку в профиль PowerShell. Профиль — это скрипт, который
-PowerShell выполняет при открытии каждой вкладки; путь к нему лежит в переменной `$PROFILE`.
-Открой его (`notepad $PROFILE`; если файла нет, создай: `New-Item -Force $PROFILE`) и допиши строку:
+To avoid typing the flag by hand, add a wrapper to your PowerShell profile. The profile is a script that
+PowerShell runs when it opens every tab. The path to it is in the variable `$PROFILE`.
+Open it (`notepad $PROFILE`; if the file does not exist, create it: `New-Item -Force $PROFILE`) and add the line:
 
 ```powershell
 . C:\code\claude-telegram-hub\scripts\telegram-hub-profile.ps1
 ```
 
-Точка с пробелом в начале — это не опечатка. Без неё PowerShell выполнит скрипт и тут же забудет всё,
-что тот определил. С точкой функции скрипта остаются в текущей вкладке. Скрипт определяет функции
-`claude` и `cswap`, которые сами подставляют флаг. Команды вроде `claude mcp list`, `claude -p "..."`,
-`cswap list` проходят без изменений. Настоящие программы по-прежнему доступны как `claude.exe` и
-`cswap.exe`. Новые функции работают в новых вкладках.
+The dot and space at the start are not a typo. Without them, PowerShell runs the script and at once forgets everything
+it defined. With the dot, the script's functions stay in the current tab. The script defines the functions
+`claude` and `cswap`, which add the flag themselves. Commands like `claude mcp list`, `claude -p "..."`,
+`cswap list` pass through unchanged. The real programs are still available as `claude.exe` and
+`cswap.exe`. The new functions work in new tabs.
 
-Проверка: в новой вкладке `Get-TelegramHubClaudeArgs` должен вывести две строки — флаг и имя плагина.
+Check: in a new tab, `Get-TelegramHubClaudeArgs` must print two lines: the flag and the plugin name.
 
 ### 5. groupId
 
-Открой окно Claude Code (уже с флагом) и напиши что угодно в группе. В
-`~/.claude\channels\telegram-hub\hub.log` появится строка
-`ignored update from chat -100… (supergroup "…")`. Впиши это число в `config.json`:
+Open a Claude Code window (already with the flag) and write anything in the group. A line
+`ignored update from chat -100… (supergroup "…")` appears in
+`~/.claude\channels\telegram-hub\hub.log`. Put this number into `config.json`:
 
 ```json
 { "groupId": "-1001234567890", "allowFrom": ["123456789"] }
 ```
 
-### 6. Необязательно: хаб всегда включён
+### 6. Optional: hub always on
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install-hub-task.ps1
 ```
 
-Задача Планировщика `telegram-hub` для текущего пользователя (права администратора не нужны): запускает
-хаб при входе в систему в скрытом окне и проверяет каждые 5 минут, жив ли он. Если хаб уже работает,
-новый тут же выходит; упавший поднимается снова. Хаб помнит для каждой сессии её папку и аккаунт
-`cswap`, на котором она работала последней. Удаление: `scripts\uninstall-hub-task.ps1`.
-Скрипт установки кладёт в `~/.claude/channels/telegram-hub/` файл `service-managed`: пока он есть, окна
-Claude Code хаб не запускают, а только подключаются к тому, что держит задача. Уже созданную задачу
-переустанови этим же скриптом, иначе файла не будет.
-Перезапуск хаба, например после обновления его кода: `scripts\restart-hub.ps1` (очередь сообщений
-сохраняется, новый хаб доставит её).
+This creates the Task Scheduler task `telegram-hub` for the current user (no administrator rights needed). It starts the
+hub at login in a hidden window and checks every 5 minutes whether it is alive. If the hub is already running,
+the new one exits at once. A crashed hub is started again. For each session the hub remembers its folder and the `cswap`
+account it last ran on. To remove it, run `scripts\uninstall-hub-task.ps1`.
+The install script puts a `service-managed` file in `~/.claude/channels/telegram-hub/`. While the file exists, Claude Code
+windows do not start the hub. They only connect to the one the task keeps running. If the task is already created,
+reinstall it with the same script. Otherwise the file will not exist.
+To restart the hub, for example after updating its code, run `scripts\restart-hub.ps1` (the message queue
+is kept, and the new hub delivers it).
 
-### 7. Необязательно: запуск сессий из темы
+### 7. Optional: starting sessions from a topic
 
-Нужны хаб, который всегда включён (п. 6), и запуск без вопроса о канале (следующий раздел): иначе
-новое окно встанет на этом вопросе. В `config.json` добавь секцию `launch`:
+You need a hub that is always on (item 6) and a start without the channel question (the next section). Otherwise
+the new window will stop at this question. Add a `launch` section to `config.json`:
 
 ```json
 "launch": {
@@ -409,7 +412,7 @@ Claude Code хаб не запускают, а только подключают
 }
 ```
 
-Для Linux, например с `xterm` и `cswap`, команда передаётся отдельными аргументами:
+For Linux, for example with `xterm` and `cswap`, the command is passed as separate arguments:
 
 ```json
 "launch": {
@@ -418,58 +421,58 @@ Claude Code хаб не запускают, а только подключают
 }
 ```
 
-Сообщение в теме сессии без окна: «🚀 Запускаю сессию (аккаунт N)…», новая вкладка Windows Terminal
-в папке сессии с `cswap run N … --resume`, а когда окно подключилось, то же сообщение правится на
-«✅ Сессия запущена», и сообщение уходит агенту. Сообщения, пришедшие до этого, ждут и уходят по
-порядку; второй запуск той же сессии не делается. Когда агент берётся за работу, сообщение о запуске
-из темы удаляется. Не подключилась за `timeoutSec` — оно тоже удаляется, а приходит громкое
-«⚠️ Сессия не запустилась за N с».
+A message in the topic of a session without a window: "🚀 Starting the session (account N)…", a new Windows Terminal tab
+in the session folder with `cswap run N … --resume`, and when the window has connected, the same message is edited to
+"✅ Session started", and the message goes to the agent. Messages that arrived before that wait and go
+in order. A second start of the same session is not made. When the agent starts working, the start message
+is deleted from the topic. If the window did not connect within `timeoutSec`, the message is also deleted, and the loud
+"⚠️ The session did not start within N s" arrives.
 
-После закрытия окна с pid завершающегося Claude Code, а также после завершения окна хабом,
-любой запуск ждёт общего барьера выхода процесса. При неизвестном pid пауза длиннее максимального
-reconnect backoff плагина вместе с jitter. Живой после таймаута процесс оставляет барьер закрытым:
-смена режима отменяется с одним предупреждением, сообщения ждут выхода и затем идут обычным путём.
-Вернувшееся окно снимает барьер и получает удержанное. `/mode` показывает режим этого запуска,
-а более старую запись помечает как «Последний известный режим»; закрытая сессия запускается даже
-с тем же режимом. Оба варианта `/mode` во время перезапуска отвечают «Сессия уже запускается».
-Перезапуск сообщает 🔁, без уведомления «⏹ Сессия завершена».
+After a window with the pid of a finishing Claude Code closes, and after the hub ends a window,
+any start waits for a common process-exit barrier. If the pid is unknown, the pause is longer than the maximum
+plugin reconnect backoff together with jitter. A process that is still alive after the timeout keeps the barrier closed:
+the mode change is canceled with one warning, and messages wait for the exit and then go the usual way.
+A returning window lifts the barrier and gets the held items. `/mode` shows the mode of this launch
+and marks an older record as "Last known mode". A closed session starts even
+with the same mode. Both forms of `/mode` answer "Session is already starting" during a restart.
+A restart reports 🔁, without the notice "⏹ Session ended".
 
-С начала перезапуска очереди сообщений, подготовка вложений и результаты команд ждут нового окна
-и доставляются по порядку после его готовности; открытые опросы заканчиваются сразу. При отказе
-проверок, ошибке запуска или таймауте подключения удержанное сохраняется до следующего запуска,
-а тема получает число ожидающих элементов. `/stop` отменяет запуск на любой стадии; если процесс
-уже запущен, его окно завершается при подключении. Удержанное после подтверждения выхода идёт
-обычным путём сообщения в остановленную сессию.
+From the start of a restart, message queues, attachment preparation and command results wait for the new window
+and are delivered in order after it is ready. Open polls end at once. If the checks refuse, the launch fails, or the connection times out,
+the held items are kept until the next start,
+and the topic gets the number of waiting items. `/stop` cancels the start at any stage. If the process
+is already running, its window ends when it connects. Items held after the exit is confirmed go the
+usual way of a message to a stopped session.
 
-- Аккаунт: из `/run N`, иначе тот, на котором сессия работала последней. Если он неизвестен (окно
-  этой сессии не подключалось к хабу этой версии), сессия не запускается, а в теме будет
-  «⚠️ Аккаунт сессии неизвестен, используй /run N.».
-- Окно в профиле `cswap` называет аккаунт папкой профиля. Окно на основном логине (`~/.claude`:
-  обычный `claude`, а также `cswap run N`, когда N и есть основной логин) не называет; его аккаунт
-  хаб спрашивает у `cswap status`, а для запущенной им сессии берёт тот, на котором запускал.
-- `--share-history` у `cswap run` даёт всем аккаунтам одну историю. Без него `--resume` на другом
-  аккаунте не найдёт сессию (`/run 2` для сессии, начатой на первом аккаунте). Для Windows нужен Developer Mode
-  (режим разработчика Windows).
-- `{cwd}`, `{account}`, `{session}` подставляются в каждый элемент команды. `{mode}` заменяется на
-  `--permission-mode <режим>` для `/mode`, иначе на пустую строку; отдельный элемент `{mode}` тогда
-  разворачивается в два аргумента или удаляется. Хаб принимает только `manual`, `auto`, `acceptEdits`,
-  `plan` и `dontAsk`. До запуска он проверяет id сессии (UUID), аккаунт (только буквы, цифры, `.@-_`),
-  что папка существует и в ней нет символов
-  `"%&|<>^`. Текст сообщений в команду не попадает никогда.
-- `cmd.exe /c start "" wt.exe`: Bun не умеет запускать `wt.exe` напрямую (это псевдоним приложения из
-  WindowsApps), `start` умеет. `& exit /b 0` закрывает вкладку, когда Claude Code завершился, в том
-  числе по `/stop`.
-- Конфиг перечитывается сам; секция с ошибкой — в теме «⚠️ Автозапуск не настроен» с причиной.
+- Account: from `/run N`, otherwise the one the session last ran on. If it is unknown (the window
+  of this session never connected to a hub of this version), the session does not start, and the topic gets
+  "⚠️ The session's account is unknown, use /run N.".
+- A window in a `cswap` profile names the account by the profile folder. A window on the main login (`~/.claude`:
+  plain `claude`, and also `cswap run N` when N is the main login) does not name it. The hub asks `cswap status` for its account, and for a session
+  it started it takes the account it started it on.
+- `--share-history` in `cswap run` gives all accounts one history. Without it, `--resume` on another
+  account will not find the session (`/run 2` for a session started on the first account). On Windows it needs Developer Mode
+  (Windows developer mode).
+- `{cwd}`, `{account}`, `{session}` are substituted into every element of the command. `{mode}` is replaced with
+  `--permission-mode <mode>` for `/mode`, otherwise with an empty string. A separate `{mode}` element then
+  expands to two arguments or is removed. The hub accepts only `manual`, `auto`, `acceptEdits`,
+  `plan` and `dontAsk`. Before the start it checks the session id (UUID), the account (only letters, digits, `.@-_`),
+  that the folder exists and that it has none of the characters
+  `"%&|<>^`. The text of messages never goes into the command.
+- `cmd.exe /c start "" wt.exe`: Bun cannot start `wt.exe` directly (it is an app alias from
+  WindowsApps), but `start` can. `& exit /b 0` closes the tab when Claude Code has ended, including
+  by `/stop`.
+- The config is reread by itself. A section with an error shows in the topic "⚠️ Autolaunch is not set up" with the reason.
 
-### Необязательно: убрать вопрос о канале при запуске
+### Optional: remove the channel question at start
 
-Вопрос о канале можно убрать через **managed settings**. Это настройки
-уровня администратора: в компаниях через них админ задаёт политику для всех пользователей машины.
-Claude Code читает их на Windows из файла `C:\Program Files\ClaudeCode\managed-settings.json`,
-на Linux и WSL из `/etc/claude-code/managed-settings.json` (пути из официальной документации
-Claude Code, раздел Deploy managed settings); писать туда нужно с правами администратора
-(на Linux `sudo mkdir -p /etc/claude-code`, затем запись файла через `sudo`). В нём нужно две настройки:
-включить каналы и разрешить telegram-hub:
+You can remove the channel question with **managed settings**. These are administrator-level
+settings: in companies, the admin uses them to set a policy for all users of the machine.
+Claude Code reads them on Windows from the file `C:\Program Files\ClaudeCode\managed-settings.json`,
+and on Linux and WSL from `/etc/claude-code/managed-settings.json` (paths from the official Claude Code
+documentation, the section Deploy managed settings). Writing there needs administrator rights
+(on Linux `sudo mkdir -p /etc/claude-code`, then write the file with `sudo`). It needs two settings:
+turn on channels and allow telegram-hub:
 
 ```json
 {
@@ -478,103 +481,111 @@ Claude Code, раздел Deploy managed settings); писать туда нуж
 }
 ```
 
-После этого флаг становится короче и не требует подтверждения:
-`--channels plugin:telegram-hub@telegram-hub`. Для обёртки в профиле поставь перед строкой с точкой:
+After that the flag becomes shorter and needs no confirmation:
+`--channels plugin:telegram-hub@telegram-hub`. For the profile wrapper, put this before the line with the dot:
 
 ```powershell
 $global:TelegramHubChannelArgs = @('--channels', 'plugin:telegram-hub@telegram-hub')
 ```
 
-Минус: файл действует на всю машину и на все профили, и правится только с правами администратора.
+The downside: the file applies to the whole machine and all profiles, and only an administrator can edit it.
 
-## Если не работает
+## Language
 
-Всё, что видит хаб, пишется в `~/.claude\channels\telegram-hub\hub.log`. Сразу после старта там должна
-быть строка `polling Telegram as @имя_бота`. Если её нет:
+The hub's texts in Telegram (bot messages, buttons, card labels) are in English by default.
+They switch to Russian when the shared rig language is `ru`. To set it, run `rig language ru` on the machine,
+or send `/rig language ru` in Telegram. To go back, use `rig language en` or `/rig language en`.
+Without rig, the texts are always in English.
+This setting changes only the hub's own texts. Agents answer in the user's language regardless.
 
-- `no TELEGRAM_BOT_TOKEN` — нет `.env` или в нём нет строки `TELEGRAM_BOT_TOKEN=...`.
-- `bot token rejected` — токен неверный.
-- `getMe failed (Unable to connect...)` — с этой машины не открывается `api.telegram.org`. Нужен
-  VPN на всю систему или прокси: `$env:HTTPS_PROXY = 'http://127.0.0.1:порт'` в `$PROFILE` до
-  запуска `claude` (хаб получает переменные от окна, которое его запустило; не проверено). Хаб сам
-  повторяет попытки; когда сеть появится, в логе будет `Telegram polling works again`.
-- `getUpdates 409 Conflict` — тем же ботом пользуется кто-то ещё, обычно официальный плагин telegram
-  в каком-то окне.
+## If it does not work
 
-После правки `.env` хаб надо перезапустить: закрой все окна и подожди 5 минут или убей процесс
-`bun ...\src\hub\main.ts`; открытые окна сами запустят новый хаб. Очередь при этом не теряется.
-`config.json` перечитывается сам.
+Everything the hub sees is written to `~/.claude\channels\telegram-hub\hub.log`. Right after the start there must
+be a line `polling Telegram as @bot_name`. If it is not there:
 
-Если в логе `delivery to session … is blocked`, значит бот не может писать в группу: его удалили,
-отобрали права или в `config.json` не тот `groupId`. Хаб ждёт, пока это починят, и повторяет раз в
-30 с; сообщения ждут в `outbox.json`.
+- `no TELEGRAM_BOT_TOKEN` — there is no `.env`, or it has no line `TELEGRAM_BOT_TOKEN=...`.
+- `bot token rejected` — the token is wrong.
+- `getMe failed (Unable to connect...)` — `api.telegram.org` does not open from this machine. You need a
+  system-wide VPN or a proxy: `$env:HTTPS_PROXY = 'http://127.0.0.1:port'` in `$PROFILE` before
+  starting `claude` (the hub gets variables from the window that started it; not verified). The hub
+  retries by itself. When the network is back, the log will show `Telegram polling works again`.
+- `getUpdates 409 Conflict` — someone else uses the same bot, usually the official telegram plugin
+  in some window.
 
-Если бот опрашивается, а сообщения из группы в логе не появляются совсем, значит Telegram их боту не
-отдаёт. В карточке группы это видно по надписи у бота «has no access to messages». Такое бывает,
-когда у бота включён privacy mode и он не администратор. Чинится одним из двух способов:
+After you edit `.env`, restart the hub: close all windows and wait 5 minutes, or kill the process
+`bun ...\src\hub\main.ts`. Open windows start a new hub by themselves. The queue is not lost.
+`config.json` is reread by itself.
 
-- сделать бота администратором группы;
-- в @BotFather: `/setprivacy` → бот → `Disable`, потом удалить бота из группы и добавить заново
-  (Telegram применяет эту настройку только при добавлении).
+If the log has `delivery to session … is blocked`, the bot cannot write to the group: it was removed,
+its rights were taken away, or `config.json` has the wrong `groupId`. The hub waits until this is fixed and retries every
+30 s. Messages wait in `outbox.json`.
 
-В General хаб принимает только `/feature` и `/rig` от `allowFrom`; остальные сообщения
-игнорирует (в лог пишет `ignored update ...`): у каждой сессии своя тема.
+If the bot is polling but messages from the group do not appear in the log at all, Telegram does not
+give them to the bot. In the group card you can see this by the label "has no access to messages" at the bot. This happens
+when the bot has privacy mode on and is not an administrator. Fix it in one of two ways:
 
-## Конец хода
+- make the bot an administrator of the group;
+- in @BotFather: `/setprivacy` → the bot → `Disable`, then remove the bot from the group and add it again
+  (Telegram applies this setting only when the bot is added).
 
-Звук и уведомление решает Stop-хук плагина, а не модель; `tg_notify` больше нет. Хук смотрит на
-последний абзац последнего текста и на `background_tasks`:
+In General the hub accepts only `/feature` and `/rig` from `allowFrom`. It ignores other messages
+(it writes `ignored update ...` to the log): each session has its own topic.
 
-- **финальный `ask`** — в последнем абзаце есть `?` (блоки кода, инлайн-код и ссылки не считаются),
-  даже если фоновые задачи живы;
-- **финальный `done`** — вопроса нет и фоновых задач нет;
-- **промежуточный** — вопроса нет, но фоновые задачи есть: агент ждёт монитор, команду или
-  субагента и сам продолжит.
+## End of turn
 
-Фоновых субагентов в `background_tasks` нет, их число приходит в `turn_duration`
-(`pendingBackgroundAgentCount`). Пока оно больше нуля, плагин закрывает ход без вопроса как
-промежуточный, каким бы ни было решение хука.
+The sound and the notification are decided by the plugin's Stop hook, not by the model. `tg_notify` no longer exists. The hook looks at the
+last paragraph of the last text and at `background_tasks`:
 
-Плагин держит последний текст хода, пока ход не закроется по-настоящему. Знак конца — запись
-`turn_duration` в транскрипте: Claude Code пишет её одну на ход, после всех Stop-хуков и
-продолжений. Ход закрывается, когда есть и `turn_duration`, и решение хука. Есть только
-`turn_duration` — ход закрывается через 5 с после неё. Есть только решение — через 30 с тишины: столько
-может думать prompt-хук, который ещё продолжит ход. Если другой Stop-хук продолжил ход, текст уходит тихо, решает
-следующий Stop. Нет решения за 5 с — ход закрывается как финальный `done` (только для Телеграма,
-звука терминала нет). Решение, пришедшее после закрытия хода, отбрасывается.
+- **final `ask`** — the last paragraph has a `?` (code blocks, inline code and links do not count),
+  even if background tasks are alive;
+- **final `done`** — there is no question and no background tasks;
+- **intermediate** — there is no question, but there are background tasks: the agent waits for a monitor, a command or
+  a subagent and will continue by itself.
 
-- Режим Телеграма включён: финальный текст приходит со звуком, промежуточный без. Финальный ход
-  без текста после последнего инструмента не шлёт ничего. Звук терминала не играет.
-- Режим выключен: звук терминала играет, когда ход закрыт, а не когда пришло решение, так что
-  продолженный ход звенит один раз. На `ask` всегда, на `done` только если с последнего ввода в
-  терминале прошло не меньше 30 с (или ввода в этом окне ещё не было). Звук задаёт `turnEndChime` в
+Background subagents are not in `background_tasks`. Their number comes in `turn_duration`
+(`pendingBackgroundAgentCount`). While it is greater than zero, the plugin closes a turn without a question as
+intermediate, whatever the hook decision is.
+
+The plugin holds the last text of the turn until the turn really closes. The end sign is the
+`turn_duration` record in the transcript: Claude Code writes one per turn, after all Stop hooks and
+continuations. The turn closes when both `turn_duration` and the hook decision exist. If there is only
+`turn_duration`, the turn closes 5 s after it. If there is only a decision, it closes after 30 s of silence: that is how long
+a prompt hook, which will still continue the turn, may think. If another Stop hook continued the turn, the text goes silently, and the
+next Stop decides. If there is no decision within 5 s, the turn closes as a final `done` (only for Telegram,
+with no terminal sound). A decision that arrives after the turn closed is dropped.
+
+- Telegram mode on: the final text arrives with a sound, the intermediate one without. A final turn
+  without text after the last tool sends nothing. The terminal sound does not play.
+- Mode off: the terminal sound plays when the turn is closed, not when the decision arrived, so a
+  continued turn rings once. On `ask` always, on `done` only if at least 30 s have passed since the last input in the
+  terminal (or there has been no input in this window yet). The sound is set by `turnEndChime` in
   `config.json`.
 
-## Разработка
+## Development
 
-Без установки пакетов в worktree можно проверить типы через существующее дерево зависимостей:
-`bash scripts/typecheck-reference.sh /путь/к/plugin/node_modules`. Оно используется только для чтения.
-Скрипты контейнерных проверок: `scripts/test-linux.sh`, `scripts/test-systemd.sh`,
-`scripts/test-claude-linux.sh`; вспомогательные процессы описаны в `docker/ubuntu-24.04/README.md`.
+Without installing packages in a worktree, you can check types through an existing dependency tree:
+`bash scripts/typecheck-reference.sh /path/to/plugin/node_modules`. It is used read-only.
+Container check scripts: `scripts/test-linux.sh`, `scripts/test-systemd.sh`,
+`scripts/test-claude-linux.sh`. Helper processes are described in `docker/ubuntu-24.04/README.md`.
 
 ```powershell
 cd plugin
 bun install
-bun test          # юнит- и интеграционные тесты на фейковом Bot API, без настоящего Telegram
+bun test          # unit and integration tests on a fake Bot API, without a real Telegram
 bun run typecheck
 ```
 
-Проверить один коммит отдельно от рабочего дерева: `bun scripts/test-commit.ts <commit>` (из корня
-репозитория). Скрипт разворачивает коммит во временную копию с именем репозитория, ставит туда
-зависимости из lock-файла, гоняет проверку типов и все тесты и удаляет копию; полный вывод остаётся
-в `.tmp/test-commit-<sha>.txt`. `node_modules` основного дерева в копию ссылкой не подключать:
-удаление копии пройдёт по ссылке и опустошит настоящую папку.
+To check one commit apart from the working tree, run `bun scripts/test-commit.ts <commit>` (from the root of the
+repository). The script unpacks the commit into a temporary copy named like the repository, installs
+the dependencies from the lock file there, runs the type check and all tests, and deletes the copy. The full output stays
+in `.tmp/test-commit-<sha>.txt`. Do not link the main tree's `node_modules` into the copy:
+deleting the copy would follow the link and empty the real folder.
 
-Запустить рабочую копию без установки:
+Run a working copy without installing:
 
 ```powershell
 claude.exe --plugin-dir .\plugin --dangerously-load-development-channels plugin:telegram-hub@inline
 ```
 
-Переменные для тестов: `TELEGRAM_HUB_STATE_DIR`, `TELEGRAM_HUB_PORT` (по умолчанию 47613), `TELEGRAM_HUB_API_BASE`,
+Variables for tests: `TELEGRAM_HUB_STATE_DIR`, `TELEGRAM_HUB_PORT` (47613 by default), `TELEGRAM_HUB_API_BASE`,
 `TELEGRAM_HUB_IDLE_MS`, `TELEGRAM_HUB_POLL_TIMEOUT`, `TELEGRAM_BOT_TOKEN`.

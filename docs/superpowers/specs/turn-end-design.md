@@ -1,127 +1,130 @@
-# Сигнал конца хода
+# End-of-turn signal
 
-Как сессия сообщает пользователю, что ход кончился: звук в терминале или уведомление в Телеграме.
-Решает код по данным Stop-хука, модель ничего для этого не вызывает.
+How a session tells the user that a turn has ended: a sound in the terminal or a notification in Telegram.
+The code decides from the Stop hook data; the model calls nothing for this.
 
-## Зачем
+## Why
 
-Раньше модель в конце хода вызывала `tg_notify` (в Телеграме) или скрипт звука (в терминале).
-Каждый такой вызов — лишний запрос к модели с полным контекстом (~150–170k токенов), плюс загрузка
-описания `tg_notify` через ToolSearch после каждого компакта. В долгих сессиях таких вызовов сотни,
-и это заметная доля стоимости.
+Before, at the end of a turn the model called `tg_notify` (in Telegram) or a sound script (in the terminal).
+Each such call is an extra model request with the full context (~150–170k tokens), plus loading the
+`tg_notify` description through ToolSearch after every compaction. In long sessions there are hundreds of such calls,
+and they are a noticeable part of the cost.
 
-## Решение о ходе
+## The turn decision
 
-Stop-хук плагина (`plugin/src/hook/stop.ts`, команда в `hooks.json` рядом с SessionStart) читает
-свой вход и решает:
+The plugin's Stop hook (`plugin/src/hook/stop.ts`, a command in `hooks.json` next to SessionStart) reads
+its input and decides:
 
-- **финальный `ask`** — в последнем абзаце `last_assistant_message` есть вопрос, даже если фоновые
-  задачи живы;
-- **финальный `done`** — вопроса нет, `background_tasks` пуст;
-- **промежуточный** — вопроса нет, фоновые задачи есть. Агент ждёт событие (монитор, фоновую
-  команду, субагента) и сам продолжит.
+- **final `ask`**: the last paragraph of `last_assistant_message` has a question, even if background
+  tasks are alive;
+- **final `done`**: there is no question, `background_tasks` is empty;
+- **intermediate**: there is no question, there are background tasks. The agent waits for an event (a monitor, a background
+  command, a subagent) and will continue on its own.
 
-Фоновые субагенты (Agent в фоне) в `background_tasks` не попадают, поэтому без отдельного учёта
-каждый промежуточный ход пришёл бы со звуком. Их число Claude Code пишет в
-`turn_duration` (`pendingBackgroundAgentCount`). Плагин окна, закрывая ход по правилам ниже, при
-числе больше нуля считает ход без вопроса промежуточным, каким бы ни было решение хука и даже без
-решения (п. 2 ниже закрывает такой ход тихо). Звук терминала хук сам играет только без хаба, а там
-этого числа ещё нет, — редкий случай, оставлен.
+Background subagents (Agent in the background) do not appear in `background_tasks`, so without separate accounting
+every intermediate turn would come with a sound. Claude Code writes their number in
+`turn_duration` (`pendingBackgroundAgentCount`). When the window plugin closes a turn by the rules below, with
+the number above zero it treats a turn without a question as intermediate, whatever the hook decided and even with no
+decision (item 2 below closes such a turn silently). The terminal sound is played by the hook itself only without a hub, and there
+this number is not available yet; this is a rare case, left as is.
 
-Фоновой задачей считается любая запись `background_tasks`, какого бы типа она ни была. Висящий
-dev-сервер тоже делает ходы промежуточными: это редкий случай, а короткие фоновые команды без
-монитора агент действительно ждёт. `session_crons` на решение не влияют.
+A background task is any `background_tasks` entry, of whatever type. A hanging
+dev server also makes turns intermediate: this is a rare case, and the agent really does wait for short background commands without
+a monitor. `session_crons` do not affect the decision.
 
-**Вопрос.** Последний абзац — текст после последней пустой строки (концы строк `\r\n` и `\n`), без
-пробелов по краям. Перед поиском `?` из всего текста убираются блоки кода (```` ``` ````…```` ``` ````)
-и инлайн-код (`` `…` ``), а из последнего абзаца — ссылки (`http://…`, `https://…` до пробела;
-`?` в самом конце ссылки, перед пробелом или концом текста, считается вопросом, а не частью ссылки).
-Незакрытый блок кода (обрезанный ответ) убирается до конца текста.
-Вопрос есть, если в оставшемся тексте последнего абзаца есть `?`. Пустой абзац после блока кода не
-считается: берётся последний непустой.
+**Question.** The last paragraph is the text after the last blank line (line endings `\r\n` and `\n`), with
+whitespace trimmed at the edges. Before looking for `?`, code blocks (```` ``` ````…```` ``` ````)
+and inline code (`` `…` ``) are removed from the whole text, and links (`http://…`, `https://…` up to a space)
+are removed from the last paragraph (a `?` at the very end of a link, before a space or the end of the text, counts as a question, not as part of the link).
+An unclosed code block (a truncated answer) is removed up to the end of the text.
+There is a question if the remaining text of the last paragraph has a `?`. An empty paragraph after a code block does not
+count: the last non-empty one is taken.
 
-Хук передаёт решение хабу: `POST /turn-end` с телом `{ messagingSocket, session_id, final, kind }`
-(`kind` только у финального). Хаб отдаёт его окну с этим `messagingSocket` WS-сообщением
-`{ type: "turnEnd", final, kind? }`. Хук никогда не падает и ничего не печатает. Если хаб не ответил
-за 1,5 с и ход финальный, хук сам играет звук терминала (без хаба Телеграм всё равно не работает).
-Порог в 30 с для `done` тут не действует: время ввода знает только плагин окна. Хаб работает
-постоянно, так что это редкий случай.
+The hook passes the decision to the hub: `POST /turn-end` with the body `{ messagingSocket, session_id, final, kind }`
+(`kind` only for a final one). The hub gives it to the window with this `messagingSocket` in the WS message
+`{ type: "turnEnd", final, kind? }`. The hook never fails and prints nothing. If the hub does not answer
+within 1.5 s and the turn is final, the hook plays the terminal sound itself (without the hub Telegram does not work anyway).
+The 30 s threshold for `done` does not apply here: only the window plugin knows the input time. The hub runs
+all the time, so this is a rare case.
 
-## Когда ход действительно кончился
+## When the turn has really ended
 
-Хук не знает, продолжит ли ход другой Stop-хук или классификатор. Ждать тишины мало: prompt-хук
-`/goal` может продолжить ход через пару секунд после конца ответа. Надёжный знак настоящего
-конца — системная запись `turn_duration` (в парсере `turn_closed`). Claude Code пишет её один раз на
-весь ход, после всех Stop-хуков и всех продолжений: в транскрипте с продолжениями несколько `stop_hook_summary`
-подряд и одна `turn_duration` в конце.
+The hook does not know whether another Stop hook or a classifier will continue the turn. Waiting for silence is not enough: the `/goal`
+prompt hook can continue the turn a couple of seconds after the answer ends. The reliable sign of the real
+end is the system record `turn_duration` (`turn_closed` in the parser). Claude Code writes it once for
+the whole turn, after all Stop hooks and all continuations: in a transcript with continuations there are several `stop_hook_summary`
+in a row and one `turn_duration` at the end.
 
-Плагин закрывает ход так:
+The plugin closes a turn like this:
 
-1. Транскрипт показал `turn_end`, а затем `turn_closed`, и решение `turnEnd` есть — ход закрывается
-   по последнему решению сразу.
-2. `turn_closed` есть, решения нет — ждать его `TURN_DECISION_MS = 5000` мс от `turn_closed`, потом
-   закрыть как финальный `done`. Это хук упал или хаб перезапускался: в Телеграме лишний звук лучше
-   потерянного. Звук терминала тут не играет: сломанные хуки не должны звенеть на каждом ходе.
-3. `turn_closed` нет (старый Claude Code, прерванный ход) — закрыть, когда `TURN_CLOSE_WAIT_MS =
-   30_000` мс нет новых записей основного агента и не пришло новое решение: по решению, если оно
-   есть, иначе как в п. 2. Срок длинный, потому что prompt-хук может думать дольше 5 с и всё же
-   продолжить ход, а `turn_closed` в нынешнем Claude Code приходит всегда.
+1. The transcript showed `turn_end`, then `turn_closed`, and a `turnEnd` decision exists: the turn is closed
+   at once by the last decision.
+2. `turn_closed` exists, there is no decision: wait for it `TURN_DECISION_MS = 5000` ms from `turn_closed`, then
+   close as a final `done`. This means the hook failed or the hub restarted: in Telegram an extra sound is better than
+   a lost one. The terminal sound is not played here: broken hooks must not chime on every turn.
+3. There is no `turn_closed` (old Claude Code, an interrupted turn): close when for `TURN_CLOSE_WAIT_MS =
+   30_000` ms there are no new records from the main agent and no new decision has come: by the decision, if there is
+   one, otherwise as in item 2. The period is long because a prompt hook can think for more than 5 s and still
+   continue the turn, and `turn_closed` always comes in the current Claude Code.
 
-Пришла запись другого сообщения после `turn_end` — ход продолжился: текст уходит тихо, как
-промежуточный, решение сбрасывается, решает следующий Stop. Решение может прийти раньше, чем
-дочитаны записи конца хода: перед тем как принять решение, плагин дочитывает транскрипт.
+A record of another message after `turn_end` means the turn continued: the text goes out silently, as an
+intermediate one, the decision is reset, and the next Stop decides. The decision can arrive earlier than the
+records of the turn end are fully read: before accepting a decision, the plugin reads the transcript to the end.
 
-Решение, пришедшее после того, как ход уже закрыт (и новых записей с тех пор не было), опоздало и
-отбрасывается: иначе оно сделало бы громким следующий ход, начатый монитором. При принудительном
-закрытии (завершение окна, смена сессии, обрыв ответа) решение учитывается, только если ход уже
-кончился (`turn_end`); текст посреди хода уходит тихо.
+A decision that arrives after the turn is already closed (and there have been no new records since) is late and
+is dropped: otherwise it would make the next turn, started by a monitor, loud. On a forced
+close (window shutdown, session change, a cut-off answer) the decision is taken into account only if the turn has already
+ended (`turn_end`); text in the middle of a turn goes out silently.
 
-Задержка: финальный текст уходит, когда дочитана `turn_duration` — через время работы Stop-хука
-(запуск bun и запрос к хабу) плюс до 300 мс опроса транскрипта.
+Delay: the final text goes out when `turn_duration` is read: after the running time of the Stop hook
+(starting bun and the request to the hub) plus up to 300 ms of transcript polling.
 
-## Режим Телеграма включён
+## Telegram mode on
 
-Финальный текст хода уходит в тему один раз, как раньше:
+The final text of the turn goes to the topic once, as before:
 
-- финальный ход — со звуком (`ask` и `done` в Телеграме звучат одинаково);
-- промежуточный — без звука;
-- финальный ход без текста после последнего вызова инструмента — ничего: отдельных сообщений ради
-  звука нет. Уведомление в Телеграме бывает только вместе с сообщением, поэтому такой ход кончается
-  тихо. Отдельное сообщение «✅ Готово» не отправляется.
+- a final turn: with a sound (`ask` and `done` sound the same in Telegram);
+- an intermediate one: without a sound;
+- a final turn with no text after the last tool call: nothing. There are no separate messages just for
+  a sound. A notification in Telegram exists only together with a message, so such a turn ends
+  silently. A separate message "✅ Done" is not sent.
 
-Тексты перед вызовами инструментов по-прежнему уходят сразу и без звука. Звук терминала в этом
-режиме не играет никогда.
+Texts before tool calls still go out at once and without a sound. The terminal sound is never played in this
+mode.
 
-## Режим Телеграма выключен
+## Telegram mode off
 
-На финальный ход плагин окна запускает звук:
+For a final turn the window plugin starts the sound:
 
-- `ask` — всегда;
-- `done` — только если с последнего ввода пользователя в терминале (`terminal_input`) прошло не
-  меньше `CHIME_MIN_TURN_MS = 30_000` мс. Быстрые ответы, пока пользователь у терминала, не звенят.
-  Ходы, начатые монитором или фоновой задачей, отсчёт не сбрасывают: итог после долгого прогона
-  звенит. Ввода в этом окне ещё не было — звенит.
+- `ask`: always;
+- `done`: only if at least `CHIME_MIN_TURN_MS = 30_000` ms have passed since the user's last input in the terminal (`terminal_input`). Quick
+  answers while the user is at the terminal do not chime.
+  Turns started by a monitor or a background task do not reset the count: the result after a long run
+  chimes. If there has been no input in this window yet, it chimes.
 
-Звук играет, когда ход закрыт по правилам выше, а не когда пришло решение: продолженный ход звенит
-один раз, в настоящем конце.
+The sound plays when the turn is closed by the rules above, not when the decision arrives: a continued turn chimes
+once, at the real end.
 
-Команда — `turnEndChime` в `config.json` хаба, строка с подстановкой `{kind}` (`ask` или `done`),
-запускается через оболочку, не дожидаясь конца. По умолчанию на Windows играет системный сигнал
-Windows. Заданная команда заменяет его. Пустая строка — без звука. Ошибочное значение (не строка) — как по умолчанию, с записью в лог.
+The command is `turnEndChime` in the hub's `config.json`, a string with the substitution `{kind}` (`ask` or `done`),
+run through the shell without waiting for it to finish. By default on Windows the system Windows
+sound plays. A set command replaces it. An empty string means no sound. A wrong value (not a string) is treated as the default, with a log entry.
 
-## Что убрано
+## What was removed
 
-Инструмента `tg_notify` больше нет: ни в списке инструментов, ни в инструкциях MCP-сервера, ни в
-`relay.ts` (флаг `notify` заменён решением Stop-хука, маркер «🔔 Ход завершён — ответ выше.» убран
-без замены). Остальные инструменты (`tg_enable`, `tg_disable`, `tg_send_file`, `download_attachment`,
-`tg_before_question`) не меняются.
+The `tg_notify` tool is gone: from the tool list, from the MCP server instructions, and from
+`relay.ts` (the `notify` flag is replaced by the Stop hook decision, the marker "🔔 Turn finished — answer above." was removed
+with no replacement). The other tools (`tg_enable`, `tg_disable`, `tg_send_file`, `download_attachment`,
+`tg_before_question`) do not change.
 
-Если у пользователя есть свой скилл или инструкция, по которым модель сама играет звук в конце хода,
-их нужно убрать: иначе звук будет двойным. Сигнал конца хода даёт только Stop-хук telegram-hub.
+If the user has their own skill or instruction by which the model plays a sound at the end of a turn itself,
+it must be removed: otherwise the sound will be doubled. The end-of-turn signal comes only from the telegram-hub Stop hook.
 
-## Принятые решения
+## Decisions made
 
-При выборе предпочтение отдано надёжности. Так выбраны: закрытие хода по
-`turn_duration` (ожидание тишины ненадёжно: prompt-хуки продолжают ход позже), `done` со звуком через 5 с без решения (только Телеграм), исключение кода и ссылок при поиске
-вопроса, порог 30 с с последнего ввода для `done` в терминале, любая фоновая задача делает ход
-промежуточным.
+Where there was a choice, reliability was preferred. Chosen this way: closing the turn by
+`turn_duration` (waiting for silence is unreliable: prompt hooks continue the turn later), `done` with a sound after 5 s with no decision (Telegram only), excluding code and links when looking for
+a question, the 30 s threshold since the last input for `done` in the terminal, and any background task making a turn
+intermediate.
+
+The texts in Telegram that this signal produces are English by default and Russian when rig's language is `ru`,
+see `language-design.md`.
