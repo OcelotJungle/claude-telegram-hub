@@ -27,6 +27,8 @@ export type TranscriptEvent =
   | { kind: "text"; text: string; messageId: string }
   // detail: what the call works on, for a status line.
   | { kind: "tool_use"; name: string; messageId: string; detail?: string }
+  // A tool result arrived in a user record: the assistant turn goes on.
+  | { kind: "tool_result" }
   // cut: the connection to the API failed, before or during the response,
   // and the turn ended on it: the answer is missing or incomplete.
   | { kind: "turn_end"; messageId: string; cut?: true }
@@ -65,9 +67,7 @@ export function parseRecord(r: unknown): TranscriptEvent[] {
     case "assistant":
       return parseAssistant(r);
     case "user":
-      if (isTerminalInput(r)) return [{ kind: "terminal_input" }];
-      if (isOurChannel(r.origin)) return channelSeen(contentText(r));
-      return INTERRUPTED.test(contentText(r)) ? [{ kind: "interrupted" }] : taskStatus(contentText(r));
+      return userRecord(r);
     // A message typed while the agent works is absorbed into the running turn.
     case "attachment": {
       const a = r.attachment;
@@ -89,6 +89,19 @@ export function parseRecord(r: unknown): TranscriptEvent[] {
     default:
       return [];
   }
+}
+
+function userRecord(r: Rec): TranscriptEvent[] {
+  const text = contentText(r);
+  const events: TranscriptEvent[] = isTerminalInput(r)
+    ? [{ kind: "terminal_input" }]
+    : isOurChannel(r.origin)
+      ? channelSeen(text)
+      : INTERRUPTED.test(text) ? [{ kind: "interrupted" }] : taskStatus(text);
+  const content = field(r.message, "content");
+  const hasToolResult = arr(content).some(block => isObject(block) && block.type === "tool_result");
+  // First, so an interrupt written in the same record still ends the work.
+  return hasToolResult ? [{ kind: "tool_result" }, ...events] : events;
 }
 
 // A record of a subagent's own transcript (subagents/agent-<id>.jsonl): all

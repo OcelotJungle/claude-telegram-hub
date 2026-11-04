@@ -133,6 +133,8 @@ function busyAfter(ev: TranscriptEvent): boolean | undefined {
       return true;
     case "tool_use":
       return !WAITS_FOR_USER.has(ev.name);
+    case "tool_result":
+      return true;
     case "turn_end":
     case "interrupted":
       return false;

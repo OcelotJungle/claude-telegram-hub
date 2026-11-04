@@ -518,6 +518,37 @@ describe("PluginCore", () => {
     expect(typing()).toBe(ended);
   });
 
+  test("a tool result resumes busy state and a lone ! interrupts with empty content", async () => {
+    await enabledCore();
+    const typing = () => fake.callsOf("sendChatAction").length;
+    append(assistantTool("Bash", "q1"));
+    await waitFor(() => typing() >= 1, 3000, "initial busy state");
+    append(assistantTool("AskUserQuestion", "q2"));
+    await Bun.sleep(150);
+    const waiting = typing();
+    await Bun.sleep(200);
+    expect(typing()).toBe(waiting);
+
+    append({
+      type: "user",
+      isSidechain: false,
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "The answer" }] },
+    });
+    await waitFor(() => typing() > waiting, 3000, "busy state after the answer");
+
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!" }));
+    await waitFor(() => interrupts.length === 1, 3000, "interrupt after the answer");
+    expect(channel).toEqual([]);
+    expect(interrupts[0].prompt).toEndWith(">\n\n</channel>");
+
+    append(assistantText("Finished", "end_turn", "q3"), closed);
+    await stopHook(true, "done");
+    await waitFor(() => sent().some(message => message.text.includes("Finished")), 3000, "turn end after the answer");
+    const ended = typing();
+    await Bun.sleep(200);
+    expect(typing()).toBe(ended);
+  });
+
   test("a subagent shows as one card that is edited until it is done", async () => {
     await enabledCore();
     const dir = join(transcript.replace(/\.jsonl$/, ""), "subagents");

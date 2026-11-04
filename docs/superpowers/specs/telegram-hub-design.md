@@ -175,7 +175,9 @@ goes into the topic name when it is created.
 - interrupt: a message whose own text or caption starts with `!` (not forwarded)
   interrupts the working agent. `!` is a signal for the hub only: the hub removes it and the spaces after it
   from the text and sends the window a notification with the flag `interrupt: true`. The plugin interrupts the agent
-  only if the flag is present and the agent is working; text starting with `!` without the flag (for example, a pasted document)
+  only if the flag is present and the agent is working. The agent counts as working through its turn, except while it
+  waits for the answer to a poll; any tool result in the transcript, the poll's answer included, makes it working
+  again. Text starting with `!` without the flag (for example, a pasted document)
   arrives as a normal message. A lone `!` gives an interrupt with an empty message. The hub makes its own checks for
   `!` (straight to the window during `/cleanup`, a new batch) on the original text from Telegram.
   After updating to this scheme, both the hub and the windows must be restarted: an old window does not know the flag and does not

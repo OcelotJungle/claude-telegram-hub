@@ -85,6 +85,8 @@ export class Relay {
       if (!this.ended.includes(ev.messageId)) this.closed = false;
     }
     switch (ev.kind) {
+      case "tool_result":
+        break;
       case "terminal_input":
       case "channel_seen":
       case "interrupted":

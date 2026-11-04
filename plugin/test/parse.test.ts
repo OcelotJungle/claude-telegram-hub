@@ -157,7 +157,18 @@ describe("user records", () => {
 
   test("tool result is not terminal input", () => {
     const rec = { ...userBase, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "ok" }] } };
-    expect(parseRecord(rec)).toEqual([]);
+    expect(parseRecord(rec)).toEqual([{ kind: "tool_result" }]);
+  });
+
+  test("an interrupt in the same record as a tool result comes after it", () => {
+    const content = [{ type: "tool_result", tool_use_id: "t", content: "no" }, { type: "text", text: "[Request interrupted by user for tool use]" }];
+    const rec = { ...userBase, message: { role: "user", content } };
+    expect(parseRecord(rec)).toEqual([{ kind: "tool_result" }, { kind: "interrupted" }]);
+  });
+
+  test("a plain user prompt does not emit a tool result event", () => {
+    const rec = { ...userBase, origin: { kind: "human" }, message: { role: "user", content: "hello" } };
+    expect(parseRecord(rec)).toEqual([{ kind: "terminal_input" }]);
   });
 
   test("compact summary is not terminal input", () => {
