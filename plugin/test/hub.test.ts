@@ -1262,6 +1262,25 @@ describe("files", () => {
     expect(existsSync(join(dir, "outbox-files", "f1"))).toBe(false);
   });
 
+  test("a caption without a visible character is not sent", async () => {
+    await startHub();
+    const a = await enabled("a");
+    sendFiles(a, "f1", [queued("f1", "shot.png")], { caption: " ​\n" });
+    await done(a, "f1");
+    expect(fake.callsOf("sendPhoto")[0]).not.toHaveProperty("caption");
+  });
+
+  test("a turn text without a visible character sends nothing", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send({ type: "send", id: "t1", sessionId: "a", text: "​", notify: true });
+    await a.next("ack", m => m.id === "t1");
+    a.send({ type: "send", id: "t2", sessionId: "a", text: "ok", notify: true });
+    await a.next("ack", m => m.id === "t2");
+    await waitFor(() => fake.callsOf("sendMessage").length > 0);
+    expect(fake.callsOf("sendMessage").map(c => c.text)).toEqual(["ok"]);
+  });
+
   test("albums follow the files, the caption and the sound go with the first send only", async () => {
     await startHub();
     const a = await enabled("a");

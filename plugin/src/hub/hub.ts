@@ -25,7 +25,7 @@ import { randomUUID } from "crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync } from "fs";
 import { basename, dirname, join } from "path";
 import { z } from "zod";
-import { chunk } from "../shared/chunk.ts";
+import { chunk, hasVisibleText } from "../shared/chunk.ts";
 import { notifies } from "../shared/notification.ts";
 import { isInside } from "../shared/config.ts";
 import { field } from "../shared/guards.ts";
@@ -1514,7 +1514,8 @@ ${msg.text}`);
       this.log.warn(`session ${msg.sessionId} has no topic, files not sent: ${msg.files.map(f => f.name).join(", ")}`);
       return fail("This session has no Telegram topic yet — call tg_enable first.");
     }
-    const caption = toTelegram(msg.caption);
+    const formatted = toTelegram(msg.caption);
+    const caption = hasVisibleText(formatted.text) ? formatted : undefined;
     const pieces = albums(msg.files.map(f => ({ ...f, kind: msg.asDocument ? "document" : kindOf(f.name, f.size) }))).map((files, i) => filesPiece(files, i === 0 ? caption : undefined, msg.notify && i === 0));
     if (this.outbox.add(msg.id, msg.sessionId, pieces)) {
       this.fileMessages.set(msg.id, { errors: [], ws });

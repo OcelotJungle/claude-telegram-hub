@@ -55,6 +55,14 @@ describe("chunk", () => {
     expect(texts(`${"a".repeat(60)}\n\n\n\n${"b".repeat(60)}`, 100)).toEqual(["a".repeat(60), "b".repeat(60)]);
   });
 
+  // Telegram rejects such text with "text must be non-empty"; a turn that
+  // ends on a lone zero-width space is the case seen live.
+  test("never yields pieces without a visible character", () => {
+    expect(texts("​")).toEqual([]);
+    expect(texts(" ‌‍⁠﻿­\n")).toEqual([]);
+    expect(texts("​ok")).toEqual(["​ok"]);
+  });
+
   test("never cuts a surrogate pair", () => {
     const pieces = texts("a" + "😀".repeat(60), 100);
     expect(pieces.join("")).toBe("a" + "😀".repeat(60));

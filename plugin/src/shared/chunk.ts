@@ -5,6 +5,14 @@ import type { Entity, Formatted } from "./markdown.ts";
 // hard cut otherwise, never inside a surrogate pair. Each piece gets the parts
 // of the entities that fall into it.
 export const MAX_MESSAGE = 4096;
+// Whitespace and characters that render as nothing (zero-width space, joiners,
+// BOM, soft hyphen...). Telegram rejects a text made only of these with
+// "text must be non-empty", and `trim()` keeps the invisible ones.
+const VISIBLE = /[^\p{White_Space}\p{Default_Ignorable_Code_Point}]/u;
+
+export function hasVisibleText(text: string): boolean {
+  return VISIBLE.test(text);
+}
 
 export function chunk(f: Formatted, limit = MAX_MESSAGE): Formatted[] {
   const { text } = f;
@@ -30,7 +38,7 @@ export function chunk(f: Formatted, limit = MAX_MESSAGE): Formatted[] {
 
 function piece(f: Formatted, start: number, end: number, out: Formatted[]): void {
   while (end > start && /\s/.test(f.text[end - 1])) end--;
-  if (end <= start) return;
+  if (!hasVisibleText(f.text.slice(start, end))) return;
   const entities: Entity[] = [];
   for (const e of f.entities) {
     const s = Math.max(e.offset, start);
