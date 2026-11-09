@@ -3146,7 +3146,7 @@ print(json.dumps({"checked_at": "2026-01-02T12:00:00Z", "source": "none", "day_p
   test("the hub puts the commands into the bot menu", async () => {
     await startHub();
     const call = await waitFor(() => fake.callsOf("setMyCommands")[0]);
-    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "rename", "run", "stop", "cleanup", "mode", "pwsh", "cmd", "bash", "feature", "rig"]);
+    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "compact", "rename", "run", "stop", "cleanup", "mode", "pwsh", "cmd", "bash", "rig"]);
     expect(field(arr(call.commands).find(c => field(c, "command") === "compact"), "description")).toBe("Compact the context; /compact <instructions> adds instructions; /compact N sets the autocompact window");
     expect(field(arr(call.commands).find(c => field(c, "command") === "rename"), "description")).toBe("Rename the session and its topic; /rename <name> is the new name");
     expect(field(arr(call.commands).find(c => field(c, "command") === "pwsh"), "description")).toBe("Run a command in PowerShell in the session folder");

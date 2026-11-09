@@ -2,7 +2,7 @@ import type { Update } from "../src/hub/telegram.ts";
 
 import { describe, expect, test } from "bun:test";
 import { join } from "path";
-import { commandOf, hubCommandOf, routeUpdate } from "../src/hub/router.ts";
+import { commandOf, hubCommandOf, machineCommandOf, routeUpdate } from "../src/hub/router.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
 import { topicMsg } from "./fake-telegram.ts";
 import { tempDir } from "./helpers.ts";
@@ -160,5 +160,13 @@ describe("hubCommandOf", () => {
     expect(hubCommandOf("/mode acceptedits", "test_bot")).toEqual({ name: "mode", args: "acceptedits" });
     expect(hubCommandOf("/mode", "test_bot")).toEqual({ name: "mode", args: "" });
     expect(commandOf("/mode plan", "test_bot")).toBeUndefined();
+  });
+
+  test("/feature is no machine command: only /rig is", () => {
+    expect(machineCommandOf("/rig feature telegram disable", "test_bot")).toEqual({ name: "rig", args: "feature telegram disable" });
+    expect(machineCommandOf("/feature", "test_bot")).toBeUndefined();
+    expect(machineCommandOf("/feature telegram disable", "test_bot")).toBeUndefined();
+    expect(hubCommandOf("/feature", "test_bot")).toBeUndefined();
+    expect(commandOf("/feature", "test_bot")).toBeUndefined();
   });
 });

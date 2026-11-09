@@ -140,10 +140,28 @@ describe("rig contract", () => {
 
   test("client text cannot become an executable, path, option or shell expression", () => {
     for (const args of ["../cmd enable", "cmd&calc enable", "--help enable", "cmd enable extra", "cmd ENABLE", "cmd%PATH% enable", '"cmd" enable', "cmd enable\nupdate"]) {
-      expect(rigAction({ name: "feature", args }, en).ok).toBe(false);
+      expect(rigAction({ name: "rig", args: `feature ${args}` }, en).ok).toBe(false);
     }
-    expect(rigAction({ name: "feature", args: "telegram disable" }, en)).toEqual({ ok: true, value: { kind: "mutate", args: ["feature", "telegram", "disable"], confirm: true } });
+    expect(rigAction({ name: "rig", args: "feature telegram disable" }, en)).toEqual({ ok: true, value: { kind: "mutate", args: ["feature", "telegram", "disable"], confirm: true } });
     expect(rigAction({ name: "rig", args: "status --json" }, en).ok).toBe(false);
     expect(statusSchema.safeParse({ schemaVersion: 2 }).success).toBe(false);
+  });
+
+  test("/rig feature lists the features; /rig feature <name> enable|disable mutates one of them", () => {
+    expect(rigAction({ name: "rig", args: "feature" }, en)).toEqual({ ok: true, value: { kind: "features" } });
+    expect(rigAction({ name: "rig", args: "feature cmd enable" }, en)).toEqual({ ok: true, value: { kind: "mutate", args: ["feature", "cmd", "enable"], confirm: false } });
+    expect(rigAction({ name: "rig", args: "feature telegram disable" }, en)).toEqual({ ok: true, value: { kind: "mutate", args: ["feature", "telegram", "disable"], confirm: true } });
+    expect(rigAction({ name: "rig", args: "feature cmd" }, en)).toEqual({ ok: false, error: en.rigFeatureUsage });
+  });
+
+  test("bad /rig arguments answer the usage that lists every form", () => {
+    for (const args of ["", "bogus", "status now", "language xx"]) {
+      expect(rigAction({ name: "rig", args }, en)).toEqual({ ok: false, error: en.rigUsage });
+    }
+    expect(en.rigUsage).toContain("/rig status");
+    expect(en.rigUsage).toContain("/rig update");
+    expect(en.rigUsage).toContain("/rig language [en|ru]");
+    expect(en.rigUsage).toContain("/rig feature");
+    expect(en.rigUsage).toContain("/rig feature <name> enable|disable");
   });
 });

@@ -81,12 +81,12 @@ function fixture(extra: Partial<HubOptions> = {}) {
 
 test("General routes only allowed machine commands and preserves a session topic destination", async () => {
   const f = fixture();
-  await f.update("/feature", STRANGER);
+  await f.update("/rig feature", STRANGER);
   await f.update("/cmd echo forbidden");
   expect(f.texts).toEqual([]);
-  await f.update("/feature");
+  await f.update("/rig feature");
   expect(f.texts[0]).toEqual({ text: en.featuresEmpty, topic: undefined, silent: true });
-  await f.update("/feature", USER, 1);
+  await f.update("/rig feature", USER, 1);
   expect(f.texts.at(-1)?.topic).toBeUndefined();
   await f.update("/rig update", USER, TOPIC);
   expect(f.spawned).toHaveLength(1);
@@ -95,13 +95,40 @@ test("General routes only allowed machine commands and preserves a session topic
   expect(f.hub["commands"].size).toBe(0);
 });
 
+test("/feature is no machine command: General ignores it and nothing runs", async () => {
+  const f = fixture();
+  await f.update("/feature", USER);
+  await f.update("/feature telegram disable", USER);
+  expect(f.texts).toEqual([]);
+  expect(f.spawned).toEqual([]);
+  expect(f.hub["machineQueries"]).toBe(0);
+  expect(f.hub["disableConfirmations"].size).toBe(0);
+});
+
+test("/rig feature lists the features, and /rig feature <name> enable runs rig with those arguments", async () => {
+  const f = fixture();
+  await f.update("/rig feature", USER);
+  expect(f.texts.at(-1)).toEqual({ text: en.featuresEmpty, topic: undefined, silent: true });
+  await f.update("/rig feature cmd enable", USER);
+  const spec = runnerSpecSchema.parse(JSON.parse(readFileSync(must(f.spawned[0]), "utf8")));
+  // On Windows the rig call is one `cmd /c` string, elsewhere separate arguments: the joined line holds both.
+  expect(spec.argv.join(" ")).toContain("feature cmd enable");
+});
+
+test("bad /rig and /rig feature arguments answer the usage of their own form", async () => {
+  const f = fixture();
+  await f.update("/rig bogus", USER);
+  await f.update("/rig feature cmd", USER);
+  expect(f.texts.map(message => message.text)).toEqual([en.rigUsage, en.rigFeatureUsage]);
+});
+
 test("missing rig answers commands, keeps them in the menu and preserves legacy shells", async () => {
   const f = fixture({ findRig: () => undefined });
-  await f.update("/feature");
+  await f.update("/rig feature");
   await f.update("/rig update");
   expect(f.texts.every(message => message.text.includes(en.rigMissing))).toBe(true);
   await f.hub["registerCommands"](f.api);
-  expect(f.menus[0]).toContain("feature");
+  expect(f.menus[0]).not.toContain("feature");
   expect(f.menus[0]).toContain("rig");
 });
 
@@ -116,11 +143,11 @@ test("a slow JSON query neither delays the next update nor escapes the idle gate
   let release: () => void = () => {};
   const slow = new Promise<void>(resolve => { release = resolve; });
   const f = fixture({ runRig: async () => { await slow; return { code: 0, stdout: "[]", stderr: "" }; } });
-  await f.intake("/feature");
+  await f.intake("/rig feature");
   expect(f.hub["machineQueries"]).toBe(1);
   expect(f.hub["rigIdle"]()).toBe(false);
   // The poll loop is free: another command is handled while the query waits.
-  await f.intake("/feature");
+  await f.intake("/rig feature");
   expect(f.hub["machineQueries"]).toBe(2);
   release();
   await settled(f.hub);
@@ -132,7 +159,7 @@ test("a machine command that fails is logged and does not stop the intake", asyn
   const log = memLogger();
   const f = fixture({ log });
   f.hub["rig"].refresh = async () => { throw new Error("rig crashed"); };
-  await f.update("/feature");
+  await f.update("/rig feature");
   expect(f.hub["machineQueries"]).toBe(0);
   expect(log.lines.join("\n")).toContain("rig crashed");
 });
@@ -216,7 +243,7 @@ test("a rig busy line reaches the topic while the command runs and is not a fail
 
 test("telegram disable rejects a stranger and starts only after recovery instructions arrive", async () => {
   const f = fixture();
-  await f.update("/feature telegram disable");
+  await f.update("/rig feature telegram disable");
   const key = must([...f.hub["disableConfirmations"].keys()][0]);
   const press = (fromId: string) => f.hub["handleUpdate"](f.api, buttonPress({ chatId: GROUP, fromId, messageId: 1, data: `rig-disable:${key}` }));
   await press(STRANGER);
@@ -478,7 +505,7 @@ test("a failed menu registration is retried until Telegram accepts the current s
   await f.hub["registerCommands"](f.api);
   await f.hub["registerCommands"](f.api);
   expect(attempts).toBe(2);
-  expect(f.menus[0]).toContain("feature");
+  expect(f.menus[0]).not.toContain("feature");
   expect(f.menus[0]).toContain("rig");
 });
 
@@ -524,7 +551,7 @@ test("a stale rig command is not run: its card waits for a button press", async 
 
 test("a stale disable confirmation button does not start rig", async () => {
   const f = fixture();
-  await f.hub["handleUpdate"](f.api, topicMsg({ chatId: GROUP, fromId: USER, text: "/feature telegram disable", extra: OLD_MESSAGE }));
+  await f.hub["handleUpdate"](f.api, topicMsg({ chatId: GROUP, fromId: USER, text: "/rig feature telegram disable", extra: OLD_MESSAGE }));
   await settled(f.hub);
   const key = must([...f.hub["disableConfirmations"].keys()][0]);
   await f.clock.advance(EXEC_MAX_AGE_MS + 1);
@@ -538,7 +565,7 @@ test("a stale disable confirmation button does not start rig", async () => {
 
 test("a fresh disable confirmation press starts rig", async () => {
   const f = fixture();
-  await f.update("/feature telegram disable");
+  await f.update("/rig feature telegram disable");
   const key = must([...f.hub["disableConfirmations"].keys()][0]);
   await f.hub["handleUpdate"](f.api, buttonPress({ chatId: GROUP, fromId: USER, messageId: 1, data: `rig-disable:${key}` }));
   expect(f.spawned).toHaveLength(1);
@@ -558,7 +585,7 @@ test("the run button of a disabled /pwsh asks the feature state again at the pre
   await f.hub["rig"].refresh();
   const press = () => f.hub["handleUpdate"](f.api, buttonPress({ chatId: GROUP, fromId: USER, messageId: 1, data: `x:${pending.id}:run` }));
   await press();
-  expect(f.answers.at(-1)).toContain("/feature pwsh enable");
+  expect(f.answers.at(-1)).toContain("/rig feature pwsh enable");
   expect(f.spawned).toEqual([]);
   expect(pending.state).toBe("pending");
   f.output(features(true));

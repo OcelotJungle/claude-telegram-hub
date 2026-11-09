@@ -8,8 +8,8 @@ the hub with `--always-on`, `Restart=always`, `KillMode=process` and package ins
 plain Claude with no account number. On Linux, tmux is used for autostart,
 and the CMD metacharacter checks apply only to a template whose first element is cmd/cmd.exe.
 
-The machine commands `/feature` and `/rig` are accepted by the hub from `allowFrom` in General and in session
-topics, without passing them to the agent. Feature state comes from rig's JSON; the hub config is not changed.
+The machine command `/rig` (with its `feature`, `status`, `update` and `language` forms) is accepted by the hub from `allowFrom` in General and in session
+topics, without passing it to the agent. Feature state comes from rig's JSON; the hub config is not changed.
 Commands that change things use a detached runner, file logs and cards that are separate from
 sessions. General replies and Telegram-disable confirmations are saved to disk with retries.
 Events are read every 5 seconds by byte offset; the offset is committed after delivery.
@@ -62,7 +62,7 @@ from the phone when away from the computer.
    confirmation is required.
 7. **A message to the topic of a closed session:** the bot answers "the session is not active right now".
 8. **Messages outside topics** (General, the bot's private chat, other chats, strangers) — ignore,
-   except the machine commands `/feature` and `/rig` from `allowFrom` in General.
+   except the machine command `/rig` from `allowFrom` in General.
 9. **No permanent services.** The hub lives while at least one window is open.
 10. **Closing any window, including the one that started the hub, does not break the others.** No window
     may lose the bot until the terminal is restarted.
@@ -145,7 +145,7 @@ the hub renames the topic (`editForumTopic`). While there is no topic, the new n
 goes into the topic name when it is created.
 
 **Incoming to a topic.** The hub gets an update:
-- the sender is not in `allowFrom`, the chat is not `groupId` → ignore; in General only `/feature` and `/rig` pass;
+- the sender is not in `allowFrom`, the chat is not `groupId` → ignore; in General only `/rig` passes;
 - the topic is not found in the table → ignore;
 - the session's window is not connected to the hub → reply in the topic "the session is not active right now";
 - otherwise → `enabled = true` (if it was off; `disabledByUser` is cleared) and delivery to that session's plugin → the plugin sends

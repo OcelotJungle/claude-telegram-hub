@@ -39,7 +39,7 @@ export type RigError =
   | { kind: "failure"; message: string };
 export type RigOutput = { code: number; stdout: string; stderr: string };
 export type FeatureState = { kind: "missing" } | { kind: "loading" } | { kind: "ready"; features: RigFeature[] } | { kind: "failed"; error: RigError };
-export type MachineCommand = { name: "feature" | "rig"; args: string };
+export type MachineCommand = { name: "rig"; args: string };
 export type RigAction = { kind: "features" } | { kind: "status" } | { kind: "mutate"; args: string[]; confirm: boolean };
 
 export function rigErrorText(error: RigError, m: Messages): string {
@@ -56,10 +56,10 @@ export function rigErrorText(error: RigError, m: Messages): string {
 // The usage replies are already texts: the caller passes the catalog it is answering in.
 export function rigAction(command: MachineCommand, m: Messages): RigResult<RigAction, string> {
   const args = command.args.trim().split(/\s+/).filter(Boolean);
-  if (command.name === "feature") {
-    if (!args.length) return { ok: true, value: { kind: "features" } };
-    const [name, action] = args;
-    if (args.length === 2 && name && FEATURE_NAME.test(name) && (action === "enable" || action === "disable")) {
+  if (args[0] === "feature") {
+    if (args.length === 1) return { ok: true, value: { kind: "features" } };
+    const [, name, action] = args;
+    if (args.length === 3 && name && FEATURE_NAME.test(name) && (action === "enable" || action === "disable")) {
       return { ok: true, value: { kind: "mutate", args: ["feature", name, action], confirm: name === "telegram" && action === "disable" } };
     }
     return { ok: false, error: m.rigFeatureUsage };

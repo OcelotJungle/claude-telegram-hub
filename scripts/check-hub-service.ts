@@ -296,7 +296,7 @@ try {
   await file(join(root, "child-tmux.json"));
   const tmuxChild = childSchema.parse(JSON.parse(readFileSync(join(root, "child-tmux.json"), "utf8")));
   children.push(tmuxChild.pid);
-  send("/feature telegram disable");
+  send("/rig feature telegram disable");
   // Running /bash cards carry a Stop button too; only the rig confirmation button is the one to press.
   const confirmationData = () => {
     for (const call of calls) {

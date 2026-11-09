@@ -9,7 +9,7 @@ Windows and on Ubuntu 24.04: both on one machine, on a working Windows machine o
 The contract between them is the section "Link with the hub" in `agent-rig/docs/superpowers/specs/agent-rig-design.md`. It is shared: it can be changed
 only in agreement for both sides. If it differs from this file, the `rig` spec is right.
 
-The hub works without `rig` too: while `rig` is not found, everything behaves as before, except that `/feature` and `/rig` answer that it is missing.
+The hub works without `rig` too: while `rig` is not found, everything behaves as before, except that `/rig` answers that it is missing.
 
 ## Platform
 
@@ -45,7 +45,7 @@ The scripts `scripts/install-hub-service.sh` and `scripts/uninstall-hub-service.
 
 - `Restart=always`, started with `--always-on`, packages installed with `--frozen-lockfile` before the start;
 - `KillMode=process`: the service stops only the hub itself. Otherwise the tmux server with all sessions, the started
-  `/bash` commands, and `rig`, which must outlive the hub on `/feature telegram disable`, would die with it;
+  `/bash` commands, and `rig`, which must outlive the hub on `/rig feature telegram disable`, would die with it;
 - `PATH` in the service includes `~/.local/bin` and `~/.bun/bin`: the minimal `PATH` of services does not contain them;
 - linger is enabled by the installation, so the hub comes up after a reboot without an SSH login; the installation waits for the user bus;
 - `RestartSec=2` and `StartLimitIntervalSec=0`: a fast failure at start, for example without network, must not leave the service in `failed` forever.
@@ -56,18 +56,18 @@ The hub handles SIGTERM cleanly: the same shutdown as `stop()`.
 
 The service installation scripts on Linux and the scheduler tasks on Windows create the file `service-managed` in the hub's state directory, and the removal scripts
 delete it. While the file exists, Claude Code windows do not start the hub themselves, they only wait for it and connect. Otherwise, during a
-service restart a window takes the port before the service, and after `/feature telegram disable` it brings up the disabled hub. Without the file, windows
+service restart a window takes the port before the service, and after `/rig feature telegram disable` it brings up the disabled hub. Without the file, windows
 start the hub as before. The file is created before the service or task starts: a window opened during installation does not manage to bring up
 its own hub. If the start fails, the script removes the file again (otherwise windows would wait for a hub that nobody starts).
 
 ## Machine commands
 
-`/feature`, `/feature <name> enable|disable`, `/rig status`, `/rig update`, `/rig language` and `/rig language en|ru` are executed by the hub itself, only for users from `allowFrom`,
+`/rig status`, `/rig update`, `/rig feature`, `/rig feature <name> enable|disable`, `/rig language` and `/rig language en|ru` are executed by the hub itself, only for users from `allowFrom`,
 bypassing the agent (`/rig language` follows the same access and output rules as `/rig status|update`; details in `language-design.md`). They work in the shared topic of the group and in any session topic, and the answer comes to the same place. The other commands stay in session topics.
 
 - `rig` is looked up in `PATH`, then in `~/.local/bin`. On Windows it is `rig.cmd`, started through `cmd.exe`. The feature name is checked against a
   whitelist pattern before the start, and the arguments go separately.
-- `/feature` shows the list from `rig feature --json`. The fields of the contract are parsed; the text is not parsed.
+- `/rig feature` shows the list from `rig feature --json`. A bad form of `/rig` or `/rig feature` answers its usage text, which lists the forms. The fields of the contract are parsed; the text is not parsed.
 - `/rig status` takes versions from the `releases` and `versions` fields in `rig status --json` and shows them as `0.2.0 (<commit>)`. If
   `releases` is `null`, only the commit is shown.
 - Changing commands are started as a separate process with the output written to a file, like `/bash`, and show the output as it appears.
@@ -82,7 +82,7 @@ bypassing the agent (`/rig language` follows the same access and output rules as
   checks the feature state again at the moment of the press.
 - A permanent Telegram error when answering a command does not hold the queue: a card that cannot be edited is sent again, and an answer
   that cannot be delivered is dropped with a log entry.
-- `/feature telegram disable`: a confirmation button, then a message with the command to enable it back (`rig feature telegram enable`
+- `/rig feature telegram disable`: a confirmation button, then a message with the command to enable it back (`rig feature telegram enable`
   on the server), then the `rig` launch. Only a user from `allowFrom` can confirm. While the confirmation waits for a press, the queue
   does not forget the numbers of its messages (the button and the text with the enable command), however many other messages go after them: the hub
   puts them in the queue on every tick, and a forgotten number would give a second identical message with a stale button. After the answer

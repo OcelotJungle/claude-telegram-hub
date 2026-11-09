@@ -60,16 +60,18 @@ Container files and the remaining checks: [docker/ubuntu-24.04](docker/ubuntu-24
 
 ### rig commands
 
-The hub works fully without rig. `/feature` and `/rig` stay in the menu and answer
+The hub works fully without rig. `/rig` stays in the menu and answers
 that rig is not installed. Windows shells work as before in this case.
 The hub looks for `rig` in PATH and `~/.local/bin` (`rig.cmd` on Windows).
 
-- `/feature` — list the features from the rig JSON contract.
-- `/feature <name> enable|disable` — switch a feature on or off.
 - `/rig status` — machine state from `rig status --json`.
 - `/rig update` — update the machine.
+- `/rig feature` — list the features from the rig JSON contract.
+- `/rig feature <name> enable|disable` — switch a feature on or off.
 - `/rig language` — show the language.
 - `/rig language en|ru` — switch the language.
+
+A bad `/rig` argument answers the list of these forms.
 
 These commands are available only to users in `allowFrom`, in General and in session topics.
 The answer goes back to the same topic. They are not passed to the agent. The output of commands that change something
@@ -77,11 +79,12 @@ is updated in the card as it arrives. Waiting for a lock is not an error
 and has no timeout. A running command survives a hub restart.
 `/rig language` and `/rig language en|ru` follow the same access rule as `/rig status` and `/rig update`: only `allowFrom` users.
 
-`/feature telegram disable` needs a button confirmation from a user in `allowFrom`.
+`/rig feature telegram disable` needs a button confirmation from a user in `allowFrom`.
 Before it runs, the hub delivers the command that turns it back on: `rig feature telegram enable` on the server.
 On Windows, `/pwsh` and `/cmd` are shown only when the feature is on and available.
 If reading the features fails at start, they are closed. If it fails later, the
 last known state is kept. `/bash` does not depend on these two features.
+Their unavailable reply tells the user to turn them on with `/rig feature <name> enable`.
 
 rig events from `~/.agent-rig/events.jsonl` arrive in General after the hub starts,
 including those collected while it was stopped. `info` is silent. `warn` and `error` come with a sound.
@@ -528,7 +531,7 @@ when the bot has privacy mode on and is not an administrator. Fix it in one of t
 - in @BotFather: `/setprivacy` → the bot → `Disable`, then remove the bot from the group and add it again
   (Telegram applies this setting only when the bot is added).
 
-In General the hub accepts only `/feature` and `/rig` from `allowFrom`. It ignores other messages
+In General the hub accepts only `/rig` from `allowFrom`. It ignores other messages
 (it writes `ignored update ...` to the log): each session has its own topic.
 
 ## End of turn

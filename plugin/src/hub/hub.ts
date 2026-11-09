@@ -158,7 +158,6 @@ function botCommands(m: Messages, bashName: string): { command: string; descript
     { command: "pwsh", description: m.commandPwsh },
     { command: "cmd", description: m.commandCmd },
     { command: "bash", description: m.commandBash({ shell: bashName }) },
-    { command: "feature", description: m.commandFeature },
     { command: "rig", description: m.commandRig },
   ];
 }

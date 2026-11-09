@@ -99,7 +99,7 @@ function parseCommand(text: string, botUsername: string | undefined): { name: st
 
 export function machineCommandOf(text: string, botUsername?: string): MachineCommand | undefined {
   const command = parseCommand(text, botUsername);
-  return command && (command.name === "feature" || command.name === "rig") ? { name: command.name, args: command.args } : undefined;
+  return command && command.name === "rig" ? { name: command.name, args: command.args } : undefined;
 }
 
 function ignore(reason: string): Route {
