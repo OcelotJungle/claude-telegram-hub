@@ -1,9 +1,10 @@
 // Runtime checks of the protocol messages, typed against protocol.ts: a
 // message type changed on one side and not here fails the type check.
-// protocol.ts itself has no imports, so the function hooks module can use it.
+// protocol.ts itself has no value imports, so the function hooks module can use it.
 import type { AskQuestion, CleanupReport, CommandReply, EnableResult, HookBody, HubToPlugin, LimitsPost, PluginToHub, QuestionBody, QuestionDecision, QueuedFile, RateLimit, TerminateRequest, TurnEndBody } from "./protocol.ts";
 
 import { z } from "zod";
+import { entitySchema } from "./markdown.ts";
 import { LANGUAGES } from "./protocol.ts";
 
 const queuedFile: z.ZodType<QueuedFile> = z.object({ path: z.string(), name: z.string(), size: z.number() });
@@ -30,7 +31,7 @@ export const pluginToHub: z.ZodType<PluginToHub> = z.union([
   sendFilesMessage,
   z.object({ type: z.literal("permission"), requestId: z.string().optional(), toolName: z.string(), description: z.string(), inputPreview: z.string().optional() }),
   z.object({ type: z.literal("title"), title: z.string() }),
-  z.object({ type: z.literal("card"), id: z.string(), sessionId: z.string(), text: z.string(), final: z.boolean(), reopen: z.boolean().optional(), replyTo: z.string().optional() }),
+  z.object({ type: z.literal("card"), id: z.string(), sessionId: z.string(), text: z.string(), entities: z.array(entitySchema).optional(), final: z.boolean(), reopen: z.boolean().optional(), replyTo: z.string().optional() }),
   z.object({ type: z.literal("seen"), messageIds: z.array(z.number()) }),
   z.object({ type: z.literal("busy"), busy: z.boolean() }),
   z.object({ type: z.literal("exiting"), pid: z.number() }),

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { ModelVersions } from "../src/transcript/model-versions.ts";
-import { MAX_CARD, MAX_COORDINATOR_TEXT, SETTLE_MS, SubagentWatcher, WAIT_MAX_MS } from "../src/transcript/subagents.ts";
+import { MAX_CARD, MAX_CARD_TEXT, MAX_COORDINATOR_TEXT, SETTLE_MS, SubagentWatcher, WAIT_MAX_MS } from "../src/transcript/subagents.ts";
 import { tempDir } from "./helpers.ts";
 
 const SEND_EVERY_MS = 3000;
@@ -24,6 +24,12 @@ const at = (h: number, m: number) => new Date(2026, 0, 1, h, m).toISOString();
 const stamped = (h: number, m: number, message: object) => line({ type: "assistant", isSidechain: true, timestamp: at(h, m), message });
 const coordinatorAt = (h: number, m: number, t: string) =>
   line({ type: "user", isSidechain: true, isMeta: true, timestamp: at(h, m), origin: { kind: "coordinator" }, message: { role: "user", content: `The coordinator sent a message while you were working:\n${t}` } });
+
+// A card without its entities, for asserting the text and the routing fields.
+const plain = (c: Card | undefined) => {
+  const { entities: _entities, ...rest } = c ?? { entities: [] };
+  return rest;
+};
 
 describe("SubagentWatcher", () => {
   const watchers: SubagentWatcher[] = [];
@@ -69,23 +75,22 @@ describe("SubagentWatcher", () => {
     write(assistant("m1", "tool_use", text("Looking around")));
     write(assistant("m1", "tool_use", tool("Read", { file_path: join("src", "parse.ts") })));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards).toEqual([
-      { id: "a1-0", final: false, text: "🤖 **Explore** · haiku\nFind the parser\n⏳ 0 s · 1 action\n`Read parse.ts`\n\n`[12:00]` Looking around" },
-    ]);
+    expect(plain(s.cards[0])).toEqual({ id: "a1-0", final: false, text: "🤖 Explore · haiku\nFind the parser\n⏳ 0 s · 1 action\nRead parse.ts\n\n[12:00] Looking around" });
+    expect(s.cards[0]?.entities.map(e => e.type)).toEqual(["bold", "code", "code"]);
     write(assistant("m2", "tool_use", tool("Grep", { pattern: "x" })));
     s.advance(SECOND);
     expect(s.cards.length).toBe(1);
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toContain("⏳ 4 s · 2 actions\n`Grep x`");
+    expect(s.cards.at(-1)?.text).toContain("⏳ 4 s · 2 actions\nGrep x");
     write(assistant("m3", "end_turn", text("Found it")));
     s.advance(SEND_EVERY_MS);
-    const done = "🤖 **Explore** · haiku\nFind the parser\n✅ 7 s · 2 actions\n\n`[12:00]` Looking around\n\n`[12:00]` Found it";
-    expect(s.cards.at(-1)).toEqual({ id: "a1-0", final: false, text: done });
+    const done = "🤖 Explore · haiku\nFind the parser\n✅ 7 s · 2 actions\n\n[12:00] Looking around\n\n[12:00] Found it";
+    expect(plain(s.cards.at(-1))).toEqual({ id: "a1-0", final: false, text: done });
     // The card closes once the agent has not gone on for SETTLE_MS.
     s.advance(SETTLE_MS - SECOND);
     expect(s.cards.at(-1)?.final).toBe(false);
     s.advance(SECOND);
-    expect(s.cards.at(-1)).toEqual({ id: "a1-0", final: true, text: done });
+    expect(plain(s.cards.at(-1))).toEqual({ id: "a1-0", final: true, text: done });
   });
 
   test("the header shows the model and effort of the agent's latest answer, the launch alias until then", () => {
@@ -97,19 +102,19 @@ describe("SubagentWatcher", () => {
     write(line({ type: "user", isSidechain: true, message: { role: "user", content: "Find it" } }));
     write(assistant("m0", "tool_use", tool("Grep", { pattern: "x" })));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · opus\nFind the parser\n");
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 Explore · opus\nFind the parser\n");
     write(answer("m1", "claude-opus-5-5", "high"));
     s.advance(SEND_EVERY_MS);
     // The newest version seen of its line: the line alone.
-    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · opus · high\nFind the parser\n");
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 Explore · opus · high\nFind the parser\n");
     // Claude Code's own message does not change it; a new effort does.
     write(answer("m2", "<synthetic>"));
     write(answer("m3", "claude-haiku-4-5-20251001", "low"));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · haiku · low\nFind the parser\n");
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 Explore · haiku · low\nFind the parser\n");
     write(answer("m4", "gpt-proxy"));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · gpt\\-proxy\nFind the parser\n");
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 Explore · gpt-proxy\nFind the parser\n");
   });
 
   test("a model older than the newest seen of its line keeps its version", () => {
@@ -120,7 +125,7 @@ describe("SubagentWatcher", () => {
     const write = s.agent("a1", { agentType: "Explore", description: "Find the parser" });
     write(line({ type: "assistant", isSidechain: true, effort: "low", message: { id: "m1", role: "assistant", model: "claude-haiku-4-5-20251001", content: [tool("Grep", { pattern: "x" })], stop_reason: "tool_use" } }));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toStartWith("🤖 **Explore** · haiku 4\\.5 · low\n");
+    expect(s.cards.at(-1)?.text).toStartWith("🤖 Explore · haiku 4.5 · low\n");
   });
 
   test("an agent that goes on after a turn end keeps its card", () => {
@@ -265,7 +270,7 @@ describe("SubagentWatcher", () => {
     const write = s.agent("a1");
     write(assistant("m1", "tool_use", tool("Bash", {})));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.map(c => c.text)).toEqual(["🤖 **Subagent**\n⏳ 0 s · 1 action\n`Bash`"]);
+    expect(s.cards.map(c => c.text)).toEqual(["🤖 Subagent\n⏳ 0 s · 1 action\nBash"]);
     s.advance(SECOND);
     expect(s.cards.length).toBe(1);
     s.advance(SEND_EVERY_MS);
@@ -314,12 +319,12 @@ describe("SubagentWatcher", () => {
       expect(s.cards).toEqual([]);
       write(coordinatorAt(12, 6, "second run"));
       s.advance(SEND_EVERY_MS);
-      expect(s.cards).toEqual([
+      expect(s.cards.map(plain)).toEqual([
         {
           id: "a1-0",
           final: false,
           reopen: true,
-          text: "🤖 **Subagent**\n⏳ 7 min · 1 action\n`Read a.ts`\n\n`[12:01]` first run\n\n`[12:06]` ↪ second run",
+          text: "🤖 Subagent\n⏳ 7 min · 1 action\nRead a.ts\n\n[12:01] first run\n\n[12:06] ↪ second run",
         },
       ]);
     });
@@ -334,7 +339,7 @@ describe("SubagentWatcher", () => {
       s.w.start();
       write(assistant("m4", "tool_use", text("after restart")));
       s.advance(SEND_EVERY_MS);
-      expect(s.cards).toEqual([
+      expect(s.cards.map(plain)).toEqual([
         { id: "a1-1", final: false, reopen: true, replyTo: "a1-0", text: expect.stringContaining("after restart") },
       ]);
     });
@@ -358,12 +363,12 @@ describe("SubagentWatcher", () => {
       s.advance(12 * MINUTE);
       write(assistant("m3", "tool_use", tool("Grep", { pattern: "x" })));
       s.advance(SEND_EVERY_MS);
-      expect(s.cards).toEqual([
+      expect(s.cards.map(plain)).toEqual([
         {
           id: "a1-0",
           final: false,
           reopen: true,
-          text: "🤖 **Subagent**\n⏳ 12 min · 2 actions\n`Grep x`\n\n`[12:00]` working",
+          text: "🤖 Subagent\n⏳ 12 min · 2 actions\nGrep x\n\n[12:00] working",
         },
       ]);
     });
@@ -424,7 +429,7 @@ describe("SubagentWatcher", () => {
     expect(s.cards[0]?.replyTo).toBeUndefined();
     write(assistant("m2", "tool_use", text(chunk)));
     s.advance(SECOND);
-    expect(s.cards[1]).toEqual({ id: "a1-0", final: true, text: `🤖 **Subagent**\n⬇️ continued below\n\n\`[12:00]\` ${chunk}\n\n\`[12:00]\` ${chunk}` });
+    expect(plain(s.cards[1])).toEqual({ id: "a1-0", final: true, text: `🤖 Subagent\n⬇️ continued below\n\n[12:00] ${chunk}\n\n[12:00] ${chunk}` });
     s.advance(SEND_EVERY_MS);
     expect(s.cards[2]).toMatchObject({ id: "a1-1", final: false, replyTo: "a1-0" });
     expect(s.cards.every(c => c.text.length <= MAX_CARD)).toBe(true);
@@ -456,7 +461,7 @@ describe("SubagentWatcher", () => {
     expect(card).toMatchObject({ id: "a1-0", final: false, reopen: true });
     expect(card?.replyTo).toBeUndefined();
     // The 10 minutes of idleness are not work; the earlier action is counted.
-    expect(card?.text).toBe("🤖 **Subagent**\n⏳ 3 s · 1 action\n`Read a.ts`\n\n`[12:00]` first run\n\n`[12:12]` second run");
+    expect(card?.text).toBe("🤖 Subagent\n⏳ 3 s · 1 action\nRead a.ts\n\n[12:00] first run\n\n[12:12] second run");
   });
 
   test("the coordinator's message shows in the card and reopens it at once", () => {
@@ -465,7 +470,7 @@ describe("SubagentWatcher", () => {
     write(idleMessage("Look at B too"));
     s.advance(SEND_EVERY_MS);
     expect(s.cards.at(-1)).toMatchObject({ id: "a1-0", final: false, reopen: true });
-    expect(s.cards.at(-1)?.text).toEndWith("`[12:00]` first run\n\n`[12:12]` ↪ Look at B too");
+    expect(s.cards.at(-1)?.text).toEndWith("[12:00] first run\n\n[12:12] ↪ Look at B too");
     expect(s.cards.at(-1)?.text).toContain("⏳");
   });
 
@@ -477,7 +482,7 @@ describe("SubagentWatcher", () => {
     s.advance(SEND_EVERY_MS);
     write(queuedMessage("Stop after A"));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards.at(-1)?.text).toEndWith("`[12:00]` working\n\n`[12:00]` ↪ Stop after A");
+    expect(s.cards.at(-1)?.text).toEndWith("[12:00] working\n\n[12:00] ↪ Stop after A");
     expect(s.cards.at(-1)?.reopen).toBeUndefined();
   });
 
@@ -490,7 +495,7 @@ describe("SubagentWatcher", () => {
     write(queuedMessage(`${"w".repeat(MAX_COORDINATOR_TEXT + 50)}`));
     s.advance(SEND_EVERY_MS);
     const out = s.cards.at(-1)?.text ?? "";
-    expect(out).toContain("↪ \\*bold\\* \\[x\\]\\(y\\) \\_z\\_\n");
+    expect(out).toContain("↪ *bold* [x](y) _z_\n");
     expect(out).not.toContain("second line");
     expect(out).toContain(`↪ ${"w".repeat(MAX_COORDINATOR_TEXT)}…`);
     expect(out).not.toContain("w".repeat(MAX_COORDINATOR_TEXT + 1));
@@ -534,7 +539,53 @@ describe("SubagentWatcher", () => {
     write(line({ type: "assistant", timestamp: at(17, 2), message: { id: "m1", role: "assistant", content: [text("Full run started")], stop_reason: "tool_use" } }));
     write(line({ type: "assistant", timestamp: at(18, 5), message: { id: "m2", role: "assistant", content: [text("## Results\n\n- ok")], stop_reason: "tool_use" } }));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards[0]?.text).toEndWith("\n\n`[17:02]` Full run started\n\n`[18:05]`\n## Results\n\n- ok");
+    expect(s.cards[0]?.text).toEndWith("\n\n[17:02] Full run started\n\n[18:05]\n\nResults\n\n• ok");
+  });
+
+  // The entities of a card that cover the text of the entry that starts with `marker`.
+  const coveringEntry = (card: Card | undefined, marker: string) => {
+    const start = (card?.text ?? "").indexOf(marker);
+    return (card?.entities ?? []).filter(e => e.type === "pre" && e.offset <= start && start < e.offset + e.length);
+  };
+
+  test("a long entry cut inside a code block leaves the next entries outside it", () => {
+    const s = setup();
+    s.w.start();
+    const write = s.agent("a1");
+    write(assistant("m1", "tool_use", text(`Run:\n\n\`\`\`sh\n${"bun run test --serial\n".repeat(MAX_CARD_TEXT)}\`\`\``)));
+    write(assistant("m2", "tool_use", text("later entry")));
+    s.advance(SEND_EVERY_MS);
+    const card = s.cards.at(-1);
+    expect(card?.text).toContain("…\n\n[12:00] later entry");
+    expect(card?.entities.some(e => e.type === "pre")).toBe(true);
+    expect(coveringEntry(card, "later entry")).toEqual([]);
+  });
+
+  test("an entry with its own unbalanced fence leaves the next entries outside it", () => {
+    const s = setup();
+    s.w.start();
+    const write = s.agent("a1");
+    write(assistant("m1", "tool_use", text("```sh\nbun run test")));
+    write(assistant("m2", "tool_use", text("<!-- never closed")));
+    write(assistant("m3", "tool_use", text("later entry")));
+    s.advance(SEND_EVERY_MS);
+    const card = s.cards.at(-1);
+    expect(card?.text).toContain("[12:00] later entry");
+    expect(coveringEntry(card, "later entry")).toEqual([]);
+  });
+
+  test("cutting a long entry never splits a surrogate pair", () => {
+    // With and without one extra unit in front, the cut falls inside a pair for one of the two.
+    for (const pad of ["", "y"]) {
+      const s = setup();
+      s.w.start();
+      const write = s.agent("a1");
+      write(assistant("m1", "tool_use", text(pad + "😀".repeat(MAX_CARD_TEXT))));
+      s.advance(SEND_EVERY_MS);
+      const out = s.cards.at(-1)?.text ?? "";
+      expect(out).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+      expect(out).toContain("…");
+    }
   });
 
   test("Markdown in the description is shown as it is", () => {
@@ -543,6 +594,6 @@ describe("SubagentWatcher", () => {
     const write = s.agent("a1", { agentType: "general-purpose", description: "Fix *all* [bugs]" });
     write(assistant("m1", "tool_use", text("ok")));
     s.advance(SEND_EVERY_MS);
-    expect(s.cards[0]?.text).toStartWith("🤖 **general\\-purpose**\nFix \\*all\\* \\[bugs\\]\n");
+    expect(s.cards[0]?.text).toStartWith("🤖 general-purpose\nFix *all* [bugs]\n");
   });
 });

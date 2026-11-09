@@ -123,10 +123,10 @@ describe("Executor cards", () => {
     s.events(command("check", "git status", "item.started"));
     s.tick();
     expect(s.last()).toStartWith([
-      "🤖 **codex** · sol · high",
+      "🤖 codex · sol · high",
       "Review the parser",
       "⏳ 0 s · 0 actions · event 12:00",
-      "`git status`",
+      "git status",
     ].join("\n"));
   });
 
@@ -152,7 +152,7 @@ describe("Executor cards", () => {
     s.state();
     s.events(message("Reply progress") + command("reply", "reply command"));
     s.tick(REPLY_RUN_MS);
-    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nContinue the fix\n⏳ 12 min · 2 actions");
+    expect(s.last()).toStartWith("🤖 codex · sol · high\nContinue the fix\n⏳ 12 min · 2 actions");
     expect(s.last()).toContain("Earlier Codex progress");
     expect(s.last()).toContain("Earlier worker question");
     expect(s.last()).toContain("Reply progress");
@@ -289,14 +289,14 @@ describe("Executor cards", () => {
     s.start();
     s.write(assistant("m1", "codex job running"));
     s.tick();
-    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nFix tests\n⏳ 0 s · 0 actions · event 12:00");
+    expect(s.last()).toStartWith("🤖 codex · sol · high\nFix tests\n⏳ 0 s · 0 actions · event 12:00");
     expect(s.last()).not.toContain("haiku");
     expect(s.last()).not.toContain("Inspecting the parser");
     expect(s.last()).not.toContain("codex job running");
     s.events(message("Checking the boundary") + command("check", "check boundary", "item.started"));
     s.tick(MINUTE);
-    expect(s.last()).toContain("`[12:00]` Inspecting the parser");
-    expect(s.last()).toContain("`[12:01]` Checking the boundary");
+    expect(s.last()).toContain("[12:00] Inspecting the parser");
+    expect(s.last()).toContain("[12:01] Checking the boundary");
     expect(s.last()).toContain("event 12:01");
   });
 
@@ -313,7 +313,7 @@ describe("Executor cards", () => {
     expect(s.last()).not.toContain("Visible progress");
     s.events(reasoning("Hidden reasoning after message"));
     s.tick(MINUTE);
-    expect(s.last()).toContain("`[12:00]` Visible progress");
+    expect(s.last()).toContain("[12:00] Visible progress");
     expect(s.last()).toContain("event 12:01");
     expect(s.cards.every(card => !card.text.includes("Hidden reasoning"))).toBe(true);
   });
@@ -333,7 +333,7 @@ describe("Executor cards", () => {
     expect(s.last()).toContain("New output");
     expect(s.last()).toContain("More output");
     expect(s.last()).toContain("1 action");
-    expect(s.last()).toContain("`[12:01]` 🔁 restart 1/3: new attempt");
+    expect(s.last()).toContain("[12:01] 🔁 restart 1/3: new attempt");
   });
 
   test("discovery via start result survives late meta", () => {
@@ -525,7 +525,7 @@ describe("Executor cards", () => {
     s.tick(SETTLE_MS);
     expect(s.cards.at(-1)?.final).toBe(true);
     // The closed card still tells which Codex model did the work.
-    expect(s.last()).toStartWith("🤖 **codex** · sol · high\nFix tests\n✅ ");
+    expect(s.last()).toStartWith("🤖 codex · sol · high\nFix tests\n✅ ");
   });
 
   test.each(PLURAL_CASES)("%i actions from completed commands use %s", (count, form) => {
@@ -560,11 +560,11 @@ describe("Executor cards", () => {
     const long = "x".repeat(COMMAND_LIMIT + 1);
     s.events(command("a", "older command", "item.started") + command("b", `${long}\nsecret second line`, "item.started"));
     s.tick(MINUTE);
-    expect(s.last()).toContain(` · event 12:01\n\`${long.slice(0, COMMAND_LIMIT)}…\``);
+    expect(s.last()).toContain(` · event 12:01\n${long.slice(0, COMMAND_LIMIT)}…`);
     expect(s.last()).not.toContain("secret second line");
     s.events(command("b", long));
     s.tick();
-    expect(s.last()).toContain("1 action · event 12:01\n`older command`");
+    expect(s.last()).toContain("1 action · event 12:01\nolder command");
     s.events(command("a", "older command"));
     s.tick();
     expect(s.last()).toContain("2 actions · event 12:01");
@@ -612,8 +612,8 @@ describe("Executor cards", () => {
     s.state({ notes: ["17:02 restart 1/3: exited", "18:05 model changed"] });
     s.start();
     s.tick();
-    expect(s.last()).toContain("`[17:02]` 🔁 restart 1/3: exited");
-    expect(s.last()).toContain("`[18:05]` 🔁 model changed");
+    expect(s.last()).toContain("[17:02] 🔁 restart 1/3: exited");
+    expect(s.last()).toContain("[18:05] 🔁 model changed");
     s.tick();
     expect(s.last().split("🔁 restart")).toHaveLength(2);
     s.state({ notes: ["17:02 restart 1/3: exited", "18:05 model changed", "18:05 model changed"] });
@@ -698,16 +698,16 @@ describe("Executor cards", () => {
   });
 
   test.each([
-    ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter · nemotron\\-3\\-ultra\\-550b\\-a55b"],
-    ["groq/openai/gpt-oss-120b", "groq · gpt\\-oss\\-120b"],
-    ["zhipu/glm-4.5", "zhipu · glm\\-4\\.5"],
-    ["single-model", "single\\-model"],
+    ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter · nemotron-3-ultra-550b-a55b"],
+    ["groq/openai/gpt-oss-120b", "groq · gpt-oss-120b"],
+    ["zhipu/glm-4.5", "zhipu · glm-4.5"],
+    ["single-model", "single-model"],
   ])("volunteer header formats model slug %s", (slug, expected) => {
     const s = setup(true, "volunteer");
     s.state({ slug, effort: "-" });
     s.start();
     s.tick();
-    expect(s.last()).toStartWith(`🤖 **volunteer** · ${expected}\nFix tests\n⏳`);
+    expect(s.last()).toStartWith(`🤖 volunteer · ${expected}\nFix tests\n⏳`);
     expect(s.last()).not.toContain("medium");
     expect(s.last()).not.toContain(" · -");
   });
@@ -719,7 +719,7 @@ describe("Executor cards", () => {
       const write = s.worker("a2", undefined, false, executor);
       write(line({ type: "user", message: { content: `reply: ${JOB}` } }));
       s.tick();
-      expect(s.last()).toStartWith(`🤖 **${executor}**`);
+      expect(s.last()).toStartWith(`🤖 ${executor}`);
       expect(s.last()).not.toContain("previous model switch");
       s.state({ notes: ["17:01 previous model switch", "12:01 current model switch"] });
       s.tick();
@@ -736,7 +736,7 @@ describe("Executor cards", () => {
     const write = s.worker("a2", undefined, false, executor);
     write(line(bash(`python -I C:/tools/${executor}-run.py reply ${JOB}`)));
     s.tick();
-    expect(s.last()).toStartWith(`🤖 **${executor}**`);
+    expect(s.last()).toStartWith(`🤖 ${executor}`);
   });
 
   test("ambiguous reply waits for a job directory or metadata", () => {
@@ -754,7 +754,7 @@ describe("Executor cards", () => {
 
     s.workerMeta("a2", "volunteer");
     s.tick();
-    expect(s.last()).toStartWith("🤖 **volunteer**");
+    expect(s.last()).toStartWith("🤖 volunteer");
   });
 
   test("unknown reply waits until exactly one matching job directory appears", () => {
@@ -766,7 +766,7 @@ describe("Executor cards", () => {
     s.stateFor("volunteer");
     write(line({ type: "user", message: { content: `attach: ${JOB}` } }));
     s.tick();
-    expect(s.last()).toStartWith("🤖 **volunteer**");
+    expect(s.last()).toStartWith("🤖 volunteer");
   });
 
   test("volunteer model switches update the header and append every note once", () => {
@@ -776,7 +776,7 @@ describe("Executor cards", () => {
     s.tick();
     s.state({ slug: "groq/openai/gpt-oss-120b", notes: ["16:05 model old:free failed: APIError 502; switching to groq/openai/gpt-oss-120b", "16:09 model old failed; switching to groq/openai/gpt-oss-120b"] });
     s.tick();
-    expect(s.last()).toStartWith("🤖 **volunteer** · groq · gpt\\-oss\\-120b");
+    expect(s.last()).toStartWith("🤖 volunteer · groq · gpt-oss-120b");
     expect(s.last().split("🔁 model old")).toHaveLength(3);
     s.tick();
     expect(s.last().split("🔁 model old")).toHaveLength(3);
@@ -840,8 +840,8 @@ describe("Executor cards", () => {
     write(line(result(`job ${JOB} started: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free`)));
     s.tick();
     expect(new Set(s.cards.map(card => card.id))).toEqual(new Set(["a1-0", "a2-0"]));
-    expect(s.cards.filter(card => card.id === "a1-0").at(-1)?.text).toContain("**codex**");
-    expect(s.cards.filter(card => card.id === "a2-0").at(-1)?.text).toContain("**volunteer**");
+    expect(s.cards.filter(card => card.id === "a1-0").at(-1)?.text).toContain("codex");
+    expect(s.cards.filter(card => card.id === "a2-0").at(-1)?.text).toContain("volunteer");
   });
 });
 

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { z } from "zod";
-import { cleanupSummary, Hub, projectName } from "../src/hub/hub.ts";
+import { cleanupSummary, Hub, MAX_CARDS, projectName } from "../src/hub/hub.ts";
 import { CANCEL_REASON } from "../src/hub/questions.ts";
 import { en } from "../src/shared/i18n/en.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
@@ -17,6 +17,7 @@ import { TelegramApi } from "../src/hub/telegram.ts";
 import { Runner } from "../src/mod/commands.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
+import { toTelegram } from "../src/shared/markdown.ts";
 import { notifies } from "../src/shared/notification.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { freePort, hasFfmpeg, makeVideo, memLogger, must, NO_PACE, tempDir, waitFor, wsClient } from "./helpers.ts";
@@ -1642,7 +1643,7 @@ describe("polling", () => {
 });
 
 describe("subagent cards", () => {
-  const card = (id: string, text: string, final = false) => ({ type: "card", id, sessionId: "a", text, final });
+  const card = (id: string, markdown: string, final = false) => ({ type: "card", id, sessionId: "a", ...toTelegram(markdown), final });
 
   test("a card is sent silently once, then edited in place", async () => {
     await startHub();
@@ -1658,6 +1659,28 @@ describe("subagent cards", () => {
     await Bun.sleep(150);
     expect(fake.texts().length).toBe(1);
     expect(fake.callsOf("editMessageText").length).toBe(1);
+  });
+
+  test("a card from a window older than formatted cards is still shown formatted", async () => {
+    await startHub();
+    const a = await enabled("a");
+    a.send({ type: "card", id: "x-0", sessionId: "a", text: "🤖 **Explore**\n⏳ 1 action", final: false });
+    await waitFor(() => fake.texts().length === 1);
+    expect(fake.texts()[0]).toMatchObject({ text: "🤖 Explore\n⏳ 1 action", entities: [{ type: "bold", offset: 3, length: 7 }] });
+  });
+
+  test("a queued card whose record was forgotten goes as its formatted text, not parsed as Markdown again", async () => {
+    await startHub();
+    const a = await enabled("a");
+    // The first message holds the queue while the card is queued and then
+    // forgotten behind MAX_CARDS newer ones.
+    fake.failNext("sendMessage", { code: 502, description: "Bad Gateway" });
+    a.send({ type: "send", id: "s1", text: "first", notify: false });
+    a.send({ type: "card", id: "x-0", sessionId: "a", text: "a *b* c", entities: [], final: false });
+    for (let i = 1; i <= MAX_CARDS; i++) a.send(card(`y-${i}`, `card ${i}`));
+    const sent = await waitFor(() => fake.texts().find(t => t.text === "a *b* c" || t.text === "a b c"), 5000, "first card sent");
+    expect(sent).toMatchObject({ text: "a *b* c" });
+    expect(sent.entities).toBeUndefined();
   });
 
   test("a new part replies to the previous card in the same topic", async () => {

@@ -39,11 +39,26 @@ export function chunk(f: Formatted, limit = MAX_MESSAGE): Formatted[] {
 function piece(f: Formatted, start: number, end: number, out: Formatted[]): void {
   while (end > start && /\s/.test(f.text[end - 1])) end--;
   if (!hasVisibleText(f.text.slice(start, end))) return;
+  out.push(slice(f, start, end));
+}
+
+// The part of a Formatted between two text indices, entities clipped to it.
+function slice(f: Formatted, start: number, end: number): Formatted {
   const entities: Entity[] = [];
   for (const e of f.entities) {
     const s = Math.max(e.offset, start);
     const t = Math.min(e.offset + e.length, end);
     if (t > s) entities.push({ ...e, offset: s - start, length: t - s });
   }
-  out.push({ text: f.text.slice(start, end), entities });
+  return { text: f.text.slice(start, end), entities };
+}
+
+// Truncates a Formatted to at most `limit` UTF-16 code units, without splitting
+// a surrogate pair. Clips entities to the cut and appends "…" if truncated.
+export function truncateFormatted(f: Formatted, limit: number): Formatted {
+  if (f.text.length <= limit) return f;
+  let cut = limit;
+  if (/[\uD800-\uDBFF]/.test(f.text[cut - 1] ?? "")) cut--;
+  const head = slice(f, 0, cut);
+  return { text: `${head.text}…`, entities: head.entities };
 }

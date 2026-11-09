@@ -295,7 +295,7 @@ test("each specified work category blocks update exit, while a pending shell doe
     { name: "batch being sent", add: () => { hub["batchSends"].set("session", pending); }, remove: () => hub["batchSends"].clear() },
     { name: "answer group", add: () => { hub["answerGroups"].set("q", { api: f.api, poll: pollOf(), index: 0, messages: [], parts: [], timer }); }, remove: () => hub["answerGroups"].clear() },
     { name: "pumping a session outbox", add: () => { hub["pumping"].add("session"); }, remove: () => hub["pumping"].clear() },
-    { name: "card being edited", add: () => { hub["cards"].set("session:card", { text: "card", final: false, done: false, lastEdit: 0, editing: true }); }, remove: () => hub["cards"].clear() },
+    { name: "card being edited", add: () => { hub["cards"].set("session:card", { text: "card", entities: [], final: false, done: false, lastEdit: 0, editing: true }); }, remove: () => hub["cards"].clear() },
     { name: "General flush in flight", add: () => { hub["machineOutbox"]["flushing"] = pending; }, remove: () => { hub["machineOutbox"]["flushing"] = undefined; } },
     { name: "disable awaiting recovery notice", add: () => { hub["disableConfirmations"].set("k", { message: { message_id: 1 }, destination: { chatId: GROUP }, recovery: "recovery" }); }, remove: () => hub["disableConfirmations"].clear() },
     { name: "JSON query", add: () => { hub["machineQueries"]++; }, remove: () => { hub["machineQueries"]--; } },

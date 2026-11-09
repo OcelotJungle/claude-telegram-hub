@@ -118,7 +118,7 @@ const CARD_EDIT_MS = 5000;
 // every few seconds would use it all up and hold back the agent's own text.
 const CARD_GAP_MS = 6000;
 // Cards remembered for editing; the oldest are forgotten past this.
-const MAX_CARDS = 200;
+export const MAX_CARDS = 200;
 const TOO_MANY_REQUESTS = 429;
 // On a topic message from when the hub hands it to the session until it is
 // in the agent's context.
@@ -166,11 +166,12 @@ type WS = ServerWebSocket<Conn>;
 type ModeRestart = { mode: PermissionMode; held: Held[]; cancelled?: boolean };
 type Card = {
   text: string;
+  entities: Entity[];
   final: boolean;
   // The final version is shown: nothing more to do.
   done: boolean;
   messageId?: number;
-  shown?: string;
+  shown?: Formatted;
   lastEdit: number;
   editing: boolean;
   timer?: ReturnType<typeof setTimeout>;
@@ -485,10 +486,11 @@ export class Hub {
       for (const [key, c] of loadCards(opts.cardsFile)) {
         this.cards.set(key, {
           text: c.text,
+          entities: c.entities,
           final: c.done,
           done: c.done,
           ...(c.messageId !== undefined ? { messageId: c.messageId } : {}),
-          ...(c.done ? { shown: c.text } : {}),
+          ...(c.done ? { shown: { text: c.text, entities: c.entities } } : {}),
           ...(c.buttons ? { buttons: c.buttons } : {}),
           lastEdit: 0,
           editing: false,
@@ -505,7 +507,7 @@ export class Hub {
         spawnRunner: opts.spawnRunner ?? spawnRunner,
         alive: opts.isAlive ?? isAlive,
         kill: killTree,
-        card: (sid, cardId, markdown, final, kind, buttons) => this.upsertCard(sid, cardId, markdown, final, buttons, false, undefined, kind),
+        card: (sid, cardId, markdown, final, kind, buttons) => { const f = toTelegram(markdown); this.upsertCard(sid, cardId, f.text, f.entities, final, buttons, false, undefined, kind); },
         notice: (sid, text, kind) => this.notice(sid, text, kind),
         sendFile: (sid, path, name, kind) => this.sendExecFile(sid, path, name, kind),
         report: (sid, content, meta, onSent) => this.reportExec(sid, { content, meta, onSent }),
@@ -1383,11 +1385,13 @@ ${msg.text}`);
   // among the session's messages; later versions edit that message, at most
   // every CARD_EDIT_MS.
   private onCard(msg: Extract<PluginToHub, { type: "card" }>): void {
-    this.upsertCard(msg.sessionId, msg.id, msg.text, msg.final, undefined, msg.reopen, msg.replyTo);
+    // A window started before cards carried entities still sends Markdown.
+    const f = msg.entities ? { text: msg.text, entities: msg.entities } : toTelegram(msg.text);
+    this.upsertCard(msg.sessionId, msg.id, f.text, f.entities, msg.final, undefined, msg.reopen, msg.replyTo);
   }
 
   // A subagent's card or a topic command's: buttons, when given, go under it.
-  private upsertCard(sessionId: string, cardId: string, markdown: string, final: boolean, buttons?: Button[][], reopen = false, replyTo?: string, kind?: MessageKind): void {
+  private upsertCard(sessionId: string, cardId: string, text: string, entities: Entity[], final: boolean, buttons?: Button[][], reopen = false, replyTo?: string, kind?: MessageKind): void {
     if (!this.store.get(sessionId)) return;
     const key = `${sessionId}:${cardId}`;
     const card = this.cards.get(key);
@@ -1396,20 +1400,21 @@ ${msg.text}`);
     if (card) {
       const reopened = card.done && reopen;
       if (reopened) card.done = false;
-      card.text = markdown;
+      card.text = text;
+      card.entities = entities;
       card.final = final;
       card.buttons = buttons;
       if (reopened) this.saveCards();
       if (card.messageId !== undefined) this.scheduleCardEdit(key, card);
       return;
     }
-    this.cards.set(key, { text: markdown, final, done: false, lastEdit: 0, editing: false, ...(buttons ? { buttons } : {}) });
+    this.cards.set(key, { text, entities, final, done: false, lastEdit: 0, editing: false, ...(buttons ? { buttons } : {}) });
     for (const old of this.cards.keys()) {
       if (this.cards.size <= MAX_CARDS) break;
       this.cards.delete(old);
     }
     this.saveCards();
-    const [first] = textPieces(markdown, true);
+    const [first] = formattedPieces({ text, entities });
     // The outbox remembers sent ids: a card sent anew needs a new one.
     if (first && this.outbox.add(`card-${randomUUID()}`, sessionId, [{ ...first, ...(kind ? { silent: !notifies(kind) } : {}), card: key, ...(replyTo ? { cardReplyTo: `${sessionId}:${replyTo}` } : {}) }])) void this.pump(sessionId);
   }
@@ -1421,7 +1426,7 @@ ${msg.text}`);
     try {
       saveCards(
         this.opts.cardsFile,
-        [...this.cards].map(([key, c]) => [key, { text: c.text, done: c.done, ...(c.messageId !== undefined ? { messageId: c.messageId } : {}), ...(c.buttons ? { buttons: c.buttons } : {}) }]),
+        [...this.cards].map(([key, c]) => [key, { text: c.text, entities: c.entities, done: c.done, ...(c.messageId !== undefined ? { messageId: c.messageId } : {}), ...(c.buttons ? { buttons: c.buttons } : {}) }]),
       );
     } catch (e) {
       this.log.warn(`saving subagent cards failed: ${e}`);
@@ -1430,7 +1435,7 @@ ${msg.text}`);
 
   private scheduleCardEdit(key: string, card: Card): void {
     if (card.timer || card.editing) return;
-    if (card.text === card.shown) {
+    if (card.shown && sameFormatted(card.shown, card)) {
       if (card.final && !card.done) {
         card.done = true;
         this.saveCards();
@@ -1458,14 +1463,14 @@ ${msg.text}`);
     if (!this.running || card.messageId === undefined || !this.opts.api) return;
     // The session's text goes first; the card takes a later slot.
     if (this.pumping.size || this.opts.api.floodEndsAt() > Date.now()) return this.cardTimer(key, card, Date.now());
-    const text = card.text;
-    const f = cardFormat(text);
+    const shownVersion = { text: card.text, entities: card.entities };
+    const f = cardFormat(shownVersion);
     card.editing = true;
     try {
       await this.opts.api.editMessageText(this.requireGroup(), card.messageId, f.text, f.entities, card.buttons);
-      card.shown = text;
+      card.shown = shownVersion;
     } catch (e) {
-      if (e instanceof TelegramError && /message is not modified/i.test(e.description)) card.shown = text;
+      if (e instanceof TelegramError && /message is not modified/i.test(e.description)) card.shown = shownVersion;
       else if (e instanceof TelegramError && /message to edit not found/i.test(e.description)) {
         this.cards.delete(key);
         this.saveCards();
@@ -1473,7 +1478,7 @@ ${msg.text}`);
       } else if (e instanceof TelegramError && e.code !== TOO_MANY_REQUESTS) {
         // Retrying the same version cannot help; the next one may.
         this.log.warn(`Telegram did not take an edit of subagent card ${key}: ${e.description}`);
-        card.shown = text;
+        card.shown = shownVersion;
       } else this.log.warn(`editing subagent card ${key} failed, retrying: ${e instanceof Error ? e.message : e}`);
     } finally {
       card.editing = false;
@@ -1657,13 +1662,13 @@ ${msg.text}`);
     const card = item.card ? this.cards.get(item.card) : undefined;
     if (item.card && card) {
       // The card may have changed while it waited in the queue.
-      const text = card.text;
-      const f = cardFormat(text);
+      const shownVersion = { text: card.text, entities: card.entities };
+      const f = cardFormat(shownVersion);
       const buttons = card.buttons;
       const replyTo = item.cardReplyTo ? this.cards.get(item.cardReplyTo)?.messageId : undefined;
       const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, f.text, true, f.entities, buttons, replyTo));
       card.messageId = sent.message_id;
-      card.shown = text;
+      card.shown = shownVersion;
       card.lastEdit = Date.now();
       this.saveCards();
       this.scheduleCardEdit(item.card, card);
@@ -3357,12 +3362,20 @@ function names(files: OutFile[]): string {
 // Text in pieces of at most one plain message, silent; markdown: formatted
 // with entities.
 function textPieces(text: string, markdown: boolean): Piece[] {
-  return chunk(markdown ? toTelegram(text) : { text, entities: [] }).map(p => ({ text: p.text, silent: true, ...(p.entities.length ? { entities: p.entities } : {}) }));
+  return formattedPieces(markdown ? toTelegram(text) : { text, entities: [] });
+}
+
+function formattedPieces(f: Formatted): Piece[] {
+  return chunk(f).map(p => ({ text: p.text, silent: true, ...(p.entities.length ? { entities: p.entities } : {}) }));
 }
 
 // A card is one message: its first chunk, should it ever outgrow one.
-function cardFormat(md: string): Formatted {
-  return chunk(toTelegram(md))[0] ?? { text: md, entities: [] };
+function sameFormatted(a: Formatted, b: Formatted): boolean {
+  return a.text === b.text && JSON.stringify(a.entities) === JSON.stringify(b.entities);
+}
+
+function cardFormat(f: Formatted): Formatted {
+  return chunk(f)[0] ?? { text: f.text, entities: f.entities };
 }
 
 function markdownPieces(md: string): Piece[] {

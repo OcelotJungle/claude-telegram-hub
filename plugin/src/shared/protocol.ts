@@ -1,5 +1,7 @@
 // Messages between a plugin (one per Claude Code window) and the hub, as JSON
 // over a localhost WebSocket.
+import type { Entity } from "./markdown.ts";
+
 export const PROTOCOL_VERSION = 1;
 
 // The hub's localhost port unless TELEGRAM_HUB_PORT says otherwise. This file has no
@@ -70,10 +72,11 @@ export type PluginToHub =
   // lets the topic answer it.
   | { type: "permission"; requestId?: string; toolName: string; description: string; inputPreview?: string }
   | { type: "title"; title: string }
-  // A subagent's card as Markdown: one Telegram message, sent once and then
-  // edited in place. final: the card closes; reopen explicitly allows a
-  // continuation to update a closed card.
-  | { type: "card"; id: string; sessionId: string; text: string; final: boolean; reopen?: boolean; replyTo?: string }
+  // A subagent's card as formatted text (plain text + Telegram entities): one
+  // Telegram message, sent once and then edited in place. final: the card closes;
+  // reopen explicitly allows a continuation to update a closed card. Older
+  // plugins omit entities and send the card as Markdown.
+  | { type: "card"; id: string; sessionId: string; text: string; entities?: Entity[]; final: boolean; reopen?: boolean; replyTo?: string }
   // Topic messages that reached the agent's context, by Telegram message id.
   | { type: "seen"; messageIds: number[] }
   // The agent started working, or stopped: its turn ended or it waits for the user.

@@ -1,5 +1,6 @@
 import type { Messages } from "../shared/i18n/index.ts";
 import type { Logger } from "../shared/log.ts";
+import type { Entity, Formatted } from "../shared/markdown.ts";
 import type { ExecutorConfig, ExecutorDiscovery, ExecutorType } from "./codex-job.ts";
 import type { Model } from "./model-versions.ts";
 import type { TranscriptEvent } from "./parse.ts";
@@ -10,6 +11,7 @@ import { join } from "path";
 import { z } from "zod";
 import { field } from "../shared/guards.ts";
 import { nullLogger } from "../shared/log.ts";
+import { truncateFormatted } from "../shared/chunk.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { catalogOf, DEFAULT_LANGUAGE } from "../shared/i18n/index.ts";
 import { discoverExecutorJob, isExecutorWorkerSummary, ExecutorJob, EXECUTORS } from "./codex-job.ts";
@@ -46,9 +48,9 @@ const MAX_COMMAND_CHARS = 60;
 // The coordinator's message in a card is cut to this.
 export const MAX_COORDINATOR_TEXT = 200;
 
-// A subagent's card as Markdown. final: its last version (the agent stopped,
+// A subagent's card as formatted text. final: its last version (the agent stopped,
 // or the card is full and continues in the next one).
-export type Card = { id: string; text: string; final: boolean; reopen?: boolean; replyTo?: string };
+export type Card = { id: string; text: string; entities: Entity[]; final: boolean; reopen?: boolean; replyTo?: string };
 
 type Status = "running" | "done" | "failed" | "stopped";
 
@@ -113,7 +115,7 @@ class Agent {
   private dirty = false;
   private idle = false;
   private lastSent = 0;
-  private sentText = "";
+  private sentText: Formatted = { text: "", entities: [] };
   private executor: ExecutorConfig | undefined;
   private executorJob: ExecutorJob | undefined;
   private executorMetaChecked = false;
@@ -261,13 +263,13 @@ class Agent {
     if (!this.shown && !this.env.canStart()) return;
     // The final message comes in several records: wait until all are read.
     if (final ? !this.idle : this.env.now() - this.lastSent < this.env.sendEveryMs) return;
-    const text = this.render(this.texts, this.statusLine());
+    const formatted = this.render(this.texts, this.statusLine());
     this.dirty = false;
-    if (!final && text === this.sentText) return;
-    this.send(text, final);
+    if (!final && formatted.text === this.sentText.text && JSON.stringify(formatted.entities) === JSON.stringify(this.sentText.entities)) return;
+    this.send(formatted, final);
     this.shown = true;
     this.sealed = final;
-    this.sentText = text;
+    this.sentText = formatted;
     this.lastSent = this.env.now();
   }
 
@@ -357,9 +359,9 @@ class Agent {
     return this.baseWorkMs + Math.max(0, (this.ended ?? this.env.now()) - this.started);
   }
 
-  private send(text: string, final: boolean): void {
+  private send(formatted: Formatted, final: boolean): void {
     if (this.replaying) return;
-    this.env.send({ id: this.cardId(), text, final, ...(this.reopenCard ? { reopen: true } : {}), ...(this.replyTo ? { replyTo: this.replyTo } : {}) });
+    this.env.send({ id: this.cardId(), text: formatted.text, entities: formatted.entities, final, ...(this.reopenCard ? { reopen: true } : {}), ...(this.replyTo ? { replyTo: this.replyTo } : {}) });
     this.replyTo = undefined;
     this.displayed = true;
     this.registerJob();
@@ -406,8 +408,8 @@ class Agent {
 
   private addText(t: string, at: number): Entry {
     const trimmed = t.trim();
-    const entry = { at, text: trimmed.length > MAX_CARD_TEXT ? `${trimmed.slice(0, MAX_CARD_TEXT)}…` : trimmed };
-    if (this.texts.length && toTelegram(this.render([...this.texts, entry], this.statusLine())).text.length > MAX_CARD) {
+    const entry = { at, text: trimmed };
+    if (this.texts.length && this.render([...this.texts, entry], this.statusLine()).text.length > MAX_CARD) {
       const previousCardId = this.cardId();
       if (this.shown) this.send(this.render(this.texts, this.env.messages().subagentContinued), true);
       this.part++;
@@ -460,7 +462,7 @@ class Agent {
     return `${this.cardAgentId}-${this.part}`;
   }
 
-  private render(texts: Entry[], status: string): string {
+  private render(texts: Entry[], status: string): Formatted {
     const m = this.meta;
     // The worker only relays: the model doing the work is the executor's.
     const state = this.getExecutorJob()?.state;
@@ -480,8 +482,11 @@ class Agent {
       model = [modelLabel, effort].filter((s): s is string => s !== "");
     }
     const head = [`🤖 **${escapeMd(this.executor?.displayName ?? m?.agentType ?? this.env.messages().subagentName)}**`, ...model.map(escapeMd)].join(" · ");
-    const task = m?.description ? `${escapeMd(m.description)}\n` : "";
-    return [`${head}\n${task}${status}`, ...texts.map(e => `\`[${clock(e.at)}]\`${STARTS_WITH_BLOCK.test(e.text) ? "\n" : " "}${e.text}`)].join("\n\n");
+    // Every part is converted on its own: what one entry leaves open (an
+    // unclosed fence or HTML block) cannot reach the next.
+    const top = [toTelegram(head), ...(m?.description ? [toTelegram(escapeMd(m.description))] : []), toTelegram(status)];
+    const header = joinFormatted(top, "\n");
+    return joinFormatted([header, ...texts.map(entryFormatted)], "\n\n");
   }
 
   private getExecutorJob(): ExecutorJob | undefined {
@@ -636,6 +641,28 @@ function executorForAgentType(agentType: string | undefined): ExecutorConfig | u
 export function clock(ms: number): string {
   const d = new Date(ms);
   return `${String(d.getHours()).padStart(CLOCK_PAD, "0")}:${String(d.getMinutes()).padStart(CLOCK_PAD, "0")}`;
+}
+
+// One text entry of a card: its clock prefix and Markdown, converted alone and
+// cut to MAX_CARD_TEXT after the prefix.
+function entryFormatted(e: Entry): Formatted {
+  const stamp = `[${clock(e.at)}]`;
+  const prefix = `\`${stamp}\`${STARTS_WITH_BLOCK.test(e.text) ? "\n" : " "}`;
+  return truncateFormatted(toTelegram(prefix + e.text), stamp.length + 1 + MAX_CARD_TEXT);
+}
+
+// Parts of a card laid one after another, each one's entities shifted to its
+// place in the joined text.
+function joinFormatted(parts: Formatted[], separator: string): Formatted {
+  let text = "";
+  const entities: Entity[] = [];
+  parts.forEach((part, i) => {
+    if (i > 0) text += separator;
+    const offset = text.length;
+    text += part.text;
+    for (const e of part.entities) entities.push({ ...e, offset: e.offset + offset });
+  });
+  return { text, entities };
 }
 
 function escapeMd(s: string): string {
