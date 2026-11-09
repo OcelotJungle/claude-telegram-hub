@@ -4,11 +4,12 @@ import type { Logger } from "../shared/log.ts";
 import type { Entity, Formatted } from "../shared/markdown.ts";
 import type { OutFile } from "../shared/media.ts";
 import type { Language, Messages } from "../shared/i18n/index.ts";
-import type { AskQuestion, ChannelMeta, EnableResult, HookBody, HubToPlugin, LimitsReading, PermissionBehavior, PluginToHub, QuestionDecision, ResolutionKind, TopicCommand } from "../shared/protocol.ts";
+import type { AskQuestion, ChannelMeta, EnableResult, HookBody, HubToPlugin, LimitsReading, PermissionBehavior, PluginToHub, QuestionDecision, ResolutionKind, TopicCommand, VolunteerLimitsResult, WorkerLimitsError } from "../shared/protocol.ts";
 import type { PermissionMode } from "./launch.ts";
 import type { OutItem, Piece } from "./outbox.ts";
 import type { Poll } from "./questions.ts";
 import type { SessionRecord } from "./sessions.ts";
+import type { Worker, WorkerAvailability } from "./worker-availability.ts";
 import type { Button, Message, TelegramApi, Update } from "./telegram.ts";
 import type { RichMessage } from "./rich.ts";
 import type { HubCommand } from "./router.ts";
@@ -38,6 +39,7 @@ import { loadCards, saveCards } from "./cards.ts";
 import { loadPollOffset, savePollOffset } from "./poll-offset.ts";
 import { CodexLimits } from "./codex-limits.ts";
 import { VolunteerLimits } from "./volunteer-limits.ts";
+import { rigToolPath, workerAvailability } from "./worker-availability.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
@@ -64,6 +66,8 @@ import { confirmationPromptId, MachineOutbox } from "./machine-outbox.ts";
 import { RigEvents, RIG_POLL_MS } from "./rig-events.ts";
 import { hubCommit, RigLifecycle, startedCommit } from "./rig-lifecycle.ts";
 
+// The rig script that reads the volunteers' quota, in the volunteers feature's tools folder.
+const VOLUNTEER_SCRIPT = "volunteer-models.py";
 // The queue id prefix of the start notice, "starting the session".
 const LAUNCH_NOTICE = "launch-";
 // CLAUDE_CODE_ENTRYPOINT of a window started in the terminal; such a window is on by default.
@@ -160,7 +164,7 @@ function botCommands(m: Messages, bashName: string): { command: string; descript
 }
 
 // exitingPid: the Claude Code process the plugin said it is ending.
-type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; entrypoint?: string; busy?: boolean; reportsSeen?: boolean; exitingPid?: number; attachedOffset?: number; launchedMode?: PermissionMode };
+type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; configDir?: string; entrypoint?: string; busy?: boolean; reportsSeen?: boolean; exitingPid?: number; attachedOffset?: number; launchedMode?: PermissionMode };
 type WS = ServerWebSocket<Conn>;
 // cancelled: /stop won; held items still wait for the ending process.
 type ModeRestart = { mode: PermissionMode; held: Held[]; cancelled?: boolean };
@@ -206,10 +210,8 @@ const cleanupStartKey = (c: Cleanup) => `cmd-${c.id}.0#0`;
 
 export type HubOptions = {
   codexSessionsDir?: string;
-  // Path to the volunteer-models.py script; defaults to ~/.claude/tools/volunteer-models.py.
-  // The command to run it; defaults to ["python", "-I"].
+  // The command to run volunteer-models.py (found through the rig state); defaults to ["python", "-I"].
   // Timeout for the script; defaults to 5000 ms.
-  volunteerLimitsScript?: string;
   volunteerLimitsCommand?: string[];
   volunteerLimitsTimeoutMs?: number;
   port: number;
@@ -444,7 +446,6 @@ export class Hub {
   constructor(private opts: HubOptions) {
     this.codexLimits = new CodexLimits(opts.codexSessionsDir);
     this.volunteerLimits = new VolunteerLimits(
-      opts.volunteerLimitsScript,
       opts.volunteerLimitsCommand,
       opts.volunteerLimitsTimeoutMs
     );
@@ -540,6 +541,11 @@ export class Hub {
     }
   }
 
+  // The port the hub listens on (the configured one; the OS-chosen one when configured as 0).
+  get port(): number {
+    return this.server?.port ?? this.opts.port;
+  }
+
   start(): boolean {
     try {
       this.server = Bun.serve<Conn>({
@@ -557,7 +563,7 @@ export class Hub {
       throw e;
     }
     this.running = true;
-    this.log.info(`hub listening on 127.0.0.1:${this.opts.port}`);
+    this.log.info(`hub listening on 127.0.0.1:${this.port}`);
     if (this.outbox.size) this.log.info(`${this.outbox.size} queued piece(s) left by the previous hub — delivering`);
     for (const item of this.outbox.items()) if (item.files) this.fileMessages.set(messageOf(item.id), { errors: [] });
     for (const sid of this.outbox.sessions()) void this.pump(sid);
@@ -671,8 +677,8 @@ export class Hub {
     }
     if (url.pathname === "/language" && req.method === "GET") return Response.json({ language: this.lang });
     if (url.pathname === "/limits" && req.method === "GET") return Response.json(this.freshestLimits(url.searchParams.get("session") ?? "") ?? null);
-    if (url.pathname === "/codex-limits" && req.method === "GET") return Response.json(await this.codexLimits.read() ?? null);
-    if (url.pathname === "/volunteer-limits" && req.method === "GET") return Response.json(await this.volunteerLimits.read());
+    if (url.pathname === "/codex-limits" && req.method === "GET") return Response.json(await this.codexLimitsFor(url.searchParams.get("session") ?? ""));
+    if (url.pathname === "/volunteer-limits" && req.method === "GET") return Response.json(await this.volunteerLimitsFor(url.searchParams.get("session") ?? ""));
     if (url.pathname === "/reply" && req.method === "POST") {
       const r = commandReply.safeParse(await req.json().catch(() => undefined));
       if (!r.success) return new Response("bad reply", { status: 400 });
@@ -730,6 +736,27 @@ export class Hub {
       if (same && r.rateLimits.length && (!best || r.at > best.at)) best = { at: r.at, rateLimits: r.rateLimits };
     }
     return best;
+  }
+
+  // The worker is available to the asking session: its rig feature is on and
+  // the session's own config dir holds the agent file. The config dir comes
+  // from the session's hello, never from the request.
+  private availability(worker: Worker, sessionId: string): WorkerAvailability {
+    const configDir = this.connOf(sessionId)?.data.configDir ?? this.opts.defaultConfigDir ?? DEFAULT_CONFIG_DIR;
+    return workerAvailability(worker, this.opts.rigDir, configDir);
+  }
+
+  // null: Codex is not available to the session (no block). An error: it is
+  // available but there is nothing to show.
+  private async codexLimitsFor(sessionId: string): Promise<LimitsReading | WorkerLimitsError | null> {
+    if (!this.availability("codex", sessionId).available) return null;
+    return await this.codexLimits.read() ?? { kind: "error", reason: this.m().limitsNoCodexRollout };
+  }
+
+  private async volunteerLimitsFor(sessionId: string): Promise<VolunteerLimitsResult> {
+    const worker = this.availability("volunteers", sessionId);
+    if (!worker.available) return { kind: "none" };
+    return this.volunteerLimits.read(rigToolPath(worker.repo, "volunteers", VOLUNTEER_SCRIPT), this.m());
   }
 
   private accountOf(sessionId: string): string | undefined {
@@ -1138,7 +1165,7 @@ ${msg.text}`);
     const entrypoint = msg.entrypoint ?? ws.data.entrypoint;
     const transcript = this.transcriptOf(msg.sessionId);
     const attachedOffset = transcript ? statSync(transcript).size : undefined;
-    ws.data = { ...ws.data, sessionId: msg.sessionId, cwd: msg.cwd, account, entrypoint, attachedOffset, launchedMode: undefined };
+    ws.data = { ...ws.data, sessionId: msg.sessionId, cwd: msg.cwd, account, configDir: msg.configDir ?? ws.data.configDir, entrypoint, attachedOffset, launchedMode: undefined };
     this.exitGates.get(msg.sessionId)?.reconnect();
     this.applyDefaultMode({ sessionId: msg.sessionId, cwd: msg.cwd, entrypoint, title: msg.title });
     this.store.setWhere(msg.sessionId, msg.cwd, account);

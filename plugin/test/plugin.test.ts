@@ -15,7 +15,7 @@ import { platformFor } from "../src/shared/platform.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { TURN_DECISION_MS } from "../src/transcript/relay.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
-import { freePort, memLogger, NO_PACE, tempDir, waitFor } from "./helpers.ts";
+import { memLogger, NO_PACE, tempDir, waitFor } from "./helpers.ts";
 
 const en = catalogOf("en");
 const CUT_LIMIT_NOTE = cutLimitNote(en);
@@ -135,11 +135,10 @@ function makeCore(sessionId = SID, entrypoint?: string) {
 
 beforeEach(async () => {
   fake = new FakeTelegram();
-  port = await freePort();
   state = tempDir();
   config = { groupId: GROUP, allowFrom: [ME], turnEndChime: "" };
   hub = new Hub({
-    port,
+    port: 0,
     sessionsFile: join(state, "sessions.json"),
     outboxFile: join(state, "outbox.json"),
     filesDir: join(state, "outbox-files"),
@@ -159,6 +158,7 @@ beforeEach(async () => {
     onExit() {},
   });
   hub.start();
+  port = hub.port;
   configDir = tempDir();
   const projDir = join(configDir, "projects", "C--code-demo-app");
   mkdirSync(projDir, { recursive: true });

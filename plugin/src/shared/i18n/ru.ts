@@ -182,6 +182,13 @@ export const ru: Messages = {
   infoLimitLine: ({ name, percent, resetIn }) => `${name}: ${percent}%${resetIn ? ` (сброс через ${resetIn})` : ""}`,
   infoVolunteerDay: ({ percent, resetIn }) => resetIn ? `День: ${percent}% (сброс через ${resetIn})` : `День: ${percent}%`,
   infoVolunteerNoData: ({ reason }) => `Лимиты волонтёров: нет данных — ${reason}`,
+  infoCodexNoData: ({ reason }) => `Лимиты Codex: нет данных — ${reason}`,
+  limitsNoCodexRollout: "в сессиях Codex ещё нет лимитов",
+  limitsScriptMissing: "volunteer-models.py не найден",
+  limitsScriptExit: ({ code, stderr }) => `скрипт завершился с кодом ${code}: ${stderr || "stderr пуст"}`,
+  limitsScriptTimeout: "скрипт не ответил вовремя",
+  limitsScriptBadJson: "скрипт вернул неверный JSON",
+  limitsNoSource: "нет источника данных",
   infoContext: "**Контекст**",
   infoNoData: "нет данных",
 

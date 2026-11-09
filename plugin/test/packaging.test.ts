@@ -49,10 +49,10 @@ describe("SessionStart hook", () => {
   });
 
   test("tells the hub which session the window now runs", async () => {
-    const port = await freePort();
     const dir = tempDir();
-    hub = new Hub({ port, sessionsFile: join(dir, "s.json"), outboxFile: join(dir, "o.json"), filesDir: join(dir, "files"), inboxDir: dir, api: undefined, config: () => ({ allowFrom: [], turnEndChime: "" }), idleMs: 60_000, log: memLogger(), onExit() {} });
+    hub = new Hub({ port: 0, sessionsFile: join(dir, "s.json"), outboxFile: join(dir, "o.json"), filesDir: join(dir, "files"), inboxDir: dir, api: undefined, config: () => ({ allowFrom: [], turnEndChime: "" }), idleMs: 60_000, log: memLogger(), onExit() {} });
     hub.start();
+    const port = hub.port;
     const c = await wsClient(port, { type: "hello", v: PROTOCOL_VERSION, windowKey: "pipe-H", sessionId: "old", cwd: "C:\\p" });
     clients.push(c);
     const r = await runHook(port, { session_id: "new", transcript_path: "C:\\t\\new.jsonl", cwd: "C:\\p", hook_event_name: "SessionStart", source: "clear" });
@@ -109,10 +109,10 @@ describe("Stop hook", () => {
   }
 
   test("tells the window how the turn ended, without a sound of its own", async () => {
-    const port = await freePort();
     const { dir, chimes } = chimeSetup();
-    hub = new Hub({ port, sessionsFile: join(dir, "s.json"), outboxFile: join(dir, "o.json"), filesDir: join(dir, "files"), inboxDir: dir, api: undefined, config: () => ({ allowFrom: [], turnEndChime: "" }), idleMs: 60_000, log: memLogger(), onExit() {} });
+    hub = new Hub({ port: 0, sessionsFile: join(dir, "s.json"), outboxFile: join(dir, "o.json"), filesDir: join(dir, "files"), inboxDir: dir, api: undefined, config: () => ({ allowFrom: [], turnEndChime: "" }), idleMs: 60_000, log: memLogger(), onExit() {} });
     hub.start();
+    const port = hub.port;
     const c = await wsClient(port, { type: "hello", v: PROTOCOL_VERSION, windowKey: "pipe-S", sessionId: "s", cwd: "C:\\p" });
     clients.push(c);
     const r = await runStop(port, { session_id: "s", hook_event_name: "Stop", last_assistant_message: "\u0413\u043e\u0442\u043e\u0432\u043e. \u0414\u0430\u043b\u044c\u0448\u0435?", background_tasks: [{ id: "t" }] }, dir);
@@ -317,10 +317,10 @@ describe("AskUserQuestion hook", () => {
   });
 
   test("the real hub decides nothing for a session with the mode off", async () => {
-    const port = await freePort();
     const dir = tempDir();
-    hub = new Hub({ port, sessionsFile: join(dir, "s.json"), outboxFile: join(dir, "o.json"), filesDir: join(dir, "files"), inboxDir: dir, api: undefined, config: () => ({ allowFrom: [], turnEndChime: "" }), idleMs: 60_000, log: memLogger(), onExit() {} });
+    hub = new Hub({ port: 0, sessionsFile: join(dir, "s.json"), outboxFile: join(dir, "o.json"), filesDir: join(dir, "files"), inboxDir: dir, api: undefined, config: () => ({ allowFrom: [], turnEndChime: "" }), idleMs: 60_000, log: memLogger(), onExit() {} });
     hub.start();
+    const port = hub.port;
     clients.push(await wsClient(port, { type: "hello", v: PROTOCOL_VERSION, windowKey: "pipe-Q", sessionId: "s", cwd: "C:\\p" }));
     expect(await runQuestion(port, INPUT)).toEqual({ status: 0, stdout: "" });
   });

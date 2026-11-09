@@ -1,7 +1,6 @@
+import type { Messages } from "../shared/i18n/index.ts";
 import type { VolunteerLimitsResult } from "../shared/protocol.ts";
 
-import { homedir } from "os";
-import { join } from "path";
 import { z } from "zod";
 import { existsSync } from "fs";
 
@@ -47,19 +46,27 @@ const scriptOutputSchema = z.discriminatedUnion("source", [
   }),
 ]);
 
+// Text that is not JSON becomes undefined, which the schema rejects like any wrong shape.
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
 export class VolunteerLimits {
   constructor(
-    private scriptPath: string = join(homedir(), ".claude", "tools", "volunteer-models.py"),
     private command: string[] = ["python", "-I"],
     private timeoutMs: number = SCRIPT_TIMEOUT_MS
   ) {}
 
-  async read(): Promise<VolunteerLimitsResult> {
+  async read(scriptPath: string | undefined, m: Messages): Promise<VolunteerLimitsResult> {
     try {
-      if (!existsSync(this.scriptPath)) {
-        return { kind: "none" };
+      if (!scriptPath || !existsSync(scriptPath)) {
+        return { kind: "error", reason: m.limitsScriptMissing };
       }
-      const args = [...this.command.slice(1), this.scriptPath, "limits", "--json"];
+      const args = [...this.command.slice(1), scriptPath, "limits", "--json"];
       const proc = Bun.spawn([this.command[0], ...args], {
         stdout: "pipe",
         stderr: "pipe",
@@ -82,18 +89,18 @@ export class VolunteerLimits {
         const exitCode = await proc.exited;
 
         if (exitCode !== 0) {
-          return { kind: "error", reason: `script exited with code ${exitCode}: ${stderr.trim() || "no stderr"}` };
+          return { kind: "error", reason: m.limitsScriptExit({ code: exitCode, stderr: stderr.trim() }) };
         }
 
-        const parsed = scriptOutputSchema.safeParse(JSON.parse(stdout));
+        const parsed = scriptOutputSchema.safeParse(parseJson(stdout));
         if (!parsed.success) {
-          return { kind: "error", reason: "bad JSON from script" };
+          return { kind: "error", reason: m.limitsScriptBadJson };
         }
 
         const data = parsed.data;
 
         if (data.source === "none") {
-          return { kind: "error", reason: data.error ?? "no data source" };
+          return { kind: "error", reason: data.error ?? m.limitsNoSource };
         }
 
         const at = Date.parse(data.checked_at);
@@ -116,7 +123,7 @@ export class VolunteerLimits {
       }
     } catch (e) {
       if (e instanceof Error && e.message === "timeout") {
-        return { kind: "error", reason: "timeout" };
+        return { kind: "error", reason: m.limitsScriptTimeout };
       }
       return { kind: "error", reason: e instanceof Error ? e.message : String(e) };
     }

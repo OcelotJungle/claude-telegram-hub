@@ -194,6 +194,13 @@ export const en = {
     `${name}: ${percent}%${resetIn ? ` (resets in ${resetIn})` : ""}`,
   infoVolunteerDay: ({ percent, resetIn }: { percent: number; resetIn: string | undefined }) => resetIn ? `Day: ${percent}% (resets in ${resetIn})` : `Day: ${percent}%`,
   infoVolunteerNoData: ({ reason }: { reason: string }) => `Volunteer limits: no data, ${reason}`,
+  infoCodexNoData: ({ reason }: { reason: string }) => `Codex limits: no data, ${reason}`,
+  limitsNoCodexRollout: "no Codex rollout with limits yet",
+  limitsScriptMissing: "volunteer-models.py not found",
+  limitsScriptExit: ({ code, stderr }: { code: number; stderr: string }) => `script exited with code ${code}: ${stderr || "no stderr"}`,
+  limitsScriptTimeout: "the script timed out",
+  limitsScriptBadJson: "bad JSON from script",
+  limitsNoSource: "no data source",
   infoContext: "**Context**",
   infoNoData: "no data",
 

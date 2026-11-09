@@ -148,6 +148,11 @@ describe("/info text", () => {
     expect(text).toContain("\n\nVolunteer limits: no data, timeout\n\n**Context**");
   });
 
+  test("codex limits error shows single line", () => {
+    const text = infoText(usage(), NOW, en, undefined, { kind: "error", reason: "no rollout" });
+    expect(text).toContain("Codex limits: no data, no rollout");
+  });
+
   test("volunteer limits none produces no block", () => {
     const text = infoText(usage(), NOW, en, undefined, undefined, { kind: "none" });
     expect(text).not.toContain("Volunteer limits");
@@ -221,6 +226,7 @@ describe("limits shared through the hub", () => {
     volunteer: () => { status: number; text: string } = () => ({ status: 200, text: "null" })
   ) {
     const posted: { path: string; body: unknown }[] = [];
+    const asked: string[] = [];
     let commands = [{ id: "c1", name: "info", args: "" }];
     const r = new Runner("http://hub", {
       sessionId: async () => "s",
@@ -233,8 +239,8 @@ describe("limits shared through the hub", () => {
           return { status: 200, text: "ok" };
         }
         if (new URL(url).pathname === "/limits") return answer();
-        if (new URL(url).pathname === "/codex-limits") return codex();
-        if (new URL(url).pathname === "/volunteer-limits") return volunteer();
+        if (new URL(url).pathname === "/codex-limits") { asked.push(url); return codex(); }
+        if (new URL(url).pathname === "/volunteer-limits") { asked.push(url); return volunteer(); }
         const list = commands;
         commands = [];
         return { status: 200, text: JSON.stringify(list) };
@@ -242,7 +248,7 @@ describe("limits shared through the hub", () => {
       now: () => NOW,
     });
     const info = () => String(field(posted.find(p => p.path === "/reply")?.body, "text"));
-    return { r, posted, info };
+    return { r, posted, info, asked };
   }
 
   test("/info shows the freshest reading of the account, with its age", async () => {
@@ -266,6 +272,20 @@ describe("limits shared through the hub", () => {
       expect(s.info()).toStartWith("**Claude limits**");
       expect(s.info().includes("**Codex limits**")).toBe(index === 0);
     }
+  });
+
+  test("/info asks both worker endpoints as its own session, with no path in the request", async () => {
+    const s = runner(() => ({ status: 200, text: "null" }));
+    await s.r.poll();
+    await Bun.sleep(50);
+    expect(s.asked.sort()).toEqual(["http://hub/codex-limits?session=s", "http://hub/volunteer-limits?session=s"]);
+  });
+
+  test("/info shows the error line the hub gives for an available Codex without data", async () => {
+    const s = runner(() => ({ status: 200, text: "null" }), () => ({ status: 200, text: JSON.stringify({ kind: "error", reason: "no rollout" }) }));
+    await s.r.poll();
+    await Bun.sleep(50);
+    expect(s.info()).toContain("Codex limits: no data, no rollout");
   });
 
   test("/info fetches volunteer limits and tolerates failures", async () => {

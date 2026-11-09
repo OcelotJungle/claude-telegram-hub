@@ -2,7 +2,7 @@
 // The module runs inside Claude Code with no Node: everything outside comes
 // in as Deps (the engine's `$` calls), so this file imports only types and
 // plain helpers from shared/ that need nothing at run time.
-import type { CleanupReport, Language, LimitsReading, RateLimit, ResolutionKind, TopicCommand, VolunteerLimitsResult } from "../shared/protocol.ts";
+import type { CleanupReport, Language, LimitsReading, RateLimit, ResolutionKind, TopicCommand, VolunteerLimitsResult, WorkerLimitsError } from "../shared/protocol.ts";
 import type { MessageKind } from "../shared/notification.ts";
 import type { Messages } from "../shared/i18n/index.ts";
 
@@ -169,8 +169,8 @@ export class Runner {
         const usage = await this.deps.usage();
         const [shared, codex, volunteer] = await Promise.all([
           this.sharedLimits(sessionId),
-          this.codexLimits(),
-          this.volunteerLimits(),
+          this.codexLimits(sessionId),
+          this.volunteerLimits(sessionId),
         ]);
         await this.reply(
           to,
@@ -328,20 +328,20 @@ export class Runner {
     }
   }
 
-  private async codexLimits(): Promise<LimitsReading | undefined> {
+  private async codexLimits(sessionId: string): Promise<LimitsReading | WorkerLimitsError | undefined> {
     try {
-      const res = await this.deps.http(`${this.base}/codex-limits`);
+      const res = await this.deps.http(`${this.base}/codex-limits?session=${encodeURIComponent(sessionId)}`);
       if (res.status !== 200) return undefined;
       const value: unknown = JSON.parse(res.text);
-      return isLimitsReading(value) ? value : undefined;
+      return isLimitsReading(value) || isWorkerLimitsError(value) ? value : undefined;
     } catch {
       return undefined;
     }
   }
 
-  private async volunteerLimits(): Promise<VolunteerLimitsResult | undefined> {
+  private async volunteerLimits(sessionId: string): Promise<VolunteerLimitsResult | undefined> {
     try {
-      const res = await this.deps.http(`${this.base}/volunteer-limits`);
+      const res = await this.deps.http(`${this.base}/volunteer-limits?session=${encodeURIComponent(sessionId)}`);
       if (res.status !== 200) return undefined;
       const value: unknown = JSON.parse(res.text);
       return isVolunteerLimitsResult(value) ? value : undefined;
@@ -396,7 +396,7 @@ export function infoText(
   now: number,
   m: Messages,
   limitsAt?: number,
-  codex?: LimitsReading,
+  codex?: LimitsReading | WorkerLimitsError,
   volunteer?: VolunteerLimitsResult
 ): string {
   const lines: string[] = [];
@@ -412,7 +412,9 @@ export function infoText(
       lines.push(m.infoLimitLine({ name: limitName(l.kind, m), percent: l.percentUsed, resetIn: resetIn(left) }));
     }
   }
-  if (codex) {
+  if (codex && "kind" in codex) {
+    lines.push("", m.infoCodexNoData({ reason: codex.reason }));
+  } else if (codex) {
     const age = now - codex.at;
     lines.push("", m.infoCodexLimits({ age: staleAge(age) }));
     const order = (kind: string) => (LIMIT_ORDER.includes(kind) ? LIMIT_ORDER.indexOf(kind) : LIMIT_ORDER.length);
@@ -499,6 +501,10 @@ function message(e: unknown): string {
 function topicCommands(json: string): TopicCommand[] {
   const list: unknown = JSON.parse(json);
   return Array.isArray(list) ? list.filter(isTopicCommand) : [];
+}
+
+function isWorkerLimitsError(v: unknown): v is WorkerLimitsError {
+  return typeof v === "object" && v !== null && "kind" in v && v.kind === "error" && "reason" in v && typeof v.reason === "string";
 }
 
 function isLimitsReading(v: unknown): v is LimitsReading {

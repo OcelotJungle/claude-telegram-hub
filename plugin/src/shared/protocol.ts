@@ -33,6 +33,8 @@ export type CleanupReport = { sessionId: string; id: string; before?: number; af
 // (GET /limits?session=<id>, answered with a reading or null).
 export type RateLimit = { kind: string; percentUsed: number; resetsAt?: string };
 export type LimitsReading = { at: number; rateLimits: RateLimit[] };
+// A worker that is available but has nothing to show: /info prints the reason instead of dropping the block.
+export type WorkerLimitsError = { kind: "error"; reason: string };
 export type VolunteerLimitsResult =
   | { kind: "none" }
   | { kind: "error"; reason: string }

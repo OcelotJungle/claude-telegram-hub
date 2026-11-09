@@ -13,7 +13,7 @@ import { ru } from "../src/shared/i18n/ru.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { platformFor } from "../src/shared/platform.ts";
 import { FakeTelegram, topicMsg } from "./fake-telegram.ts";
-import { freePort, memLogger, must, NO_PACE, offlineApi, tempDir, waitFor, wsClient } from "./helpers.ts";
+import { memLogger, must, NO_PACE, offlineApi, tempDir, waitFor, wsClient } from "./helpers.ts";
 import { manualClock } from "./manual-clock.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
 
@@ -74,9 +74,8 @@ afterEach(async () => {
 });
 
 async function startHub(rig: FakeRig & { run(argv: string[]): RigOutput }, options: { findRig?: () => string | undefined; rigDir?: string } = {}) {
-  const port = await freePort();
   hub = new Hub({
-    platform: platformFor("linux"), accountsAvailable: () => true, port,
+    platform: platformFor("linux"), accountsAvailable: () => true, port: 0,
     sessionsFile: join(dir, "sessions.json"), outboxFile: join(dir, "outbox.json"), spoolDir: join(dir, "spool"), spoolScanMs: 50,
     filesDir: join(dir, "outbox-files"), inboxDir: join(dir, "inbox"), execDir: join(dir, "exec"), execsFile: join(dir, "execs.json"),
     api: new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, sendAttemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500, groupPace: NO_PACE }),
@@ -88,7 +87,7 @@ async function startHub(rig: FakeRig & { run(argv: string[]): RigOutput }, optio
     log: memLogger(), onExit: () => {},
   });
   expect(hub.start()).toBe(true);
-  return { hub, port };
+  return { hub, port: hub.port };
 }
 
 async function connect(port: number) {

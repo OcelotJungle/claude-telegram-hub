@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { VolunteerLimits } from "../src/hub/volunteer-limits.ts";
+import { en } from "../src/shared/i18n/en.ts";
+import { ru } from "../src/shared/i18n/ru.ts";
 
 const CHECKED_AT = "2026-01-02T12:00:00Z";
 const RESET_IN_S = 56455;
@@ -58,8 +60,8 @@ describe("VolunteerLimits", () => {
 import sys, json
 print(json.dumps(${scriptOutput()}))
 `);
-    const reader = new VolunteerLimits(scriptPath, ["python", "-I"], 5000);
-    const result = await reader.read();
+    const reader = new VolunteerLimits(["python", "-I"], 5000);
+    const result = await reader.read(scriptPath, en);
     expect(result.kind).toBe("ok");
     if (result.kind === "ok") {
       expect(result.at).toBe(Date.parse(CHECKED_AT));
@@ -78,8 +80,8 @@ print(json.dumps(${scriptOutput()}))
 import sys, json
 print(json.dumps(${scriptOutput({ providers: { zhipu: { used: 4, cap: 100 } } })}))
 `);
-    const reader = new VolunteerLimits(scriptPath, ["python", "-I"], 5000);
-    const result = await reader.read();
+    const reader = new VolunteerLimits(["python", "-I"], 5000);
+    const result = await reader.read(scriptPath, en);
     expect(result.kind).toBe("ok");
     if (result.kind === "ok") {
       expect(result.providers).toEqual([{ name: "Zhipu", used: 4, cap: 100 }]);
@@ -91,8 +93,8 @@ print(json.dumps(${scriptOutput({ providers: { zhipu: { used: 4, cap: 100 } } })
 import sys, json
 print(json.dumps(${scriptOutput({ providers: { unknown: { used: 10, cap: 100 } } })}))
 `);
-    const reader = new VolunteerLimits(scriptPath, ["python", "-I"], 5000);
-    const result = await reader.read();
+    const reader = new VolunteerLimits(["python", "-I"], 5000);
+    const result = await reader.read(scriptPath, en);
     expect(result.kind).toBe("ok");
     if (result.kind === "ok") {
       expect(result.providers).toEqual([{ name: "unknown", used: 10, cap: 100 }]);
@@ -104,8 +106,8 @@ print(json.dumps(${scriptOutput({ providers: { unknown: { used: 10, cap: 100 } }
 import sys, json
 print(json.dumps(${scriptOutput({ source: "none", day_percent: null, used: null, cap: null, reset_in_s: null, providers: null, error: "no proxy configured" })}))
 `);
-    const reader = new VolunteerLimits(scriptPath, ["python", "-I"], 5000);
-    const result = await reader.read();
+    const reader = new VolunteerLimits(["python", "-I"], 5000);
+    const result = await reader.read(scriptPath, en);
     expect(result).toEqual({ kind: "error", reason: "no proxy configured" });
   });
 
@@ -114,8 +116,8 @@ print(json.dumps(${scriptOutput({ source: "none", day_percent: null, used: null,
 import sys, json
 print(json.dumps(${scriptOutput({ source: "none", day_percent: null, used: null, cap: null, reset_in_s: null, providers: null, error: null })}))
 `);
-    const reader = new VolunteerLimits(scriptPath, ["python", "-I"], 5000);
-    const result = await reader.read();
+    const reader = new VolunteerLimits(["python", "-I"], 5000);
+    const result = await reader.read(scriptPath, en);
     expect(result).toEqual({ kind: "error", reason: "no data source" });
   });
 
@@ -123,18 +125,26 @@ print(json.dumps(${scriptOutput({ source: "none", day_percent: null, used: null,
     await writeScript(`#!/usr/bin/env python3
 print("not json")
 `);
-    const reader = new VolunteerLimits(scriptPath, ["python", "-I"], 5000);
-    const result = await reader.read();
+    const reader = new VolunteerLimits(["python", "-I"], 5000);
+    const result = await reader.read(scriptPath, en);
     expect(result.kind).toBe("error");
     if (result.kind === "error") {
       expect(result.reason).toContain("JSON");
     }
   });
 
-  test("missing script file: returns none", async () => {
-    const reader = new VolunteerLimits(join(scriptDir, "missing.py"), ["python", "-I"], 5000);
-    const result = await reader.read();
-    expect(result).toEqual({ kind: "none" });
+  test("missing script file: returns an error line, not a dropped block", async () => {
+    const reader = new VolunteerLimits(["python", "-I"], 5000);
+    const result = await reader.read(join(scriptDir, "missing.py"), en);
+    expect(result).toEqual({ kind: "error", reason: en.limitsScriptMissing });
+  });
+
+  test("the reasons of our own come from the given catalog", async () => {
+    const reader = new VolunteerLimits(["python", "-I"], 5000);
+    expect(await reader.read(join(scriptDir, "missing.py"), ru)).toEqual({ kind: "error", reason: ru.limitsScriptMissing });
+    expect(await reader.read(undefined, ru)).toEqual({ kind: "error", reason: ru.limitsScriptMissing });
+    await writeScript("import sys\nsys.exit(3)\n");
+    expect(await reader.read(scriptPath, ru)).toEqual({ kind: "error", reason: ru.limitsScriptExit({ code: 3, stderr: "" }) });
   });
 
   test("script crash (non-zero exit): returns error", async () => {
@@ -142,8 +152,8 @@ print("not json")
 import sys
 sys.exit(1)
 `);
-    const reader = new VolunteerLimits(scriptPath, ["python", "-I"], 5000);
-    const result = await reader.read();
+    const reader = new VolunteerLimits(["python", "-I"], 5000);
+    const result = await reader.read(scriptPath, en);
     expect(result.kind).toBe("error");
     if (result.kind === "error") {
       expect(result.reason).toContain("script exited with code 1");
@@ -155,9 +165,9 @@ sys.exit(1)
 import time
 time.sleep(10)
 `);
-    const reader = new VolunteerLimits(scriptPath, ["python", "-I"], 50);
-    const result = await reader.read();
-    expect(result).toEqual({ kind: "error", reason: "timeout" });
+    const reader = new VolunteerLimits(["python", "-I"], 50);
+    const result = await reader.read(scriptPath, en);
+    expect(result).toEqual({ kind: "error", reason: en.limitsScriptTimeout });
   });
 
   test("injectable command and timeout for tests", async () => {
@@ -165,8 +175,8 @@ time.sleep(10)
 import sys, json
 print(json.dumps(${scriptOutput()}))
 `);
-    const reader = new VolunteerLimits(scriptPath, ["python", "-I"], 5000);
-    const result = await reader.read();
+    const reader = new VolunteerLimits(["python", "-I"], 5000);
+    const result = await reader.read(scriptPath, en);
     expect(result.kind).toBe("ok");
   });
 });
