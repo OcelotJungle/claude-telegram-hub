@@ -146,18 +146,19 @@ const MAX_BATCH_IDS = 200;
 const TYPING_EVERY_MS = 4000;
 
 // The bot's command menu in the hub's language; bashName is the platform's name for the bash shell.
+// Telegram shows it in this order: the user's own, by how often the commands are used.
 function botCommands(m: Messages, bashName: string): { command: string; description: string }[] {
   return [
     { command: "info", description: m.commandInfo },
-    { command: "compact", description: m.commandCompact },
-    { command: "rename", description: m.commandRename },
-    { command: "run", description: m.commandRun },
-    { command: "stop", description: m.commandStop },
     { command: "cleanup", description: m.commandCleanup },
-    { command: "mode", description: m.commandMode },
+    { command: "compact", description: m.commandCompact },
+    { command: "stop", description: m.commandStop },
+    { command: "bash", description: m.commandBash({ shell: bashName }) },
     { command: "pwsh", description: m.commandPwsh },
     { command: "cmd", description: m.commandCmd },
-    { command: "bash", description: m.commandBash({ shell: bashName }) },
+    { command: "run", description: m.commandRun },
+    { command: "mode", description: m.commandMode },
+    { command: "rename", description: m.commandRename },
     { command: "rig", description: m.commandRig },
   ];
 }
