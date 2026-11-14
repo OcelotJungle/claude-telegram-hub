@@ -233,6 +233,15 @@ describe("user records", () => {
     expect(parseRecord(blocks)).toEqual([{ kind: "task_status", taskId: "a1b2c3", status: "killed" }]);
   });
 
+  test("a Stop hook's feedback after the turn wakes the agent to follow up its answer", () => {
+    // Claude Code 2.1.x: an async Stop hook that blocked after the turn had ended.
+    const content = "<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n<system-reminder>\nStop hook blocking error from command \"Stop\": the answer missed a step\n</system-reminder>";
+    const rec = { ...userBase, origin: { kind: "task-notification", producer: "session-task" }, promptSource: "system", turnOrigin: "task_notification", message: { role: "user", content } };
+    expect(parseRecord(rec)).toEqual([{ kind: "hook_feedback" }]);
+    const queued = { type: "attachment", attachment: { type: "queued_command", prompt: content, commandMode: "task-notification", origin: { kind: "task-notification" } } };
+    expect(parseRecord(queued)).toEqual([{ kind: "hook_feedback" }]);
+  });
+
   test("an agent that stopped to wait for its own background work has not stopped", () => {
     // Claude Code 2.1.x writes this each time a background agent ends a turn with a task of its own still running.
     const content = [

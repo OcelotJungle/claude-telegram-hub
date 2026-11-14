@@ -340,6 +340,57 @@ describe("relay: a turn the user's own message started", () => {
   });
 });
 
+describe("relay: a follow-up to a Stop hook's feedback", () => {
+  const FEEDBACK: TranscriptEvent = { kind: "hook_feedback" };
+
+  test("the answered turn chimes, its follow-up is silent and not reported", () => {
+    const { r, finals } = makeRelay();
+    r.feed(text("Answer", "m1"));
+    r.feed(end("m1"));
+    r.decide(DONE);
+    expect(r.feed(CLOSED)).toEqual([{ text: "Answer", notify: true }]);
+    r.feed(FEEDBACK);
+    r.feed(text("Reflection: fixed the number", "m2"));
+    r.feed(end("m2"));
+    r.decide(DONE);
+    expect(r.feed(CLOSED)).toEqual([{ text: "Reflection: fixed the number", notify: false }]);
+    expect(finals).toEqual(["done"]);
+  });
+
+  test("a follow-up that asks is final", () => {
+    const { r, finals } = makeRelay();
+    r.feed(FEEDBACK);
+    r.feed(text("Which one?", "m1"));
+    r.feed(end("m1"));
+    r.decide(ASK);
+    expect(r.feed(CLOSED)).toEqual([{ text: "Which one?", notify: true }]);
+    expect(finals).toEqual(["ask"]);
+  });
+
+  test("a user's message taken into the follow-up makes it an answer again", () => {
+    const { r } = makeRelay();
+    r.feed(FEEDBACK);
+    r.feed({ kind: "channel_seen", messageIds: [9] });
+    r.feed(text("Answer", "m1"));
+    r.feed(end("m1"));
+    r.decide(DONE);
+    expect(r.feed(CLOSED)).toEqual([{ text: "Answer", notify: true }]);
+  });
+
+  test("the turn after the follow-up chimes again", () => {
+    const { r } = makeRelay();
+    r.feed(FEEDBACK);
+    r.feed(text("Reflection", "m1"));
+    r.feed(end("m1"));
+    r.decide(DONE);
+    r.feed(CLOSED);
+    r.feed(text("Run finished", "m2"));
+    r.feed(end("m2"));
+    r.decide(DONE);
+    expect(r.feed(CLOSED)).toEqual([{ text: "Run finished", notify: true }]);
+  });
+});
+
 describe("relay: late decisions", () => {
   test("a decision after the turn closed is dropped", () => {
     const { r, clock, finals } = makeRelay();

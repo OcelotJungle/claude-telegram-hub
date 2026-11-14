@@ -40,6 +40,9 @@ export class Relay {
   private decision: { d: TurnEnd; at: number } | undefined;
   // When the last record of a main-agent message came.
   private lastMessageAt = 0;
+  // A Stop hook's feedback woke the agent after its answer: this turn follows
+  // that answer up, so it does not chime unless it asks.
+  private followUp = false;
   // The last turn is closed and no new message has started since.
   private closed = false;
   // The last turn closed with its decision. Each turn gets one decision, before
@@ -103,6 +106,9 @@ export class Relay {
         if (this.ending !== undefined) out.push(...this.close(false));
         if (ev.kind !== "interrupted") this.byUser = true;
         break;
+      case "hook_feedback":
+        this.followUp = true;
+        break;
       case "text":
         if (!this.enabled) break;
         if (this.pending !== undefined) out.push({ text: this.pending, notify: false });
@@ -125,6 +131,7 @@ export class Relay {
           this.lastCloseDecided = this.decision !== undefined;
           this.decision = undefined;
           this.byUser = false;
+          this.followUp = false;
         } else {
           this.pendingAgents = ev.pendingAgents;
           if (this.decision) out.push(...this.closeBy(this.decision.d));
@@ -167,11 +174,13 @@ export class Relay {
 
   // The decision as the relay applies it. A question is final. A turn the
   // user's own message started answers them: final even when background work
-  // made the hook call it a pause. Any other turn with background subagents
-  // still running is a pause.
+  // made the hook call it a pause. A follow-up to a Stop hook's feedback adds
+  // to an answer that already chimed: a pause. Any other turn with background
+  // subagents still running is a pause.
   private effective(given: TurnEnd | undefined): TurnEnd | undefined {
     if (given?.final === true && given.kind === "ask") return given;
     if (this.byUser) return given?.final === false ? { final: true, kind: "done" } : given;
+    if (this.followUp) return { final: false };
     return this.pendingAgents > 0 ? { final: false } : given;
   }
 
@@ -195,6 +204,7 @@ export class Relay {
     this.closedAt = undefined;
     this.pendingAgents = 0;
     this.byUser = false;
+    this.followUp = false;
     this.closed = true;
     this.lastCloseDecided = this.decision !== undefined;
     const out: Outgoing[] = this.enabled && this.pending !== undefined ? [{ text: this.pending, notify: final }] : [];

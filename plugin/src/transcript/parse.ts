@@ -18,6 +18,9 @@ const TASK_STOPPED = "Successfully stopped task";
 // The note of a notification Claude Code writes each time a background agent
 // ends a turn with a task of its own still running: the agent goes on.
 const AGENT_WAITING = /<note>[^<]*background work of its own still running/;
+// How Claude Code wakes the agent with a Stop hook's feedback that came after
+// the turn ended (an async hook, such as a reflection on the answer).
+const HOOK_FEEDBACK = "<task-notification>\n<summary>Stop hook feedback</summary>";
 // The model name of messages Claude Code writes itself.
 const SYNTHETIC_MODEL = "<synthetic>";
 // How Claude Code opens a coordinator's message to an idle subagent.
@@ -53,6 +56,9 @@ export type TranscriptEvent =
   | { kind: "task_started"; taskId: string }
   // Topic messages that reached the agent's context: Telegram message ids.
   | { kind: "channel_seen"; messageIds: number[] }
+  // A Stop hook's feedback on the answer just given woke the agent: what it
+  // writes now follows up that answer.
+  | { kind: "hook_feedback" }
   // The user stopped the turn (Esc).
   | { kind: "interrupted" }
   // A subagent's coordinator sent it a message (SendMessage): its whole text.
@@ -201,6 +207,7 @@ function toolDetail(input: unknown): string | undefined {
 // a queued command absorbed into the running turn otherwise. A background
 // agent waiting for its own task is told about as completed too, with a note.
 function taskStatus(text: string): TranscriptEvent[] {
+  if (text.startsWith(HOOK_FEEDBACK)) return [{ kind: "hook_feedback" }];
   if (!text.includes("<task-notification>") || AGENT_WAITING.test(text)) return [];
   const taskId = text.match(/<task-id>([^<]+)<\/task-id>/)?.[1];
   const status = text.match(/<status>([^<]+)<\/status>/)?.[1];

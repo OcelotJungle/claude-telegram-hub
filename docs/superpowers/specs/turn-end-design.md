@@ -35,6 +35,11 @@ the sound is how they learn the agent is waiting for them. Only turns that Claud
 task, a monitor, a subagent's report) stay intermediate while background work is left. With no decision such a turn
 closes loud, as any other (item 2 below). An interrupt (Esc) does not count as a message.
 
+**A follow-up to a Stop hook's feedback is silent.** An async Stop hook (such as a reflection on the answer) that
+blocks after the turn has ended wakes the agent with a `user` record whose text starts with
+`<task-notification>\n<summary>Stop hook feedback</summary>` (`hook_feedback` in the parser). The answer before it
+already chimed, so the turn it starts is intermediate unless it asks a question or the user's own message joins it.
+
 A background task is any `background_tasks` entry, of whatever type. A hanging
 dev server also makes turns intermediate: this is a rare case, and the agent really does wait for short background commands without
 a monitor. `session_crons` do not affect the decision.
