@@ -78,8 +78,12 @@ A record of another message after `turn_end` means the turn continued: the text 
 intermediate one, the decision is reset, and the next Stop decides. The decision can arrive earlier than the
 records of the turn end are fully read: before accepting a decision, the plugin reads the transcript to the end.
 
-A decision that arrives after the turn is already closed (and there have been no new records since) is late and
-is dropped: otherwise it would make the next turn, started by a monitor, loud. On a forced
+Each turn gets one decision, and Claude Code writes the turn's `turn_duration` after it. So a decision that arrives
+after the last turn closed with its own decision belongs to the next turn, even when none of that turn's records
+can be read yet: a one-shot turn (a prompt and one answer, no tool calls) has its answer written to the transcript
+only after the Stop hook has reported. The plugin keeps such a decision for the next `turn_closed`. A decision that
+arrives after the last turn closed without one (item 2, or terminal input) is that turn's, late, and is dropped:
+otherwise it would make the next turn, started by a monitor, loud. On a forced
 close (window shutdown, session change, a cut-off answer) the decision is taken into account only if the turn has already
 ended (`turn_end`); text in the middle of a turn goes out silently.
 

@@ -377,6 +377,34 @@ describe("relay: late decisions", () => {
     expect(r.feed(CLOSED)).toEqual([{ text: "C", notify: true }]);
   });
 
+  // A one-shot turn (a prompt and one answer, no tool calls): Claude Code may
+  // write the answer to the transcript only after the Stop hook reported.
+  test("a decision before its turn's records are written counts for that turn", () => {
+    const { r, finals } = makeRelay();
+    r.feed(text("A", "m1"));
+    r.feed(end("m1"));
+    r.decide(DONE);
+    r.feed(CLOSED);
+    expect(r.decide(PAUSE)).toEqual([]);
+    r.feed(text("B", "m2"));
+    r.feed(end("m2"));
+    expect(r.feed(CLOSED)).toEqual([{ text: "B", notify: false }]);
+    expect(finals).toEqual(["done"]);
+  });
+
+  test("an early final decision closes its one-shot turn at once, loud", () => {
+    const { r, finals } = makeRelay();
+    r.feed(text("A", "m1"));
+    r.feed(end("m1"));
+    r.decide(PAUSE);
+    r.feed(CLOSED);
+    r.decide(DONE);
+    r.feed(text("B", "m2"));
+    r.feed(end("m2"));
+    expect(r.feed(CLOSED)).toEqual([{ text: "B", notify: true }]);
+    expect(finals).toEqual(["done"]);
+  });
+
   test("turn_closed with no turn end makes a later decision stale", () => {
     const { r, finals } = makeRelay();
     r.feed(CLOSED);

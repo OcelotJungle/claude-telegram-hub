@@ -40,9 +40,14 @@ export class Relay {
   private decision: { d: TurnEnd; at: number } | undefined;
   // When the last record of a main-agent message came.
   private lastMessageAt = 0;
-  // The last turn is closed and no new message has started since: a decision
-  // arriving now is late.
+  // The last turn is closed and no new message has started since.
   private closed = false;
+  // The last turn closed with its decision. Each turn gets one decision, before
+  // Claude Code writes its turn_closed; so a decision coming after a decided
+  // turn is for the next one, whose records Claude Code has not written yet (a
+  // one-shot answer is written only after the Stop hook). After a turn closed
+  // without a decision, a decision is that turn's, late, and is dropped.
+  private lastCloseDecided = true;
   private now: () => number;
 
   constructor(
@@ -70,10 +75,10 @@ export class Relay {
   }
 
   // The Stop hook's verdict on how the turn ended. A later one replaces an
-  // earlier one (another Stop hook can continue the turn); one for a turn
-  // already closed is dropped.
+  // earlier one (another Stop hook can continue the turn); a late one for a
+  // turn already closed without it is dropped.
   decide(d: TurnEnd): Outgoing[] {
-    if (this.closed) return [];
+    if (this.closed && !this.lastCloseDecided) return [];
     this.decision = { d, at: this.now() };
     return this.ending !== undefined && this.closedAt !== undefined ? this.closeBy(d) : [];
   }
@@ -117,7 +122,9 @@ export class Relay {
       case "turn_closed":
         if (this.ending === undefined) {
           this.closed = true;
+          this.lastCloseDecided = this.decision !== undefined;
           this.decision = undefined;
+          this.byUser = false;
         } else {
           this.pendingAgents = ev.pendingAgents;
           if (this.decision) out.push(...this.closeBy(this.decision.d));
@@ -189,6 +196,7 @@ export class Relay {
     this.pendingAgents = 0;
     this.byUser = false;
     this.closed = true;
+    this.lastCloseDecided = this.decision !== undefined;
     const out: Outgoing[] = this.enabled && this.pending !== undefined ? [{ text: this.pending, notify: final }] : [];
     this.pending = undefined;
     this.decision = undefined;
