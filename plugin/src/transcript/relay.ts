@@ -33,6 +33,9 @@ export class Relay {
   // Background subagents still running when the turn closed: the agent waits
   // for them and goes on, so a turn without a question is only a pause.
   private pendingAgents = 0;
+  // The user's own message (terminal or topic) started or joined this turn:
+  // its end answers them, so it is final even with background work left.
+  private byUser = false;
   private ended: string[] = [];
   private decision: { d: TurnEnd; at: number } | undefined;
   // When the last record of a main-agent message came.
@@ -58,7 +61,7 @@ export class Relay {
   setEnabled(on: boolean): Outgoing[] {
     let out: Outgoing[] = [];
     if (!on && this.enabled) {
-      if (this.ending !== undefined) out = this.close(this.decision?.d.final === true);
+      if (this.ending !== undefined) out = this.close(this.decision !== undefined && this.effective(this.decision.d)?.final === true);
       else if (this.pending !== undefined) out = [{ text: this.pending, notify: false }];
     }
     this.enabled = on;
@@ -93,6 +96,7 @@ export class Relay {
         // A decision made for a turn the user has already left is stale.
         this.decision = undefined;
         if (this.ending !== undefined) out.push(...this.close(false));
+        if (ev.kind !== "interrupted") this.byUser = true;
         break;
       case "text":
         if (!this.enabled) break;
@@ -147,19 +151,27 @@ export class Relay {
   // An ended turn is closed by its decision, if any; text mid-turn goes
   // silently and its decision is dropped. Nothing chimes.
   endTurn(): Outgoing[] {
-    if (this.ending !== undefined) return this.close(this.decision?.d.final === true);
+    if (this.ending !== undefined) return this.close(this.decision !== undefined && this.effective(this.decision.d)?.final === true);
     const out: Outgoing[] = this.enabled && this.pending !== undefined ? [{ text: this.pending, notify: false }] : [];
     this.pending = undefined;
     this.decision = undefined;
     return out;
   }
 
+  // The decision as the relay applies it. A question is final. A turn the
+  // user's own message started answers them: final even when background work
+  // made the hook call it a pause. Any other turn with background subagents
+  // still running is a pause.
+  private effective(given: TurnEnd | undefined): TurnEnd | undefined {
+    if (given?.final === true && given.kind === "ask") return given;
+    if (this.byUser) return given?.final === false ? { final: true, kind: "done" } : given;
+    return this.pendingAgents > 0 ? { final: false } : given;
+  }
+
   // The turn is really over: by the decision, or, with none, as a final one
-  // that does not report (a broken hook must not chime on every turn). With
-  // background subagents still running, only a question makes it final.
+  // that does not report (a broken hook must not chime on every turn).
   private closeBy(given: TurnEnd | undefined): Outgoing[] {
-    const asks = given?.final === true && given.kind === "ask";
-    const d: TurnEnd | undefined = this.pendingAgents > 0 && !asks ? { final: false } : given;
+    const d = this.effective(given);
     if (d === undefined) return this.close(true);
     const out = this.close(d.final);
     if (d.final) this.opts.onFinalClose?.(d.kind);
@@ -175,6 +187,7 @@ export class Relay {
     this.ending = undefined;
     this.closedAt = undefined;
     this.pendingAgents = 0;
+    this.byUser = false;
     this.closed = true;
     const out: Outgoing[] = this.enabled && this.pending !== undefined ? [{ text: this.pending, notify: final }] : [];
     this.pending = undefined;

@@ -270,6 +270,76 @@ describe("relay: background subagents still running", () => {
   });
 });
 
+describe("relay: a turn the user's own message started", () => {
+  const FROM_TOPIC: TranscriptEvent = { kind: "channel_seen", messageIds: [7] };
+  const FROM_TERMINAL: TranscriptEvent = { kind: "terminal_input" };
+
+  test("a topic message's turn is final despite background tasks", () => {
+    const { r, finals } = makeRelay();
+    r.feed(FROM_TOPIC);
+    r.feed(text("Answer", "m1"));
+    r.feed(end("m1"));
+    r.decide(PAUSE);
+    expect(r.feed(CLOSED)).toEqual([{ text: "Answer", notify: true }]);
+    expect(finals).toEqual(["done"]);
+  });
+
+  test("a terminal message's turn is final despite background subagents", () => {
+    const { r, finals } = makeRelay();
+    r.feed(FROM_TERMINAL);
+    r.feed(text("Answer", "m1"));
+    r.feed(end("m1"));
+    r.decide(DONE);
+    expect(r.feed(CLOSED_WAITING)).toEqual([{ text: "Answer", notify: true }]);
+    expect(finals).toEqual(["done"]);
+  });
+
+  test("a topic message absorbed mid-turn makes the turn's end final", () => {
+    const { r, finals } = makeRelay();
+    r.feed(text("working", "m1"));
+    r.feed(tool("Bash", "m1"));
+    r.feed(FROM_TOPIC);
+    r.feed(text("Answer", "m2"));
+    r.feed(end("m2"));
+    r.feed(CLOSED);
+    expect(r.decide(PAUSE)).toEqual([{ text: "Answer", notify: true }]);
+    expect(finals).toEqual(["done"]);
+  });
+
+  test("with no decision and background subagents it is still loud", () => {
+    const { r, clock } = makeRelay();
+    r.feed(FROM_TOPIC);
+    r.feed(text("Answer", "m1"));
+    r.feed(end("m1"));
+    r.feed(CLOSED_WAITING);
+    clock.t += TURN_DECISION_MS;
+    expect(r.idle()).toEqual([{ text: "Answer", notify: true }]);
+  });
+
+  test("the next turn, started by a background task, is a pause again", () => {
+    const { r, finals } = makeRelay();
+    r.feed(FROM_TOPIC);
+    r.feed(text("Started the run", "m1"));
+    r.feed(end("m1"));
+    r.decide(PAUSE);
+    r.feed(CLOSED);
+    r.feed(text("Step 2 of 5", "m2"));
+    r.feed(end("m2"));
+    r.decide(PAUSE);
+    expect(r.feed(CLOSED)).toEqual([{ text: "Step 2 of 5", notify: false }]);
+    expect(finals).toEqual(["done"]);
+  });
+
+  test("endTurn closes the user's turn loud despite a pause decision", () => {
+    const { r } = makeRelay();
+    r.feed(FROM_TOPIC);
+    r.feed(text("Answer", "m1"));
+    r.feed(end("m1"));
+    r.decide(PAUSE);
+    expect(r.endTurn()).toEqual([{ text: "Answer", notify: true }]);
+  });
+});
+
 describe("relay: late decisions", () => {
   test("a decision after the turn closed is dropped", () => {
     const { r, clock, finals } = makeRelay();

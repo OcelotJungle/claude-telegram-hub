@@ -317,12 +317,21 @@ describe("PluginCore", () => {
       expect(chimes).toEqual(["done"]);
     });
 
-    test("an intermediate turn end never chimes", async () => {
-      await terminalTurn();
-      clockSkew = CHIME_MIN_TURN_MS;
+    test("an intermediate end of a turn the user did not start never chimes", async () => {
+      makeCore();
+      await waitFor(() => hub.isConnected(SID), 3000, "plugin connected");
+      append(assistantText("Шаг 2 из 5", "end_turn", "e1"), closed);
       await stopHook(false);
       await Bun.sleep(200);
       expect(chimes).toEqual([]);
+    });
+
+    test("a turn the user typed chimes done despite background work", async () => {
+      await terminalTurn();
+      clockSkew = CHIME_MIN_TURN_MS;
+      await stopHook(false);
+      await waitFor(() => chimes.length === 1, 3000, "chime");
+      expect(chimes).toEqual(["done"]);
     });
 
     test("with the mode on the terminal stays silent", async () => {

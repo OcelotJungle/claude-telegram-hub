@@ -28,6 +28,13 @@ the number above zero it treats a turn without a question as intermediate, whate
 decision (item 2 below closes such a turn silently). The terminal sound is played by the hook itself only without a hub, and there
 this number is not available yet; this is a rare case, left as is.
 
+**A turn the user started is final.** When the user's own message started the turn or was taken into it (typed in the
+terminal, `terminal_input`, or a topic message, `channel_seen`), the window plugin closes the turn as final `done`
+even when the hook called it intermediate or background subagents are still running: its end answers the user, and
+the sound is how they learn the agent is waiting for them. Only turns that Claude Code started itself (a background
+task, a monitor, a subagent's report) stay intermediate while background work is left. With no decision such a turn
+closes loud, as any other (item 2 below). An interrupt (Esc) does not count as a message.
+
 A background task is any `background_tasks` entry, of whatever type. A hanging
 dev server also makes turns intermediate: this is a rare case, and the agent really does wait for short background commands without
 a monitor. `session_crons` do not affect the decision.
@@ -124,7 +131,8 @@ it must be removed: otherwise the sound will be doubled. The end-of-turn signal 
 Where there was a choice, reliability was preferred. Chosen this way: closing the turn by
 `turn_duration` (waiting for silence is unreliable: prompt hooks continue the turn later), `done` with a sound after 5 s with no decision (Telegram only), excluding code and links when looking for
 a question, the 30 s threshold since the last input for `done` in the terminal, and any background task making a turn
-intermediate.
+intermediate unless the user's own message started it (agents nearly always leave a monitor or a subagent running, so
+otherwise their answers to the user came without sound).
 
 The texts in Telegram that this signal produces are English by default and Russian when rig's language is `ru`,
 see `language-design.md`.
