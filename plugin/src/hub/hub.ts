@@ -1616,6 +1616,7 @@ ${msg.text}`);
         try {
           await this.sendItem(sessionId, item);
           this.outbox.remove(item.id);
+          if (!item.silent) this.log.info(`sent ${item.id} to session ${sessionId} with sound${item.rich ? " (rich)" : ""}`);
           this.settled(item);
           if (failures) this.log.info(`delivery to session ${sessionId} works again after ${failures} failed attempt(s)`);
           failures = 0;
