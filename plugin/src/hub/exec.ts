@@ -350,11 +350,16 @@ export class Execs {
         this.resumeLive(rec);
         live = this.live.get(rec.id);
       }
-      if (live && !live.polling) this.deps.spawn(this.follow(rec, rec.runId, live));
+      // A standing wait, like the Telegram poll, not work busy() waits for: rig holds the read until the run writes
+      // or ends (--wait), so a quiet run would keep the hub busy for as long as it runs. stop() lets the read go
+      // (abandon); handling an answer is synchronous, and what it starts (card edits, the log file, the agent's
+      // report) is tracked where it starts.
+      if (live && !live.polling) void this.follow(rec, rec.runId, live);
     }
   }
 
-  // Reads the run's log from where it stopped until rig has no more, then the end.
+  // Reads the run's log from where it stopped until rig has no more, then the end. Nothing awaits it, so it never
+  // rejects: a failure is logged here.
   private async follow(rec: ExecRun, runId: string, live: Live): Promise<void> {
     live.polling = true;
     const offset = rec.offset;
@@ -377,6 +382,8 @@ export class Execs {
       }
       if (rec.offset !== offset) this.save();
       if (rec.shell === "rig") this.refreshRigCard(rec, live);
+    } catch (error) {
+      this.deps.log.error(`exec ${rec.id}: reading the run failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       live.polling = false;
     }

@@ -1,12 +1,13 @@
 // Guards the hub against work that starts and that nobody tracks. `Hub.busy()` (and so `settled()` in the tests) can
 // only see work that went through `spawn()` or sits in a map `busy()` reads; a fire-and-forget start anywhere else is
-// work a test cannot wait for, and the only way left to wait for it is a sleep.
+// work a test cannot wait for, and the only way left to wait for it is a sleep. Every file of the hub is scanned: the
+// managers hub.ts builds (exec.ts, for one) start work through the spawn it hands them, or the start is listed here.
 import ts from "typescript";
 import { expect, test } from "bun:test";
-import { readFileSync } from "fs";
+import { readdirSync, readFileSync } from "fs";
 import { join } from "path";
 
-const HUB_FILE = join(import.meta.dir, "..", "src", "hub", "hub.ts");
+const HUB_DIR = join(import.meta.dir, "..", "src", "hub");
 // Promise methods that start a chain: a statement that is only such a call drops the promise.
 const CHAIN_METHODS = new Set(["then", "catch", "finally"]);
 // Calls that hand a callback to a timer: the timer drops what the callback returns.
@@ -24,6 +25,16 @@ const VOID_ALLOWED: Record<string, Allowed> = {
   "void this.keepInOrder": { count: 1, reason: "a synchronous call: the void only ends deliver() with no value" },
   "void work.then": { count: 1, reason: "the bookkeeping inside spawn() itself: the work is already in `spawned`, and its failure is logged there" },
   "void next.then": { count: 2, reason: "drops the map entry of a chain that is already in batchSends or reactions, both read by busy()" },
+};
+
+// The same list for the hub's other files, by file name; a file not named here may have none.
+const VOID_ALLOWED_ELSEWHERE: Record<string, Record<string, Allowed>> = {
+  "exec.ts": {
+    "void this.follow": { count: 1, reason: "the standing read of a running command: rig holds it until the run writes or ends (--wait), stop() lets it go, and what an answer starts is spawned" },
+  },
+  "process-guard.ts": {
+    "void stopHub().catch(error => log.error(`stop failed: ${error}`)).then": { count: 1, reason: "a stop signal: the process exits after it, nothing is left to wait" },
+  },
 };
 
 function nameOf(expr: ts.Expression): string {
@@ -105,11 +116,18 @@ const SAMPLE_HEAD = ["class Sample {", "  private async work(): Promise<void> {}
 const SAMPLE_TAIL = ["  }", "}"];
 const sample = (...body: string[]): Scan => scan([...SAMPLE_HEAD, ...body, ...SAMPLE_TAIL].join("\n"));
 
-test("hub.ts starts no work that busy() cannot see, apart from the listed ones", () => {
-  const found = scan(readFileSync(HUB_FILE, "utf8"));
-  for (const key of Object.keys(VOID_ALLOWED)) expect(VOID_ALLOWED[key]?.reason).toBeTruthy();
-  expect(found.dropped).toEqual([]);
-  expect(mismatches(found.voids, VOID_ALLOWED)).toEqual([]);
+test("no hub file starts work that busy() cannot see, apart from the listed ones", () => {
+  const files = readdirSync(HUB_DIR).filter(file => file.endsWith(".ts"));
+  expect(files).toContain("hub.ts");
+  for (const file of Object.keys(VOID_ALLOWED_ELSEWHERE)) expect(files).toContain(file);
+  const problems: string[] = [];
+  for (const file of files) {
+    const allowed = file === "hub.ts" ? VOID_ALLOWED : VOID_ALLOWED_ELSEWHERE[file] ?? {};
+    for (const entry of Object.values(allowed)) expect(entry.reason).toBeTruthy();
+    const found = scan(readFileSync(join(HUB_DIR, file), "utf8"));
+    problems.push(...found.dropped.map(line => `${file} ${line}`), ...mismatches(found.voids, allowed).map(line => `${file} ${line}`));
+  }
+  expect(problems).toEqual([]);
 });
 
 test("a new `void this.x()` is not allowed unless it is listed", () => {
