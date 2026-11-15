@@ -36,7 +36,6 @@ const DEFAULT_DIR = "C:\\Users\\me\\.claude";
 // Topic commands: a real command's run, a wait for what it shows, the idle
 // time a test hub exits after, a pause for what must not come, the age of a
 // command from while the hub was off, a test file limit.
-const RUN_MS = 15_000;
 // A file limit that a log of forty lines is over.
 const FILE_LIMIT = 200;
 const LOG_LINES = 40;
@@ -2396,16 +2395,20 @@ describe("session commands", () => {
 
   test("a command result for a session without a window starts it through rig and reaches the agent once", async () => {
     closedSession();
-    await start();
+    const x = new FakeExec();
+    await start({ execClient: x });
     fake.pushUpdate(msg(PLATFORM.windows ? "/cmd echo hi" : "/bash echo hi"));
-    await waitFor(() => callsOf("run").length === 1, RUN_MS, "the run call");
+    await waitFor(() => x.starts.length === 1, WAIT_MS, "the exec start");
+    x.write(x.last(), "hi\n");
+    x.finish(x.last(), { kind: "exit", code: 0 });
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the run call");
     expect(callsOf("run")).toEqual([{ sub: "run", sid: SID, args: ["--account", ACCOUNT] }]);
     const w = await plugin(SID);
     const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
     expect(inbound.meta.exit_code).toBe("0");
     await settle();
     expect(w.messages.filter(m => m.type === "inbound")).toHaveLength(1);
-  }, RUN_MS + 2 * WAIT_MS);
+  });
 
   test("/mode lists the modes as buttons without calling rig", async () => {
     await start();

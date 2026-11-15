@@ -16,7 +16,6 @@ const TEST_ALLOWED: Record<string, Allowed> = {
   "manual-clock.ts": { count: 1, reason: "makes a unique timer handle and cancels it at once; nothing waits" },
   "election.test.ts": { count: 1, reason: "a real hub process must outlive its own idle limit with plugins connected; its timer is in another process" },
   "packaging.test.ts": { count: 2, reason: "a slow reader against a real OS pipe, and a child process that stays alive in the packaged-hook scenario" },
-  "hub.test.ts": { count: 1, reason: "a real ping process runs for seconds while the hub must not exit idle; the process end is the subject" },
 };
 
 // Files that still wait on real time and are to be converted, one at a time, with the number of uses left.

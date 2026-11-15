@@ -41,17 +41,15 @@ export type ExecError = RigError | { kind: "cwdUnsafe" };
 
 // A working folder that cmd.exe would read as something else once it is on a command line.
 const UNSAFE_CWD = /["%\r\n]/;
-const PLAIN_CWD = /^[A-Za-z0-9._:\\/-]+$/;
 
 export type CwdCheck = { ok: true; arg: string } | { ok: false };
 
-// The --cwd value as the command line carries it. On Windows rig is a .cmd file started through cmd.exe
-// with its arguments joined verbatim, so a folder with a space needs quotes and one with a quote or a
-// percent sign cannot be passed at all.
+// The --cwd value as one argv item. On Windows rig is a .cmd file started through cmd.exe, and
+// rigInvocation quotes and escapes every argument there (a folder with a space included), so this only
+// refuses a folder with a quote, a percent sign or a line break, which cmd.exe could still read as something else.
 export function cwdArg(cwd: string, windows: boolean): CwdCheck {
-  if (!windows) return { ok: true, arg: cwd };
-  if (UNSAFE_CWD.test(cwd)) return { ok: false };
-  return { ok: true, arg: PLAIN_CWD.test(cwd) ? cwd : `"${cwd}"` };
+  if (windows && UNSAFE_CWD.test(cwd)) return { ok: false };
+  return { ok: true, arg: cwd };
 }
 
 // What the hub's run manager needs of rig exec; RigExec is the real one, tests give a fake.

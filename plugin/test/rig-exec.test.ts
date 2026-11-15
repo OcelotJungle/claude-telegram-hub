@@ -51,10 +51,10 @@ describe("cwdArg", () => {
     expect(cwdArg("/home/me/my project", false)).toEqual({ ok: true, arg: "/home/me/my project" });
   });
 
-  test("a plain Windows folder is bare, one with a space is quoted", () => {
+  test("a Windows folder is one argument as it is, quoting is rigInvocation's", () => {
     expect(cwdArg("C:\\proj\\sub-1", true)).toEqual({ ok: true, arg: "C:\\proj\\sub-1" });
-    expect(cwdArg("C:\\my proj", true)).toEqual({ ok: true, arg: "\"C:\\my proj\"" });
-    expect(cwdArg("C:\\proj&calc", true)).toEqual({ ok: true, arg: "\"C:\\proj&calc\"" });
+    expect(cwdArg("C:\\my proj", true)).toEqual({ ok: true, arg: "C:\\my proj" });
+    expect(cwdArg("C:\\proj&calc", true)).toEqual({ ok: true, arg: "C:\\proj&calc" });
   });
 
   test("a folder cmd.exe would read as something else is refused", () => {
@@ -74,10 +74,10 @@ describe("the rig exec client", () => {
     expect(t.calls[0]?.argv.join(" ")).not.toContain("findstr");
   });
 
-  test("quotes a folder with a space on Windows, where rig runs through cmd.exe", async () => {
+  test("a folder with a space is quoted once on Windows, by rigInvocation, with both cmd.exe parses protected", async () => {
     const t = client(() => ok(START_JSON), "win32");
     await t.exec.start("cmd", "C:\\my proj", "dir");
-    expect(t.calls[0]?.argv.at(-1)).toContain("exec start cmd --cwd \"C:\\my proj\"");
+    expect(t.calls[0]?.argv.at(-1)).toContain("exec start cmd --cwd ^^^\"C:\\my^^^ proj^^^\"");
   });
 
   test("refuses a folder a Windows command line cannot carry, without calling rig", async () => {
