@@ -1,7 +1,7 @@
 import type { Language, Messages } from "../shared/i18n/index.ts";
 import type { InfoData } from "../shared/info-data.ts";
 import type { Platform } from "../shared/platform.ts";
-import type { PermissionMode, RigCleanup, RigCompact, RigMode, RigRename, RigRun, RigRunOptions, RigStop } from "./rig-session.ts";
+import type { PermissionMode, RigAutocompact, RigCleanup, RigCompact, RigMode, RigRename, RigRun, RigRunOptions, RigStop } from "./rig-session.ts";
 
 import { spawn } from "child_process";
 import { homedir } from "os";
@@ -14,7 +14,7 @@ import { infoDataSchema } from "./info-schema.ts";
 import { plainLines } from "./rig-output.ts";
 import { LANGUAGES } from "../shared/protocol.ts";
 import { PLATFORM } from "../shared/platform.ts";
-import { isPermissionMode, isSessionWaiting, RIG_SESSION_LIMIT_MS, rigCleanupSchema, rigCompactSchema, rigModeSchema, rigRenameSchema, rigRunSchema, rigStopSchema } from "./rig-session.ts";
+import { isPermissionMode, isSessionWaiting, RIG_SESSION_LIMIT_MS, rigAutocompactSchema, rigCleanupSchema, rigCompactSchema, rigModeSchema, rigRenameSchema, rigRunSchema, rigStopSchema } from "./rig-session.ts";
 
 const MS_PER_SECOND = 1000;
 const FEATURE_NAME = /^[a-z][a-z0-9-]*$/;
@@ -254,6 +254,11 @@ export class Rig {
   // leading "-" is a value there; a "--" or "--instructions=" form would be read by rig as part of the text.
   compact(sessionId: string, instructions?: string, onWaiting?: () => void): Promise<RigResult<RigCompact>> {
     return this.sessionQuery(sessionId, ["compact", ...(instructions ? ["--instructions", instructions] : [])], rigCompactSchema, onWaiting);
+  }
+
+  // `window` is an integer string matching ^[1-9][0-9]*$ or "auto" (rig 0.7.2 refuses anything else as usage).
+  autocompact(sessionId: string, window: string, onWaiting?: () => void): Promise<RigResult<RigAutocompact>> {
+    return this.sessionQuery(sessionId, ["autocompact", window], rigAutocompactSchema, onWaiting);
   }
 
   rename(sessionId: string, name: string, onWaiting?: () => void): Promise<RigResult<RigRename>> {

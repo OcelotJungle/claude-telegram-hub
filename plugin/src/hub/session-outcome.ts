@@ -1,7 +1,7 @@
 import type { Messages } from "../shared/i18n/index.ts";
 import type { MessageKind } from "../shared/notification.ts";
 import type { RigError } from "./rig.ts";
-import type { RigCleanup, RigCompact, RigRename, RigStop } from "./rig-session.ts";
+import type { RigAutocompact, RigCleanup, RigCompact, RigRename, RigStop } from "./rig-session.ts";
 
 import { tokens } from "../shared/tokens.ts";
 import { rigErrorText } from "./rig.ts";
@@ -24,6 +24,12 @@ export function compactOutcome(value: RigCompact, m: Messages): SessionOutcome {
 
 export function renameOutcome(value: RigRename, m: Messages): SessionOutcome {
   return { text: m.renameDone({ name: value.name }), kind: "info" };
+}
+
+// rig's own words when it said any, otherwise the window that was set.
+export function autocompactOutcome(value: RigAutocompact, m: Messages): SessionOutcome {
+  const text = value.text?.trim();
+  return { text: text || m.autocompactDone({ window: String(value.window) }), kind: "info" };
 }
 
 export function cleanupOutcome(value: RigCleanup, m: Messages): SessionOutcome {

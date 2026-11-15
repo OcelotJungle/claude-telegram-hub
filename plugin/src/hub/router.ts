@@ -73,13 +73,18 @@ export function routeCallback(u: Update, cfg: Config): CallbackRoute | undefined
 export type HubCommand = { name: "run" | "stop" | "cleanup" | "mode" | "info" | "compact" | "rename" | "pwsh" | "cmd" | "bash"; args: string };
 
 // `/compact <N>` with a token count (333000, 333k, 1.5m) or `auto` asks for the autocompact window: the value
-// (integer digits as a string, or "auto"), or undefined when the arguments are instructions for the summary.
-export function autocompactArg(args: string): string | undefined {
+// (a string rig accepts: digits matching ^[1-9][0-9]*$, or "auto"), `refused` when it is a count that rounds to
+// 0 or is too big to be an exact integer, or undefined when the arguments are instructions for the summary.
+export type AutocompactArg = { window: string } | { refused: true };
+const RIG_WINDOW = /^[1-9][0-9]*$/;
+
+export function autocompactArg(args: string): AutocompactArg | undefined {
   const a = args.trim().toLowerCase();
-  if (a === "auto") return a;
+  if (a === "auto") return { window: a };
   const m = a.match(/^(\d+(?:\.\d+)?)([km]?)$/);
   if (!m) return undefined;
-  return String(Math.round(Number(m[1]) * (m[2] === "k" ? THOUSAND : m[2] === "m" ? MILLION : 1)));
+  const window = String(Math.round(Number(m[1]) * (m[2] === "k" ? THOUSAND : m[2] === "m" ? MILLION : 1)));
+  return RIG_WINDOW.test(window) ? { window } : { refused: true };
 }
 
 const HUB_COMMANDS: readonly HubCommand["name"][] = ["run", "stop", "cleanup", "mode", "info", "compact", "rename", "pwsh", "cmd", "bash"];

@@ -372,9 +372,11 @@ the sound of the results and the `/cleanup` texts are in `cleanup-design.md`. `/
   module) adds the restart hint; the other codes (`session-ended`, `session-unknown`, `session-timeout`,
   `session-cleanup-not-compacted`, `launch-unavailable`) show rig's message verbatim. Rig missing: the missing-rig text.
 - `/compact <text>` passes the text to the compact as its instructions. `/compact <N>` (a token count: `120000`, `333k`, `1.5m`, any case)
-  and `/compact auto` set the autocompact window; rig has no such command yet (`rig session autocompact <id> <N|auto>` is
-  planned), so the hub answers "Setting the autocompact window from the topic is not available yet." and makes no rig call.
-  Any other text stays compaction instructions.
+  and `/compact auto` set the autocompact window through one `rig session autocompact <id> <N|auto>` call (same running
+  message, "waiting for the turn" text and verbatim rig errors as the other session actions). The count is rounded to an
+  integer matching `^[1-9][0-9]*$`; one that rounds to 0 (or is not an exact integer) is refused with a notice and no rig
+  call. The reply is rig's `text` when it gave one, otherwise "✅ Autocompact window: <N|auto>". Any other text stays
+  compaction instructions.
 - `/rename <name>`: the name is trimmed and its spaces collapsed; without a name — "Write the name: /rename new name"
   and no call. The topic changes its name when Claude Code writes the new name into the transcript — by the same path
   as any session name change (`retitle`).

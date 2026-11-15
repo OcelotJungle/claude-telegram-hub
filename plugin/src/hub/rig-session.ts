@@ -17,6 +17,7 @@ const compactError = z.strictObject({ error: z.string() });
 
 export const rigCompactSchema = z.union([z.strictObject({ session, ...tokens }), z.strictObject({ session, skip: z.string() })]);
 export const rigRenameSchema = z.strictObject({ session, name: z.string() });
+export const rigAutocompactSchema = z.strictObject({ session, window: z.union([z.number().int().positive(), z.literal("auto")]), text: z.string().optional() });
 export const rigStopSchema = z.union([
   z.strictObject({ session, stopped: z.literal(false), reason: z.literal("not-running") }),
   z.strictObject({ session, stopped: z.literal(true), compacted: z.union([compacted, skipped, compactError]).nullable() }),
@@ -31,6 +32,7 @@ export const rigModeSchema = z.union([
 export type PermissionMode = z.infer<typeof modeSchema>;
 export type RigCompact = z.infer<typeof rigCompactSchema>;
 export type RigRename = z.infer<typeof rigRenameSchema>;
+export type RigAutocompact = z.infer<typeof rigAutocompactSchema>;
 export type RigStop = z.infer<typeof rigStopSchema>;
 export type RigCleanup = z.infer<typeof rigCleanupSchema>;
 export type RigRun = z.infer<typeof rigRunSchema>;

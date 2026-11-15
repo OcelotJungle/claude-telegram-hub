@@ -2001,6 +2001,7 @@ function sessionRig() {
     switch (sub) {
       case "compact": return rigOk({ session, ...compacted });
       case "rename": return rigOk({ session, name: args[0] });
+      case "autocompact": return rigOk({ session, window: args[0] === "auto" ? "auto" : Number(args[0]) });
       case "stop": return rigOk({ session, stopped: true, compacted });
       case "cleanup": return rigOk({ session, compacted, backup: "backup.jsonl", skillsRemoved: 0 });
       case "run": return rigOk({ session, pid: RIG_PID, mode: null, account: null });
@@ -2109,17 +2110,53 @@ describe("session commands", () => {
     });
   }
 
-  for (const arg of ["333k", "1m", "120000", "auto"]) {
-    test(`/compact ${arg} says the autocompact window is not available and calls no rig`, async () => {
+  const AUTOCOMPACT = [
+    { arg: "333k", window: "333000", answer: { text: "Autocompact window set to 333000" }, done: "Autocompact window set to 333000" },
+    { arg: "1.5m", window: "1500000", answer: {}, done: "✅ Autocompact window: 1500000" },
+    { arg: "auto", window: "auto", answer: {}, done: "✅ Autocompact window: auto" },
+  ];
+  for (const c of AUTOCOMPACT) {
+    test(`/compact ${c.arg} is one rig session autocompact ${c.window} call and shows rig's text or the window`, async () => {
+      rig.answer("autocompact", rigOk({ session: SID, window: c.window === "auto" ? "auto" : Number(c.window), ...c.answer }));
+      await start();
+      await enabled(SID);
+      fake.pushUpdate(msg(`/compact ${c.arg}`));
+      await waitFor(() => edits().includes(c.done), WAIT_MS, "result");
+      expect(callsOf("autocompact")).toEqual([{ sub: "autocompact", sid: SID, args: [c.window] }]);
+      expect(callsOf("compact")).toEqual([]);
+      expect(sent(en.autocompactRunning)?.disable_notification).toBe(true);
+    });
+  }
+
+  test("/compact with a rig error on the autocompact shows rig's words verbatim", async () => {
+    rig.answer("autocompact", rigRefused("usage", "bad window value"));
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/compact 333k"));
+    const failure = await startedAs("bad window value");
+    expect(failure.disable_notification).toBe(false);
+  });
+
+  for (const arg of ["0", "0k", "0.3"]) {
+    test(`/compact ${arg} is refused with a notice and calls no rig`, async () => {
       await start();
       await enabled(SID);
       fake.pushUpdate(msg(`/compact ${arg}`));
-      await startedAs(en.autocompactUnavailable);
+      await startedAs(en.autocompactInvalid);
       await settle();
-      expect(rig.calls.filter(c => c.sub === "compact")).toEqual([]);
-      expect(rig.calls.filter(c => c.sub === "autocompact")).toEqual([]);
+      expect(callsOf("compact")).toEqual([]);
+      expect(callsOf("autocompact")).toEqual([]);
     });
   }
+
+  test("/compact with instructions that only start like a window still compacts", async () => {
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/compact keep the plan"));
+    await waitFor(() => edits().includes("✅ Compaction done: 120k → 30k tokens."), WAIT_MS, "result");
+    expect(callsOf("compact")).toEqual([{ sub: "compact", sid: SID, args: ["--instructions", "keep the plan"] }]);
+    expect(callsOf("autocompact")).toEqual([]);
+  });
 
   test("a compaction rig skipped is a warning with its reason", async () => {
     rig.answer("compact", rigOk({ session: SID, skip: "a hook vetoed it" }));

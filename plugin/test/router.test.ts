@@ -132,11 +132,18 @@ describe("window commands as hub commands", () => {
 
 describe("autocompactArg", () => {
   test("token counts and auto are windows, in any case", () => {
-    expect(autocompactArg("120000")).toBe("120000");
-    expect(autocompactArg("333k")).toBe("333000");
-    expect(autocompactArg(" 1M ")).toBe("1000000");
-    expect(autocompactArg("1.5m")).toBe("1500000");
-    expect(autocompactArg("AUTO")).toBe("auto");
+    expect(autocompactArg("120000")).toEqual({ window: "120000" });
+    expect(autocompactArg("333k")).toEqual({ window: "333000" });
+    expect(autocompactArg(" 1M ")).toEqual({ window: "1000000" });
+    expect(autocompactArg("1.5m")).toEqual({ window: "1500000" });
+    expect(autocompactArg("AUTO")).toEqual({ window: "auto" });
+  });
+
+  test("a count that rounds to 0 or is not an exact integer is refused, never handed to rig", () => {
+    expect(autocompactArg("0")).toEqual({ refused: true });
+    expect(autocompactArg("0k")).toEqual({ refused: true });
+    expect(autocompactArg("0.4")).toEqual({ refused: true });
+    expect(autocompactArg("1".repeat(30))).toEqual({ refused: true });
   });
 
   test("anything else is instructions", () => {
