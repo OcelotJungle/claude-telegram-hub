@@ -121,6 +121,7 @@ export const en = {
   execRigNoResult: ({ reason }: { reason: string }) => `rig printed no usable answer (${reason})`,
   execOutcomeFailed: ({ error }: { error: string }) => `❌ did not start: ${error}`,
   execRigSilent: ({ reason }: { reason: string }) => `⚠️ rig is not answering about this command (${reason}); still waiting`,
+  execStopFailed: ({ reason }: { reason: string }) => `⚠️ The stop did not work: ${reason}. Press Stop again to retry`,
   execStartUnknown: "⚠️ The hub restarted while starting this command: it is not known whether it started",
   execPending: ({ minutes }: { minutes: number }) => `⏸ The command arrived ${minutes} min ago while the hub was off`,
 

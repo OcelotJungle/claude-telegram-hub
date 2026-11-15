@@ -510,8 +510,83 @@ describe("a run rig has been asked to stop twice", () => {
     await t.clock.advance(1);
     expect(t.fake.stops).toEqual([runId, runId]);
     await t.clock.advance(10 * EXEC_STOP_AGAIN_MS);
-    // Another press of Stop does not ask rig again either.
+    // The hub itself never sends a third one.
+    expect(t.fake.stops).toEqual([runId, runId]);
+  });
+
+  test("a press while the second stop is owed does not call rig; after it was sent a press does", async () => {
+    const t = setup();
+    const { id, runId } = await started(t, "hang");
+    await t.execs.press(id, "stop");
     expect(await t.execs.press(id, "stop")).toBe(en.execStopping);
+    expect(t.fake.stops).toEqual([runId]);
+    await t.clock.advance(EXEC_STOP_AGAIN_MS);
+    expect(t.fake.stops).toEqual([runId, runId]);
+    expect(await t.execs.press(id, "stop")).toBe(en.execStopping);
+    expect(t.fake.stops).toEqual([runId, runId, runId]);
+  });
+
+  test("a failed second stop shows on the card, a later press reaches rig and clears the line", async () => {
+    const t = setup();
+    const { id, runId } = await started(t, "hang");
+    await t.execs.press(id, "stop");
+    t.fake.stopError = rigError("exec-io", "cannot kill the process");
+    await t.clock.advance(EXEC_STOP_AGAIN_MS);
+    await t.settle();
+    expect(t.lastCard().markdown).toContain(en.execStopFailed({ reason: "cannot kill the process" }));
+    // The press reaches rig (a refusal is its own answer) and the line stays while the stop fails.
+    t.fake.stopError = rigError("exec-io", "cannot kill the process");
+    expect(await t.execs.press(id, "stop")).toBe("cannot kill the process");
+    expect(t.fake.stops).toEqual([runId, runId, runId]);
+    expect(await t.execs.press(id, "stop")).toBe(en.execStopping);
+    expect(t.fake.stops).toEqual([runId, runId, runId, runId]);
+    expect(t.lastCard().markdown).not.toContain(en.execStopFailed({ reason: "cannot kill the process" }));
+  });
+
+  test("the failure line goes when the run ends", async () => {
+    const t = setup();
+    const { id, runId } = await started(t, "hang");
+    await t.execs.press(id, "stop");
+    t.fake.stopError = rigError("exec-io", "cannot kill the process");
+    await t.clock.advance(EXEC_STOP_AGAIN_MS);
+    await t.settle();
+    t.fake.finish(runId, { kind: "stopped" });
+    await t.until(() => t.cards.find(c => c.final), "final card");
+    expect(t.lastCard().markdown).not.toContain("cannot kill the process");
+  });
+
+  test("a restarted hub sends the owed second stop at the time left", async () => {
+    const t = setup();
+    const { id, runId } = await started(t, "hang");
+    await t.execs.press(id, "stop");
+    t.execs.stop();
+    const file = join(t.dir, "exec-runs.json");
+    const saved = loadRuns(file);
+    expect(saved[0]?.secondStop).toBe("owed");
+    // The new hub's clock starts at NOW: the stop was asked 2 s before.
+    const asked = 2000;
+    saveRuns(file, saved.map(r => ({ ...r, stopAskedAt: NOW - asked })));
+    const t2 = setup({ dir: t.dir, fake: t.fake });
+    await t2.clock.advance(EXEC_STOP_AGAIN_MS - asked - 1);
+    expect(t.fake.stops).toEqual([runId]);
+    await t2.clock.advance(1);
+    expect(t.fake.stops).toEqual([runId, runId]);
+    expect(loadRuns(file)[0]?.secondStop).toBe("sent");
+  });
+
+  test("a restarted hub sends a second stop that is already past at once, and none that was sent", async () => {
+    const t = setup();
+    const { id, runId } = await started(t, "hang");
+    await t.execs.press(id, "stop");
+    t.execs.stop();
+    const file = join(t.dir, "exec-runs.json");
+    saveRuns(file, loadRuns(file).map(r => ({ ...r, stopAskedAt: NOW - 10 * EXEC_STOP_AGAIN_MS })));
+    const t2 = setup({ dir: t.dir, fake: t.fake });
+    await t2.settle();
+    expect(t.fake.stops).toEqual([runId, runId]);
+    t2.execs.stop();
+    const t3 = setup({ dir: t.dir, fake: t.fake });
+    await t3.clock.advance(10 * EXEC_STOP_AGAIN_MS);
     expect(t.fake.stops).toEqual([runId, runId]);
   });
 

@@ -110,7 +110,11 @@ The "Stop" button calls `rig exec stop <id>`; rig kills the process tree. Only s
 is not killed and shows its code. "⏹ stopped" is shown when rig reports the end `stopped`; a run that ended with its own
 exit code after the press shows that code.
 `rig exec stop` only records the request: if the run has not ended `EXEC_STOP_AGAIN_MS` (5 s, rig's own
-grace before it kills) after the press, the hub calls `rig exec stop` once more, never more often.
+grace before it kills) after the press, the hub calls `rig exec stop` once more by itself, never more often. The run
+record keeps when the Stop was asked and whether that second stop is still owed, so a restarted hub sends an owed one at
+the time left (at once when past). A press while it is owed only answers "stopping"; once it was sent, a press calls
+`rig exec stop` again (rig retries the outside kill), so a run stays stoppable until it ends. A failed second stop shows
+on the card with rig's message and a note to press Stop again; the line goes when the run ends or a later stop succeeds.
 
 ### What the agent gets
 

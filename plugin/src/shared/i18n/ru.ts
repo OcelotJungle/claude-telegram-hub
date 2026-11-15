@@ -111,6 +111,7 @@ export const ru: Messages = {
   execRigNoResult: ({ reason }) => `rig не вывел пригодный ответ (${reason})`,
   execOutcomeFailed: ({ error }) => `❌ не запустилось: ${error}`,
   execRigSilent: ({ reason }) => `⚠️ rig не отвечает про эту команду (${reason}); жду`,
+  execStopFailed: ({ reason }) => `⚠️ Остановить не получилось: ${reason}. Нажми «Остановить» ещё раз, чтобы повторить`,
   execStartUnknown: "⚠️ Хаб перезапустился, пока запускал эту команду: неизвестно, запустилась ли она",
   execPending: ({ minutes }) => `⏸ Команда пришла ${minutes} мин назад, пока хаб был выключен`,
 

@@ -144,7 +144,15 @@ export class Execs {
     this.abandon = new Promise(resolve => { this.abandonNow = () => resolve("abandoned"); });
     this.recs = loadRuns(this.deps.file);
     // A run goes on after a hub restart: its log is read again from a little before where the last read stopped.
-    for (const rec of this.recs) if (rec.state === "running") this.resumeLive(rec);
+    for (const rec of this.recs) {
+      if (rec.state !== "running") continue;
+      this.resumeLive(rec);
+      // A Stop asked before the restart still owes its second stop, at the time left (at once when it is past).
+      if (rec.secondStop === "owed" && rec.runId !== undefined) {
+        const left = (rec.stopAskedAt ?? 0) + EXEC_STOP_AGAIN_MS - this.deps.timers.now();
+        this.scheduleSecondStop(rec, rec.runId, Math.max(0, left));
+      }
+    }
     this.markUnknownStarts();
     this.resendLogs();
     this.repeaters.push(this.deps.timers.setRepeat(() => this.poll(), this.deps.checkMs));
@@ -251,24 +259,51 @@ export class Execs {
     }
     if (rec.state === "pending" || rec.runId === undefined) return m.execNotStarted;
     // rig only records the stop: the run kills itself at its next check and the poll reads how it ended. One request
-    // is enough until the second one, which the hub sends by itself (askStopAgain).
-    if (this.stopTimers.has(rec.id)) return m.execStopping;
+    // is enough until the second one, which the hub sends by itself (askStopAgain). While that one is owed the press
+    // only answers; once it was sent, a press asks rig again (rig retries the outside kill on a later stop) and the
+    // run stays stoppable until it ends.
+    if (rec.secondStop === "owed") return m.execStopping;
     const runId = rec.runId;
     const stopped = await this.deps.rig.stop(runId);
     if (!stopped.ok) return rigErrorText(stopped.error, m);
     if (stopped.value.state === "ended") return m.execAlreadyEnded;
-    if (!this.stopped && rec.state === "running" && !this.stopTimers.has(rec.id)) {
-      this.stopTimers.set(rec.id, this.deps.timers.setTimer(() => this.askStopAgain(rec, runId), EXEC_STOP_AGAIN_MS));
+    if (!this.stopped && rec.state === "running") {
+      if (rec.secondStop === undefined) {
+        rec.stopAskedAt = this.deps.timers.now();
+        rec.secondStop = "owed";
+        this.save();
+        this.scheduleSecondStop(rec, runId, EXEC_STOP_AGAIN_MS);
+      } else if (rec.stopFailure !== undefined) {
+        delete rec.stopFailure;
+        this.save();
+        this.showCard(rec);
+      }
     }
     return m.execStopping;
   }
 
+  private scheduleSecondStop(rec: ExecRun, runId: string, delayMs: number): void {
+    this.stopTimers.set(rec.id, this.deps.timers.setTimer(() => this.askStopAgain(rec, runId), delayMs));
+  }
+
   // A run that has not ended EXEC_STOP_AGAIN_MS after the user's Stop is hung: rig kills it from outside on a
-  // second stop. Once, never more often.
+  // second stop. The hub sends it once by itself; a failure shows on the card and the user's next Stop retries.
   private askStopAgain(rec: ExecRun, runId: string): void {
+    this.stopTimers.delete(rec.id);
     if (this.stopped || rec.state !== "running") return;
+    rec.secondStop = "sent";
+    this.save();
     this.deps.spawn(this.deps.rig.stop(runId).then(result => {
-      if (!result.ok) this.deps.log.warn(`exec ${rec.id}: the second stop failed: ${rigErrorText(result.error, catalogOf("en"))}`);
+      if (this.stopped || rec.state !== "running") return;
+      if (result.ok) {
+        if (rec.stopFailure === undefined) return;
+        delete rec.stopFailure;
+      } else {
+        this.deps.log.warn(`exec ${rec.id}: the second stop failed: ${rigErrorText(result.error, catalogOf("en"))}`);
+        rec.stopFailure = rigErrorText(result.error, this.deps.messages());
+      }
+      this.save();
+      this.showCard(rec);
     }));
   }
 
@@ -464,6 +499,7 @@ export class Execs {
     const stopTimer = this.stopTimers.get(rec.id);
     if (stopTimer !== undefined) this.deps.timers.clearTimer(stopTimer);
     this.stopTimers.delete(rec.id);
+    delete rec.stopFailure;
     rec.state = "ended";
     rec.end = end;
     this.deps.log.info(`exec ${rec.id}: ended ${end.kind}${end.code === undefined ? "" : ` ${end.code}`}`);
@@ -763,6 +799,7 @@ export function execCardText(rec: ExecRun, tail: string, now: number, m: Message
   }
   const lines = [head, inlineCode(rec.text)];
   if (rec.state === "running" && silentReason !== undefined) lines.push(m.execRigSilent({ reason: silentReason }));
+  if (rec.state === "running" && rec.stopFailure !== undefined) lines.push(m.execStopFailed({ reason: rec.stopFailure }));
   if (tail) {
     const fence = "`".repeat(Math.max(MIN_FENCE, longestRun(tail, "`") + 1));
     lines.push(fence, tail, fence);

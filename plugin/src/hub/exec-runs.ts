@@ -43,6 +43,12 @@ export type ExecRun = {
   // The run's log file (a log that does not fit the card): "owed" is saved with the run's end, "sent" once the file
   // was handed over. A restarted hub builds and sends an owed file; a sent one never goes again. None: no file.
   logFile?: "owed" | "sent";
+  // The user's Stop: stopAskedAt (ms) is when the first `rig exec stop` went out. secondStop: "owed" until the hub sent
+  // the second one (rig kills the run from outside on it), "sent" after; a restarted hub fires an owed one at the time
+  // left. stopFailure: rig's message when the second stop failed, shown on the card until the run ends or a later stop succeeds.
+  stopAskedAt?: number;
+  secondStop?: "owed" | "sent";
+  stopFailure?: string;
 };
 
 const fileSchema: z.ZodType<ExecRun[]> = z.array(
@@ -69,6 +75,9 @@ const fileSchema: z.ZodType<ExecRun[]> = z.array(
     starting: z.boolean().optional(),
     startUnknown: z.boolean().optional(),
     logFile: z.enum(["owed", "sent"]).optional(),
+    stopAskedAt: z.number().optional(),
+    secondStop: z.enum(["owed", "sent"]).optional(),
+    stopFailure: z.string().optional(),
   }).refine(run => (run.shell === "rig" ? run.destination !== undefined && run.args !== undefined : run.sessionId !== undefined && run.cwd !== undefined))
     .refine(run => run.state !== "running" || run.runId !== undefined),
 );
