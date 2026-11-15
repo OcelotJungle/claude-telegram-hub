@@ -12,7 +12,8 @@ const DEFAULT_IDLE_MS = 5 * 60 * 1000;
 const UTF16LE_BOM = [0xff, 0xfe];
 const UTF16BE_BOM = [0xfe, 0xff];
 const UTF8_BOM = [0xef, 0xbb, 0xbf];
-let legacyLaunchLogged = false;
+// Removed keys already noticed in this process: each gets its info line once, not on every config read.
+const noticedRemovedKeys = new Set<string>();
 
 // Shared by every cswap profile, so it never depends on CLAUDE_CONFIG_DIR.
 export function paths() {
@@ -93,6 +94,13 @@ export type Config = {
   turnEndChimeError?: string;
 };
 
+// Keys that a release removed. A config that still has one loads without it and gets one info line per key.
+type RemovedKey = { key: string; reason: string };
+const REMOVED_CONFIG_KEYS: readonly RemovedKey[] = [
+  { key: "launch", reason: "rig session manages session launches" },
+  { key: "exec", reason: "topic commands run through rig exec, which finds bash itself" },
+];
+
 export function loadConfig(info?: (text: string) => void): Config {
   let raw: unknown;
   try {
@@ -106,10 +114,10 @@ export function loadConfig(info?: (text: string) => void): Config {
   if (typeof chime === "string") cfg.turnEndChime = chime;
   else if (chime !== undefined) cfg.turnEndChimeError = "turnEndChime in config.json must be a string";
   if (groupId != null && groupId !== "") cfg.groupId = String(groupId);
-  // Old configurations keep loading; rig owns all session launches now.
-  if (field(raw, "launch") !== undefined && info && !legacyLaunchLogged) {
-    legacyLaunchLogged = true;
-    info("Ignoring launch in config.json; rig session manages session launches");
+  for (const { key, reason } of REMOVED_CONFIG_KEYS) {
+    if (field(raw, key) === undefined || !info || noticedRemovedKeys.has(key)) continue;
+    noticedRemovedKeys.add(key);
+    info(`Ignoring ${key} in config.json; ${reason}`);
   }
   return cfg;
 }

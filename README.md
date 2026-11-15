@@ -28,7 +28,7 @@ The install puts a `service-managed` file in `~/.claude/channels/telegram-hub/`.
 only wait for the hub and connect to it. They do not start the hub themselves (the service keeps it running and restarts it).
 If the service is already installed, reinstall it with the same script. Otherwise the file will not exist.
 
-Session actions require agent-rig. Rig chooses the terminal and builds the Claude launch command; on Linux it can use tmux when no graphical terminal is available. There is no `launch` section to configure in the hub. An existing `launch` key is ignored with an info log line.
+Session actions require agent-rig. Rig chooses the terminal and builds the Claude launch command; on Linux it can use tmux when no graphical terminal is available. There is no `launch` section to configure in the hub. An existing `launch` key is ignored with an info log line, as is an old `exec` section (rig exec finds the shells itself).
 Claude may ask you to confirm the channel in the terminal. You can remove that question with managed settings (see "Optional: remove the channel question at start" below).
 cswap accounts are optional. Without cswap, use `/run` without a number; rig handles the launch.
 `/bash` runs through `rig exec` (rig 0.7.1 or newer), which uses `bash` from PATH as a login shell. `/pwsh` and `/cmd` are not available on Linux.
@@ -337,7 +337,7 @@ is kept, and the new hub delivers it).
 You need a hub that is always on (item 6), agent-rig on the machine and a start without the channel question (the
 next section). Otherwise the new window will stop at this question. There is nothing to configure in the hub: rig
 chooses the terminal, builds the Claude command and checks the folder and the account (`rig session run`). A
-`launch` section left in an old `config.json` is ignored; the hub writes one info line about it to its log.
+`launch` or `exec` section left in an old `config.json` is ignored; the hub writes one info line per key to its log.
 
 A message in the topic of a session without a window: "🚀 Starting the session (account N)…", a new terminal window
 in the session folder, and when the window has connected, the same message is edited to "✅ Session started", and the

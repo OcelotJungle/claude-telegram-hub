@@ -173,13 +173,16 @@ describe("config", () => {
     expect(paths().execRunsFile).toBe(join(dir, "exec-runs.json"));
   });
 
-  test("legacy launch values are ignored and logged once even across config reloads", () => {
+  test("each removed key still in config.json loads and is noticed once per key, even across config reloads", () => {
     const messages: string[] = [];
-    for (const launch of [{ command: "cswap.exe run 1" }, null, false, "unused"]) {
-      writeFileSync(join(dir, "config.json"), JSON.stringify({ groupId: "-1001", allowFrom: ["1"], launch }));
+    for (const removed of [{ launch: { command: "cswap.exe run 1" }, exec: { bash: "C:/bash.exe" } }, { launch: null, exec: false }]) {
+      writeFileSync(join(dir, "config.json"), JSON.stringify({ groupId: "-1001", allowFrom: ["1"], ...removed }));
       expect(loadConfig(text => messages.push(text))).toEqual({ groupId: "-1001", allowFrom: ["1"], turnEndChime: defaultTurnEndChime() });
     }
-    expect(messages).toEqual(["Ignoring launch in config.json; rig session manages session launches"]);
+    expect(messages).toEqual([
+      "Ignoring launch in config.json; rig session manages session launches",
+      "Ignoring exec in config.json; topic commands run through rig exec, which finds bash itself",
+    ]);
   });
 
   test("missing or corrupt config gives empty allowFrom", () => {

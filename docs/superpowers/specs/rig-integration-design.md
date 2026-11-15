@@ -18,7 +18,7 @@ The hub chooses behavior by platform in one place; the rest of the code gets rea
 - **`/bash`.** On Windows, Git Bash, as now. On Linux, `bash` from `PATH`, started as a login shell, the label in the card is `bash`. The
   `bash` value in the config works on both systems.
 - **`/pwsh`, `/cmd`.** Only on Windows. On Linux they are not shown in the menu, and a call answers that they are not available on this platform.
-- **Starting sessions.** The hub calls `rig session run <id>` with the account it would use for that session. Rig owns terminal selection, launch validation, the Claude command and process liveness. There is no hub launch template. An old `launch` config key is ignored with one info log line.
+- **Starting sessions.** The hub calls `rig session run <id>` with the account it would use for that session. Rig owns terminal selection, launch validation, the Claude command and process liveness. There is no hub launch template. Old `launch` and `exec` config keys are ignored with one info log line each (one list of removed keys with reasons in `shared/config.ts`).
 - **Terminals.** Rig selects Windows Terminal, Terminal.app or a Linux terminal, falling back to tmux on Linux. The hub shows rig's launch failure message verbatim.
 - **Channel confirmation dialog on Linux.** Whether it repeats on every launch or only on the first one is unknown without a logged-in Claude Code
   and goes to the end-to-end check. It can be removed with managed settings (`channelsEnabled`, `allowedChannelPlugins`); on Linux the file
