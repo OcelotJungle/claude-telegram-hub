@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { writeFileSync } from "fs";
 import { join } from "path";
 import { cwdArg, execStatusSchema, isGone, RigExec } from "../src/hub/rig-exec.ts";
-import { Rig, runRig } from "../src/hub/rig.ts";
+import { Rig, RIG_QUERY_LIMIT_MS, runRig } from "../src/hub/rig.ts";
 import { en } from "../src/shared/i18n/en.ts";
 import { platformFor } from "../src/shared/platform.ts";
 import { manualClock } from "./manual-clock.ts";
@@ -142,6 +142,24 @@ describe("the rig exec client", () => {
   test("a failure with no rig error object is an exit code failure", async () => {
     const t = client(() => ({ code: FAILED_EXIT, stdout: "", stderr: "boom\n" }));
     expect(await t.exec.status("x", 0)).toEqual({ ok: false, error: { kind: "exitCode", code: FAILED_EXIT, output: "boom" } });
+  });
+
+  test("reads a status with a wait: --wait right after --from, the digits of the wait", async () => {
+    const t = client(() => ok(STATUS_RUNNING_JSON));
+    const result = await t.exec.status("3f9c2a1e", 12, 5000);
+    expect(result.ok).toBe(true);
+    expect(t.calls[0]?.argv).toEqual(["rig-file", "exec", "status", "3f9c2a1e", "--from", "12", "--wait", "5000"]);
+  });
+
+  test("a status that waits is not cut as a failure when the wait alone is longer than a plain query may take", async () => {
+    const clock = manualClock();
+    const hold = RIG_QUERY_LIMIT_MS + 1000;
+    const slow = (): Promise<RigOutput> => new Promise(resolve => { clock.setTimer(() => resolve(ok(STATUS_RUNNING_JSON)), hold); });
+    const rig = new Rig({ find: () => "rig-file", platform: platformFor("linux"), messages: () => en, run: slow, warn: () => {}, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+    const pending = new RigExec(rig, false).status("x", 0, hold);
+    await clock.advance(hold);
+    expect((await pending).ok).toBe(true);
+    clock.dispose();
   });
 
   test("a rig that does not answer in time is a timeout, as data", async () => {

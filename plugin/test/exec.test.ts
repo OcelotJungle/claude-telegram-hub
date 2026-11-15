@@ -8,7 +8,7 @@ import type { MessageKind } from "../src/shared/notification.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { Execs, EXEC_CARD_LINES, EXEC_CHECK_MS, execCardText, execReportText, MAX_EXECS } from "../src/hub/exec.ts";
+import { Execs, EXEC_CARD_LINES, EXEC_CHECK_MS, EXEC_STOP_AGAIN_MS, execCardText, execReportText, MAX_EXECS } from "../src/hub/exec.ts";
 import { loadRuns, saveRuns } from "../src/hub/exec-runs.ts";
 import { en } from "../src/shared/i18n/en.ts";
 import { ru } from "../src/shared/i18n/ru.ts";
@@ -460,6 +460,77 @@ describe("the Stop and Run buttons", () => {
   });
 });
 
+describe("polling with a wait", () => {
+  test("a quiet run costs one rig call per wait, not one per check", async () => {
+    const t = setup();
+    await started(t);
+    for (let i = 0; i < FAILING_SHORT_TICKS; i++) await t.tick();
+    expect(t.fake.statuses).toHaveLength(1);
+    expect(t.fake.held()).toBe(1);
+    // The wait is as long as the card pace here, the shorter of it and EXEC_WAIT_MS.
+    expect(t.fake.waitCalls[0]?.waitMs).toBe(CARD_MS);
+  });
+
+  test("a wait that ran out is not an error: the next check waits again, from the same place", async () => {
+    const t = setup();
+    const { runId } = await started(t);
+    await t.tick();
+    t.fake.expireWaits();
+    await t.settle();
+    await t.tick();
+    expect(t.fake.waitCalls).toHaveLength(2);
+    expect(t.fake.waitCalls[1]).toEqual({ id: runId, from: 0, waitMs: CARD_MS });
+    expect(t.log.lines.filter(l => l.includes("reading the run failed"))).toEqual([]);
+    expect(t.execs.running()).toBe(1);
+    t.fake.write(runId, "late\n");
+    await t.until(() => t.cards.find(c => c.markdown.includes("late")), "card with the output");
+  });
+
+  test("output or an end answers a held wait at once", async () => {
+    const t = setup();
+    const { runId } = await started(t);
+    t.fake.write(runId, "x\n");
+    await t.settle();
+    t.fake.finish(runId, { kind: "exit", code: 0 });
+    await t.until(() => t.cards.find(c => c.final), "final card");
+  });
+
+  test("a stopped manager lets go of a read rig is still holding", async () => {
+    const t = setup();
+    await started(t);
+    await t.tick();
+    expect(t.fake.held()).toBe(1);
+    t.execs.stop();
+    await Promise.all(t.spawned);
+  });
+});
+
+describe("a run rig has been asked to stop twice", () => {
+  test("a run still alive after the stop wait gets one second stop, never more", async () => {
+    const t = setup();
+    const { id, runId } = await started(t, "hang");
+    expect(await t.execs.press(id, "stop")).toBe(en.execStopping);
+    await t.clock.advance(EXEC_STOP_AGAIN_MS - 1);
+    expect(t.fake.stops).toEqual([runId]);
+    await t.clock.advance(1);
+    expect(t.fake.stops).toEqual([runId, runId]);
+    await t.clock.advance(10 * EXEC_STOP_AGAIN_MS);
+    // Another press of Stop does not ask rig again either.
+    expect(await t.execs.press(id, "stop")).toBe(en.execStopping);
+    expect(t.fake.stops).toEqual([runId, runId]);
+  });
+
+  test("a run that ended before the stop wait gets no second stop", async () => {
+    const t = setup();
+    const { id, runId } = await started(t, "x");
+    await t.execs.press(id, "stop");
+    t.fake.finish(runId, { kind: "stopped" });
+    await t.until(() => t.cards.find(c => c.final), "final card");
+    await t.clock.advance(10 * EXEC_STOP_AGAIN_MS);
+    expect(t.fake.stops).toEqual([runId]);
+  });
+});
+
 describe("a run that rig loses or that cannot be read", () => {
   test("a run rig does not know ends as lost", async () => {
     const t = setup();
@@ -754,6 +825,9 @@ describe("rig run cards", () => {
     await t.clock.advance(CARD_MS - 1);
     expect(t.machineCards).toHaveLength(1);
     await t.clock.advance(1);
+    // The read waiting in rig runs out at the pace (the wait is capped by it) and the card is redrawn then.
+    t.fake.expireWaits();
+    await t.settle();
     expect(t.machineCards).toHaveLength(2);
     await t.tick();
     expect(t.machineCards).toHaveLength(2);

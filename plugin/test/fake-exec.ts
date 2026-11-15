@@ -50,16 +50,62 @@ export class FakeExec implements ExecClient {
     return { ok: true, value: this.add({ shell: "rig", args }) };
   }
 
-  async status(id: string, from: number): Promise<RigResult<ExecStatus>> {
+  // With waitMs this is rig 0.7.2 `--wait`: the answer comes at once when the run ended or the log has whole bytes
+  // past `from`; otherwise it is held until a write or an end, or until the test calls expireWaits (the wait ran out).
+  async status(id: string, from: number, waitMs?: number): Promise<RigResult<ExecStatus>> {
     this.statuses.push({ id, from });
+    if (waitMs !== undefined) this.waitCalls.push({ id, from, waitMs });
     const failed = this.fail("statusError") ?? (this.statusDown ? { ok: false as const, error: this.statusDown } : undefined);
     if (failed) return failed;
     const run = this.runs.get(id);
     if (!run) return { ok: false, error: { kind: "rig", code: "exec-unknown", message: `no run ${id}` } };
+    if (waitMs !== undefined && !run.end && this.page_(run, from).stop === this.page_(run, from).start) {
+      await new Promise<void>(resolve => { this.parked.push({ id, from, resolve }); });
+    }
+    return this.answer(id, from);
+  }
+
+  // The status calls made with a wait, and the ones held now.
+  waitCalls: { id: string; from: number; waitMs: number }[] = [];
+  private parked: { id: string; from: number; resolve: () => void }[] = [];
+
+  // How many calls rig is holding.
+  held(): number {
+    return this.parked.length;
+  }
+
+  // The wait of every held call runs out: each is answered as it stands, the way rig answers at the timeout.
+  expireWaits(): void {
+    this.wake(() => true);
+  }
+
+  // A held call is answered when its run wrote whole bytes past its offset or ended.
+  private wake(which: (p: { id: string; from: number }) => boolean): void {
+    const woken = this.parked.filter(which);
+    this.parked = this.parked.filter(p => !which(p));
+    for (const p of woken) p.resolve();
+  }
+
+  private wakeReady(): void {
+    this.wake(p => {
+      const run = this.runs.get(p.id);
+      return !run || run.end !== undefined || this.page_(run, p.from).stop > this.page_(run, p.from).start;
+    });
+  }
+
+  // The byte range one status call reads from `from`.
+  private page_(run: FakeRun, from: number): { start: number; stop: number } {
     const start = Math.min(from, run.log.length);
     let stop = Math.min(start + this.page, run.log.length);
     // Rig keeps a character that the page cuts for the next one.
     if (stop < run.log.length) while (stop > start && ((run.log[stop] ?? 0) & UTF8_CONTINUATION_MASK) === UTF8_CONTINUATION) stop--;
+    return { start, stop };
+  }
+
+  private answer(id: string, from: number): RigResult<ExecStatus> {
+    const run = this.runs.get(id);
+    if (!run) return { ok: false, error: { kind: "rig", code: "exec-unknown", message: `no run ${id}` } };
+    const { start, stop } = this.page_(run, from);
     const slice = run.log.subarray(start, stop);
     const status: ExecStatus = {
       id,
@@ -87,12 +133,14 @@ export class FakeExec implements ExecClient {
   write(id: string, text: string): void {
     const run = this.must(id);
     run.log = Buffer.concat([run.log, Buffer.from(text, "utf8")]);
+    this.wakeReady();
   }
 
   finish(id: string, end: { kind: ExecEnd["kind"]; code?: number | null; reason?: string }, result?: unknown): void {
     const run = this.must(id);
     run.end = { kind: end.kind, ...(end.code !== undefined ? { code: end.code } : {}), ...(end.reason !== undefined ? { reason: end.reason } : {}), at: this.now() };
     if (result !== undefined) run.result = result;
+    this.wakeReady();
   }
 
   // The newest run's id.

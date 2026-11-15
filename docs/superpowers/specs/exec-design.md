@@ -109,6 +109,8 @@ The "Stop" button calls `rig exec stop <id>`; rig kills the process tree. Only s
 (`routeCallback`) can press it. A command that managed to finish before the press
 is not killed and shows its code. "⏹ stopped" is shown when rig reports the end `stopped`; a run that ended with its own
 exit code after the press shows that code.
+`rig exec stop` only records the request: if the run has not ended `EXEC_STOP_AGAIN_MS` (5 s, rig's own
+grace before it kills) after the press, the hub calls `rig exec stop` once more, never more often.
 
 ### What the agent gets
 
@@ -142,8 +144,13 @@ a call in flight counts for `hub.busy()`. The client is `plugin/src/hub/rig-exec
 
 The hub learns the state **only from `rig exec status <id> --from <offset>`**: `state` (`running` or `ended`), the
 `end` (`exit` with a code, `stopped`, or `lost` with a reason), for a rig run the `result` object rig printed, and a page
-of the log (`from`, `to`, `size`, `text`; at most 64 KiB, offsets in bytes). The hub polls a running run once a second
-(`EXEC_CHECK_MS`, an injected timer) and reads pages until it has all of the log. The usual case and the case "the hub
+of the log (`from`, `to`, `size`, `text`; at most 64 KiB, offsets in bytes). The hub polls a running run with one rig process at a time, `rig exec status <id> --from <offset> --wait <ms>`:
+rig answers at once when the run ended or the log has whole bytes past the offset, otherwise within `<ms>`, and a
+timeout is not an error (the next read just waits again). The wait is `min(EXEC_WAIT_MS, cardMs)` (`EXEC_WAIT_MS` is
+10 s): short enough that a quiet rig run's card is still redrawn at the card pace and that the hub notices its own stop
+or shutdown (a manager that stops lets go of a read rig is still holding); the read may take the wait plus
+`RIG_QUERY_LIMIT_MS`. The next read starts at the next `EXEC_CHECK_MS` check (an injected timer), and pages are read
+until the hub has all of the log. The usual case and the case "the hub
 restarted while the command was running" are the same code.
 
 The hub's own state is `exec-runs.json` in the state folder: for each launch its id, the rig run id, the session, the
@@ -151,7 +158,7 @@ message `message_id`, the shell, the text, the folder, the state, the byte offse
 the result was delivered to the agent. Nothing is migrated from the old `execs.json`, `exec/` folder or runner files; the
 hub ignores them. A restarted hub reads `exec-runs.json` and goes on with every unfinished run by its run id: it reads
 the log again from a little before the saved offset (64 KiB), so the card has a tail at once. A run that ended while the
-hub was down gets its final card at the start. "Stop" is `rig exec stop <id>`.
+hub was down gets its final card at the start. "Stop" is `rig exec stop <id>`, asked twice at most (see above).
 
 A result that did not reach the agent (the session was starting and the start failed; the hub crashed between the end of
 the command and the delivery) is sent again when the session connects.
@@ -199,7 +206,8 @@ card fits in a message.
 
 ## Known gaps of the move
 
-- A running run costs one rig process per second (the poll). Fine for a few runs, not for dozens.
+- A running run holds one rig process, which answers on output or at the end of the wait (at most once per wait
+  when quiet). Fine for a few runs, not for dozens.
 - The log the card and the report show is capped in memory (see "The log"); the file is not.
 - A hub that dies while `rig exec start` is in flight: the record (chat, message id, `pending`, `starting`, no rig id) is
   saved before every start (shell commands, rig mutations, the Run button) and gets the rig id once start answers; a

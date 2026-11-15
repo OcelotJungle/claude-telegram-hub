@@ -4,6 +4,7 @@
 import type { Rig, RigError, RigResult } from "./rig.ts";
 
 import { z } from "zod";
+import { RIG_QUERY_LIMIT_MS } from "./rig.ts";
 
 export type ExecShellName = "pwsh" | "cmd" | "bash";
 export type ExecEndKind = "exit" | "stopped" | "lost";
@@ -56,7 +57,9 @@ export function cwdArg(cwd: string, windows: boolean): CwdCheck {
 export type ExecClient = {
   start(shell: ExecShellName, cwd: string, text: string): Promise<RigResult<ExecStart, ExecError>>;
   startRig(args: string[]): Promise<RigResult<ExecStart>>;
-  status(id: string, from: number): Promise<RigResult<ExecStatus>>;
+  // waitMs: rig holds the answer until the run ended or the log has whole bytes past `from`, at most waitMs
+  // (rig 0.7.2 --wait); a timeout is a plain answer.
+  status(id: string, from: number, waitMs?: number): Promise<RigResult<ExecStatus>>;
   stop(id: string): Promise<RigResult<ExecStop>>;
 };
 
@@ -75,8 +78,11 @@ export class RigExec implements ExecClient {
     return this.rig.query(["exec", "start", "rig", "--", ...args], startSchema);
   }
 
-  status(id: string, from: number): Promise<RigResult<ExecStatus>> {
-    return this.rig.query(["exec", "status", id, "--from", String(from)], execStatusSchema);
+  // The query's time limit starts after the wait, so a wait is never cut as a failure.
+  status(id: string, from: number, waitMs?: number): Promise<RigResult<ExecStatus>> {
+    const args = ["exec", "status", id, "--from", String(from)];
+    if (waitMs === undefined) return this.rig.query(args, execStatusSchema);
+    return this.rig.query([...args, "--wait", String(waitMs)], execStatusSchema, { limit: waitMs + RIG_QUERY_LIMIT_MS });
   }
 
   stop(id: string): Promise<RigResult<ExecStop>> {

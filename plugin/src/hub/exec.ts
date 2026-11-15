@@ -32,8 +32,16 @@ export const EXEC_CARD_LINES = 10;
 export const EXEC_AGENT_LINES = 30;
 export const MAX_EXECS = 50;
 export const EXEC_MAX_AGE_MS = 120_000;
-// How often a running run's log is read. Each read is one rig process.
+// How often the hub looks whether a running run needs a read (none in flight): the read itself waits in rig.
 export const EXEC_CHECK_MS = 1000;
+// How long one rig status read waits for new output (rig exec status --wait): a run that writes or ends answers at
+// once, a quiet one costs one rig process per wait instead of one per second. It is short enough that a quiet rig
+// run's card still gets its pace redraw (it is also capped by the card pace, see waitMs) and that a rig that hangs
+// is let go of soon (RigExec adds this wait to the query's time limit).
+export const EXEC_WAIT_MS = 10_000;
+// rig 0.7.2: a second `rig exec stop` of a run is let through only at least this long after the first (rig's own
+// constant; it kills a hung run from outside). The hub sends it once, never earlier.
+export const EXEC_STOP_AGAIN_MS = 5000;
 const ID_BYTES = 4;
 // The part of a log a restarted hub reads again before it goes on: what a rig status answer holds at most.
 const TAIL_BYTES = 64 * 1024;
@@ -125,11 +133,17 @@ export class Execs {
   // Runs whose start is in flight.
   private launching = new Set<string>();
   private sweepTimer: ReturnType<typeof setTimeout> | undefined;
+  // Runs the user asked to stop: the timer of the hub's one second stop request (cleared when the run ends).
+  private stopTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Resolves when the manager stops, so a read waiting in rig is let go of at once.
+  private abandon: Promise<"abandoned"> = new Promise(() => {});
+  private abandonNow: () => void = () => {};
 
   constructor(private deps: ExecDeps) {}
 
   start(): void {
     this.stopped = false;
+    this.abandon = new Promise(resolve => { this.abandonNow = () => resolve("abandoned"); });
     this.recs = loadRuns(this.deps.file);
     // A run goes on after a hub restart: its log is read again from a little before where the last read stopped.
     for (const rec of this.recs) if (rec.state === "running") this.resumeLive(rec);
@@ -159,6 +173,9 @@ export class Execs {
   // Only the timers: the runs go on in rig and a next manager picks them up.
   stop(): void {
     this.stopped = true;
+    this.abandonNow();
+    for (const t of this.stopTimers.values()) this.deps.timers.clearTimer(t);
+    this.stopTimers.clear();
     for (const t of this.repeaters) this.deps.timers.clearTimer(t);
     this.repeaters = [];
     if (this.sweepTimer !== undefined) this.deps.timers.clearTimer(this.sweepTimer);
@@ -238,10 +255,26 @@ export class Execs {
       return m.execStarting;
     }
     if (rec.state === "pending" || rec.runId === undefined) return m.execNotStarted;
-    // rig stops the run; the next poll reads how it ended.
-    const stopped = await this.deps.rig.stop(rec.runId);
+    // rig only records the stop: the run kills itself at its next check and the poll reads how it ended. One request
+    // is enough until the second one, which the hub sends by itself (askStopAgain).
+    if (this.stopTimers.has(rec.id)) return m.execStopping;
+    const runId = rec.runId;
+    const stopped = await this.deps.rig.stop(runId);
     if (!stopped.ok) return rigErrorText(stopped.error, m);
-    return stopped.value.state === "ended" ? m.execAlreadyEnded : m.execStopping;
+    if (stopped.value.state === "ended") return m.execAlreadyEnded;
+    if (!this.stopped && rec.state === "running" && !this.stopTimers.has(rec.id)) {
+      this.stopTimers.set(rec.id, this.deps.timers.setTimer(() => this.askStopAgain(rec, runId), EXEC_STOP_AGAIN_MS));
+    }
+    return m.execStopping;
+  }
+
+  // A run that has not ended EXEC_STOP_AGAIN_MS after the user's Stop is hung: rig kills it from outside on a
+  // second stop. Once, never more often.
+  private askStopAgain(rec: ExecRun, runId: string): void {
+    if (this.stopped || rec.state !== "running") return;
+    this.deps.spawn(this.deps.rig.stop(runId).then(result => {
+      if (!result.ok) this.deps.log.warn(`exec ${rec.id}: the second stop failed: ${rigErrorText(result.error, catalogOf("en"))}`);
+    }));
   }
 
   // Results the agent has not got go again once its session is back.
@@ -365,7 +398,9 @@ export class Execs {
     const offset = rec.offset;
     try {
       for (let page = 0; page < PAGES_PER_POLL; page++) {
-        const got = await this.deps.rig.status(runId, live.next);
+        const got = await Promise.race([this.deps.rig.status(runId, live.next, this.waitMs()), this.abandon]);
+        // The manager stopped while rig was holding the answer: the read is let go of.
+        if (got === "abandoned") return;
         if (this.stopped || rec.state !== "running") return;
         if (!got.ok) return this.pollFailed(rec, live, got.error);
         live.failingSince = undefined;
@@ -387,6 +422,11 @@ export class Execs {
     } finally {
       live.polling = false;
     }
+  }
+
+  // A rig run's card is redrawn at the card pace even when its output is quiet, so a read never waits longer.
+  private waitMs(): number {
+    return Math.min(EXEC_WAIT_MS, this.deps.cardMs);
   }
 
   // Adds a page to what the hub holds; whether the page moved the reading on.
@@ -426,6 +466,9 @@ export class Execs {
 
   private end(rec: ExecRun, end: RunEnd): void {
     const live = this.live.get(rec.id);
+    const stopTimer = this.stopTimers.get(rec.id);
+    if (stopTimer !== undefined) this.deps.timers.clearTimer(stopTimer);
+    this.stopTimers.delete(rec.id);
     rec.state = "ended";
     rec.end = end;
     this.deps.log.info(`exec ${rec.id}: ended ${end.kind}${end.code === undefined ? "" : ` ${end.code}`}`);
