@@ -12,6 +12,8 @@ import { arr, field, isObject } from "../src/shared/guards.ts";
 type Params = Record<string, unknown>;
 type Call = { method: string; params: Params };
 type Failure = { code: number; description: string; retry_after?: number };
+// Where a file download stops: before the response headers, or after them with the body never ending.
+export type DownloadHang = "headers" | "body";
 
 // One message_id sequence for the bot's messages and the user's, as in a
 // real chat: a message sent after another has a larger id.
@@ -36,6 +38,9 @@ export class FakeTelegram {
   private holds = new Map<string, Promise<void>>();
   private deletedTopics = new Set<number>();
   files = new Map<string, { path: string; body: Uint8Array }>();
+  // Paths of the file downloads the server has received, in order.
+  downloads: string[] = [];
+  private hangDownloads = new Map<string, DownloadHang>();
 
   constructor() {
     this.server = Bun.serve({
@@ -83,6 +88,11 @@ export class FakeTelegram {
   // the network silently drops.
   hangNext(method: string, count = 1): void {
     this.hangs.set(method, (this.hangs.get(method) ?? 0) + count);
+  }
+
+  // Downloads of the file at `path` never finish: the response headers (or, with "body", only the body) never arrive.
+  hangDownload(path: string, where: DownloadHang): void {
+    this.hangDownloads.set(path, where);
   }
 
   // The next call of `method` is answered only after `ms`, like a slow network.
@@ -133,7 +143,15 @@ export class FakeTelegram {
     const filePrefix = `/file/bot${this.token}/`;
     if (url.pathname.startsWith(filePrefix)) {
       const path = url.pathname.slice(filePrefix.length);
-      for (const f of this.files.values()) if (f.path === path) return new Response(Buffer.from(f.body));
+      this.downloads.push(path);
+      const hang = this.hangDownloads.get(path);
+      if (hang === "headers") return new Promise<Response>(() => {});
+      for (const f of this.files.values()) {
+        if (f.path !== path) continue;
+        // Headers arrive with a first chunk (the server sends headers only with body data), then the stream never ends.
+        if (hang === "body") return new Response(new ReadableStream<Uint8Array>({ start: controller => controller.enqueue(new Uint8Array([0])) }));
+        return new Response(Buffer.from(f.body));
+      }
       return new Response("not found", { status: 404 });
     }
     const m = url.pathname.match(/^\/bot([^/]+)\/(\w+)$/);

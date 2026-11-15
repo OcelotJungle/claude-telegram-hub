@@ -4,7 +4,7 @@ type Entry = { at: number; fn(): void; every?: number };
 
 // Deterministic timers (the Timers shape) for tests: nothing fires until `advance` moves the clock.
 // Native handles are cancelled immediately; they only serve as unique keys of the right type.
-export function manualClock(): Timers & { advance(ms: number): Promise<void>; dispose(): void } {
+export function manualClock(): Timers & { advance(ms: number): Promise<void>; armed(): number; dispose(): void } {
   let now = 0;
   const timers = new Map<TimerHandle, Entry>();
   const add = (entry: Entry): TimerHandle => {
@@ -36,6 +36,8 @@ export function manualClock(): Timers & { advance(ms: number): Promise<void>; di
       now = target;
       await turn();
     },
+    // Timers not yet fired or cancelled: a test checks that a finished operation left none behind.
+    armed: () => timers.size,
     dispose: () => timers.clear(),
   };
 }

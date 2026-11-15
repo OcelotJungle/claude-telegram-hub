@@ -23,7 +23,7 @@ const ATTEMPT_TIMEOUT_MS = 5000;
 const SEND_ATTEMPT_TIMEOUT_MS = 60_000;
 const NETWORK_RETRY_MS = 300;
 const DEADLINE_MS = 120_000;
-const DOWNLOAD_TIMEOUT_MS = 120_000;
+export const DOWNLOAD_TIMEOUT_MS = 120_000;
 // An upload attempt may take as long as sending its bytes at this rate
 // (64 KB/s), on top of the usual attempt timeout.
 const UPLOAD_BYTES_PER_MS = 64;
@@ -200,7 +200,18 @@ export class TelegramApi {
   }
 
   private async callOnce<T>(method: string, params: Body, result: z.ZodType<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
-    const timeout = AbortSignal.timeout(timeoutMs);
+    // The attempt timeout runs on the injected timers, so a test can fire it by hand.
+    const timeoutController = new AbortController();
+    const timeout = timeoutController.signal;
+    const timer = this.timers.setTimer(() => timeoutController.abort(new DOMException("The operation timed out.", "TimeoutError")), timeoutMs);
+    try {
+      return await this.fetchOnce(method, params, result, timeout, signal);
+    } finally {
+      this.timers.clearTimer(timer);
+    }
+  }
+
+  private async fetchOnce<T>(method: string, params: Body, result: z.ZodType<T>, timeout: AbortSignal, signal?: AbortSignal): Promise<T> {
     const res = await fetch(`${this.base}/bot${this.opts.token}/${method}`, {
       method: "POST",
       ...(typeof params === "function" ? { body: params() } : { headers: { "content-type": "application/json" }, body: JSON.stringify(params) }),
@@ -323,9 +334,17 @@ export class TelegramApi {
   async downloadFile(fileId: string, destDir: string): Promise<string> {
     const file = await this.call("getFile", { file_id: fileId }, fileSchema);
     if (!file.file_path) throw new Error("Telegram returned no file_path — the file may have expired");
-    const res = await fetch(`${this.base}/file/bot${this.opts.token}/${file.file_path}`, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
-    if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
-    const buf = Buffer.from(await res.arrayBuffer());
+    // The download timeout runs on the injected timers, as the attempt timeout does, and covers the body too.
+    const timeoutController = new AbortController();
+    const timer = this.timers.setTimer(() => timeoutController.abort(new DOMException("The operation timed out.", "TimeoutError")), DOWNLOAD_TIMEOUT_MS);
+    let buf: Buffer;
+    try {
+      const res = await fetch(`${this.base}/file/bot${this.opts.token}/${file.file_path}`, { signal: timeoutController.signal });
+      if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
+      buf = Buffer.from(await res.arrayBuffer());
+    } finally {
+      this.timers.clearTimer(timer);
+    }
     const rawExt = file.file_path.includes(".") ? (file.file_path.split(".").at(-1) ?? "") : "";
     const ext = rawExt.replace(/[^a-zA-Z0-9]/g, "") || "bin";
     const unique = (file.file_unique_id ?? "").replace(/[^a-zA-Z0-9_-]/g, "") || "dl";

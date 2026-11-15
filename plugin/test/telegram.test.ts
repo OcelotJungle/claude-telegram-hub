@@ -1,15 +1,27 @@
 import type { OutFile } from "../src/shared/media.ts";
+import type { DownloadHang } from "./fake-telegram.ts";
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
-import { isThreadNotFound, TelegramApi, TelegramError } from "../src/hub/telegram.ts";
+import { DOWNLOAD_TIMEOUT_MS, isThreadNotFound, TelegramApi, TelegramError } from "../src/hub/telegram.ts";
 import { field } from "../src/shared/guards.ts";
 import { FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { tempDir, waitFor } from "./helpers.ts";
-import { manualClock } from "./manual-clock.ts";
+import { manualClock, turn } from "./manual-clock.ts";
 
 const RETRY_AFTER_MS = 1000;
+// Loopback I/O settles within a few thousand event-loop turns; the cap only turns a lost wake-up into a failure.
+const MAX_SPIN_TURNS = 100_000;
+
+// Waits for a condition by yielding the event loop, with no wall-clock sleep.
+async function spin(pred: () => boolean | Promise<boolean>): Promise<void> {
+  for (let i = 0; i < MAX_SPIN_TURNS; i++) {
+    if (await pred()) return;
+    await turn();
+  }
+  throw new Error("condition not reached");
+}
 
 let fake: FakeTelegram;
 let api: TelegramApi;
@@ -137,43 +149,90 @@ describe("TelegramApi", () => {
   // The Bot API is reachable only now and then from some networks: a connect
   // attempt hangs, the next one may get through, and then the connection is reused.
   describe("flaky network", () => {
-    const flaky = (o: object = {}) =>
-      new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 100, sendAttemptTimeoutMs: 100, networkRetryMs: 5, ...o });
+    const ATTEMPT_TIMEOUT_MS = 100;
+    const NETWORK_RETRY_MS = 5;
+    const BEYOND_ATTEMPT_TIMEOUT_MS = 2 * ATTEMPT_TIMEOUT_MS;
+    const LONG_SEND_TIMEOUT_MS = 1000;
+    const HUNG_ATTEMPTS = 4;
+
+    // An api on a manual clock: attempt timeouts and retry pauses fire only when the test advances it.
+    const flaky = (o: object = {}) => {
+      const base = manualClock();
+      let sleeps = 0;
+      const clock = { ...base, sleep: (ms: number) => { sleeps++; return base.sleep(ms); }, sleepsStarted: () => sleeps };
+      const flakyApi = new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: ATTEMPT_TIMEOUT_MS, sendAttemptTimeoutMs: ATTEMPT_TIMEOUT_MS, networkRetryMs: NETWORK_RETRY_MS, timers: clock, ...o });
+      return { api: flakyApi, clock };
+    };
+    const received = (method: string, count: number) => spin(() => fake.callsOf(method).length >= count);
+    // The server got `count` calls and the last one hangs: time it out, wait until the api pauses
+    // before its retry, pass that pause once, and wait until the next attempt reaches the server.
+    // The clock moves only by these two steps, so the next attempt's own timeout stays armed.
+    const abandonAttempt = async (clock: ReturnType<typeof flaky>["clock"], method: string, count: number) => {
+      await received(method, count);
+      const pausesBefore = clock.sleepsStarted();
+      await clock.advance(ATTEMPT_TIMEOUT_MS);
+      await spin(() => clock.sleepsStarted() > pausesBefore);
+      await clock.advance(NETWORK_RETRY_MS);
+      await received(method, count + 1);
+    };
 
     test("a hung attempt is abandoned quickly and retried", async () => {
       fake.hangNext("sendMessage");
-      const started = Date.now();
-      await flaky().sendMessage("-100", 7, "hi", true);
-      expect(Date.now() - started).toBeLessThan(1000);
+      const { api: hung, clock } = flaky();
+      const sent = hung.sendMessage("-100", 7, "hi", true);
+      await abandonAttempt(clock, "sendMessage", 1);
+      await sent;
       expect(fake.callsOf("sendMessage").length).toBe(2);
     });
 
     // An edit is safe to repeat; a send that took long may already be in the chat.
     test("a slow answer to a send is waited for, so the message is not posted twice", async () => {
-      fake.delayNext("sendMessage", 300);
-      fake.delayNext("editMessageText", 300);
-      const slow = flaky({ sendAttemptTimeoutMs: 1000 });
-      await slow.sendMessage("-100", 7, "hi", true);
-      await slow.editMessageText("-100", 1, "edited");
+      const releaseSend = fake.holdNext("sendMessage");
+      const releaseEdit = fake.holdNext("editMessageText");
+      const { api: slow, clock } = flaky({ sendAttemptTimeoutMs: LONG_SEND_TIMEOUT_MS });
+      const sent = slow.sendMessage("-100", 7, "hi", true);
+      await received("sendMessage", 1);
+      await clock.advance(BEYOND_ATTEMPT_TIMEOUT_MS);
+      releaseSend();
+      await sent;
+      const edited = slow.editMessageText("-100", 1, "edited");
+      await abandonAttempt(clock, "editMessageText", 1);
+      releaseEdit();
+      await edited;
       expect(fake.callsOf("sendMessage").length).toBe(1);
       expect(fake.callsOf("editMessageText").length).toBe(2);
     });
 
     test("network failures are retried past maxAttempts until the deadline", async () => {
-      fake.hangNext("sendMessage", 4);
-      await flaky({ deadlineMs: 5000 }).sendMessage("-100", 7, "hi", true);
-      expect(fake.callsOf("sendMessage").length).toBe(5);
+      fake.hangNext("sendMessage", HUNG_ATTEMPTS);
+      const { api: hung, clock } = flaky({ deadlineMs: 5000 });
+      const sent = hung.sendMessage("-100", 7, "hi", true);
+      for (let attempt = 1; attempt <= HUNG_ATTEMPTS; attempt++) {
+        await abandonAttempt(clock, "sendMessage", attempt);
+      }
+      await sent;
+      expect(fake.callsOf("sendMessage").length).toBe(HUNG_ATTEMPTS + 1);
     });
 
     test("network failures give up at the deadline", async () => {
-      const dead = new TelegramApi({ token: "x", base: "http://127.0.0.1:1", attemptTimeoutMs: 100, sendAttemptTimeoutMs: 100, networkRetryMs: 5, deadlineMs: 300 });
-      const started = Date.now();
-      await expect(dead.sendMessage("-100", 1, "x", true)).rejects.toThrow();
-      expect(Date.now() - started).toBeLessThan(1500);
+      const { api: dead, clock } = flaky({ token: "x", base: "http://127.0.0.1:1", deadlineMs: 300 });
+      let settled = false;
+      const outcome = dead.sendMessage("-100", 1, "x", true).then(() => "resolved", () => "rejected").finally(() => { settled = true; });
+      // A refused connection fails at once; only the pauses between attempts are on the clock.
+      await spin(async () => {
+        await clock.advance(NETWORK_RETRY_MS);
+        return settled;
+      });
+      expect(await outcome).toBe("rejected");
     });
 
     test("getUpdates may wait for the long poll beyond the attempt timeout", async () => {
-      expect(await flaky().getUpdates(0, 1)).toEqual([]);
+      const { api: polling, clock } = flaky();
+      const polled = polling.getUpdates(0, 1);
+      await received("getUpdates", 1);
+      await clock.advance(BEYOND_ATTEMPT_TIMEOUT_MS);
+      fake.pushUpdate({ update_id: 0 });
+      expect((await polled).length).toBe(1);
     });
   });
 
@@ -206,6 +265,51 @@ describe("TelegramApi", () => {
     expect(basename(path)).toMatch(/^\d+-uF1\.jpg$/);
     expect(existsSync(path)).toBe(true);
     expect([...readFileSync(path)]).toEqual([1, 2, 3]);
+  });
+});
+
+describe("downloadFile on a manual clock", () => {
+  const PATH = "photos/file_9.jpg";
+  const BODY = new Uint8Array([4, 5, 6]);
+  const HANG_POINTS: readonly DownloadHang[] = ["headers", "body"];
+  // Restores the fetch spy of the running test, also when the test is cut off by its timeout.
+  let restoreFetch = (): void => {};
+  afterEach(() => restoreFetch());
+
+  for (const where of HANG_POINTS) {
+    test(`a download whose ${where} never finishes fails with a timeout once the download deadline passes`, async () => {
+      fake.files.set("F9", { path: PATH, body: BODY });
+      fake.hangDownload(PATH, where);
+      const { api: clocked, clock } = clockedApi();
+      const fetchSpy = spyOn(globalThis, "fetch");
+      restoreFetch = () => fetchSpy.mockRestore();
+      let settled = false;
+      const outcome = clocked
+        .downloadFile("F9", tempDir())
+        .then(() => undefined, (e: unknown) => e)
+        .finally(() => { settled = true; });
+      // The server has the request, so the deadline is armed.
+      await spin(() => fake.downloads.includes(PATH));
+      // With a hung body, the client must have its response headers before the deadline: fetch has resolved then.
+      if (where === "body") {
+        const last = fetchSpy.mock.results.at(-1);
+        if (last?.type !== "return") throw new Error("the download's fetch did not return");
+        await last.value;
+      }
+      await clock.advance(DOWNLOAD_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await clock.advance(1);
+      expect(field(await outcome, "name")).toBe("TimeoutError");
+      expect(clock.armed()).toBe(0);
+    });
+  }
+
+  test("a download that finishes before the deadline succeeds and leaves no timer armed", async () => {
+    fake.files.set("F8", { path: "photos/file_8.jpg", body: BODY });
+    const { api: clocked, clock } = clockedApi();
+    const path = await clocked.downloadFile("F8", tempDir());
+    expect([...readFileSync(path)]).toEqual([...BODY]);
+    expect(clock.armed()).toBe(0);
   });
 });
 

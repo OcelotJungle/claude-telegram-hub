@@ -28,6 +28,8 @@ const TO_CONVERT: Record<string, number> = {
 const SRC_ALLOWED: Record<string, Allowed> = {
   "shared/timers.ts": { count: 4, reason: "the real implementation of Timers" },
   "hook/question.ts": { count: 2, reason: "a hook process that is its own composition root: a deadline and a heartbeat" },
+  "hook/session-start.ts": { count: 1, reason: "a hook process that is its own composition root: its deadline against a hung hub; no test drives it" },
+  "hook/stop.ts": { count: 1, reason: "a hook process that is its own composition root: its deadline against a hung hub; no test drives it" },
   "plugin/main.ts": { count: 2, reason: "the plugin process entry: shutdown deadline and its interval" },
   "hub/exec-runner.ts": { count: 4, reason: "the detached runner is its own process: wall clock of its heartbeat and end time" },
   "hub/cards.ts": { count: 1, reason: "file-name suffix of a corrupt file set aside, not timing" },
@@ -59,6 +61,11 @@ test("the scan counts code, not comments, and counts each use", () => {
   const sleep = "Bun" + ".sleep(10)";
   const timeout = "setTimeout" + "(fn, 1)";
   expect(countMatches(`await ${sleep};\n// ${sleep}\n await new Promise(r => ${timeout}); ${sleep};`, TEST_WAIT)).toBe(3);
+});
+
+test("the source scan counts AbortSignal.timeout, a timer on the real clock", () => {
+  const abort = "AbortSignal" + ".timeout(1500)";
+  expect(countMatches(`signal: ${abort}`, SRC_CLOCK)).toBe(1);
 });
 
 test("the comparison fails when a count grows, a new file appears, or a list entry is stale", () => {

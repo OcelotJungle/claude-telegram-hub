@@ -5,7 +5,7 @@ import { join, relative } from "path";
 const COMMENT_LINE = /^\s*(\/\/|\*|\/\*)/;
 // Escaped so this file does not contain the text it looks for.
 export const TEST_WAIT = /Bun\.sleep\(|setTimeout\(/g;
-export const SRC_CLOCK = /setTimeout\(|setInterval\(|Bun\.sleep\(|Date\.now\(/g;
+export const SRC_CLOCK = /setTimeout\(|setInterval\(|Bun\.sleep\(|Date\.now\(|AbortSignal\.timeout\(/g;
 
 // A file allowed to keep its raw uses, with the number it keeps and why.
 export type Allowed = { count: number; reason: string };
