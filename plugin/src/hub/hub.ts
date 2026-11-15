@@ -2845,10 +2845,14 @@ ${msg.text}`);
   }
 
   // Runs work nobody awaits (a handler's follow-up, a timer's job). It is tracked so `busy` can tell
-  // whether any is left. A failure stays unhandled, as with a bare `void`.
+  // whether any is left. A failure is logged here once, whether or not the work also handles it itself.
   private spawn(work: Promise<unknown>): void {
     this.spawned.add(work);
-    void work.finally(() => this.spawned.delete(work));
+    const done = (): void => { this.spawned.delete(work); };
+    void work.then(done, error => {
+      done();
+      this.log.error(`background work failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
   // Test hook: what the hub has exchanged since it started. A test compares it with its own side:

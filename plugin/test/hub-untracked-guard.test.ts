@@ -22,7 +22,7 @@ type Allowed = { count: number; reason: string };
 const VOID_ALLOWED: Record<string, Allowed> = {
   "void this.pollLoop": { count: 1, reason: "the standing poll loop: it ends with stop()'s abort, and each update it takes is counted in updatesInFlight" },
   "void this.keepInOrder": { count: 1, reason: "a synchronous call: the void only ends deliver() with no value" },
-  "void work.finally": { count: 1, reason: "the bookkeeping inside spawn() itself: the work is already in `spawned`" },
+  "void work.then": { count: 1, reason: "the bookkeeping inside spawn() itself: the work is already in `spawned`, and its failure is logged there" },
   "void next.then": { count: 2, reason: "drops the map entry of a chain that is already in batchSends or reactions, both read by busy()" },
   "void gate.settled.then": { count: 1, reason: "a synchronous notice after an exit gate's deadline; the gate waits on a process, which is not work" },
   "void gate.done.then": { count: 1, reason: "a synchronous follow-up of an exit gate; what it starts (a launch, a replay) is tracked on its own" },

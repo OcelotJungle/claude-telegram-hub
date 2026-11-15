@@ -1014,6 +1014,27 @@ describe("send", () => {
     expect(new SessionStore(join(dir, "sessions.json")).get("a")?.topicId).toBe(101);
   });
 
+  test("a background job that fails is logged once, leaves no unhandled rejection and leaves busy()", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      await startHub();
+      const c = await connect(cliHello("s1", { title: "A" }));
+      // The store saves through "<file>.tmp": a folder under that name makes the title write fail.
+      mkdirSync(join(dir, "sessions.json.tmp"));
+      c.send({ type: "title", title: "B" });
+      await waitFor(() => log.lines.some(line => line.startsWith("ERROR background work failed")), WAIT_MS, "the failure logged");
+      await settle();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(log.lines.filter(line => line.startsWith("ERROR background work failed")).length).toBe(1);
+      expect(unhandled).toEqual([]);
+      expect(hub.busy()).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
   test("a title change renames the topic", async () => {
     await startHub();
     const a = await enabled("a", "Old");
