@@ -171,15 +171,17 @@ type QueuedBatch = { messages: Message[]; captured: boolean };
 type Replay = { held: Held[]; inFlight: Held[]; after: (() => void)[] };
 // A rig action that ends the session's window is running (a stop or a cleanup): `actions` of them are in
 // flight; `stopped` is set once one ended the process, `failed` once one failed, `closing` once all are done
-// and what is left is the window's connection dropping. `old` is every connection that could be the window being
-// ended, taken when the action began: the ones attached to the session and the ones that had not said hello yet.
-// The hold ends by this identity (the old connections closing, or a different window connecting), never by a timer.
-type Ending = { actions: number; stopped: boolean; failed: boolean; closing: boolean; old: Set<WS> };
+// and what is left is the window's connection dropping. The hold ends by identity (the connections open when the
+// action began closing, or a different window connecting), never by a timer; see `Launch.old`.
+type Ending = { actions: number; stopped: boolean; failed: boolean; closing: boolean };
 // A rig session action is holding the session's incoming items: a start (a run or a mode change: what it
 // will get once its window says hello, the mode it was started in, the account it runs on, and the timer
 // that gives up on a window that never comes) or an `ending` (a stop or a cleanup: the items wait until the
 // old window is gone or a different window has connected, then go the way a new topic message would).
-type Launch = { held: Held[]; mode?: PermissionMode; account?: string; timer?: ReturnType<typeof setTimeout>; ending?: Ending };
+// `old` is every connection that could be the window being replaced, taken when the action began: the ones attached
+// to the session and the ones that had not said hello yet (empty for a plain start, which begins with no window).
+// Held items never go to a connection of that set, so a late hello from the old window changes nothing.
+type Launch = { held: Held[]; old: Set<WS>; mode?: PermissionMode; account?: string; timer?: ReturnType<typeof setTimeout>; ending?: Ending };
 // How a stop or a cleanup came out for the hold it set.
 type EndingResult = "ended" | "failed" | "not-running";
 // Topic messages of a session waiting to go to its window together.
@@ -665,7 +667,7 @@ export class Hub {
       for (const p of this.polls.values()) if (p.sessionId === sid) this.spawn(this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal));
     }
     // The window a stop or a cleanup ended is gone: what was held meanwhile goes the way a new topic message would.
-    const closing = [...this.launches].filter(([launchSid, l]) => l.ending?.closing && this.endingSettled(launchSid, l.ending));
+    const closing = [...this.launches].filter(([launchSid, l]) => l.ending?.closing && this.endingSettled(launchSid, l.old));
     for (const [launchSid, l] of closing) this.finishEnding(launchSid, l);
     this.armIdle();
   }
@@ -2128,7 +2130,7 @@ ${msg.text}`);
   // One `rig session mode` call: rig restarts the session in the mode (or says it is in it already) and the
   // new window connects like one of a start. What comes meanwhile is held for that window.
   private changeMode(sessionId: string, mode: PermissionMode): void {
-    const entry: Launch = { held: [], mode, ...this.accountOf(sessionId) };
+    const entry: Launch = { held: [], old: this.openConns(sessionId), mode, ...this.accountOf(sessionId) };
     this.launches.set(sessionId, entry);
     this.capturePending(sessionId);
     this.launchEnds.delete(sessionId);
@@ -2203,15 +2205,20 @@ ${msg.text}`);
     else this.retainHeld(sessionId, l.held);
   }
 
+  // Every connection that could be the session's window now: the ones attached to it and the ones not named yet.
+  private openConns(sessionId: string): Set<WS> {
+    const open = new Set<WS>();
+    for (const ws of this.conns) if (ws.data.sessionId === sessionId || ws.data.sessionId === undefined) open.add(ws);
+    return open;
+  }
+
   // A stop or a cleanup begins: everything of the session that is on its way to the window (open polls,
   // batches, an open replay) is taken into the hold, and what comes later joins it, until the old window
   // is gone. A start already under way keeps its own hold.
   private beginEnding(sessionId: string): Launch {
     let entry = this.launches.get(sessionId);
     if (!entry) {
-      const old = new Set<WS>();
-      for (const ws of this.conns) if (ws.data.sessionId === sessionId || ws.data.sessionId === undefined) old.add(ws);
-      entry = { held: [], ending: { actions: 0, stopped: false, failed: false, closing: false, old } };
+      entry = { held: [], old: this.openConns(sessionId), ending: { actions: 0, stopped: false, failed: false, closing: false } };
       this.launches.set(sessionId, entry);
     }
     if (entry.ending) entry.ending.actions++;
@@ -2238,7 +2245,7 @@ ${msg.text}`);
       // window), however long it takes. A bound would have to deliver to the closing window or give up on the
       // items, and the process being gone means neither is needed.
       ending.closing = true;
-      if (this.endingSettled(sessionId, ending)) this.finishEnding(sessionId, entry);
+      if (this.endingSettled(sessionId, entry.old)) this.finishEnding(sessionId, entry);
       return;
     }
     if (ending.failed) return this.abandonLaunch(sessionId, entry);
@@ -2247,9 +2254,9 @@ ${msg.text}`);
 
   // The window being ended is settled: every connection that was open for the session when the action began is
   // closed (or went to another session), or a window that was not among them is attached to the session.
-  private endingSettled(sessionId: string, ending: Ending): boolean {
-    for (const ws of this.conns) if (ws.data.sessionId === sessionId && !ending.old.has(ws)) return true;
-    for (const ws of ending.old) {
+  private endingSettled(sessionId: string, old: Set<WS>): boolean {
+    for (const ws of this.conns) if (ws.data.sessionId === sessionId && !old.has(ws)) return true;
+    for (const ws of old) {
       if (this.conns.has(ws) && (ws.data.sessionId === undefined || ws.data.sessionId === sessionId)) return false;
     }
     return true;
@@ -2328,7 +2335,7 @@ ${msg.text}`);
       return;
     }
     const chosen = this.hasAccounts() ? account ?? rec.account : undefined;
-    const entry: Launch = { held, ...(chosen ? { account: chosen } : {}) };
+    const entry: Launch = { held, old: new Set(), ...(chosen ? { account: chosen } : {}) };
     this.launches.set(sessionId, entry);
     this.capturePending(sessionId);
     this.launchEnds.delete(sessionId);
@@ -2366,9 +2373,11 @@ ${msg.text}`);
     // a different one: the hold goes on until rig is done, then ends when the old connections are gone or a
     // window that was not among them is attached. Held items never go to a window of the old set.
     if (l.ending) {
-      if (l.ending.closing && this.endingSettled(sessionId, l.ending)) this.finishEnding(sessionId, l);
+      if (l.ending.closing && this.endingSettled(sessionId, l.old)) this.finishEnding(sessionId, l);
       return;
     }
+    // A mode change: the old window's late hello (or its reconnect while rig stops it) is not the new window.
+    if (l.old.has(ws)) return;
     this.clearTimer(l.timer);
     this.launches.delete(sessionId);
     ws.data.launchedMode = l.mode;

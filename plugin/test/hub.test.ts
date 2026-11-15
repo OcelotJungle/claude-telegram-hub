@@ -2741,6 +2741,51 @@ describe("holding across session actions", () => {
     expect(callsOf("mode")).toEqual([{ sub: "mode", sid: SID, args: ["plan"] }]);
   });
 
+  test("a hello from a connection open before /mode gets nothing; the new window gets the held items in order", async () => {
+    const clock = newClock();
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    // A connection that has not said hello when the switch begins could be the window being replaced.
+    const late = await wsClient(port);
+    clients.push(late);
+    pressMode("plan");
+    await modeStarted();
+    fake.pushUpdate(msg("held one"));
+    fake.pushUpdate(msg("held two"));
+    await updatesHandled();
+    late.send(hello(SID, "late"));
+    await late.next("state");
+    await settle();
+    await passReadyDelay(clock);
+    await settle();
+    expect(contentsOf(late)).toEqual([]);
+    expect(contentsOf(old)).toEqual([]);
+    const next = await plugin(SID, "win2");
+    expect(await arrived(clock, next, 1)).toEqual(["held one\n\nheld two"]);
+    expect(contentsOf(late)).toEqual([]);
+  });
+
+  test("a hello from the old window after the new one has connected changes nothing", async () => {
+    const clock = newClock();
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    const late = await wsClient(port);
+    clients.push(late);
+    pressMode("plan");
+    await modeStarted();
+    fake.pushUpdate(msg("held"));
+    await updatesHandled();
+    const next = await plugin(SID, "win2");
+    expect(await arrived(clock, next, 1)).toEqual(["held"]);
+    late.send(hello(SID, "late"));
+    await settle();
+    await passReadyDelay(clock);
+    await settle();
+    expect(contentsOf(next)).toEqual(["held"]);
+    expect(contentsOf(late)).toEqual([]);
+    expect(contentsOf(old)).toEqual([]);
+  });
+
   test("a mode press takes a waiting batch and an open replay before the window can get them", async () => {
     const clock = newClock();
     await start({ timers: clock, idleMs: 0 });

@@ -398,7 +398,8 @@ the sound of the results and the `/cleanup` texts are in `cleanup-design.md`. `/
   released when none of them is open any more, or when a window that was not among them connects. A hello from a
   recorded connection (a late hello of the dying window) never gets held items, however long that connection stays
   open: the process has ended, so the OS closes its socket, and a bound would have to either deliver to the closing
-  window or give up the items. With no window at all, a message that arrives later is a normal start.
+  window or give up the items. A `/mode` restart records the same set (a plain start records an empty one): a hello
+  from a recorded connection does not end its hold, only a window outside the set does. With no window at all, a message that arrives later is a normal start.
 - Known limit: the held items live in memory only. A hub restart while items are held loses them, although the Telegram
   update offset is already saved. Persisting the hold is not built.
 - Nothing held is dropped. If rig fails (`rig` missing, an error answer, a launch that never connects within

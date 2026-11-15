@@ -292,7 +292,7 @@ test("each specified work category blocks update exit, while a pending shell doe
     { name: "permissions", add: () => { hub["permissions"].set("p", { sessionId: "session", requestId: "p", text: "question", entities: [] }); }, remove: () => hub["permissions"].clear() },
     { name: "questions", add: () => { hub["polls"].set("q", pollOf()); }, remove: () => hub["polls"].clear() },
     { name: "running shell or rig", add: () => { must(hub["execs"])["recs"].push({ id: "pending", shell: "bash", sessionId: "session", messageId: 0, text: "work", cwd: f.dir, state: "running", offset: 0, reported: false }); }, remove: () => { must(hub["execs"])["recs"] = []; } },
-    { name: "launch", add: () => { hub["launches"].set("session", { account: "", held: [], timer }); }, remove: () => hub["launches"].clear() },
+    { name: "launch", add: () => { hub["launches"].set("session", { account: "", held: [], old: new Set(), timer }); }, remove: () => hub["launches"].clear() },
     { name: "held input", add: () => { hub["retained"].set("session", [held]); }, remove: () => hub["retained"].clear() },
     { name: "replay", add: () => { hub["replays"].set("session", { held: [held], inFlight: [], after: [] }); }, remove: () => hub["replays"].clear() },
     { name: "session outbox", add: () => { hub["outbox"].add("waiting", "session", [{ text: "waiting", silent: true }]); }, remove: () => { for (const item of hub["outbox"].items()) hub["outbox"].remove(item.id); } },
