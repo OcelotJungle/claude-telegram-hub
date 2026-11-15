@@ -20,7 +20,7 @@ function fixture(found = true) {
   const clock = manualClock();
   const rig = new Rig({ find: () => found ? "rig-file" : undefined, platform: platformFor("win32"),
     run: async invocation => { calls.push(invocation.argv); return output; }, warn: text => { warnings.push(text); },
-    messages: () => catalogOf("en"), setTimer: clock.set, clearTimer: clock.clear });
+    messages: () => catalogOf("en"), setTimer: clock.setTimer, clearTimer: clock.clearTimer });
   return { rig, warnings, calls, output: (next: RigOutput) => { output = next; } };
 }
 
@@ -66,7 +66,7 @@ function switchable(run: (signal?: AbortSignal) => Promise<RigOutput>, windowsPa
   const clock = manualClock();
   const warnings: string[] = [];
   const rig = new Rig({ find: () => windowsPath, platform: platformFor("win32"), run: (_invocation, signal) => run(signal), warn: text => { warnings.push(text); },
-    messages: () => catalogOf(language), setTimer: clock.set, clearTimer: clock.clear });
+    messages: () => catalogOf(language), setTimer: clock.setTimer, clearTimer: clock.clearTimer });
   return { rig, clock, warnings, setLanguage: (next: Language) => { language = next; } };
 }
 

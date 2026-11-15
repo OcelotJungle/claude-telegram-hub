@@ -16,6 +16,7 @@ import { en } from "../src/shared/i18n/en.ts";
 import { ru } from "../src/shared/i18n/ru.ts";
 import { notifies } from "../src/shared/notification.ts";
 import { platformFor } from "../src/shared/platform.ts";
+import { realTimers } from "../src/shared/timers.ts";
 import { memLogger, must, tempDir, waitFor } from "./helpers.ts";
 
 const SID = "s1";
@@ -100,7 +101,7 @@ function setup(o: { messages?: () => Messages; dir?: string; sendOnSent?: boolea
     },
     machineCard: (_record, text, final) => void machineCards.push({ text, final }),
     machineFile: (_record, path, kind) => void machineFiles.push({ path, kind }),
-    now: () => clock.now,
+    timers: { ...realTimers, now: () => clock.now },
     checkMs: CHECK_MS,
     cardMs: CARD_MS,
     maxAgeMs: 2 * MIN_MS,

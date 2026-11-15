@@ -11,6 +11,7 @@ import { open, readdir, readFile, rename, stat, unlink, writeFile } from "fs/pro
 import { basename, dirname, join } from "path";
 import { z } from "zod";
 import { field, isObject, str } from "../shared/guards.ts";
+import { realTimers } from "../shared/timers.ts";
 
 export const KEEP_BACKUPS = 3;
 const CHUNK_BYTES = 1024 * 1024;
@@ -60,13 +61,14 @@ export type CleanupIo = {
   chunkBytes?: number;
   rename?: (from: string, to: string) => Promise<void>;
   size?: (path: string) => Promise<number>;
+  sleep?: (ms: number) => Promise<void>;
 };
 type Io = Required<CleanupIo>;
 
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 
 function ioOf(io: CleanupIo): Io {
-  return { chunkBytes: io.chunkBytes ?? CHUNK_BYTES, rename: io.rename ?? rename, size: io.size ?? (async p => (await stat(p)).size) };
+  return { chunkBytes: io.chunkBytes ?? CHUNK_BYTES, rename: io.rename ?? rename, size: io.size ?? (async p => (await stat(p)).size), sleep: io.sleep ?? realTimers.sleep };
 }
 
 export async function cleanTranscript(path: string, now: number, opts: CleanupIo = {}): Promise<CleanupResult> {
@@ -253,7 +255,7 @@ async function replace(tmp: string, path: string, io: Io): Promise<void> {
       return;
     } catch (e) {
       if (attempt >= RENAME_TRIES || !BUSY_CODES.includes(field(e, "code"))) throw e;
-      await new Promise(resolve => setTimeout(resolve, RENAME_RETRY_MS));
+      await io.sleep(RENAME_RETRY_MS);
     }
   }
 }

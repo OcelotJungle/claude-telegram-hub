@@ -20,6 +20,7 @@ import type { ExitGate } from "./exit-gate.ts";
 import type { Platform } from "../shared/platform.ts";
 import type { MachineCommand, RigInvocation, RigOutput } from "./rig.ts";
 import type { MachineDestination, RigConfirmation } from "./machine-outbox.ts";
+import type { Timers } from "../shared/timers.ts";
 
 import { randomUUID } from "crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync } from "fs";
@@ -57,6 +58,7 @@ import { formatPermission } from "./format-permission.ts";
 import { exitGate } from "./exit-gate.ts";
 import { MAX_RECONNECT_PAUSE_MS } from "../shared/reconnect.ts";
 import { PLATFORM } from "../shared/platform.ts";
+import { realTimers } from "../shared/timers.ts";
 import { featureText, findRig, Rig, rigAction, rigErrorText, runRig, statusText } from "./rig.ts";
 import { confirmationPromptId, MachineOutbox } from "./machine-outbox.ts";
 import { RigEvents, RIG_POLL_MS } from "./rig-events.ts";
@@ -243,8 +245,8 @@ export type HubOptions = {
   projectsDir?: string;
   // Runs a launch command; by default a detached process.
   spawn?(command: string[]): void | Promise<void>;
-  setTimer?(fn: () => void, ms: number): ReturnType<typeof setTimeout>;
-  clearTimer?(timer: ReturnType<typeof setTimeout>): void;
+  // The clock and every timer of the hub; tests drive them by hand.
+  timers?: Timers;
   readyDelayMs?: number;
   stopTimeoutMs?: number;
   // /cleanup: how long it waits for the compact, for Claude Code to exit,
@@ -254,8 +256,6 @@ export type HubOptions = {
   cleanupExitMs?: number;
   cleanupSettleMs?: number;
   exitPollMs?: number;
-  now?(): number;
-  sleep?(ms: number): Promise<void>;
   isAlive?(pid: number): boolean;
   cleanTranscript?: typeof cleanTranscript;
   // A window in this config dir runs on the default login, whose account is
@@ -428,9 +428,17 @@ export class Hub {
   private featureRefresh: Promise<void> | undefined;
   private featureRefreshAgain = false;
   private updatesInFlight = 0;
+  // Fire-and-forget work still running, and what the hub has taken in so far: the tests' proof that it has handled all that was sent to it.
+  private spawned = new Set<Promise<unknown>>();
+  private messagesFrom = new WeakMap<WS, number>();
+  private messagesTo = new WeakMap<WS, number>();
+  private requestsTaken = 0;
   private disableConfirmations = new Map<string, RigConfirmation>();
 
+  private timers: Timers;
+
   constructor(private opts: HubOptions) {
+    this.timers = opts.timers ?? realTimers;
     this.store = new SessionStore(opts.sessionsFile);
     this.log = opts.log;
     this.outbox = new Outbox(opts.outboxFile, opts.log);
@@ -444,10 +452,10 @@ export class Hub {
       // The commit of the code that was loaded: the service script fixes it before `bun` starts; without it HEAD at start is the best guess.
       const started = startedCommit(process.env) ?? head();
       this.rigLifecycle = new RigLifecycle({ dir: opts.rigDir, head, started: () => started,
-        now: opts.now ?? Date.now, idle: () => this.rigIdle(),
+        now: () => this.timers.now(), idle: () => this.rigIdle(),
         notice: (id, text) => { const group = opts.config().groupId; if (group) this.machineOutbox.post(id, { chatId: group }, text); },
         // Stopping first hands waiting answers and open polls back and flushes batches; the exit happens even if that fails.
-        exit: code => { void this.stop().catch(error => this.log.warn(`stop before restart: ${String(error)}`)).then(() => opts.onExit(code)); },
+        exit: code => { this.spawn(this.stop().catch(error => this.log.warn(`stop before restart: ${String(error)}`)).then(() => opts.onExit(code))); },
         warn: text => this.log.warn(text), messages: () => this.m() });
       this.rigEvents = new RigEvents({ dir: opts.rigDir, stateDir: dirname(opts.outboxFile), running: () => this.running,
         available: () => this.running && this.botReady && Boolean(opts.config().groupId),
@@ -494,7 +502,7 @@ export class Hub {
         notice: (sid, text, kind) => this.notice(sid, text, kind),
         sendFile: (sid, path, name, kind) => this.sendExecFile(sid, path, name, kind),
         report: (sid, content, meta, onSent) => this.reportExec(sid, { content, meta, onSent }),
-        now: opts.now ?? Date.now,
+        timers: this.timers,
         checkMs: opts.execCheckMs ?? EXEC_CHECK_MS,
         cardMs: opts.execCardMs ?? EXEC_CARD_MS,
         maxAgeMs: opts.execMaxAgeMs ?? EXEC_MAX_AGE_MS,
@@ -507,7 +515,7 @@ export class Hub {
         machineCard: (record, text, final, kind, buttons) => {
           if (record.destination) this.machineOutbox.post(`rig-${record.id}`, record.destination, text, !notifies(kind), buttons, true);
           if (record.destination && final && kind !== "info") this.machineOutbox.post(`rig-failed-${record.id}`, record.destination, text.split("\n").slice(0, 2).join("\n"), false);
-          if (this.botReady && opts.api) void this.machineOutbox.flush(opts.api);
+          if (this.botReady && opts.api) this.spawn(this.machineOutbox.flush(opts.api));
         },
         machineFile: (record, path, kind) => {
           const id = `rig-log-${record.id}`;
@@ -548,18 +556,18 @@ export class Hub {
     this.log.info(`hub listening on 127.0.0.1:${this.port}`);
     if (this.outbox.size) this.log.info(`${this.outbox.size} queued piece(s) left by the previous hub — delivering`);
     for (const item of this.outbox.items()) if (item.files) this.fileMessages.set(messageOf(item.id), { errors: [] });
-    for (const sid of this.outbox.sessions()) void this.pump(sid);
+    for (const sid of this.outbox.sessions()) this.spawn(this.pump(sid));
     this.ingestSpool();
-    this.spoolTimer = setInterval(() => this.ingestSpool(), this.opts.spoolScanMs ?? SPOOL_SCAN_MS);
-    this.typingTimer = setInterval(() => {
+    this.spoolTimer = this.timers.setRepeat(() => this.ingestSpool(), this.opts.spoolScanMs ?? SPOOL_SCAN_MS);
+    this.typingTimer = this.timers.setRepeat(() => {
       for (const ws of this.conns) if (ws.data.busy) this.showTyping(ws);
     }, this.opts.typingEveryMs ?? TYPING_EVERY_MS);
     // Before armIdle: commands still running keep the hub up.
     this.execs?.start();
     // The language first: the features and the menu are registered in it.
     this.machineQueries++;
-    void this.readLanguage().then(() => this.refreshFeatures()).finally(() => this.endMachineQuery());
-    void this.rigTick();
+    this.spawn(this.readLanguage().then(() => this.refreshFeatures()).finally(() => this.endMachineQuery()));
+    this.spawn(this.rigTick());
     this.armIdle();
     if (this.opts.api) void this.pollLoop(this.opts.api);
     else this.log.error("no TELEGRAM_BOT_TOKEN — not polling Telegram");
@@ -586,8 +594,8 @@ export class Hub {
     // A question still being sent shows the outcome right after its send.
     await Promise.allSettled([...this.questionSends]);
     if (this.idleTimer) this.clearTimer(this.idleTimer);
-    if (this.spoolTimer) clearInterval(this.spoolTimer);
-    if (this.typingTimer) clearInterval(this.typingTimer);
+    if (this.spoolTimer) this.clearTimer(this.spoolTimer);
+    if (this.typingTimer) this.clearTimer(this.typingTimer);
     for (const queued of this.commands.values()) for (const e of queued) this.clearTimer(e.timer);
     for (const card of this.cards.values()) this.clearTimer(card.timer);
     for (const l of this.launches.values()) this.clearTimer(l.timer);
@@ -615,6 +623,7 @@ export class Hub {
       if (server.upgrade(req, { data: {} })) return undefined;
       return new Response("upgrade required", { status: 426 });
     }
+    this.requestsTaken++;
     if (url.pathname === "/health") return Response.json({ ok: true, pid: process.pid });
     if (url.pathname === "/hook" && req.method === "POST") {
       const body = hookBody.safeParse(await req.json().catch(() => undefined));
@@ -782,7 +791,7 @@ export class Hub {
       if (ws.data.exitingPid !== undefined || this.stops.has(sid) || this.modeRestarts.has(sid) || this.dyingHeld.has(sid)) this.gateExit(sid, ws.data.exitingPid);
       this.stopping.delete(sid);
       // Without its window the session cannot take an answer any more.
-      for (const p of this.polls.values()) if (p.sessionId === sid) void this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal);
+      for (const p of this.polls.values()) if (p.sessionId === sid) this.spawn(this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal));
     }
     const cleanup = sid ? this.cleanups.get(sid) : undefined;
     if (sid && cleanup && !this.connOf(sid)) {
@@ -791,7 +800,7 @@ export class Hub {
         const t = this.stops.get(sid);
         if (t) this.clearTimer(t);
         this.stops.delete(sid);
-        void this.finishCleanup(sid, cleanup, ws.data.exitingPid);
+        this.spawn(this.finishCleanup(sid, cleanup, ws.data.exitingPid));
       } else {
         this.log.info(`window for session ${sid} closed while compacting for /cleanup; /cleanup dropped`);
         this.cleanupOutcome(sid, cleanup, this.m().cleanupWindowClosed, "warning", "warning");
@@ -854,12 +863,12 @@ export class Hub {
     if (!this.idleExpired || !this.running || this.conns.size > 0 || this.deliverable() > 0 || this.machineOutbox.size > 0 || this.machineOutbox.busy || this.alwaysOn()) return;
     if (this.outbox.size) this.log.info(`no plugins connected — exiting; ${this.outbox.size} queued piece(s) wait on disk until the setup is fixed`);
     else this.log.info("no plugins connected — exiting");
-    void this.stop().then(() => this.opts.onExit());
+    this.spawn(this.stop().then(() => this.opts.onExit()));
   }
 
   private send(ws: WS, msg: HubToPlugin): void {
     try {
-      ws.send(JSON.stringify(msg));
+      if (ws.send(JSON.stringify(msg)) !== 0) this.messagesTo.set(ws, (this.messagesTo.get(ws) ?? 0) + 1);
     } catch {}
   }
 
@@ -879,7 +888,7 @@ export class Hub {
         return;
       }
     }
-    this.pendingHooks.set(body.messagingSocket, { body, at: Date.now() });
+    this.pendingHooks.set(body.messagingSocket, { body, at: this.timers.now() });
   }
 
   private forwardHook(ws: WS, body: HookBody): void {
@@ -889,6 +898,7 @@ export class Hub {
   // --- plugin messages -----------------------------------------------------
 
   private onMessage(ws: WS, raw: string): void {
+    this.messagesFrom.set(ws, (this.messagesFrom.get(ws) ?? 0) + 1);
     let json: unknown;
     try {
       json = JSON.parse(raw);
@@ -922,7 +932,7 @@ export class Hub {
         this.giveHeldResults(ws, msg.sessionId);
         const pending = this.pendingHooks.get(msg.windowKey);
         this.pendingHooks.delete(msg.windowKey);
-        if (pending && Date.now() - pending.at < HOOK_TTL_MS) this.forwardHook(ws, pending.body);
+        if (pending && this.timers.now() - pending.at < HOOK_TTL_MS) this.forwardHook(ws, pending.body);
         this.launched(ws, msg.sessionId);
         if (msg.busy) this.showTyping(ws);
         return;
@@ -934,7 +944,7 @@ export class Hub {
         return;
       }
       case "req":
-        void this.handleRequest(ws, msg);
+        this.spawn(this.handleRequest(ws, msg));
         return;
       // The plugin sends only text written while the mode was on, so it is
       // delivered whatever the mode is now. The ack goes once it is on disk.
@@ -954,7 +964,7 @@ ${msg.text}`);
         if (sid && this.store.get(sid)?.enabled) this.askPermission(sid, msg);
         return;
       case "title":
-        if (sid) void this.chain(sid, () => this.retitle(sid, msg.title));
+        if (sid) this.spawn(this.chain(sid, () => this.retitle(sid, msg.title)));
         return;
       case "card":
         this.onCard(msg);
@@ -1113,7 +1123,7 @@ ${msg.text}`);
     this.applyDefaultMode({ sessionId: msg.sessionId, cwd: msg.cwd, entrypoint, title: msg.title });
     this.store.setWhere(msg.sessionId, msg.cwd, account);
     const title = msg.title;
-    if (title) void this.chain(msg.sessionId, () => this.retitle(msg.sessionId, title));
+    if (title) this.spawn(this.chain(msg.sessionId, () => this.retitle(msg.sessionId, title)));
     this.pushState(msg.sessionId);
   }
 
@@ -1133,7 +1143,7 @@ ${msg.text}`);
     this.store.setEnabled(sessionId, on, byUser);
     this.pushState(sessionId);
     // With the mode off the user answers in the terminal, as on a timeout.
-    if (!on) for (const p of this.polls.values()) if (p.sessionId === sessionId) void this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal);
+    if (!on) for (const p of this.polls.values()) if (p.sessionId === sessionId) this.spawn(this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal));
     return on;
   }
 
@@ -1162,7 +1172,7 @@ ${msg.text}`);
         { text: this.m().permissionDeny, data: `p:${key}:deny` },
       ],
     ];
-    if (this.outbox.add(`perm-${key}`, sessionId, [{ text: f.text, silent: !notifies("action"), buttons, ...(f.entities.length ? { entities: f.entities } : {}) }])) void this.pump(sessionId);
+    if (this.outbox.add(`perm-${key}`, sessionId, [{ text: f.text, silent: !notifies("action"), buttons, ...(f.entities.length ? { entities: f.entities } : {}) }])) this.spawn(this.pump(sessionId));
   }
 
   // A button under a permission prompt: the answer goes to the session's
@@ -1195,20 +1205,20 @@ ${msg.text}`);
   // the window left, the hub stops). A newer poll of the session ends the old one.
   private askQuestion(sessionId: string, questions: AskQuestion[], signal: AbortSignal): Promise<QuestionDecision> {
     if (this.isStarting(sessionId) || this.dyingHeld.has(sessionId)) return Promise.resolve({ decision: "none" });
-    for (const old of this.polls.values()) if (old.sessionId === sessionId) void this.finishPoll(old, { decision: "none" }, this.m().pollMovedToTerminal);
+    for (const old of this.polls.values()) if (old.sessionId === sessionId) this.spawn(this.finishPoll(old, { decision: "none" }, this.m().pollMovedToTerminal));
     const key = randomUUID().replaceAll("-", "").slice(0, PERMISSION_KEY_CHARS);
     return new Promise(resolve => {
       const p: Poll = { key, sessionId, questions, answers: {}, index: 0, checked: new Set(), messageIds: [], outcomes: [], taken: [], done: false, resolve };
       this.polls.set(key, p);
       if (signal.aborted) {
-        void this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal);
+        this.spawn(this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal));
         return;
       }
-      signal.addEventListener("abort", () => void this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal), { once: true });
+      signal.addEventListener("abort", () => this.spawn(this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal)), { once: true });
       this.log.info(`question poll ${key} for session ${sessionId}: ${questions.length} question(s)`);
-      void this.catchUp(sessionId, key).then(() => {
+      this.spawn(this.catchUp(sessionId, key).then(() => {
         if (!p.done) this.queueQuestion(p);
-      });
+      }));
     });
   }
 
@@ -1234,7 +1244,7 @@ ${msg.text}`);
   private queueQuestion(p: Poll): void {
     const f = questionText(this.m(), p.questions, p.index);
     const piece = { text: f.text, silent: !notifies("action"), buttons: questionButtons(this.m(), p), ...(f.entities.length ? { entities: f.entities } : {}) };
-    if (this.outbox.add(`poll:${p.key}:${p.index}`, p.sessionId, [piece])) void this.pump(p.sessionId);
+    if (this.outbox.add(`poll:${p.key}:${p.index}`, p.sessionId, [piece])) this.spawn(this.pump(p.sessionId));
   }
 
   private async finishPoll(p: Poll, decision: QuestionDecision, outcome: string): Promise<void> {
@@ -1285,7 +1295,7 @@ ${msg.text}`);
     const known = parsed ? this.polls.get(parsed.key) : undefined;
     // Nobody is left to take the answer: the question moves to the terminal and the button is stale.
     const closed = known && !this.connOf(known.sessionId);
-    if (known && closed) void this.finishPoll(known, { decision: "none" }, this.m().pollMovedToTerminal);
+    if (known && closed) this.spawn(this.finishPoll(known, { decision: "none" }, this.m().pollMovedToTerminal));
     const p = closed ? undefined : known;
     const q = p?.questions[p.index];
     const action = parsed?.action;
@@ -1386,7 +1396,7 @@ ${msg.text}`);
     this.saveCards();
     const [first] = formattedPieces({ text, entities });
     // The outbox remembers sent ids: a card sent anew needs a new one.
-    if (first && this.outbox.add(`card-${randomUUID()}`, sessionId, [{ ...first, ...(kind ? { silent: !notifies(kind) } : {}), card: key, ...(replyTo ? { cardReplyTo: `${sessionId}:${replyTo}` } : {}) }])) void this.pump(sessionId);
+    if (first && this.outbox.add(`card-${randomUUID()}`, sessionId, [{ ...first, ...(kind ? { silent: !notifies(kind) } : {}), card: key, ...(replyTo ? { cardReplyTo: `${sessionId}:${replyTo}` } : {}) }])) this.spawn(this.pump(sessionId));
   }
 
   // On the card's creation, first send and end: its text in between is the
@@ -1423,16 +1433,16 @@ ${msg.text}`);
     card.timer = this.setTimer(
       () => {
         card.timer = undefined;
-        void this.editCard(key, card);
+        this.spawn(this.editCard(key, card));
       },
-      Math.max(0, at - Date.now()),
+      Math.max(0, at - this.timers.now()),
     );
   }
 
   private async editCard(key: string, card: Card): Promise<void> {
     if (!this.running || card.messageId === undefined || !this.opts.api) return;
     // The session's text goes first; the card takes a later slot.
-    if (this.pumping.size || this.opts.api.floodEndsAt() > Date.now()) return this.cardTimer(key, card, Date.now());
+    if (this.pumping.size || this.opts.api.floodEndsAt() > this.timers.now()) return this.cardTimer(key, card, this.timers.now());
     const shownVersion = { text: card.text, entities: card.entities };
     const f = cardFormat(shownVersion);
     card.editing = true;
@@ -1452,7 +1462,7 @@ ${msg.text}`);
       } else this.log.warn(`editing subagent card ${key} failed, retrying: ${e instanceof Error ? e.message : e}`);
     } finally {
       card.editing = false;
-      card.lastEdit = Date.now();
+      card.lastEdit = this.timers.now();
     }
     if (this.cards.get(key) === card) this.scheduleCardEdit(key, card);
   }
@@ -1470,7 +1480,7 @@ ${msg.text}`);
       return;
     }
     const pieces = (markdown ? markdownPieces(text) : textPieces(text, false)).map((p, i) => ({ ...p, silent: !(notify && i === 0), ...(i === 0 && replaces ? { resolution: { id: `cmd-${replaces.id}#0`, kind: replaces.kind } } : {}), ...(i === 0 && awaitsResult ? { keepId: true as const } : {}) }));
-    if (pieces.length && this.outbox.add(sourceId, sessionId, pieces)) void this.pump(sessionId);
+    if (pieces.length && this.outbox.add(sourceId, sessionId, pieces)) this.spawn(this.pump(sessionId));
   }
 
   // One queue item per Telegram send, so a retry never repeats an album that
@@ -1494,7 +1504,7 @@ ${msg.text}`);
     const pieces = albums(msg.files.map(f => ({ ...f, kind: msg.asDocument ? "document" : kindOf(f.name, f.size) }))).map((files, i) => filesPiece(files, i === 0 ? caption : undefined, msg.notify && i === 0));
     if (this.outbox.add(msg.id, msg.sessionId, pieces)) {
       this.fileMessages.set(msg.id, { errors: [], ws });
-      void this.pump(msg.sessionId);
+      this.spawn(this.pump(msg.sessionId));
     } else if (!this.outbox.hasMessage(msg.id)) {
       // Sent before; the plugin re-sent it after a reconnect.
       this.filesSent(msg.id, msg.sessionId, [], ws);
@@ -1640,7 +1650,7 @@ ${msg.text}`);
       const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, f.text, true, f.entities, buttons, replyTo));
       card.messageId = sent.message_id;
       card.shown = shownVersion;
-      card.lastEdit = Date.now();
+      card.lastEdit = this.timers.now();
       this.saveCards();
       this.scheduleCardEdit(item.card, card);
       return;
@@ -1726,7 +1736,7 @@ ${msg.text}`);
     // A question the topic cannot show is asked in the terminal.
     const pollKey = item.notice ? undefined : POLL_ITEM.exec(item.id)?.[1];
     const poll = pollKey ? this.polls.get(pollKey) : undefined;
-    if (poll) void this.finishPoll(poll, { decision: "none" }, this.m().pollMovedToTerminal);
+    if (poll) this.spawn(this.finishPoll(poll, { decision: "none" }, this.m().pollMovedToTerminal));
     if (item.notice) {
       this.outbox.remove(item.id);
       this.settled(item);
@@ -1734,7 +1744,6 @@ ${msg.text}`);
   }
 
   private sleep(ms: number): Promise<void> {
-    if (this.opts.sleep) return this.opts.sleep(ms);
     return new Promise(resolve => {
       const onAbort = () => {
         this.clearTimer(timer);
@@ -1815,7 +1824,7 @@ ${msg.text}`);
             this.botId = me.id;
             // Updates before it were handled by an earlier hub; Telegram would send them again.
             if (this.opts.pollOffsetFile) offset = loadPollOffset(this.opts.pollOffsetFile, me.id);
-            void this.registerCommands(api);
+            this.spawn(this.registerCommands(api));
           }
           online = wasOnline = true;
           this.botReady = true;
@@ -1828,7 +1837,7 @@ ${msg.text}`);
             return;
           }
           this.log.warn(`Telegram unreachable (${e}); still trying`);
-          await (this.opts.sleep ?? Bun.sleep)(this.opts.pollRetryBaseMs ?? POLL_RETRY_BASE_MS);
+          await this.timers.sleep(this.opts.pollRetryBaseMs ?? POLL_RETRY_BASE_MS);
           continue;
         }
       }
@@ -1851,7 +1860,7 @@ ${msg.text}`);
         const delay = Math.min((this.opts.pollRetryBaseMs ?? POLL_RETRY_BASE_MS) * failures, MAX_POLL_DELAY_MS);
         const conflict = e.code === 409;
         this.log.warn(`${conflict ? "getUpdates 409 Conflict — another poller uses this bot token" : `getUpdates failed: ${e}`}; retry in ${delay}ms`);
-        await (this.opts.sleep ?? Bun.sleep)(delay);
+        await this.timers.sleep(delay);
         continue;
       }
       for (const u of updates) {
@@ -1944,7 +1953,7 @@ ${msg.text}`);
     const role = pollRole(m, this.botUsername);
     if (role === "pass") return m;
     if (role === "cancel") {
-      void this.finishPoll(p, { decision: "deny", reason: CANCEL_REASON }, this.m().pollCancelled);
+      this.spawn(this.finishPoll(p, { decision: "deny", reason: CANCEL_REASON }, this.m().pollCancelled));
       // Answer messages still waiting reach the agent before this one.
       await this.takeAnswer(p.key);
       const plain = withoutInterrupt(m);
@@ -1968,11 +1977,11 @@ ${msg.text}`);
       g.messages.push(m);
       g.parts.push(part);
       this.clearTimer(g.timer);
-      g.timer = this.setTimer(() => void this.takeAnswer(p.key), quietMs);
+      g.timer = this.setTimer(() => this.spawn(this.takeAnswer(p.key)), quietMs);
       return;
     }
-    if (g) void this.takeAnswer(p.key);
-    const timer = this.setTimer(() => void this.takeAnswer(p.key), quietMs);
+    if (g) this.spawn(this.takeAnswer(p.key));
+    const timer = this.setTimer(() => this.spawn(this.takeAnswer(p.key)), quietMs);
     this.answerGroups.set(p.key, { api, poll: p, index: p.index, messages: [m], parts: [part], timer });
   }
 
@@ -2050,20 +2059,20 @@ ${msg.text}`);
       this.queueCommand(sessionId, cmd);
       return;
     }
-    if (isInterrupt(m)) void this.flushBatch(sessionId);
+    if (isInterrupt(m)) this.spawn(this.flushBatch(sessionId));
     const quietMs = this.opts.batchQuietMs ?? BATCH_QUIET_MS;
     const b = this.batches.get(sessionId);
     if (b) {
       b.messages.push(m);
       this.clearTimer(b.quietTimer);
-      b.quietTimer = this.setTimer(() => void this.flushBatch(sessionId), quietMs);
+      b.quietTimer = this.setTimer(() => this.spawn(this.flushBatch(sessionId)), quietMs);
       return;
     }
     this.batches.set(sessionId, {
       api,
       messages: [m],
-      quietTimer: this.setTimer(() => void this.flushBatch(sessionId), quietMs),
-      maxTimer: this.setTimer(() => void this.flushBatch(sessionId), this.opts.batchMaxMs ?? BATCH_MAX_MS),
+      quietTimer: this.setTimer(() => this.spawn(this.flushBatch(sessionId)), quietMs),
+      maxTimer: this.setTimer(() => this.spawn(this.flushBatch(sessionId)), this.opts.batchMaxMs ?? BATCH_MAX_MS),
     });
   }
 
@@ -2281,7 +2290,7 @@ ${msg.text}`);
     if (this.isStarting(sessionId)) return this.notice(sessionId, msg.sessionAlreadyStarting, "info");
     const requested = PERMISSION_MODES.find(mode => mode.toLowerCase() === args.toLowerCase());
     if (args && !requested) return this.notice(sessionId, msg.modeList({ modes: PERMISSION_MODES.join(", ") }), "info");
-    if (!requested) return void this.showModes(sessionId);
+    if (!requested) return this.spawn(this.showModes(sessionId));
     const current = this.knownMode(sessionId);
     if (current === requested) return this.notice(sessionId, msg.modeAlready({ mode: requested }), "info");
     const cfg = this.opts.config();
@@ -2347,7 +2356,7 @@ ${msg.text}`);
     const label = current === undefined ? msg.modeUnknown : current;
     const buttons = PERMISSION_MODES.map(mode => [{ text: `${current === mode ? "✅ " : ""}${mode}`, data: `m:${sessionId}:${mode}` }]);
     const text = known === undefined && current !== undefined ? msg.modeLastKnown({ mode: label }) : msg.modeCurrent({ mode: label });
-    if (this.outbox.add(`modes-${randomUUID()}`, sessionId, [{ text, silent: true, buttons }])) void this.pump(sessionId);
+    if (this.outbox.add(`modes-${randomUUID()}`, sessionId, [{ text, silent: true, buttons }])) this.spawn(this.pump(sessionId));
   }
 
   private terminate(sessionId: string, stopId?: string): void {
@@ -2421,7 +2430,7 @@ ${msg.text}`);
       silent: !notifies(kind),
       ...(index === 0 ? { resolution: { id: key, kind: outcome } } : {}),
     }));
-    if (this.outbox.add(`cleanup-result-${c.id}`, sessionId, pieces)) void this.pump(sessionId);
+    if (this.outbox.add(`cleanup-result-${c.id}`, sessionId, pieces)) this.spawn(this.pump(sessionId));
   }
 
   // /stop ends a compacting window at once, the /cleanup dropped and the
@@ -2790,7 +2799,7 @@ ${msg.text}`);
   private whenReady(fn: () => void | Promise<void>): void {
     const t = this.setTimer(() => {
       this.readyTimers.delete(t);
-      void fn();
+      this.spawn(Promise.resolve(fn()));
     }, this.opts.readyDelayMs ?? READY_DELAY_MS);
     this.readyTimers.add(t);
   }
@@ -2831,6 +2840,46 @@ ${msg.text}`);
   private endMachineQuery(): void {
     this.machineQueries--;
     this.armIdle();
+  }
+
+  // Runs work nobody awaits (a handler's follow-up, a timer's job). It is tracked so `busy` can tell
+  // whether any is left. A failure stays unhandled, as with a bare `void`.
+  private spawn(work: Promise<unknown>): void {
+    this.spawned.add(work);
+    void work.finally(() => this.spawned.delete(work));
+  }
+
+  // Test hook: what the hub has exchanged since it started. A test compares it with its own side:
+  // windows connected, messages taken from the open ones, messages written to them, and HTTP requests
+  // taken (not the socket upgrade).
+  intake(): { windows: number; messages: number; sent: number; requests: number } {
+    let messages = 0;
+    let sent = 0;
+    for (const ws of this.conns) {
+      messages += this.messagesFrom.get(ws) ?? 0;
+      sent += this.messagesTo.get(ws) ?? 0;
+    }
+    return { windows: this.conns.size, messages, sent, requests: this.requestsTaken };
+  }
+
+  // Test hook: the work the hub still has under way that ends by itself and may still produce output;
+  // empty when nothing is left. Waits on a user (an open poll, a busy window), on a deadline of a
+  // stopping or exiting session, and standing activity (spool scan, typing) are not work in this sense.
+  busy(): string[] {
+    const parts: [string, boolean][] = [
+      ["spawned work", this.spawned.size > 0],
+      ["updates in flight", this.updatesInFlight > 0],
+      ["machine commands", this.machineTasks.size > 0 || this.machineQueries > 0],
+      ["catch-ups", this.catchUps.size > 0],
+      ["question sends", this.questionSends.size > 0],
+      ["message batches", this.batches.size > 0 || this.batchSends.size > 0],
+      ["reactions", this.reactions.size > 0],
+      ["answer groups", this.answerGroups.size > 0],
+      ["pumps", this.pumping.size > 0],
+      ["replays", this.replays.size > 0],
+      ["card edits", [...this.cards.values()].some(card => card.editing)],
+    ];
+    return parts.filter(([, on]) => on).map(([name]) => name);
   }
 
   // A question or permission request counts only while its window is open: after it closes nobody can answer.
@@ -2881,7 +2930,7 @@ ${msg.text}`);
     } catch (error) { this.log.warn(`rig tick: ${String(error)}`); }
     finally {
       this.rigTickRunning = false;
-      if (this.running) this.rigTimer = this.setTimer(() => { void this.rigTick(); }, RIG_POLL_MS);
+      if (this.running) this.rigTimer = this.setTimer(() => { this.spawn(this.rigTick()); }, RIG_POLL_MS);
     }
   }
 
@@ -2949,7 +2998,7 @@ ${msg.text}`);
       return;
     }
     // Same age limit as /bash: an old button must not switch Telegram off. A confirmation without a time is from an older hub.
-    const now = this.opts.now ?? Date.now;
+    const now = () => this.timers.now();
     if (confirmation.sentAt === undefined || now() - confirmation.sentAt > (this.opts.execMaxAgeMs ?? EXEC_MAX_AGE_MS)) {
       this.disableConfirmations.delete(key);
       this.machineOutbox.deleteConfirmation(key);
@@ -3021,7 +3070,7 @@ ${msg.text}`);
     }
     const wasStarting = this.isStarting(sessionId);
     this.onModeCommand(sessionId, mode);
-    if (!wasStarting && this.isStarting(sessionId) && cfg.groupId) void api.removeKeyboard(cfg.groupId, press.messageId).catch(e => this.log.warn(`removing mode buttons failed: ${e}`));
+    if (!wasStarting && this.isStarting(sessionId) && cfg.groupId) this.spawn(api.removeKeyboard(cfg.groupId, press.messageId).catch(e => this.log.warn(`removing mode buttons failed: ${e}`)));
     await api.answerCallbackQuery(press.id).catch(e => this.log.warn(`answering a mode button failed: ${e}`));
   }
 
@@ -3066,14 +3115,11 @@ ${msg.text}`);
   }
 
   private setTimer(fn: () => void, ms: number): ReturnType<typeof setTimeout> {
-    if (this.opts.setTimer) return this.opts.setTimer(fn, ms);
-    return setTimeout(fn, ms);
+    return this.timers.setTimer(fn, ms);
   }
 
   private clearTimer(timer: ReturnType<typeof setTimeout> | undefined): void {
-    if (timer === undefined) return;
-    if (this.opts.clearTimer) this.opts.clearTimer(timer);
-    else clearTimeout(timer);
+    if (timer !== undefined) this.timers.clearTimer(timer);
   }
 
   private retainHeld(sessionId: string, held: Held[]): void {
@@ -3086,8 +3132,8 @@ ${msg.text}`);
 
   private capturePending(sessionId: string): void {
     for (const p of this.polls.values()) if (p.sessionId === sessionId) {
-      void this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal);
-      void this.takeAnswer(p.key);
+      this.spawn(this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal));
+      this.spawn(this.takeAnswer(p.key));
     }
     for (const entry of this.batchItems.get(sessionId) ?? []) {
       entry.captured = true;
@@ -3119,7 +3165,7 @@ ${msg.text}`);
     if (existing) return existing;
     if (pid === undefined) this.log.info(`session ${sessionId}: the Claude Code process is unknown; waiting for it to go`);
     const gate = exitGate(pid, {
-      now: this.opts.now ?? Date.now,
+      now: () => this.timers.now(),
       sleep: ms => this.sleep(ms),
       isAlive: this.opts.isAlive ?? isAlive,
       pollMs: this.opts.exitPollMs ?? EXIT_POLL_MS,
@@ -3159,20 +3205,20 @@ ${msg.text}`);
     mkdirSync(dirname(copy), { recursive: true });
     copyFileSync(path, copy);
     const file: OutFile = { path: copy, name, size: statSync(copy).size, kind: "document" };
-    if (this.outbox.add(`exec-${id}`, sessionId, [filesPiece([file], undefined, notifies(kind))])) void this.pump(sessionId);
+    if (this.outbox.add(`exec-${id}`, sessionId, [filesPiece([file], undefined, notifies(kind))])) this.spawn(this.pump(sessionId));
   }
 
   // A window on the default login does not name its account in its config
   // dir; cswap tells which account that login is.
   private askDefaultAccount(ws: WS, configDir: string | undefined): void {
     if (!this.hasAccounts() || !configDir || !isDefaultConfigDir(configDir, this.opts.defaultConfigDir ?? DEFAULT_CONFIG_DIR, this.opts.platform ?? PLATFORM)) return;
-    void (this.opts.defaultAccount ?? defaultLoginAccount)().then(account => {
+    this.spawn((this.opts.defaultAccount ?? defaultLoginAccount)().then(account => {
       const sid = ws.data.sessionId;
       if (!account || !sid) return this.log.warn(`window ${ws.data.windowKey}: the account of the default login is unknown`);
       this.log.info(`window ${ws.data.windowKey} runs on the default login, account ${account}`);
       ws.data.account = account;
       this.store.setWhere(sid, undefined, account);
-    });
+    }));
   }
 
   // The hub's own word in a session's topic, in order with the rest.
@@ -3211,7 +3257,7 @@ ${msg.text}`);
     const launched = this.m().sessionLaunched;
     if (notice.text === launched || !api || !groupId) return;
     notice.text = launched;
-    api.editMessageText(groupId, notice.id, launched).catch(e => this.log.warn(`editing start notice ${notice.id} failed: ${e}`));
+    this.spawn(api.editMessageText(groupId, notice.id, launched).catch(e => this.log.warn(`editing start notice ${notice.id} failed: ${e}`)));
   }
 
   private dropLaunchNotices(sessionId: string): void {
@@ -3220,7 +3266,7 @@ ${msg.text}`);
     const groupId = this.opts.config().groupId;
     if (!notices || !api || !groupId) return;
     this.launchNotices.delete(sessionId);
-    for (const { id } of notices) api.deleteMessage(groupId, id).catch(e => this.log.warn(`deleting start notice ${id} failed: ${e}`));
+    for (const { id } of notices) this.spawn(api.deleteMessage(groupId, id).catch(e => this.log.warn(`deleting start notice ${id} failed: ${e}`)));
   }
 
   // Photos inside are downloaded like a photo message; a photo that fails keeps

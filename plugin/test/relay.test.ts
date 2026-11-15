@@ -2,6 +2,7 @@ import type { TranscriptEvent } from "../src/transcript/parse.ts";
 
 import { describe, expect, test } from "bun:test";
 import { Relay, TURN_CLOSE_WAIT_MS, TURN_DECISION_MS } from "../src/transcript/relay.ts";
+import { realTimers } from "../src/shared/timers.ts";
 
 const own = (name: string) => /(^|__)tg_(enable|disable)$/.test(name);
 const text = (t: string, m = "m1"): TranscriptEvent => ({ kind: "text", text: t, messageId: m });
@@ -17,7 +18,7 @@ const PAUSE = { final: false } as const;
 function makeRelay(enabled = true) {
   const clock = { t: 1_000_000 };
   const finals: string[] = [];
-  const r = new Relay({ isOwnTool: own, onFinalClose: kind => finals.push(kind), now: () => clock.t });
+  const r = new Relay({ isOwnTool: own, onFinalClose: kind => finals.push(kind), timers: { ...realTimers, now: () => clock.t } });
   r.setEnabled(enabled);
   return { r, clock, finals };
 }

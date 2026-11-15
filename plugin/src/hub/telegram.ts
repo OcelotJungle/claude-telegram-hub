@@ -4,6 +4,7 @@ import type { Entity } from "../shared/markdown.ts";
 import type { OutFile } from "../shared/media.ts";
 import type { Priority } from "./pace.ts";
 import type { Block } from "./rich-out.ts";
+import type { Timers } from "../shared/timers.ts";
 
 import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -12,6 +13,7 @@ import { API_BASE } from "../shared/config.ts";
 import { field } from "../shared/guards.ts";
 import { nullLogger } from "../shared/log.ts";
 import { Pace } from "./pace.ts";
+import { realTimers } from "../shared/timers.ts";
 
 const MS_PER_SECOND = 1000;
 const MAX_ATTEMPTS = 5;
@@ -97,6 +99,8 @@ type ApiOptions = {
   networkRetryMs?: number;
   deadlineMs?: number;
   groupPace?: { count: number; perMs: number };
+  // The clock and the waits (flood, retries, pace); real ones when not given.
+  timers?: Timers;
 };
 
 // Calls that go on while the bot waits out a flood limit: polling, and
@@ -132,6 +136,7 @@ export class TelegramApi {
   // Until when Telegram asked the bot to wait (429 retry_after).
   private floodUntil = 0;
   private pace: Pace;
+  private timers: Timers;
 
   constructor(private opts: ApiOptions) {
     this.base = opts.base ?? API_BASE;
@@ -142,7 +147,8 @@ export class TelegramApi {
     this.sendAttemptTimeoutMs = opts.sendAttemptTimeoutMs ?? SEND_ATTEMPT_TIMEOUT_MS;
     this.networkRetryMs = opts.networkRetryMs ?? NETWORK_RETRY_MS;
     this.deadlineMs = opts.deadlineMs ?? DEADLINE_MS;
-    this.pace = new Pace(opts.groupPace?.count ?? GROUP_POSTS, opts.groupPace?.perMs ?? GROUP_POSTS_PER_MS);
+    this.timers = opts.timers ?? realTimers;
+    this.pace = new Pace(opts.groupPace?.count ?? GROUP_POSTS, opts.groupPace?.perMs ?? GROUP_POSTS_PER_MS, this.timers);
   }
 
   // When the current flood wait ends; in the past if there is none.
@@ -160,15 +166,15 @@ export class TelegramApi {
   async call<T>(method: string, params: Body, result: z.ZodType<T>, o: { signal?: AbortSignal; retry?: boolean; waitMs?: number; sends?: boolean } = {}): Promise<T> {
     const priority = PACED[method];
     if (priority) await this.pace.take(priority);
-    const deadline = Date.now() + this.deadlineMs;
+    const deadline = this.timers.now() + this.deadlineMs;
     const timeoutMs = (o.sends ? this.sendAttemptTimeoutMs : this.attemptTimeoutMs) + (o.waitMs ?? 0);
     let apiFailures = 0;
     let netFailures = 0;
     for (;;) {
-      const flood = FLOOD_FREE.has(method) ? 0 : this.floodUntil - Date.now();
+      const flood = FLOOD_FREE.has(method) ? 0 : this.floodUntil - this.timers.now();
       if (flood > 0) {
         if (o.retry === false) throw new TelegramError(429, "Too Many Requests: waiting out the flood limit", Math.ceil(flood / MS_PER_SECOND));
-        await Bun.sleep(flood);
+        await this.timers.sleep(flood);
       }
       let wait: number;
       try {
@@ -176,20 +182,20 @@ export class TelegramApi {
         if (netFailures) this.log.info(`telegram ${method} got through after ${netFailures} failed attempt(s)`);
         return answer;
       } catch (e) {
-        if (e instanceof TelegramError && e.code === 429 && e.retryAfter != null) this.floodUntil = Math.max(this.floodUntil, Date.now() + e.retryAfter * MS_PER_SECOND);
+        if (e instanceof TelegramError && e.code === 429 && e.retryAfter != null) this.floodUntil = Math.max(this.floodUntil, this.timers.now() + e.retryAfter * MS_PER_SECOND);
         if (o.retry === false || o.signal?.aborted) throw e;
         if (e instanceof TelegramError) {
           if (!(e.code === 429 || e.code >= 500) || ++apiFailures >= this.maxAttempts) throw e;
           wait = e.retryAfter != null ? e.retryAfter * MS_PER_SECOND : Math.min(this.baseDelayMs * 2 ** (apiFailures - 1), MAX_DELAY_MS);
           this.log.warn(`telegram ${method} failed (${e.message}), retry ${apiFailures}/${this.maxAttempts - 1} in ${wait}ms`);
         } else {
-          if (Date.now() + this.networkRetryMs >= deadline) throw e;
+          if (this.timers.now() + this.networkRetryMs >= deadline) throw e;
           wait = this.networkRetryMs;
           // One line per streak, not one per attempt.
           if (++netFailures === 1) this.log.warn(`telegram ${method}: no connection (${e instanceof Error ? e.message : e}), retrying`);
         }
       }
-      await Bun.sleep(wait);
+      await this.timers.sleep(wait);
     }
   }
 

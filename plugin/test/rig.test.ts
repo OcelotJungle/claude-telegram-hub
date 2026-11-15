@@ -21,7 +21,7 @@ function fixture(platform = "win32", found = true) {
   const clock = manualClock();
   const rig = new Rig({ find: () => found ? "rig-file" : undefined, platform: platformFor(platform), messages: () => en,
     run: async invocation => { calls.push(invocation.argv); return output; }, warn: text => { warnings.push(text); },
-    setTimer: clock.set, clearTimer: clock.clear });
+    setTimer: clock.setTimer, clearTimer: clock.clearTimer });
   return { rig, warnings, calls, clock, output: (next: RigOutput) => { output = next; }, found: (next: boolean) => { found = next; } };
 }
 
@@ -123,7 +123,7 @@ describe("rig contract", () => {
     const f = fixture();
     let signal: AbortSignal | undefined;
     const hung = new Rig({ find: () => "rig-file", platform: platformFor("linux"), messages: () => en, warn: text => { f.warnings.push(text); },
-      run: (_invocation, abort) => { signal = abort; return new Promise<RigOutput>(() => {}); }, setTimer: f.clock.set, clearTimer: f.clock.clear });
+      run: (_invocation, abort) => { signal = abort; return new Promise<RigOutput>(() => {}); }, setTimer: f.clock.setTimer, clearTimer: f.clock.clearTimer });
     let settled: string | undefined;
     void hung.status().then(result => { settled = result.ok ? "ok" : rigErrorText(result.error, en); });
     await f.clock.advance(RIG_QUERY_LIMIT_MS - 1);
@@ -140,7 +140,7 @@ describe("rig contract", () => {
   test("a rig path with a percent sign is refused on Windows, where cmd.exe would expand it", async () => {
     const run = async () => ({ code: 0, stdout: featuresReply([]), stderr: "" });
     const clock = manualClock();
-    const make = (windows: string) => new Rig({ find: () => "C:\\100%\\rig.cmd", platform: platformFor(windows), messages: () => en, run, warn: () => {}, setTimer: clock.set, clearTimer: clock.clear });
+    const make = (windows: string) => new Rig({ find: () => "C:\\100%\\rig.cmd", platform: platformFor(windows), messages: () => en, run, warn: () => {}, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
     const refused = make("win32").invocation(["update"]);
     expect(refused.ok).toBe(false);
     if (!refused.ok) expect(rigErrorText(refused.error, en)).toContain("%");

@@ -3,6 +3,7 @@ import type { VideoTools } from "../src/hub/video.ts";
 import type { Compaction, Usage } from "../src/mod/commands.ts";
 import type { Config } from "../src/shared/config.ts";
 import type { MessageKind } from "../src/shared/notification.ts";
+import type { Timers } from "../src/shared/timers.ts";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "fs";
@@ -22,7 +23,7 @@ import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { toTelegram } from "../src/shared/markdown.ts";
 import { notifies } from "../src/shared/notification.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
-import { hasFfmpeg, makeVideo, memLogger, must, NO_PACE, tempDir, waitFor, wsClient } from "./helpers.ts";
+import { hasFfmpeg, makeVideo, memLogger, must, NO_PACE, settled, tempDir, waitFor, wsClient } from "./helpers.ts";
 import { manualClock } from "./manual-clock.ts";
 import { fullInfo, neverSleep } from "./info-fixtures.ts";
 import { PLATFORM, platformFor } from "../src/shared/platform.ts";
@@ -53,6 +54,7 @@ const LONG_GRACE_MS = 2000;
 // Topic messages that come together go as one; a short quiet window keeps
 // the other tests quick.
 const BATCH_QUIET_MS = 5;
+const READY_DELAY_MS = 50;
 // Time for the hub to take in a sent question's message id: only messages
 // after it answer the question. A slow send keeps a question unsent.
 const SHOWN_MS = 50;
@@ -87,8 +89,7 @@ type HubExtras = {
   cleanupExitMs?: number;
   cleanupSettleMs?: number;
   exitPollMs?: number;
-  now?(): number;
-  sleep?(ms: number): Promise<void>;
+  timers?: Timers;
   cleanTranscript?: typeof cleanTranscript;
   catchUpMs?: number;
   rigDir?: string;
@@ -126,7 +127,7 @@ async function startHub(o: StartOptions = {}): Promise<void> {
     cardGapMs: o.cardGapMs ?? 0,
     typingEveryMs: o.typingEveryMs ?? 50,
     reactionDelayMs: o.reactionDelayMs ?? 50,
-    readyDelayMs: 50,
+    readyDelayMs: READY_DELAY_MS,
     batchQuietMs: o.batchQuietMs ?? BATCH_QUIET_MS,
     catchUpMs: o.catchUpMs ?? CATCH_UP_MS,
     ...(o.batchMaxMs ? { batchMaxMs: o.batchMaxMs } : {}),
@@ -138,8 +139,7 @@ async function startHub(o: StartOptions = {}): Promise<void> {
     ...(o.cleanupExitMs ? { cleanupExitMs: o.cleanupExitMs } : {}),
     ...(o.cleanupSettleMs ? { cleanupSettleMs: o.cleanupSettleMs } : {}),
     ...(o.exitPollMs ? { exitPollMs: o.exitPollMs } : {}),
-    ...(o.now ? { now: o.now } : {}),
-    ...(o.sleep ? { sleep: o.sleep } : {}),
+    ...(o.timers ? { timers: o.timers } : {}),
     ...(o.cleanTranscript ? { cleanTranscript: o.cleanTranscript } : {}),
     ...(o.rigDir ? { rigDir: o.rigDir, hubCommit: () => "invented-commit", repository: dir } : {}),
     ...(o.findRig ? { findRig: o.findRig } : {}),
@@ -161,6 +161,9 @@ async function startHub(o: StartOptions = {}): Promise<void> {
   if (!hub.start()) throw new Error("hub did not start");
   port = hub.port;
 }
+
+// Resolves when the hub has handled everything sent so far: use it instead of a sleep before "nothing happened".
+const settle = () => settled(hub, { fake });
 
 const PROFILE = "C:\\Users\\me\\.claude-swap-backup\\sessions\\2-me_gmail.com";
 const hello = (sessionId: string, windowKey = `win-${sessionId}`) => ({ type: "hello", v: PROTOCOL_VERSION, windowKey, sessionId, cwd: CWD, configDir: PROFILE, reportsSeen: true });
@@ -2192,7 +2195,7 @@ describe("starting and stopping sessions", () => {
     const clock = manualClock();
     let alive = true;
     config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c), isAlive: () => alive, cleanupExitMs: MODE_SETTLE_MS, exitPollMs: MODE_SETTLE_MS, now: clock.now, sleep: clock.sleep });
+    await startHub({ spawn: c => void spawned.push(c), isAlive: () => alive, cleanupExitMs: MODE_SETTLE_MS, exitPollMs: MODE_SETTLE_MS, timers: clock });
     const a = await enabled(SID);
     fake.pushUpdate(msg("/mode plan"));
     await a.next("terminate");
@@ -2209,6 +2212,8 @@ describe("starting and stopping sessions", () => {
     await waitFor(() => spawned.length === 1);
     expect(spawned[0]).not.toContain("--permission-mode");
     const next = await plugin(SID);
+    await waitFor(() => hub.busy().includes("replays"), WAIT_MS, "the held-message hand-over armed");
+    await clock.advance(READY_DELAY_MS);
     expect((await next.next("inbound")).content).toBe("held past the deadline");
     clock.dispose();
   });
@@ -3280,7 +3285,7 @@ describe("commands", () => {
     test("a Claude Code that does not exit keeps held messages gated until it dies", async () => {
       const clock = manualClock();
       let alive = true;
-      const { a, spawned } = await liveSession(SKILLS, { isAlive: () => alive, cleanupExitMs: EXIT_MS, exitPollMs: EXIT_MS, now: clock.now, sleep: clock.sleep });
+      const { a, spawned } = await liveSession(SKILLS, { isAlive: () => alive, cleanupExitMs: EXIT_MS, exitPollMs: EXIT_MS, timers: clock });
       const { runner } = mod(SID);
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
@@ -3297,6 +3302,8 @@ describe("commands", () => {
       await waitFor(() => spawned.length);
       expect(spawned).toEqual([STARTED]);
       const w = await plugin(SID);
+      await waitFor(() => hub.busy().includes("replays"), WAIT_MS, "the held-message hand-over armed");
+      await clock.advance(READY_DELAY_MS);
       expect((await w.next("inbound")).content).toBe("meanwhile");
       clock.dispose();
     });
@@ -4206,7 +4213,7 @@ describe("questions", () => {
     await polled();
     say("!");
     expect(await answer).toEqual({ decision: "deny", reason: CANCEL_REASON });
-    await Bun.sleep(SETTLE_MS);
+    await settle();
     expect(a.messages.filter(m => m.type === "inbound")).toEqual([]);
   });
 

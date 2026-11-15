@@ -10,6 +10,7 @@ import { ru } from "../src/shared/i18n/ru.ts";
 import { discoverExecutorJob, EXECUTORS } from "../src/transcript/codex-job.ts";
 import { MAX_CARD_TEXT, SETTLE_MS, SubagentWatcher } from "../src/transcript/subagents.ts";
 import { tempDir } from "./helpers.ts";
+import { realTimers } from "../src/shared/timers.ts";
 
 const STEP = 3000;
 const MINUTE = 60_000;
@@ -60,7 +61,7 @@ describe("Executor cards", () => {
     const cards: Card[] = [];
     let now = START;
     let messages: Messages = en;
-    const watcher = new SubagentWatcher({ dir, codexJobsDir: codexJobs, volunteerJobsDir: volunteerJobs, onCard: card => cards.push(card), canStart: () => true, now: () => now, messages: () => messages });
+    const watcher = new SubagentWatcher({ dir, codexJobsDir: codexJobs, volunteerJobsDir: volunteerJobs, onCard: card => cards.push(card), canStart: () => true, timers: { ...realTimers, now: () => now }, messages: () => messages });
     cleanups.push(() => watcher.stop());
     watcher.start();
     const agent = join(dir, "agent-a1.jsonl");

@@ -63,10 +63,14 @@ export async function wsClient(port: number, hello?: object) {
     ws.onopen = () => resolve();
     ws.onerror = () => reject(new Error("ws connect failed"));
   });
+  let sent = 0;
   const client = {
     ws,
     messages,
-    send: (o: object) => ws.send(JSON.stringify(o)),
+    send: (o: object) => {
+      sent++;
+      ws.send(JSON.stringify(o));
+    },
     // Search all received messages, including messages received before this call.
     next: <K extends HubToPlugin["type"]>(type: K, pred: (m: Extract<HubToPlugin, { type: K }>) => boolean = () => true, timeoutMs = 3000) => {
       const ofType = (m: HubToPlugin): m is Extract<HubToPlugin, { type: K }> => m.type === type;
@@ -80,8 +84,80 @@ export async function wsClient(port: number, hello?: object) {
     },
     close: () => ws.close(),
   };
+  const open = windowsOf(port);
+  const entry: WindowSent = { sent: () => sent, received: () => messages.length, isOpen: () => ws.readyState === WebSocket.OPEN };
+  open.add(entry);
+  ws.addEventListener("close", () => open.delete(entry));
   if (hello) client.send(hello);
   return client;
+}
+
+// What each test window has sent and received, per hub port, so `settled` can tell when the hub has taken all it was sent and the window has all the hub wrote.
+type WindowSent = { sent(): number; received(): number; isOpen(): boolean };
+const windowsByPort = new Map<number, Set<WindowSent>>();
+
+function windowsOf(port: number): Set<WindowSent> {
+  const existing = windowsByPort.get(port);
+  if (existing) return existing;
+  const created = new Set<WindowSent>();
+  windowsByPort.set(port, created);
+  return created;
+}
+
+// HTTP requests a test sent to each hub through `hubFetch` (per hub object: a hub restarted on a port counts from zero).
+const requestsByHub = new WeakMap<object, number>();
+
+// An HTTP request to the hub that `settled` counts: it is settled only once the hub has taken it.
+export async function hubFetch(hub: { port: number }, path: string, init?: RequestInit): Promise<Response> {
+  requestsByHub.set(hub, (requestsByHub.get(hub) ?? 0) + 1);
+  return fetch(`http://127.0.0.1:${hub.port}${path}`, init);
+}
+
+// What the hub exposes so a test can tell it has handled everything sent to it.
+export type Settleable = {
+  port: number;
+  intake(): { windows: number; messages: number; sent: number; requests: number };
+  busy(): string[];
+};
+
+const SETTLE_TIMEOUT_MS = 5000;
+// Two quiet looks in a row, a turn of the event loop apart: work a handler started after the first look shows in the second.
+const QUIET_LOOKS = 2;
+
+// Resolves once the hub has fully handled everything the test sent so far: every WS message from the test
+// windows, every HTTP request made through `hubFetch`, every update pushed to the fake Telegram, and all work
+// those started; and every message the hub wrote to a window has reached it. Use it before a "nothing happened" assertion instead of sleeping. It is a proof, not a pause:
+// when something stays unfinished it throws and names it.
+export async function settled(hub: Settleable, o: { fake?: { unconfirmedUpdates: number }; timeoutMs?: number } = {}): Promise<void> {
+  const deadline = Date.now() + (o.timeoutMs ?? SETTLE_TIMEOUT_MS);
+  let quiet = 0;
+  for (;;) {
+    const unmet = unmetCondition(hub, o.fake);
+    if (unmet === undefined) {
+      quiet++;
+      if (quiet >= QUIET_LOOKS) return;
+    } else {
+      quiet = 0;
+      if (Date.now() > deadline) throw new Error(`hub did not settle: ${unmet}`);
+    }
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+}
+
+function unmetCondition(hub: Settleable, fake: { unconfirmedUpdates: number } | undefined): string | undefined {
+  const windows = [...windowsOf(hub.port)].filter(w => w.isOpen());
+  const intake = hub.intake();
+  if (intake.windows !== windows.length) return `hub counts ${intake.windows} windows, the test has ${windows.length} open`;
+  const sent = windows.reduce((sum, w) => sum + w.sent(), 0);
+  if (intake.messages < sent) return `hub took ${intake.messages} of ${sent} window messages`;
+  const received = windows.reduce((sum, w) => sum + w.received(), 0);
+  if (received < intake.sent) return `windows received ${received} of ${intake.sent} hub messages`;
+  const requests = requestsByHub.get(hub) ?? 0;
+  if (intake.requests < requests) return `hub took ${intake.requests} of ${requests} http requests`;
+  if (fake && fake.unconfirmedUpdates > 0) return `${fake.unconfirmedUpdates} telegram updates not handled`;
+  const busy = hub.busy();
+  if (busy.length > 0) return `unfinished work: ${busy.join(", ")}`;
+  return undefined;
 }
 
 const healthSchema = z.object({ pid: z.number() });

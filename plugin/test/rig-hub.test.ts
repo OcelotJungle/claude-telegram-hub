@@ -66,7 +66,7 @@ function fixture(extra: Partial<HubOptions> = {}) {
       writeFileSync(spec.log, "Waiting for an invented resource\n");
       return PID;
     },
-    now: clock.now, setTimer: clock.set, clearTimer: clock.clear, sleep: clock.sleep, isAlive: () => true,
+    timers: clock, isAlive: () => true,
     log: memLogger(), onExit() {}, ...extra,
   };
   const hub = track(new Hub(options));
@@ -296,7 +296,7 @@ test("each specified work category blocks update exit, while a pending shell doe
   // Questions and permission requests count only while their window can still answer them.
   hub["conns"].add(fakeWindow("session"));
   const held = { inbound: { content: "held", meta: {}, onSent() {} } };
-  const timer = f.clock.set(() => {}, 0);
+  const timer = f.clock.setTimer(() => {}, 0);
   const pending = new Promise<void>(() => {});
   const pollOf = () => pollFor("session");
   const blockers: { name: string; add(): void; remove(): void }[] = [

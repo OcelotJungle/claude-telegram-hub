@@ -1,7 +1,9 @@
 import type { Logger } from "../shared/log.ts";
+import type { Timers, TimerHandle } from "../shared/timers.ts";
 
 import { closeSync, openSync, readFileSync, readSync, statSync } from "fs";
 import { nullLogger } from "../shared/log.ts";
+import { realTimers } from "../shared/timers.ts";
 import { parseRecord } from "./parse.ts";
 
 const NEWLINE = 0x0a;
@@ -13,7 +15,8 @@ const POLL_INTERVAL_MS = 300;
 export class TranscriptTailer {
   private offset = 0;
   private rest: Buffer = Buffer.alloc(0);
-  private timer: ReturnType<typeof setInterval> | undefined;
+  private timer: TimerHandle | undefined;
+  private timers: Timers;
   private log: Logger;
 
   constructor(
@@ -24,9 +27,11 @@ export class TranscriptTailer {
       intervalMs?: number;
       fromStart?: boolean;
       log?: Logger;
+      timers?: Timers;
     },
   ) {
     this.log = opts.log ?? nullLogger;
+    this.timers = opts.timers ?? realTimers;
   }
 
   get path(): string {
@@ -35,7 +40,7 @@ export class TranscriptTailer {
 
   start(): void {
     this.open();
-    this.timer = setInterval(() => this.pollNow(), this.opts.intervalMs ?? POLL_INTERVAL_MS);
+    this.timer = this.timers.setRepeat(() => this.pollNow(), this.opts.intervalMs ?? POLL_INTERVAL_MS);
   }
 
   // Picks the start offset without polling on a timer: the owner calls pollNow.
@@ -45,7 +50,7 @@ export class TranscriptTailer {
   }
 
   stop(): void {
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) this.timers.clearTimer(this.timer);
     this.timer = undefined;
   }
 

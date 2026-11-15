@@ -9,6 +9,7 @@ import { basename, join } from "path";
 import { field } from "../shared/guards.ts";
 import { catalogOf } from "../shared/i18n/index.ts";
 import { PLATFORM } from "../shared/platform.ts";
+import { realTimers } from "../shared/timers.ts";
 
 // A launch command that ends within this time with a non-zero code failed to
 // launch (tmux new-session -d exits at once and reports through its code). One
@@ -77,7 +78,7 @@ export type SpawnTimers = {
 // grace time or has ended with code 0; rejects when it cannot start or ends
 // within the grace time with another code. Its stderr goes to a file, so a
 // long-lived command never meets a closed pipe.
-export function spawnDetached(command: string[], timers: SpawnTimers = { graceMs: LAUNCH_EXIT_GRACE_MS, setTimer: setTimeout, clearTimer: clearTimeout }): Promise<void> {
+export function spawnDetached(command: string[], timers: SpawnTimers = { graceMs: LAUNCH_EXIT_GRACE_MS, setTimer: realTimers.setTimer, clearTimer: realTimers.clearTimer }): Promise<void> {
   const [exe, ...args] = command;
   if (!exe) throw new LaunchError(m => m.launchEmptyCommand);
   const dir = mkdtempSync(join(tmpdir(), "hub-launch-"));

@@ -224,7 +224,7 @@ function fixture(extra: { runRig?: HubOptions["runRig"]; setMyCommands?: Telegra
       writeFileSync(spec.log, "Language is now invented\n");
       return PID;
     },
-    now: clock.now, setTimer: clock.set, clearTimer: clock.clear, sleep: clock.sleep, isAlive: () => true,
+    timers: clock, isAlive: () => true,
     log: memLogger(), onExit() {},
   };
   const machine = new Hub(options);

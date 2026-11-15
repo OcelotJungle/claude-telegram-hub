@@ -6,12 +6,14 @@ import type { TranscriptEvent } from "../transcript/parse.ts";
 import type { Outgoing } from "../transcript/relay.ts";
 import type { Titles } from "../transcript/tail.ts";
 import type { Platform } from "../shared/platform.ts";
+import type { Timers } from "../shared/timers.ts";
 
 import { randomUUID } from "crypto";
 import { copyFileSync, mkdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { playChime } from "../shared/chime.ts";
 import { PLATFORM } from "../shared/platform.ts";
+import { realTimers } from "../shared/timers.ts";
 import { isInside, loadConfig } from "../shared/config.ts";
 import { catalogOf, DEFAULT_LANGUAGE } from "../shared/i18n/index.ts";
 import { toTelegram } from "../shared/markdown.ts";
@@ -104,7 +106,7 @@ export type PluginOptions = {
   cardEveryMs?: number;
   // Plays the end-of-turn sound; the configured command by default.
   chime?: (kind: ChimeKind) => void;
-  now?: () => number;
+  timers?: Timers;
 };
 
 // Plays the turnEndChime of config.json; a bad one is logged once per
@@ -165,7 +167,7 @@ export class PluginCore {
   private apiError: string | undefined;
   // The agent is in a turn and not waiting for the user.
   private busy = false;
-  private now: () => number;
+  private timers: Timers;
   // When the user last typed in the terminal of this window.
   private lastInputAt: number | undefined;
   // Topic messages reach the session one after another, in the order they came.
@@ -183,8 +185,8 @@ export class PluginCore {
     this.cwd = opts.cwd;
     this.log = opts.log;
     this.versions = new ModelVersions(join(opts.stateDir, "model-versions.json"), opts.log);
-    this.now = opts.now ?? Date.now;
-    this.relay = new Relay({ isOwnTool, onFinalClose: kind => this.turnClosed(kind), now: this.now });
+    this.timers = opts.timers ?? realTimers;
+    this.relay = new Relay({ isOwnTool, onFinalClose: kind => this.turnClosed(kind), timers: this.timers });
     this.transcriptPath = transcriptPathFor(opts.sessionId, opts.cwd, opts.configDir);
     this.client = new HubClient({
       port: opts.port,
@@ -192,6 +194,7 @@ export class PluginCore {
       spawnHub: opts.spawnHub,
       serviceManaged: opts.serviceManaged,
       onMessage: m => this.onHubMessage(m),
+      timers: this.timers,
       log: opts.log,
     });
   }
@@ -336,6 +339,7 @@ export class PluginCore {
       onRecord: rec => this.onRecord(rec),
       onIdle: () => this.flush(this.relay.idle()),
       intervalMs: this.opts.tailIntervalMs,
+      timers: this.timers,
       log: this.log,
     });
     this.tailer.start();
@@ -348,6 +352,7 @@ export class PluginCore {
       onCard: card => this.client.send({ type: "card", sessionId, ...card }),
       canStart: () => this.enabled,
       intervalMs: this.opts.tailIntervalMs,
+      timers: this.timers,
       sendEveryMs: this.opts.cardEveryMs,
       log: this.log,
       versions: this.versions,
@@ -362,7 +367,7 @@ export class PluginCore {
     if (answered) this.versions.see(answered.model);
     for (const ev of parseRecord(rec).flatMap(e => this.settleApiError(e))) {
       this.flush(this.relay.feed(ev));
-      if (ev.kind === "terminal_input") this.lastInputAt = this.now();
+      if (ev.kind === "terminal_input") this.lastInputAt = this.timers.now();
       if (ev.kind === "unknown_thinking" && !this.reportedKinds.has(ev.blockKind)) {
         this.reportedKinds.add(ev.blockKind);
         this.log.warn(`transcript: thinking block of unknown kind "${ev.blockKind}" with text — not relayed; the transcript format may have changed`);
@@ -459,7 +464,7 @@ export class PluginCore {
   // question, on "done" only when the user has not typed here for a while.
   private turnClosed(kind: ChimeKind): void {
     if (this.enabled) return;
-    if (kind === "done" && this.lastInputAt !== undefined && this.now() - this.lastInputAt < CHIME_MIN_TURN_MS) return;
+    if (kind === "done" && this.lastInputAt !== undefined && this.timers.now() - this.lastInputAt < CHIME_MIN_TURN_MS) return;
     try {
       if (this.opts.chime) this.opts.chime(kind);
       else playConfiguredChime(kind, this.log);

@@ -1,5 +1,8 @@
+import type { Timers } from "../shared/timers.ts";
 import type { TurnEnd } from "../hook/turn-end.ts";
 import type { TranscriptEvent } from "./parse.ts";
+
+import { realTimers } from "../shared/timers.ts";
 
 // How long a turn waits for the decision after turn_closed.
 export const TURN_DECISION_MS = 5000;
@@ -51,17 +54,17 @@ export class Relay {
   // one-shot answer is written only after the Stop hook). After a turn closed
   // without a decision, a decision is that turn's, late, and is dropped.
   private lastCloseDecided = true;
-  private now: () => number;
+  private timers: Timers;
 
   constructor(
     private opts: {
       isOwnTool(name: string): boolean;
       // A turn closed as final by the Stop hook's decision, whatever the mode.
       onFinalClose?(kind: FinalKind): void;
-      now?: () => number;
+      timers?: Timers;
     },
   ) {
-    this.now = opts.now ?? Date.now;
+    this.timers = opts.timers ?? realTimers;
   }
 
   // Turning off returns the text written while the mode was on and not sent
@@ -82,7 +85,7 @@ export class Relay {
   // turn already closed without it is dropped.
   decide(d: TurnEnd): Outgoing[] {
     if (this.closed && !this.lastCloseDecided) return [];
-    this.decision = { d, at: this.now() };
+    this.decision = { d, at: this.timers.now() };
     return this.ending !== undefined && this.closedAt !== undefined ? this.closeBy(d) : [];
   }
 
@@ -92,7 +95,7 @@ export class Relay {
       out.push(...this.close(false));
     }
     if ("messageId" in ev) {
-      this.lastMessageAt = this.now();
+      this.lastMessageAt = this.timers.now();
       if (!this.ended.includes(ev.messageId)) this.closed = false;
     }
     switch (ev.kind) {
@@ -135,7 +138,7 @@ export class Relay {
         } else {
           this.pendingAgents = ev.pendingAgents;
           if (this.decision) out.push(...this.closeBy(this.decision.d));
-          else this.closedAt = this.now();
+          else this.closedAt = this.timers.now();
         }
         break;
     }
@@ -155,7 +158,7 @@ export class Relay {
   // with no turn_closed, 30 s with no main-agent records and no new decision.
   idle(): Outgoing[] {
     if (this.ending === undefined) return [];
-    const now = this.now();
+    const now = this.timers.now();
     if (this.closedAt !== undefined) return now - this.closedAt >= TURN_DECISION_MS ? this.closeBy(undefined) : [];
     const quietSince = Math.max(this.lastMessageAt, this.decision?.at ?? 0);
     return now - quietSince >= TURN_CLOSE_WAIT_MS ? this.closeBy(this.decision?.d) : [];

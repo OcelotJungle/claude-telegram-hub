@@ -11,6 +11,7 @@ import type { MessageKind } from "../shared/notification.ts";
 import type { MachineDestination } from "./machine-outbox.ts";
 import type { RigInvocation } from "./rig.ts";
 import type { Messages } from "../shared/i18n/index.ts";
+import type { Timers } from "../shared/timers.ts";
 
 import { randomBytes, randomUUID } from "crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "fs";
@@ -70,7 +71,7 @@ export type ExecDeps = {
   // Copies the file before it returns: the copy is what goes.
   sendFile(sessionId: string, path: string, name: string, kind: MessageKind): void;
   report(sessionId: string, content: string, meta: ChannelMeta, onSent: () => void): void;
-  now(): number;
+  timers: Timers;
   checkMs: number;
   cardMs: number;
   maxAgeMs: number;
@@ -90,7 +91,7 @@ export type ExecDeps = {
 
 export class Execs {
   private recs: ExecRecord[] = [];
-  private timers: ReturnType<typeof setInterval>[] = [];
+  private repeaters: ReturnType<typeof setInterval>[] = [];
   // The last check, and till when a stale heartbeat still counts: after a
   // gap in the checks the machine slept, and the runners slept with it.
   private lastCheck: number | undefined;
@@ -106,14 +107,14 @@ export class Execs {
   constructor(private deps: ExecDeps) {}
 
   start(): void {
-    this.timers.push(setInterval(() => this.check(), this.deps.checkMs));
-    this.timers.push(setInterval(() => this.editCards(), this.deps.cardMs));
+    this.repeaters.push(this.deps.timers.setRepeat(() => this.check(), this.deps.checkMs));
+    this.repeaters.push(this.deps.timers.setRepeat(() => this.editCards(), this.deps.cardMs));
     const grace = this.deps.graceMs ?? 0;
-    this.deferUntil = this.deps.now() + grace;
+    this.deferUntil = this.deps.timers.now() + grace;
     // At once: a run gone while no hub watched never gets a stop button press.
     // Its result is not reported yet: a window about to reconnect gets it.
     this.restore();
-    this.sweepTimer = setTimeout(() => this.sweep(), grace);
+    this.sweepTimer = this.deps.timers.setTimer(() => this.sweep(), grace);
   }
 
   restore(): void {
@@ -139,9 +140,9 @@ export class Execs {
 
   // Only the timers: the runners go on and a next manager picks them up.
   stop(): void {
-    for (const t of this.timers) clearInterval(t);
-    this.timers = [];
-    clearTimeout(this.sweepTimer);
+    for (const t of this.repeaters) this.deps.timers.clearTimer(t);
+    this.repeaters = [];
+    if (this.sweepTimer !== undefined) this.deps.timers.clearTimer(this.sweepTimer);
   }
 
   running(): number {
@@ -171,7 +172,7 @@ export class Execs {
     };
     this.recs.push(rec);
     this.prune();
-    if (this.deps.now() - sentAt > this.deps.maxAgeMs) {
+    if (this.deps.timers.now() - sentAt > this.deps.maxAgeMs) {
       this.save();
       this.showCard(rec);
       return;
@@ -187,7 +188,7 @@ export class Execs {
       destination, chatId: destination.chatId, messageId, text, cwd, state: "pending", sentAt, reported: false };
     this.recs.push(rec);
     this.prune();
-    if (sentAt !== undefined && this.deps.now() - sentAt > this.deps.maxAgeMs) {
+    if (sentAt !== undefined && this.deps.timers.now() - sentAt > this.deps.maxAgeMs) {
       this.save();
       this.showCard(rec);
       return;
@@ -230,7 +231,7 @@ export class Execs {
 
   // Whether the run's runner touched its heartbeat file lately.
   private beating(rec: ExecRecord): boolean {
-    const now = this.deps.now();
+    const now = this.deps.timers.now();
     if (now < this.graceUntil) return true;
     try {
       return now - statSync(this.path(rec.id, "alive")).mtimeMs < HEARTBEAT_STALE_MS;
@@ -258,7 +259,7 @@ export class Execs {
       const run = rec.shell === "rig"
         ? rec.invocation && { ...rec.invocation, files: [], env: {} }
         : shellRun(rec.shell, rec.text, this.deps.dir, rec.id, this.deps.shells());
-      if (!run) return this.end(rec, { kind: "lost", at: this.deps.now(), reason: LOST_NO_RIG_COMMAND });
+      if (!run) return this.end(rec, { kind: "lost", at: this.deps.timers.now(), reason: LOST_NO_RIG_COMMAND });
       writeShellFiles(run);
       const spec: RunnerSpec = {
         argv: run.argv,
@@ -275,15 +276,15 @@ export class Execs {
       const specFile = this.path(rec.id, "spec.json");
       mkdirSync(this.deps.dir, { recursive: true });
       // The first beat, so a runner still starting counts as alive.
-      const at = this.deps.now() / MS_PER_SECOND;
+      const at = this.deps.timers.now() / MS_PER_SECOND;
       writeFileSync(spec.alive, "");
       utimesSync(spec.alive, at, at);
       // The spec carries the environment (tokens among it): the owner only.
       writeFileSync(specFile, JSON.stringify(spec), { mode: SPEC_FILE_MODE });
       rec.state = "running";
-      rec.startedAt = this.deps.now();
+      rec.startedAt = this.deps.timers.now();
       if (!this.save()) {
-        this.end(rec, { kind: "lost", at: this.deps.now(), reason: LOST_SAVE_FAILED });
+        this.end(rec, { kind: "lost", at: this.deps.timers.now(), reason: LOST_SAVE_FAILED });
         return;
       }
       rec.pid = this.deps.spawnRunner(specFile);
@@ -292,8 +293,8 @@ export class Execs {
       this.showCard(rec);
     } catch (e) {
       this.deps.log.error(`exec ${rec.id}: start failed: ${e}`);
-      rec.startedAt = this.deps.now();
-      this.end(rec, { kind: "lost", at: this.deps.now(), reason: LOST_START_FAILED, detail: e instanceof Error ? e.message : String(e) });
+      rec.startedAt = this.deps.timers.now();
+      this.end(rec, { kind: "lost", at: this.deps.timers.now(), reason: LOST_START_FAILED, detail: e instanceof Error ? e.message : String(e) });
     }
   }
 
@@ -317,7 +318,7 @@ export class Execs {
 
   // quiet: the runs that ended are not reported; see start().
   private check(quiet = false): void {
-    const now = this.deps.now();
+    const now = this.deps.timers.now();
     if (this.lastCheck !== undefined && now - this.lastCheck > HEARTBEAT_MS) this.graceUntil = now + HEARTBEAT_STALE_MS;
     this.lastCheck = now;
     for (const rec of this.recs) {
@@ -336,7 +337,7 @@ export class Execs {
       }
       // The runner may have written the file just before it exited.
       if (existsSync(exit)) this.ended(rec, exit, quiet);
-      else this.end(rec, rec.stopping ? { kind: "stopped", at: this.deps.now() } : { kind: "lost", at: this.deps.now(), reason: LOST_PROCESS_GONE }, quiet);
+      else this.end(rec, rec.stopping ? { kind: "stopped", at: this.deps.timers.now() } : { kind: "lost", at: this.deps.timers.now(), reason: LOST_PROCESS_GONE }, quiet);
     }
   }
 
@@ -367,7 +368,7 @@ export class Execs {
     // In the start's grace a session without a window may be reconnecting:
     // reporting now would launch a second copy of it or say "not delivered".
     if (rec.shell === "rig") return;
-    const inGrace = this.deps.now() < this.deferUntil && (rec.sessionId === undefined || !this.deps.hasWindow(rec.sessionId));
+    const inGrace = this.deps.timers.now() < this.deferUntil && (rec.sessionId === undefined || !this.deps.hasWindow(rec.sessionId));
     if (quiet || inGrace) this.deferred.add(rec.id);
     else this.report(rec);
   }
@@ -414,7 +415,7 @@ export class Execs {
   private report(rec: ExecRecord): void {
     if (rec.sessionId === undefined || rec.shell === "rig") return;
     const log = this.path(rec.id, "log");
-    const meta: ChannelMeta = { source: "exec", exec_id: rec.id, ts: new Date(rec.end?.at ?? this.deps.now()).toISOString() };
+    const meta: ChannelMeta = { source: "exec", exec_id: rec.id, ts: new Date(rec.end?.at ?? this.deps.timers.now()).toISOString() };
     if (rec.end?.kind === "exit" && rec.end.code !== undefined) meta.exit_code = String(rec.end.code);
     this.deps.report(rec.sessionId, execReportText(rec, logTail(log, EXEC_AGENT_LINES), log, this.deps.shellNames), meta, () => {
       rec.reported = true;
@@ -433,7 +434,7 @@ export class Execs {
   private refreshRigCard(rec: ExecRecord): void {
     const shown = this.rigShown.get(rec.id);
     const tail = tailText(this.shown(rec, TAIL_BYTES), EXEC_CARD_LINES);
-    if (shown !== undefined && shown.tail === tail && this.deps.now() - shown.at < this.deps.cardMs) return;
+    if (shown !== undefined && shown.tail === tail && this.deps.timers.now() - shown.at < this.deps.cardMs) return;
     this.showCard(rec);
   }
 
@@ -462,9 +463,9 @@ export class Execs {
     const kind = rec.state !== "ended" || rec.end?.kind === "stopped" || (rec.end?.kind === "exit" && rec.end.code === 0)
       ? "info"
       : rec.end?.kind === "exit" ? "error" : "warning";
-    const text = execCardText(rec, tail, this.deps.now(), m, this.deps.shellNames);
+    const text = execCardText(rec, tail, this.deps.timers.now(), m, this.deps.shellNames);
     if (rec.shell === "rig") {
-      if (rec.state === "running") this.rigShown.set(rec.id, { tail, at: this.deps.now() });
+      if (rec.state === "running") this.rigShown.set(rec.id, { tail, at: this.deps.timers.now() });
       else this.rigShown.delete(rec.id);
       this.deps.machineCard?.(rec, text, rec.state === "ended", kind, rec.state === "pending" ? buttons : undefined);
     } else if (rec.sessionId !== undefined) this.deps.card(rec.sessionId, `exec-${rec.id}`, text, rec.state === "ended", kind, buttons);

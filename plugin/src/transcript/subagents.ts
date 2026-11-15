@@ -4,6 +4,7 @@ import type { Entity, Formatted } from "../shared/markdown.ts";
 import type { ExecutorConfig, ExecutorDiscovery, ExecutorType } from "./codex-job.ts";
 import type { Model } from "./model-versions.ts";
 import type { TranscriptEvent } from "./parse.ts";
+import type { Timers, TimerHandle } from "../shared/timers.ts";
 
 import { existsSync, readdirSync, readFileSync } from "fs";
 import { homedir } from "os";
@@ -11,6 +12,7 @@ import { join } from "path";
 import { z } from "zod";
 import { field } from "../shared/guards.ts";
 import { nullLogger } from "../shared/log.ts";
+import { realTimers } from "../shared/timers.ts";
 import { truncateFormatted } from "../shared/chunk.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { catalogOf, DEFAULT_LANGUAGE } from "../shared/i18n/index.ts";
@@ -555,7 +557,8 @@ class Agent {
 // then their history is replayed silently and the card goes on from it.
 export class SubagentWatcher {
   private agents = new Map<string, Agent>();
-  private timer: ReturnType<typeof setInterval> | undefined;
+  private timer: TimerHandle | undefined;
+  private timers: Timers;
   private env: Env;
 
   constructor(
@@ -567,7 +570,7 @@ export class SubagentWatcher {
       canStart(): boolean;
       intervalMs?: number;
       sendEveryMs?: number;
-      now?(): number;
+      timers?: Timers;
       log?: Logger;
       codexJobsDir?: string;
       volunteerJobsDir?: string;
@@ -576,10 +579,11 @@ export class SubagentWatcher {
       messages?(): Messages;
     },
   ) {
+    this.timers = opts.timers ?? realTimers;
     this.env = {
       send: card => opts.onCard(card),
       canStart: () => opts.canStart(),
-      now: opts.now ?? Date.now,
+      now: () => this.timers.now(),
       sendEveryMs: opts.sendEveryMs ?? SEND_EVERY_MS,
       log: opts.log ?? nullLogger,
       executorJobsDirs: new Map([
@@ -594,11 +598,11 @@ export class SubagentWatcher {
 
   start(): void {
     for (const id of this.ids()) this.agents.set(id, new Agent(id, this.opts.dir, true, this.env));
-    this.timer = setInterval(() => this.tick(), this.opts.intervalMs ?? SCAN_MS);
+    this.timer = this.timers.setRepeat(() => this.tick(), this.opts.intervalMs ?? SCAN_MS);
   }
 
   stop(): void {
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) this.timers.clearTimer(this.timer);
     this.timer = undefined;
     this.agents.clear();
     this.env.jobs.clear();

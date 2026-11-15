@@ -1,11 +1,13 @@
 import type { Logger } from "../shared/log.ts";
 import type { HubRequest, HubToPlugin, PluginToHub } from "../shared/protocol.ts";
+import type { Timers } from "../shared/timers.ts";
 
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { homedir } from "os";
 import { hubToPlugin } from "../shared/protocol-schema.ts";
 import { MAX_RECONNECT_DELAY_MS, RECONNECT_JITTER } from "../shared/reconnect.ts";
+import { realTimers } from "../shared/timers.ts";
 
 const SPAWN_COOLDOWN_MS = 2000;
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -43,12 +45,13 @@ export class HubClient {
   private ws: WebSocket | undefined;
   private stopped = true;
   private attempt = 0;
-  private lastSpawn = 0;
+  private lastSpawn = Number.NEGATIVE_INFINITY;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private outbox: Queued[] = [];
   private pending = new Map<string, Pending>();
   private fileWaiters = new Map<string, (r: { error?: string }) => void>();
   private waiters: (() => void)[] = [];
+  private timers: Timers;
 
   constructor(
     private opts: {
@@ -61,8 +64,11 @@ export class HubClient {
       log: Logger;
       minDelayMs?: number;
       maxDelayMs?: number;
+      timers?: Timers;
     },
-  ) {}
+  ) {
+    this.timers = opts.timers ?? realTimers;
+  }
 
   get connected(): boolean {
     return this.ws !== undefined;
@@ -75,7 +81,7 @@ export class HubClient {
 
   // Starts a hub now, for text left behind by a closing window.
   spawnHubNow(): void {
-    this.lastSpawn = 0;
+    this.lastSpawn = Number.NEGATIVE_INFINITY;
     this.maybeSpawn();
   }
 
@@ -86,7 +92,7 @@ export class HubClient {
 
   stop(): void {
     this.stopped = true;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.reconnectTimer) this.timers.clearTimer(this.reconnectTimer);
     const ws = this.ws;
     this.ws = undefined;
     ws?.close();
@@ -107,12 +113,12 @@ export class HubClient {
   // with undefined after timeoutMs; the files stay queued either way.
   sendFiles(msg: SendFiles, timeoutMs: number): Promise<{ error?: string } | undefined> {
     const result = new Promise<{ error?: string } | undefined>(resolve => {
-      const timer = setTimeout(() => {
+      const timer = this.timers.setTimer(() => {
         this.fileWaiters.delete(msg.id);
         resolve(undefined);
       }, timeoutMs);
       this.fileWaiters.set(msg.id, r => {
-        clearTimeout(timer);
+        this.timers.clearTimer(timer);
         this.fileWaiters.delete(msg.id);
         resolve(r);
       });
@@ -128,19 +134,19 @@ export class HubClient {
 
   // Resolves once every queued text is acked by the hub, or after timeoutMs.
   async drain(timeoutMs: number): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    while (this.outbox.length > 0 && Date.now() < deadline) await Bun.sleep(DRAIN_POLL_MS);
+    const deadline = this.timers.now() + timeoutMs;
+    while (this.outbox.length > 0 && this.timers.now() < deadline) await this.timers.sleep(DRAIN_POLL_MS);
   }
 
   async request(req: HubRequest, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
-    const deadline = Date.now() + timeoutMs;
+    const deadline = this.timers.now() + timeoutMs;
     if (!this.ws) await this.waitConnected(timeoutMs);
     const id = randomUUID();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = this.timers.setTimer(() => {
         this.pending.delete(id);
         reject(new Error("hub did not answer in time"));
-      }, Math.max(1, deadline - Date.now()));
+      }, Math.max(1, deadline - this.timers.now()));
       this.pending.set(id, { resolve, reject, timer });
       this.send({ type: "req", id, ...req });
     });
@@ -148,12 +154,12 @@ export class HubClient {
 
   private waitConnected(timeoutMs: number): Promise<void> {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = this.timers.setTimer(() => {
         this.waiters = this.waiters.filter(w => w !== done);
         reject(new Error("telegram-hub: the hub is not reachable"));
       }, timeoutMs);
       const done = () => {
-        clearTimeout(timer);
+        this.timers.clearTimer(timer);
         resolve();
       };
       this.waiters.push(done);
@@ -181,7 +187,7 @@ export class HubClient {
         this.ws = undefined;
         this.opts.log.warn("hub connection lost");
         for (const [id, p] of this.pending) {
-          clearTimeout(p.timer);
+          this.timers.clearTimer(p.timer);
           p.reject(new Error("hub connection lost"));
           this.pending.delete(id);
         }
@@ -195,8 +201,8 @@ export class HubClient {
   private maybeSpawn(): void {
     // A service keeps the hub up and restarts it: a hub started here would race the service for the port.
     if (this.opts.serviceManaged?.()) return;
-    if (Date.now() - this.lastSpawn < SPAWN_COOLDOWN_MS) return;
-    this.lastSpawn = Date.now();
+    if (this.timers.now() - this.lastSpawn < SPAWN_COOLDOWN_MS) return;
+    this.lastSpawn = this.timers.now();
     this.opts.log.info("no hub listening — starting one");
     try {
       this.opts.spawnHub();
@@ -210,7 +216,7 @@ export class HubClient {
     const max = this.opts.maxDelayMs ?? MAX_RECONNECT_DELAY_MS;
     const delay = Math.min(min * 2 ** this.attempt, max) * (1 + RECONNECT_JITTER * (2 * Math.random() - 1));
     this.attempt++;
-    this.reconnectTimer = setTimeout(() => this.connect(), delay);
+    this.reconnectTimer = this.timers.setTimer(() => this.connect(), delay);
   }
 
   private onMessage(raw: string): void {
@@ -241,7 +247,7 @@ export class HubClient {
       const p = this.pending.get(m.id);
       if (!p) return;
       this.pending.delete(m.id);
-      clearTimeout(p.timer);
+      this.timers.clearTimer(p.timer);
       if (m.ok) p.resolve(m.result);
       else p.reject(new Error(m.error ?? "hub error"));
       return;

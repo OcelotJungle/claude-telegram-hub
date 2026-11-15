@@ -16,6 +16,7 @@ import { arr, field } from "../src/shared/guards.ts";
 import { TURN_DECISION_MS } from "../src/transcript/relay.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { memLogger, NO_PACE, tempDir, waitFor } from "./helpers.ts";
+import { realTimers } from "../src/shared/timers.ts";
 
 const en = catalogOf("en");
 const CUT_LIMIT_NOTE = cutLimitNote(en);
@@ -125,7 +126,7 @@ function makeCore(sessionId = SID, entrypoint?: string) {
     },
     log: pluginLog,
     chime: kind => chimes.push(kind),
-    now: () => Date.now() + clockSkew,
+    timers: { ...realTimers, now: () => Date.now() + clockSkew },
     tailIntervalMs: 30,
     cardEveryMs: 30,
   });

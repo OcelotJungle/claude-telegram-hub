@@ -67,6 +67,12 @@ export class FakeTelegram {
     this.waiting?.resolve();
   }
 
+  // Updates Telegram still holds: pushed, and not yet confirmed by a getUpdates offset. A poller
+  // confirms an update only after it has handled it, so zero means every update was handled.
+  get unconfirmedUpdates(): number {
+    return this.updates.length;
+  }
+
   failNext(method: string, f: Failure): void {
     const list = this.failures.get(method) ?? [];
     list.push(f);

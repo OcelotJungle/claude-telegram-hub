@@ -49,7 +49,7 @@ function fixture(extra: Partial<HubOptions> = {}) {
     filesDir: join(dir, "files"), inboxDir: join(dir, "inbox"), api, config: () => config,
     idleMs: 0, spawn: command => { spawned.push(command); }, log: memLogger(), onExit: () => {},
     accountsAvailable: () => true,
-    now: clock.now, sleep: clock.sleep, setTimer: clock.set, clearTimer: clock.clear,
+    timers: clock,
     cleanupExitMs: EXIT_MS, exitPollMs: POLL_MS, cleanupSettleMs: SETTLE_MS, readyDelayMs: READY_MS,
     isAlive: () => alive, ...extra,
   });

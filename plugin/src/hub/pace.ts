@@ -1,3 +1,7 @@
+import type { Timers } from "../shared/timers.ts";
+
+import { realTimers } from "../shared/timers.ts";
+
 // A sliding-window rate limit: at most `count` slots in any `perMs`. A send
 // waiting for a slot goes before every waiting edit; within a kind, first
 // come, first served.
@@ -13,6 +17,7 @@ export class Pace {
   constructor(
     private count: number,
     private perMs: number,
+    private timers: Timers = realTimers,
   ) {}
 
   take(priority: Priority): Promise<void> {
@@ -27,7 +32,7 @@ export class Pace {
 
   private drain(): void {
     if (this.timer) return;
-    const now = Date.now();
+    const now = this.timers.now();
     this.taken = this.taken.filter(t => t > now - this.perMs);
     while (this.waiters.length && this.taken.length < this.count) {
       this.taken.push(now);
@@ -35,7 +40,7 @@ export class Pace {
     }
     const oldest = this.taken[0];
     if (!this.waiters.length || oldest === undefined) return;
-    this.timer = setTimeout(() => {
+    this.timer = this.timers.setTimer(() => {
       this.timer = undefined;
       this.drain();
     }, oldest + this.perMs - now);

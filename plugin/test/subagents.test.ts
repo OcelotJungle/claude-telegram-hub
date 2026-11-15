@@ -6,6 +6,7 @@ import { join } from "path";
 import { ModelVersions } from "../src/transcript/model-versions.ts";
 import { MAX_CARD, MAX_CARD_TEXT, MAX_COORDINATOR_TEXT, SETTLE_MS, SubagentWatcher, WAIT_MAX_MS } from "../src/transcript/subagents.ts";
 import { tempDir } from "./helpers.ts";
+import { realTimers } from "../src/shared/timers.ts";
 
 const SEND_EVERY_MS = 3000;
 const SECOND = 1000;
@@ -46,7 +47,7 @@ describe("SubagentWatcher", () => {
       onCard: c => cards.push(c),
       canStart: opts.canStart ?? (() => true),
       intervalMs: 60_000,
-      now: () => now,
+      timers: { ...realTimers, now: () => now },
       ...(opts.versions ? { versions: opts.versions } : {}),
     });
     watchers.push(w);
