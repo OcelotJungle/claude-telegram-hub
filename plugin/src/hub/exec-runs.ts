@@ -10,10 +10,12 @@ import { dirname } from "path";
 import { z } from "zod";
 
 // id: the hub's own, in the card's button data; runId: rig's, once the run has started. pending: the
-// command waits for its Run button (it came too old, or its start failed before). chatId and messageId:
+// command was not started: it came too old, or the hub restarted in the middle of its start (startUnknown); either
+// way its card has a Run button. chatId and messageId:
 // the command message's. sentAt: its date (ms). args: a rig run's arguments (shell "rig"); cwd: a shell run's
-// folder. offset: the byte of the run's log to read next. end.reason: why a lost run was lost, a code
-// (process-gone, start-failed with end.detail the text of the failure) or rig's own text (shown as it is).
+// folder. offset: the byte of the run's log to read next. end.kind lost is rig's own word (or rig not knowing the
+// run); end.reason: why, a code (process-gone) or rig's own text (shown as it is). end.kind failed is the hub's:
+// rig answered an error to the start, end.detail is its message; a failed run never started and has no run id.
 // reported: the agent has the result; reportTail: the last lines the agent report will carry, kept
 // until the agent has it.
 export type ExecRun = {
@@ -31,11 +33,11 @@ export type ExecRun = {
   sentAt?: number;
   startedAt?: number;
   offset: number;
-  end?: { kind: ExecEndKind; code?: number; at: number; reason?: string; detail?: string };
+  end?: { kind: ExecEndKind | "failed"; code?: number; at: number; reason?: string; detail?: string };
   reported: boolean;
   reportTail?: string;
   // starting: the record was saved before `rig exec start` was asked and rig's answer is not kept yet. startUnknown: a hub
-  // restarted in that window; whether rig started the run is not known, so only the Run button starts it again.
+  // restarted in that window; whether rig started the run is not known, so the record stays pending and only its Run button starts it.
   starting?: boolean;
   startUnknown?: boolean;
   // The run's log file (a log that does not fit the card): "owed" is saved with the run's end, "sent" once the file
@@ -60,7 +62,7 @@ const fileSchema: z.ZodType<ExecRun[]> = z.array(
     startedAt: z.number().optional(),
     offset: z.number(),
     end: z
-      .object({ kind: z.enum(["exit", "stopped", "lost"]), code: z.number().optional(), at: z.number(), reason: z.string().optional(), detail: z.string().optional() })
+      .object({ kind: z.enum(["exit", "stopped", "lost", "failed"]), code: z.number().optional(), at: z.number(), reason: z.string().optional(), detail: z.string().optional() })
       .optional(),
     reported: z.boolean(),
     reportTail: z.string().optional(),

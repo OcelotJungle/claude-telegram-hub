@@ -293,7 +293,7 @@ describe("a shell command", () => {
 });
 
 describe("a shell command that does not start", () => {
-  test("shows rig's message as it is, ends as lost and reaches the agent", async () => {
+  test("shows rig's message as it is, ends as failed (not lost) and reaches the agent", async () => {
     const t = setup();
     t.fake.startError = rigError("exec-unavailable", "The pwsh feature is off; run: rig feature pwsh enable");
     t.execs.command(SID, "pwsh", "ls", "C:\\proj", msg(1));
@@ -302,7 +302,7 @@ describe("a shell command that does not start", () => {
     expect(card.final).toBe(true);
     expect(card.kind).toBe("warning");
     expect(card.buttons).toBeUndefined();
-    expect(card.markdown).toStartWith(en.execOutcomeLost({ reason: en.execLostNotStarted({ error: "The pwsh feature is off; run: rig feature pwsh enable" }) }));
+    expect(card.markdown).toStartWith(en.execOutcomeFailed({ error: "The pwsh feature is off; run: rig feature pwsh enable" }));
     expect(t.execs.running()).toBe(0);
     expect(t.reports).toHaveLength(1);
     expect(t.reports[0]?.content).toContain("The pwsh feature is off");
@@ -319,7 +319,7 @@ describe("a shell command that does not start", () => {
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     current = ru;
     await t.settle();
-    expect(t.lastCard().markdown).toStartWith(ru.execOutcomeLost({ reason: ru.execLostNotStarted({ error: "cannot launch" }) }));
+    expect(t.lastCard().markdown).toStartWith(ru.execOutcomeFailed({ error: "cannot launch" }));
     expect(t.lastCard().markdown).not.toContain("did not start");
   });
 
@@ -328,7 +328,7 @@ describe("a shell command that does not start", () => {
     t.fake.start = async () => ({ ok: false, error: { kind: "cwdUnsafe" } });
     t.execs.command(SID, "cmd", "x", "C:\\100%", msg(1));
     await t.settle();
-    expect(t.lastCard().markdown).toStartWith(en.execOutcomeLost({ reason: en.execLostNotStarted({ error: en.execCwdUnsafe }) }));
+    expect(t.lastCard().markdown).toStartWith(en.execOutcomeFailed({ error: en.execCwdUnsafe }));
   });
 
   test("a rig that is not there is told in words", async () => {
@@ -492,13 +492,21 @@ describe("a run that rig loses or that cannot be read", () => {
     expect(t.log.lines.filter(l => l.includes("reading the run failed"))).toHaveLength(1);
   });
 
-  test("rig that stays unreachable ends the run as lost, with the failure in words", async () => {
+  test("rig that stays unreachable never ends the run: the card says rig is silent, and only rig's own end ends it", async () => {
     const t = setup();
-    await started(t);
+    const { runId } = await started(t);
     t.fake.statusDown = { kind: "timeout", seconds: 30 };
     for (let i = 0; i < FAILING_LONG_TICKS; i++) await t.tick();
+    expect(t.execs.running()).toBe(1);
+    expect(t.cards.some(c => c.final)).toBe(false);
+    expect(t.lastCard().markdown).toContain(en.execRigSilent({ reason: en.rigTimeout({ seconds: 30 }) }));
+    // rig answers again and reports its own end: the note goes, the run ends as rig says.
+    t.fake.statusDown = undefined;
+    t.fake.finish(runId, { kind: "lost", reason: "the supervisor died" });
+    await t.until(() => t.cards.find(c => c.final), "final card");
     const final = must(t.cards.find(c => c.final), "final card");
-    expect(final.markdown).toStartWith(en.execOutcomeLost({ reason: en.rigTimeout({ seconds: 30 }) }));
+    expect(final.markdown).toStartWith(en.execOutcomeLost({ reason: "the supervisor died" }));
+    expect(final.markdown).not.toContain(en.execRigSilent({ reason: en.rigTimeout({ seconds: 30 }) }));
     expect(t.execs.running()).toBe(0);
   });
 });
@@ -1198,7 +1206,7 @@ describe("a start that the hub may not survive", () => {
     fake.startError = rigError("boom", "no way");
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     await t.settle();
-    expect(loadRuns(join(dir, "exec-runs.json"))[0]).toMatchObject({ state: "ended", end: { kind: "lost", detail: expect.stringContaining("no way") } });
+    expect(loadRuns(join(dir, "exec-runs.json"))[0]).toMatchObject({ state: "ended", end: { kind: "failed", detail: expect.stringContaining("no way") } });
     expect(loadRuns(join(dir, "exec-runs.json"))[0]?.starting).toBeUndefined();
     // An old command waits for its button; the press saves the record before the start, and a failure ends it.
     t.execs.command(SID, "cmd", "y", "C:\\proj", msg(2, 10 * MIN_MS));
@@ -1209,6 +1217,6 @@ describe("a start that the hub may not survive", () => {
     await t.execs.press(id, "run");
     await t.settle();
     expect(fake.seen[0]?.find(r => r.id === id)).toMatchObject({ state: "pending", starting: true });
-    expect(loadRuns(join(dir, "exec-runs.json")).find(r => r.id === id)).toMatchObject({ state: "ended", end: { kind: "lost", detail: expect.stringContaining("still no way") } });
+    expect(loadRuns(join(dir, "exec-runs.json")).find(r => r.id === id)).toMatchObject({ state: "ended", end: { kind: "failed", detail: expect.stringContaining("still no way") } });
   });
 });

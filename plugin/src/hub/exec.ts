@@ -45,8 +45,9 @@ export const TELEGRAM_FILE_LIMIT = 50 * 1024 * 1024;
 const LOG_DIR_PREFIX = "hub-exec-log-";
 // A burst of pages one poll may read at most (a run that wrote a lot while the hub was off); the next poll goes on.
 const PAGES_PER_POLL = 16;
-// How long rig may fail to answer about a running run before the run counts as lost.
-const POLL_FAILURE_MS = 60_000;
+// How long rig may fail to answer about a running run before the card says rig is not answering. The run is never
+// ended for it: only rig knows a run is lost (its own end, from its heartbeat), so the hub keeps polling.
+const RIG_SILENT_NOTE_MS = 60_000;
 const LINE_MAX = 300;
 const TEXT_MAX = 200;
 const MIN_FENCE = 3;
@@ -57,7 +58,6 @@ const MS_PER_MINUTE = MS_PER_SECOND * SECONDS_PER_MINUTE;
 const BYTES_PER_MB = 1024 * 1024;
 const SIZE_DECIMALS = 1;
 const LOST_PROCESS_GONE = "process-gone";
-const LOST_START_FAILED = "start-failed";
 // rig's end.reason of a rig run that exited with no usable answer.
 const NO_RESULT_REASONS = new Set(["empty-result", "invalid-result"]);
 
@@ -105,6 +105,8 @@ type Live = {
   result?: unknown;
   polling: boolean;
   failingSince?: number;
+  // The failure shown on the card while rig does not answer; cleared by the next answer.
+  silentReason?: string;
   // The log grew since the card was drawn last.
   changed: boolean;
   shownTail?: string;
@@ -321,7 +323,7 @@ export class Execs {
     const text = execErrorText(error, this.deps.messages());
     this.deps.log.error(`exec ${rec.id}: start failed: ${text}`);
     rec.startedAt = this.deps.timers.now();
-    this.end(rec, { kind: "lost", at: this.deps.timers.now(), reason: LOST_START_FAILED, detail: text });
+    this.end(rec, { kind: "failed", at: this.deps.timers.now(), detail: text });
   }
 
   private resumeLive(rec: ExecRun): void {
@@ -362,6 +364,10 @@ export class Execs {
         if (this.stopped || rec.state !== "running") return;
         if (!got.ok) return this.pollFailed(rec, live, got.error);
         live.failingSince = undefined;
+        if (live.silentReason !== undefined) {
+          live.silentReason = undefined;
+          this.showCard(rec);
+        }
         const status = got.value;
         const progressed = this.absorb(rec, live, status);
         const drained = status.log.to >= status.log.size;
@@ -400,7 +406,10 @@ export class Execs {
       live.failingSince = now;
       this.deps.log.warn(`exec ${rec.id}: reading the run failed: ${rigErrorText(error.kind === "cwdUnsafe" ? { kind: "badSession" } : error, catalogOf("en"))}`);
     }
-    if (now - live.failingSince > POLL_FAILURE_MS) this.end(rec, { kind: "lost", at: now, reason: execErrorText(error, this.deps.messages()) });
+    if (now - live.failingSince > RIG_SILENT_NOTE_MS && live.silentReason === undefined) {
+      live.silentReason = execErrorText(error, this.deps.messages());
+      this.showCard(rec);
+    }
   }
 
   private finish(rec: ExecRun, live: Live, status: ExecStatus): void {
@@ -581,7 +590,7 @@ export class Execs {
     const kind = rec.state !== "ended" || rec.end?.kind === "stopped" || (rec.end?.kind === "exit" && rec.end.code === 0)
       ? "info"
       : rec.end?.kind === "exit" ? "error" : "warning";
-    const text = execCardText(rec, tail, now, m, this.deps.shellNames);
+    const text = execCardText(rec, tail, now, m, this.deps.shellNames, live?.silentReason);
     if (live) {
       live.shownTail = tail;
       live.shownAt = now;
@@ -679,7 +688,6 @@ function lostReason(end: RunEnd, m: Messages): string {
   switch (end.reason) {
     case undefined:
     case LOST_PROCESS_GONE: return m.execLostProcessGone;
-    case LOST_START_FAILED: return m.execLostNotStarted({ error: end.detail ?? "" });
     default: return end.reason;
   }
 }
@@ -688,6 +696,7 @@ function outcome(rec: ExecRun, m: Messages): string {
   const end = rec.end;
   if (!end) return "";
   if (end.kind === "stopped") return m.execOutcomeStopped;
+  if (end.kind === "failed") return m.execOutcomeFailed({ error: end.detail ?? "" });
   if (end.kind === "lost") return m.execOutcomeLost({ reason: lostReason(end, m) });
   return end.code === 0 ? m.execOutcomeOk : m.execOutcomeCode({ code: end.code });
 }
@@ -696,7 +705,8 @@ function shellName(rec: ExecRun, names: Record<ExecShellName, string>): string {
   return rec.shell === "rig" ? "rig" : names[rec.shell];
 }
 
-export function execCardText(rec: ExecRun, tail: string, now: number, m: Messages, names = PLATFORM.shellNames): string {
+// silentReason: why rig does not answer about a running run, when it does not.
+export function execCardText(rec: ExecRun, tail: string, now: number, m: Messages, names = PLATFORM.shellNames, silentReason?: string): string {
   let head: string;
   if (rec.state === "pending") {
     const minutes = Math.round((now - (rec.sentAt ?? now)) / MS_PER_MINUTE);
@@ -707,6 +717,7 @@ export function execCardText(rec: ExecRun, tail: string, now: number, m: Message
     head = `${outcome(rec, m)} · ${duration((rec.end?.at ?? now) - (rec.startedAt ?? now), m)}`;
   }
   const lines = [head, inlineCode(rec.text)];
+  if (rec.state === "running" && silentReason !== undefined) lines.push(m.execRigSilent({ reason: silentReason }));
   if (tail) {
     const fence = "`".repeat(Math.max(MIN_FENCE, longestRun(tail, "`") + 1));
     lines.push(fence, tail, fence);

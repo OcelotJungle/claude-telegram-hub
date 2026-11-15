@@ -119,7 +119,8 @@ export const en = {
   execOutcomeCode: ({ code }: { code: number | undefined }) => `❌ code ${code}`,
   execLostProcessGone: "the process disappeared",
   execRigNoResult: ({ reason }: { reason: string }) => `rig printed no usable answer (${reason})`,
-  execLostNotStarted: ({ error }: { error: string }) => `did not start: ${error}`,
+  execOutcomeFailed: ({ error }: { error: string }) => `❌ did not start: ${error}`,
+  execRigSilent: ({ reason }: { reason: string }) => `⚠️ rig is not answering about this command (${reason}); still waiting`,
   execStartUnknown: "⚠️ The hub restarted while starting this command: it is not known whether it started",
   execPending: ({ minutes }: { minutes: number }) => `⏸ The command arrived ${minutes} min ago while the hub was off`,
 

@@ -164,8 +164,9 @@ After 10 s from the start the results of sessions that still have no window go t
 
 A run rig reports as `lost` (the process disappeared) shows "⚠️ interrupted: <reason>", and the agent gets the same with
 the log tail. rig answers "unknown run" for a run it no longer keeps: the hub ends it as lost too. If rig cannot be
-reached for longer than a minute (`POLL_FAILURE_MS`), the run is ended as lost with the failure as the reason; a shorter
-failure is only logged and the polling goes on.
+reached, the hub never ends the run itself: only rig knows a run is lost (its own `end.kind: "lost"`, from its heartbeat).
+The first failure is logged; after a minute (`RIG_SILENT_NOTE_MS`) the card of the running run gets a line saying rig is
+not answering, with the failure; the polling goes on and the line goes when rig answers again.
 
 ### The log
 
@@ -195,7 +196,7 @@ card fits in a message.
 - The log the card and the report show is capped in memory (see "The log"); the file is not.
 - A hub that dies while `rig exec start` is in flight: the record (chat, message id, `pending`, `starting`, no rig id) is
   saved before every start (shell commands, rig mutations, the Run button) and gets the rig id once start answers; a
-  failed start ends the record with rig's message. A restarted hub finds a record still `starting`, marks it
+  failed start ends the record as `failed` (its own end kind, not `lost`): the card says "did not start" with rig's message. A restarted hub finds a record still `starting`, marks it
   `startUnknown` and does not start it again, nor on redelivery; its card says the outcome is unknown because the hub
   restarted while starting it. Such a run, if rig did start it, stays an orphan in rig. The Run button on that card may
   start it again (an explicit user action).

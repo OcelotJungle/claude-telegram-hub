@@ -109,7 +109,8 @@ export const ru: Messages = {
   execOutcomeCode: ({ code }) => `❌ код ${code}`,
   execLostProcessGone: "процесс исчез",
   execRigNoResult: ({ reason }) => `rig не вывел пригодный ответ (${reason})`,
-  execLostNotStarted: ({ error }) => `не запустилось: ${error}`,
+  execOutcomeFailed: ({ error }) => `❌ не запустилось: ${error}`,
+  execRigSilent: ({ reason }) => `⚠️ rig не отвечает про эту команду (${reason}); жду`,
   execStartUnknown: "⚠️ Хаб перезапустился, пока запускал эту команду: неизвестно, запустилась ли она",
   execPending: ({ minutes }) => `⏸ Команда пришла ${minutes} мин назад, пока хаб был выключен`,
 
