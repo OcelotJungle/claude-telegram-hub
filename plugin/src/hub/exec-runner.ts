@@ -23,6 +23,9 @@ export const runnerSpecSchema = z.object({
   // The heartbeat file: its time is the runner's last sign of life.
   alive: z.string(),
   heartbeatMs: z.number(),
+  // Set for a rig run: the streams are kept apart, each as whole lines. stderr (the progress) goes to
+  // `log`, stdout (the result or the error) to this file. Unset: both go to `log` as the bytes come.
+  result: z.string().optional(),
 });
 export type RunnerSpec = z.infer<typeof runnerSpecSchema>;
 
@@ -85,9 +88,36 @@ function touch(file: string): void {
   }
 }
 
+const NEWLINE = 0x0a;
+
+// Cuts a byte stream into whole lines: push gives back the complete lines of what came so far (each with its
+// "\n"), the partial tail waits for the next chunk; flush gives the tail as a line when the stream ends.
+// It works on bytes, so a multi-byte character split between two chunks stays whole.
+export function lineSplitter(): { push: (chunk: Buffer) => Buffer; flush: () => Buffer } {
+  let tail: Buffer = Buffer.alloc(0);
+  return {
+    push(chunk) {
+      const all = Buffer.concat([tail, chunk]);
+      const end = all.lastIndexOf(NEWLINE);
+      if (end === -1) {
+        tail = all;
+        return Buffer.alloc(0);
+      }
+      tail = all.subarray(end + 1);
+      return all.subarray(0, end + 1);
+    },
+    flush() {
+      const rest = tail;
+      tail = Buffer.alloc(0);
+      return rest.length === 0 ? rest : Buffer.concat([rest, Buffer.from("\n")]);
+    },
+  };
+}
+
 function run(specFile: string): void {
   const spec = runnerSpecSchema.parse(JSON.parse(readFileSync(specFile, "utf8")));
   appendFileSync(spec.log, "");
+  if (spec.result !== undefined) appendFileSync(spec.result, "");
   touch(spec.alive);
   const heartbeat = setInterval(() => touch(spec.alive), spec.heartbeatMs);
   let ended = false;
@@ -111,8 +141,19 @@ function run(specFile: string): void {
     stdio: ["ignore", "pipe", "pipe"],
   });
   let startError: string | undefined;
-  child.stdout.on("data", (chunk: Buffer) => appendFileSync(spec.log, chunk));
-  child.stderr.on("data", (chunk: Buffer) => appendFileSync(spec.log, chunk));
+  const resultFile = spec.result;
+  const out = lineSplitter();
+  const err = lineSplitter();
+  const append = (file: string, bytes: Buffer) => {
+    if (bytes.length > 0) appendFileSync(file, bytes);
+  };
+  if (resultFile === undefined) {
+    child.stdout.on("data", (chunk: Buffer) => appendFileSync(spec.log, chunk));
+    child.stderr.on("data", (chunk: Buffer) => appendFileSync(spec.log, chunk));
+  } else {
+    child.stdout.on("data", (chunk: Buffer) => append(resultFile, out.push(chunk)));
+    child.stderr.on("data", (chunk: Buffer) => append(spec.log, err.push(chunk)));
+  }
   child.on("error", e => {
     // An error after the start (a failed kill) is not a failed start.
     if (child.pid !== undefined) return;
@@ -120,6 +161,11 @@ function run(specFile: string): void {
     failed(e.message);
   });
   child.on("close", code => {
+    // The last line of a stream may have no "\n"; it is a line too.
+    if (resultFile !== undefined) {
+      append(resultFile, out.flush());
+      append(spec.log, err.flush());
+    }
     if (startError === undefined) end({ code, endedAt: Date.now() });
   });
 }

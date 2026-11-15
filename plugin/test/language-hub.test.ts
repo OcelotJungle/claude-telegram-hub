@@ -21,7 +21,7 @@ const GROUP = "-1001";
 const ME = "123456789";
 const STRANGER = "5678";
 const SID = "session-a";
-const FEATURES_JSON = "[]";
+const FEATURES_JSON = JSON.stringify({ features: [] });
 const PID = 424242;
 
 // What a fake rig answers to a query: the language file's content, or a failure.
@@ -42,17 +42,17 @@ function fakeRig(initial: RigOutput | Language): FakeRig & { set(next: RigOutput
     run: argv => {
       const line = argv.join(" ");
       calls.push(line);
-      return line.includes("language --json") ? asOutput(current) : { code: 0, stdout: FEATURES_JSON, stderr: "" };
+      return line.includes("language") ? asOutput(current) : { code: 0, stdout: FEATURES_JSON, stderr: "" };
     },
   };
 }
 
 function languageQueries(rig: FakeRig): number {
-  return rig.calls.filter(call => call.includes("language --json")).length;
+  return rig.calls.filter(call => call.includes("language")).length;
 }
 
 function featureQueries(rig: FakeRig): number {
-  return rig.calls.filter(call => call.includes("feature --json")).length;
+  return rig.calls.filter(call => call.includes("feature")).length;
 }
 
 let fake: FakeTelegram;
@@ -245,7 +245,7 @@ function fixture(extra: { runRig?: HubOptions["runRig"]; setMyCommands?: Telegra
 
 function languageDeferred() {
   const waiting: ((output: RigOutput) => void)[] = [];
-  const run: NonNullable<HubOptions["runRig"]> = invocation => invocation.argv.join(" ").includes("language --json")
+  const run: NonNullable<HubOptions["runRig"]> = invocation => invocation.argv.join(" ").includes("language")
     ? new Promise<RigOutput>(resolve => { waiting.push(resolve); })
     : Promise.resolve({ code: 0, stdout: FEATURES_JSON, stderr: "" });
   return { run, waiting };

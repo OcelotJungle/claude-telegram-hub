@@ -4,12 +4,11 @@ import type { Logger } from "../shared/log.ts";
 import type { Entity, Formatted } from "../shared/markdown.ts";
 import type { OutFile } from "../shared/media.ts";
 import type { Language, Messages } from "../shared/i18n/index.ts";
-import type { AskQuestion, ChannelMeta, EnableResult, HookBody, HubToPlugin, LimitsReading, PermissionBehavior, PluginToHub, QuestionDecision, ResolutionKind, TopicCommand, VolunteerLimitsResult, WorkerLimitsError } from "../shared/protocol.ts";
+import type { AskQuestion, ChannelMeta, EnableResult, HookBody, HubToPlugin, PermissionBehavior, PluginToHub, QuestionDecision, ResolutionKind, TopicCommand } from "../shared/protocol.ts";
 import type { PermissionMode } from "./launch.ts";
 import type { OutItem, Piece } from "./outbox.ts";
 import type { Poll } from "./questions.ts";
 import type { SessionRecord } from "./sessions.ts";
-import type { Worker, WorkerAvailability } from "./worker-availability.ts";
 import type { Button, Message, TelegramApi, Update } from "./telegram.ts";
 import type { RichMessage } from "./rich.ts";
 import type { HubCommand } from "./router.ts";
@@ -34,12 +33,9 @@ import { catalogOf, DEFAULT_LANGUAGE } from "../shared/i18n/index.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
-import { cleanupReport, commandReply, hookBody, limitsPost, pluginToHub, questionBody, sendFilesMessage, sendMessage, terminateRequest, turnEndBody } from "../shared/protocol-schema.ts";
+import { cleanupReport, commandReply, hookBody, pluginToHub, questionBody, sendFilesMessage, sendMessage, terminateRequest, turnEndBody } from "../shared/protocol-schema.ts";
 import { loadCards, saveCards } from "./cards.ts";
 import { loadPollOffset, savePollOffset } from "./poll-offset.ts";
-import { CodexLimits } from "./codex-limits.ts";
-import { VolunteerLimits } from "./volunteer-limits.ts";
-import { rigToolPath, workerAvailability } from "./worker-availability.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
@@ -66,10 +62,10 @@ import { confirmationPromptId, MachineOutbox } from "./machine-outbox.ts";
 import { RigEvents, RIG_POLL_MS } from "./rig-events.ts";
 import { hubCommit, RigLifecycle, startedCommit } from "./rig-lifecycle.ts";
 
-// The rig script that reads the volunteers' quota, in the volunteers feature's tools folder.
-const VOLUNTEER_SCRIPT = "volunteer-models.py";
 // The queue id prefix of the start notice, "starting the session".
 const LAUNCH_NOTICE = "launch-";
+// The status of /info when rig could not give the data.
+const INFO_FAILED_STATUS = 502;
 // CLAUDE_CODE_ENTRYPOINT of a window started in the terminal; such a window is on by default.
 const CLI_ENTRYPOINT = "cli";
 // After a launched session says hello, Claude Code still registers the
@@ -209,11 +205,6 @@ type Cleanup = {
 const cleanupStartKey = (c: Cleanup) => `cmd-${c.id}.0#0`;
 
 export type HubOptions = {
-  codexSessionsDir?: string;
-  // The command to run volunteer-models.py (found through the rig state); defaults to ["python", "-I"].
-  // Timeout for the script; defaults to 5000 ms.
-  volunteerLimitsCommand?: string[];
-  volunteerLimitsTimeoutMs?: number;
   port: number;
   sessionsFile: string;
   outboxFile: string;
@@ -340,10 +331,6 @@ export class Hub {
   private heldResults = new Map<string, HubToPlugin[]>();
   // Commands from the topic the plugin's module has not taken yet, by session.
   private commands = new Map<string, { cmd: TopicCommand; timer: ReturnType<typeof setTimeout> }[]>();
-  // The latest rate-limit reading of each session, with its account then.
-  private limits = new Map<string, LimitsReading & { account?: string }>();
-  private codexLimits: CodexLimits;
-  private volunteerLimits: VolunteerLimits;
   private botUsername: string | undefined;
   private botId: number | undefined;
   // The language of every text sent to Telegram: rig holds it, the hub reads it at start and when rig says it changed.
@@ -444,11 +431,6 @@ export class Hub {
   private disableConfirmations = new Map<string, RigConfirmation>();
 
   constructor(private opts: HubOptions) {
-    this.codexLimits = new CodexLimits(opts.codexSessionsDir);
-    this.volunteerLimits = new VolunteerLimits(
-      opts.volunteerLimitsCommand,
-      opts.volunteerLimitsTimeoutMs
-    );
     this.store = new SessionStore(opts.sessionsFile);
     this.log = opts.log;
     this.outbox = new Outbox(opts.outboxFile, opts.log);
@@ -667,18 +649,8 @@ export class Hub {
       this.onCleanupReport(r.data.sessionId, r.data.id, r.data.before, r.data.error);
       return new Response("ok");
     }
-    if (url.pathname === "/limits" && req.method === "POST") {
-      const r = limitsPost.safeParse(await req.json().catch(() => undefined));
-      if (!r.success) return new Response("bad limits", { status: 400 });
-      const { sessionId, ...reading } = r.data;
-      const account = this.accountOf(sessionId);
-      this.limits.set(sessionId, { ...reading, ...(account ? { account } : {}) });
-      return new Response("ok");
-    }
     if (url.pathname === "/language" && req.method === "GET") return Response.json({ language: this.lang });
-    if (url.pathname === "/limits" && req.method === "GET") return Response.json(this.freshestLimits(url.searchParams.get("session") ?? "") ?? null);
-    if (url.pathname === "/codex-limits" && req.method === "GET") return Response.json(await this.codexLimitsFor(url.searchParams.get("session") ?? ""));
-    if (url.pathname === "/volunteer-limits" && req.method === "GET") return Response.json(await this.volunteerLimitsFor(url.searchParams.get("session") ?? ""));
+    if (url.pathname === "/info" && req.method === "GET") return await this.infoFor(url.searchParams.get("session") ?? "");
     if (url.pathname === "/reply" && req.method === "POST") {
       const r = commandReply.safeParse(await req.json().catch(() => undefined));
       if (!r.success) return new Response("bad reply", { status: 400 });
@@ -726,41 +698,12 @@ export class Hub {
     return cmd.id;
   }
 
-  // The freshest rate-limit reading of the sessions on this session's account;
-  // with the account unknown, only the session's own.
-  private freshestLimits(sessionId: string): LimitsReading | undefined {
-    const account = this.accountOf(sessionId);
-    let best: LimitsReading | undefined;
-    for (const [sid, r] of this.limits) {
-      const same = sid === sessionId || (account !== undefined && (this.accountOf(sid) ?? r.account) === account);
-      if (same && r.rateLimits.length && (!best || r.at > best.at)) best = { at: r.at, rateLimits: r.rateLimits };
-    }
-    return best;
-  }
-
-  // The worker is available to the asking session: its rig feature is on and
-  // the session's own config dir holds the agent file. The config dir comes
-  // from the session's hello, never from the request.
-  private availability(worker: Worker, sessionId: string): WorkerAvailability {
-    const configDir = this.connOf(sessionId)?.data.configDir ?? this.opts.defaultConfigDir ?? DEFAULT_CONFIG_DIR;
-    return workerAvailability(worker, this.opts.rigDir, configDir);
-  }
-
-  // null: Codex is not available to the session (no block). An error: it is
-  // available but there is nothing to show.
-  private async codexLimitsFor(sessionId: string): Promise<LimitsReading | WorkerLimitsError | null> {
-    if (!this.availability("codex", sessionId).available) return null;
-    return await this.codexLimits.read() ?? { kind: "error", reason: this.m().limitsNoCodexRollout };
-  }
-
-  private async volunteerLimitsFor(sessionId: string): Promise<VolunteerLimitsResult> {
-    const worker = this.availability("volunteers", sessionId);
-    if (!worker.available) return { kind: "none" };
-    return this.volunteerLimits.read(rigToolPath(worker.repo, "volunteers", VOLUNTEER_SCRIPT), this.m());
-  }
-
-  private accountOf(sessionId: string): string | undefined {
-    return this.connOf(sessionId)?.data.account ?? this.store.get(sessionId)?.account;
+  // What /info draws, from rig: the session's limits and context. The window renders it. A rig failure
+  // goes back as its text, which the window shows as the answer.
+  private async infoFor(sessionId: string): Promise<Response> {
+    const result = await this.rig.info(sessionId);
+    if (result.ok) return Response.json(result.value);
+    return Response.json({ failure: rigErrorText(result.error, this.m()) }, { status: INFO_FAILED_STATUS });
   }
 
   // An older module does not know stop or cleanup: it stays queued for its

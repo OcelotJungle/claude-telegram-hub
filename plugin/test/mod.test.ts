@@ -1,99 +1,116 @@
 import type { Usage } from "../src/mod/commands.ts";
-import type { VolunteerLimitsResult } from "../src/shared/protocol.ts";
-
 import { describe, expect, test } from "bun:test";
 import { autocompactArg, infoText, Runner } from "../src/mod/commands.ts";
 import { field } from "../src/shared/guards.ts";
 import { catalogOf } from "../src/shared/i18n/index.ts";
 import { waitFor } from "./helpers.ts";
 import { tokens } from "../src/shared/tokens.ts";
+import { bareInfo, blockError, fullInfo, INFO_NOW, iso, neverSleep } from "./info-fixtures.ts";
+import { RIG_QUERY_LIMIT_MS } from "../src/shared/info-data.ts";
 
-const NOW = Date.parse("2026-01-02T11:40:00Z");
+const NOW = INFO_NOW;
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const MS_PER_SECOND = 1000;
 const en = catalogOf("en");
 const ru = catalogOf("ru");
 
-const usage = (o: { tokens?: number; limits?: Usage["rateLimits"]; breakdown?: Partial<NonNullable<Usage["context"]["breakdown"]>> | null } = {}): Usage => ({
+const usage = (o: { tokens?: number } = {}): Usage => ({
   context: {
     ...(o.tokens !== undefined ? { tokens: o.tokens } : {}),
     window: 1_000_000,
-    ...(o.breakdown === null
-      ? {}
-      : { breakdown: { totalTokens: 36_400, rawMaxTokens: 333_000, autoCompactThreshold: 300_000, isAutoCompactEnabled: true, ...o.breakdown } }),
+    breakdown: { totalTokens: 36_400, rawMaxTokens: 333_000, autoCompactThreshold: 300_000, isAutoCompactEnabled: true },
   },
-  rateLimits: o.limits ?? [
-    { kind: "seven_day", percentUsed: 36, resetsAt: "2026-01-06T18:00:00.000Z" },
-    { kind: "five_hour", percentUsed: 30, resetsAt: "2026-01-02T13:00:00.000Z" },
-  ],
-});
-
-const volunteerOk = (overrides: Partial<Omit<VolunteerLimitsResult, "kind">> = {}): VolunteerLimitsResult => ({
-  kind: "ok",
-  at: NOW - 2 * 60_000,
-  dayPercent: 6,
-  resetsAt: NOW + 15 * 60 * 60_000,
-  providers: [
-    { name: "OpenRouter", used: 39, cap: 1000 },
-    { name: "Requesty", used: 7, cap: 200 },
-    { name: "Groq", used: 194, cap: 3000 },
-  ],
-  ...overrides,
 });
 
 describe("/info text", () => {
-  test("Codex follows Claude, orders windows and rounds percentages", () => {
-    const text = infoText(usage(), NOW, en, undefined, { at: NOW, rateLimits: [
-      { kind: "seven_day", percentUsed: 22.4 },
-      { kind: "five_hour", percentUsed: 40.7, resetsAt: new Date(NOW + 2 * 60 * 60_000).toISOString() },
-    ] });
-    expect(text).toStartWith("**Claude limits**\n");
-    expect(text).toContain("\n\n**Codex limits**\n5 hours: 41% (resets in 2 h)\nWeek: 22%\n\n**Context**");
-  });
-
-  test("Codex has its own staleness and resets expired usage to zero", () => {
-    const rateLimits = [{ kind: "five_hour", percentUsed: 41, resetsAt: new Date(NOW).toISOString() }];
-    expect(infoText(usage(), NOW, en, NOW, { at: NOW - 72 * 60_000, rateLimits })).toContain("**Codex limits** (data 1 h 12 min old)\n5 hours: 0%\n\n");
-    expect(infoText(usage(), NOW, en, NOW, { at: NOW - 59_000, rateLimits })).toContain("**Codex limits**\n");
-    expect(infoText(usage(), NOW, en)).not.toContain("Codex");
-  });
-
-  test("limits with time to reset and the current context against the autocompact threshold", () => {
-    expect(infoText(usage({ tokens: 128_400 }), NOW, en)).toBe(
+  test("all four blocks from rig's data, in order, with reset times and the context against the threshold", () => {
+    expect(infoText(fullInfo(), NOW, en)).toBe(
       [
         "**Claude limits**",
-        "5 hours: 30% (resets in 1 h 20 min)",
-        "Week: 36% (resets in 4 d 6 h)",
+        "5 hours: 41% (resets in 2 h 30 min)",
+        "Week: 12% (resets in 3 h)",
+        "",
+        "**Codex limits**",
+        "5 hours: 30% (resets in 1 h)",
+        "Week: 55% (resets in 3 h)",
+        "",
+        "**Volunteer limits**",
+        "Day: 20% (resets in 2 h)",
+        "alpha: 10/50",
         "",
         "**Context**",
-        "128/300k",
+        "120/300k",
       ].join("\n"),
     );
   });
 
+  test("a block rig leaves out is not shown", () => {
+    const text = infoText(bareInfo(), NOW, en);
+    expect(text).toStartWith("**Claude limits**\n");
+    expect(text).not.toContain("Codex");
+    expect(text).not.toContain("Volunteer");
+    expect(text).toEndWith("**Context**\n120/300k");
+  });
+
+  test("a block with rig's error shows as unavailable with rig's message, the other blocks stay", () => {
+    const text = infoText(
+      fullInfo({
+        claude: blockError("claude-failed", "no session data"),
+        codex: blockError("codex-failed", "no rollout"),
+        volunteers: blockError("volunteers-failed", "timeout"),
+        context: blockError("context-failed", "no status line"),
+      }),
+      NOW,
+      en,
+    );
+    expect(text).toBe(
+      [
+        "Claude limits: unavailable, no session data",
+        "",
+        "Codex limits: unavailable, no rollout",
+        "",
+        "Volunteer limits: unavailable, timeout",
+        "",
+        "**Context**",
+        "unavailable, no status line",
+      ].join("\n"),
+    );
+    expect(infoText(fullInfo({ codex: blockError("codex-failed", "no rollout") }), NOW, en)).toContain("**Volunteer limits**\n");
+  });
+
+  test("the unavailable lines are in Russian in the Russian catalog, with rig's message as it is", () => {
+    const text = infoText(fullInfo({ codex: blockError("codex-failed", "no rollout") }), NOW, ru);
+    expect(text).toContain(ru.infoCodexUnavailable({ reason: "no rollout" }));
+    expect(ru.infoCodexUnavailable({ reason: "x" })).not.toBe(en.infoCodexUnavailable({ reason: "x" }));
+  });
+
   test("before the first model response there are no limits and the context is an estimate", () => {
-    const text = infoText(usage({ limits: [] }), NOW, en);
+    const claude = { at: null, sessionId: "s", limits: [] };
+    const text = infoText(fullInfo({ claude, context: { at: iso(NOW), tokens: 36_400, window: 1_000_000, threshold: 300_000, autocompact: true, estimated: true } }), NOW, en);
     expect(text).toContain("Claude limits: no data, they appear after the model's first reply");
-    expect(text).toContain("≈36/300k");
+    expect(text).toEndWith("**Context**\n≈36/300k");
   });
 
-  test("autocompact off", () => {
-    const text = infoText(usage({ tokens: 50_000, breakdown: { isAutoCompactEnabled: false, autoCompactThreshold: undefined } }), NOW, en);
-    expect(text.endsWith("**Context**\n50k")).toBe(true);
-  });
-
-  test("without a threshold only the context size is shown", () => {
-    const text = infoText(usage({ tokens: 100_000, breakdown: { autoCompactThreshold: undefined } }), NOW, en);
-    expect(text.endsWith("**Context**\n100k")).toBe(true);
+  test("autocompact off or no threshold shows only the context size", () => {
+    const off = fullInfo({ context: { at: iso(NOW), tokens: 50_000, window: 1_000_000, autocompact: false } });
+    expect(infoText(off, NOW, en)).toEndWith("**Context**\n50k");
+    const none = fullInfo({ context: { at: iso(NOW), tokens: 100_000, window: 1_000_000, autocompact: true } });
+    expect(infoText(none, NOW, en)).toEndWith("**Context**\n100k");
   });
 
   test("short and past resets, an unknown window kind, no reset time", () => {
     const text = infoText(
-      usage({
-        tokens: 1,
-        limits: [
-          { kind: "five_hour", percentUsed: 99.5, resetsAt: "2026-01-02T11:45:00.000Z" },
-          { kind: "seven_day", percentUsed: 7, resetsAt: "2026-01-02T11:00:00.000Z" },
-          { kind: "spend_limit", percentUsed: 12 },
-        ],
+      fullInfo({
+        claude: {
+          at: iso(NOW),
+          sessionId: "s",
+          limits: [
+            { kind: "five_hour", percentUsed: 99.5, resetsAt: iso(NOW + 5 * MINUTE_MS) },
+            { kind: "seven_day", percentUsed: 7, resetsAt: iso(NOW - HOUR_MS) },
+            { kind: "spend_limit", percentUsed: 12, resetsAt: null },
+          ],
+        },
       }),
       NOW,
       en,
@@ -103,77 +120,61 @@ describe("/info text", () => {
     expect(text).toContain("spend_limit: 12%\n");
   });
 
-  test("limits read over 5 minutes ago say how old they are", () => {
-    expect(infoText(usage({ tokens: 1 }), NOW, en, NOW - 4 * 60_000)).toStartWith("**Claude limits**\n");
-    expect(infoText(usage({ tokens: 1 }), NOW, en, NOW - 6 * 60_000)).toStartWith("**Claude limits** (data 6 min old)\n");
+  test("a block read over 5 minutes ago says how old it is, each by its own time", () => {
+    const fresh = infoText(fullInfo({ claude: { at: iso(NOW - 4 * MINUTE_MS), sessionId: "s", limits: [{ kind: "five_hour", percentUsed: 1, resetsAt: null }] } }), NOW, en);
+    expect(fresh).toStartWith("**Claude limits**\n");
+    const stale = infoText(fullInfo({ claude: { at: iso(NOW - 6 * MINUTE_MS), sessionId: "s", limits: [{ kind: "five_hour", percentUsed: 1, resetsAt: null }] } }), NOW, en);
+    expect(stale).toStartWith("**Claude limits** (data 6 min old)\n");
+    const codex = infoText(fullInfo({ codex: { at: iso(NOW - 72 * MINUTE_MS), limits: [{ windowMinutes: 300, usedPercent: 30, resetsAt: iso(NOW + HOUR_MS) }] } }), NOW, en);
+    expect(codex).toContain("**Codex limits** (data 1 h 12 min old)\n");
+    expect(codex).toContain("**Volunteer limits**\n");
   });
 
-  test("without a breakdown only the status line figure is shown", () => {
-    const text = infoText(usage({ tokens: 20_000, breakdown: null }), NOW, en);
-    expect(text.endsWith("**Context**\n20k")).toBe(true);
+  test("the context block says how old its reading is from its own time, with the same threshold", () => {
+    const at = (ms: number) => ({ at: iso(ms), tokens: 1000, window: null });
+    expect(infoText(fullInfo({ context: at(NOW - 4 * MINUTE_MS) }), NOW, en)).toContain("\n**Context**\n");
+    expect(infoText(fullInfo({ context: at(NOW - 6 * MINUTE_MS) }), NOW, en)).toContain("\n**Context** (data 6 min old)\n");
+    expect(infoText(fullInfo({ context: { at: null, tokens: 1000, window: null } }), NOW, en)).toContain("\n**Context**\n");
   });
 
-  test("without any context size shows no data", () => {
-    const text = infoText(usage({ breakdown: null }), NOW, en);
-    expect(text.endsWith("**Context**\nno data")).toBe(true);
+  test("a Codex window whose reset has passed is empty again", () => {
+    const codex = { at: iso(NOW), limits: [{ windowMinutes: 300, usedPercent: 41, resetsAt: iso(NOW) }] };
+    expect(infoText(fullInfo({ codex }), NOW, en)).toContain("**Codex limits**\n5 hours: 0%\n\n");
   });
 
-  test("volunteer limits ok block after Codex", () => {
-    const text = infoText(usage(), NOW, en, undefined, { at: NOW, rateLimits: [] }, volunteerOk());
-    expect(text).toContain("\n\n**Volunteer limits**\nDay: 6% (resets in 15 h)\nOpenRouter: 39/1000\nRequesty: 7/200\nGroq: 194/3000\n\n**Context**");
-  });
-
-  test("volunteer limits ok block after Claude when no Codex", () => {
-    const text = infoText(usage(), NOW, en, undefined, undefined, volunteerOk());
-    expect(text).toContain("\n\n**Volunteer limits**\nDay: 6% (resets in 15 h)\nOpenRouter: 39/1000\nRequesty: 7/200\nGroq: 194/3000\n\n**Context**");
+  test("the Codex percentage is rounded, a window of another length is named by it", () => {
+    const codex = { at: iso(NOW), limits: [{ windowMinutes: 90, usedPercent: 12.4, resetsAt: iso(NOW + HOUR_MS) }, { windowMinutes: 10_080, usedPercent: 22.6, resetsAt: null }] };
+    const text = infoText(fullInfo({ codex }), NOW, en);
+    expect(text).toContain("Week: 23%\n");
+    expect(text).toContain(`1 ${en.unitHour} 30 ${en.unitMinute}: 12% (resets in 1 h)`);
+    expect(infoText(fullInfo({ codex }), NOW, ru)).toContain(`1 ${ru.unitHour} 30 ${ru.unitMinute}: 12%`);
+    expect(infoText(fullInfo({ codex }), NOW, ru)).not.toContain("90m");
   });
 
   test("volunteer day percent rounds to an integer", () => {
-    const text = infoText(usage(), NOW, en, undefined, undefined, volunteerOk({ dayPercent: 6.7 }));
-    expect(text).toContain("Day: 7% (resets in 15 h)");
+    const volunteers = { at: iso(NOW), source: "api", dayPercent: 6.7, used: 1, cap: 10, resetsAt: iso(NOW + 2 * HOUR_MS), providers: {} };
+    expect(infoText(fullInfo({ volunteers }), NOW, en)).toContain("Day: 7% (resets in 2 h)");
   });
 
-  test("volunteer limits passed reset shows 0% without suffix", () => {
-    const text = infoText(usage(), NOW, en, undefined, undefined, volunteerOk({ resetsAt: NOW - 1000 }));
-    expect(text).toContain("Day: 0%\n");
-    // Check that the volunteer block doesn't have "resets in"
-    const volIdx = text.indexOf("**Volunteer limits**");
-    const ctxIdx = text.indexOf("**Context**");
-    const volBlock = text.slice(volIdx, ctxIdx);
-    expect(volBlock).not.toContain("resets in");
+  test("volunteers: providers by their names, one without a limit is not shown, a passed reset shows 0%", () => {
+    const volunteers = {
+      at: iso(NOW),
+      source: "api",
+      dayPercent: 6,
+      used: 240,
+      cap: 4200,
+      resetsAt: iso(NOW - 1000),
+      providers: { openrouter: { used: 39, cap: 1000 }, requesty: { used: 7, cap: 200 }, groq: { used: 194, cap: 3000 }, zhipu: { used: 4, cap: null }, other: { used: 1, cap: 5 } },
+    };
+    const text = infoText(fullInfo({ volunteers }), NOW, en);
+    expect(text).toContain("**Volunteer limits**\nDay: 0%\nOpenRouter: 39/1000\nRequesty: 7/200\nGroq: 194/3000\nother: 1/5\n\n**Context**");
+    expect(text).not.toContain("Zhipu");
+    expect(text).not.toContain("resets in 0");
   });
 
-  test("volunteer limits error shows single line", () => {
-    const text = infoText(usage(), NOW, en, undefined, undefined, { kind: "error", reason: "timeout" });
-    expect(text).toContain("\n\nVolunteer limits: no data, timeout\n\n**Context**");
-  });
-
-  test("codex limits error shows single line", () => {
-    const text = infoText(usage(), NOW, en, undefined, { kind: "error", reason: "no rollout" });
-    expect(text).toContain("Codex limits: no data, no rollout");
-  });
-
-  test("volunteer limits none produces no block", () => {
-    const text = infoText(usage(), NOW, en, undefined, undefined, { kind: "none" });
-    expect(text).not.toContain("Volunteer limits");
-  });
-
-  test("block order: Claude → Codex → volunteers → context", () => {
-    const text = infoText(usage(), NOW, en, undefined, { at: NOW, rateLimits: [] }, volunteerOk());
-    const claudeIdx = text.indexOf("**Claude limits**");
-    const codexIdx = text.indexOf("**Codex limits**");
-    const volIdx = text.indexOf("**Volunteer limits**");
-    const ctxIdx = text.indexOf("**Context**");
-    expect(claudeIdx).toBeLessThan(codexIdx);
-    expect(codexIdx).toBeLessThan(volIdx);
-    expect(volIdx).toBeLessThan(ctxIdx);
-  });
-
-  test("volunteer limits staleness uses 5-minute threshold", () => {
-    const recent = volunteerOk({ at: NOW - 4 * 60_000 });
-    const stale = volunteerOk({ at: NOW - 6 * 60_000 });
-    expect(infoText(usage(), NOW, en, undefined, undefined, recent)).toContain("**Volunteer limits**\n");
-    expect(infoText(usage(), NOW, en, undefined, undefined, stale)).toContain("**Volunteer limits** (data 6 min old)\n");
+  test("an estimate of the context is marked with a tilde", () => {
+    const estimated = fullInfo({ context: { at: iso(NOW), tokens: 128_400, window: 1_000_000, threshold: 300_000, autocompact: true, estimated: true } });
+    expect(infoText(estimated, NOW, en)).toEndWith("≈128/300k");
   });
 });
 
@@ -203,6 +204,7 @@ describe("replies", () => {
         return { status: 200, text: "ok" };
       },
       now: () => NOW,
+      sleep: neverSleep,
     });
     await runner.poll();
     // The next tick of the module's timer, while the first reply is posted.
@@ -216,21 +218,16 @@ describe("replies", () => {
   });
 });
 
-describe("limits shared through the hub", () => {
-  const OWN = [{ kind: "five_hour", percentUsed: 30, resetsAt: "2026-01-02T13:00:00.000Z" }];
-  const FRESH = [{ kind: "five_hour", percentUsed: 64, resetsAt: "2026-01-02T13:00:00.000Z" }];
+describe("/info through the hub", () => {
+  type Answer = { status: number; text: string };
 
-  function runner(
-    answer: () => { status: number; text: string },
-    codex: () => { status: number; text: string } = () => ({ status: 200, text: "null" }),
-    volunteer: () => { status: number; text: string } = () => ({ status: 200, text: "null" })
-  ) {
+  function runner(answer: () => Answer | Promise<Answer>, sleep: (ms: number) => Promise<void> = neverSleep) {
     const posted: { path: string; body: unknown }[] = [];
     const asked: string[] = [];
     let commands = [{ id: "c1", name: "info", args: "" }];
     const r = new Runner("http://hub", {
       sessionId: async () => "s",
-      usage: async () => usage({ tokens: 1, limits: OWN }),
+      usage: async () => usage({ tokens: 1 }),
       run: async () => ({}),
       compact: async () => ({}),
       http: async (url, init) => {
@@ -238,86 +235,95 @@ describe("limits shared through the hub", () => {
           posted.push({ path: new URL(url).pathname, body: JSON.parse(init.body ?? "null") });
           return { status: 200, text: "ok" };
         }
-        if (new URL(url).pathname === "/limits") return answer();
-        if (new URL(url).pathname === "/codex-limits") { asked.push(url); return codex(); }
-        if (new URL(url).pathname === "/volunteer-limits") { asked.push(url); return volunteer(); }
+        if (new URL(url).pathname === "/info") { asked.push(url); return answer(); }
         const list = commands;
         commands = [];
         return { status: 200, text: JSON.stringify(list) };
       },
       now: () => NOW,
+      sleep,
     });
-    const info = () => String(field(posted.find(p => p.path === "/reply")?.body, "text"));
-    return { r, posted, info, asked };
+    const reply = () => posted.find(p => p.path === "/reply")?.body;
+    return { r, posted, asked, reply, text: () => String(field(reply(), "text")) };
   }
 
-  test("/info shows the freshest reading of the account, with its age", async () => {
-    const s = runner(() => ({ status: 200, text: JSON.stringify({ at: NOW - 5 * 60_000, rateLimits: FRESH }) }));
+  test("asks the hub for rig's data of its own session, with no path in the request, and draws it", async () => {
+    const s = runner(() => ({ status: 200, text: JSON.stringify(fullInfo()) }));
     await s.r.poll();
-    await Bun.sleep(50);
-    expect(s.info()).toStartWith("**Claude limits** (data 5 min old)\n5 hours: 64%");
+    await waitFor(() => s.reply(), 1000, "the /info reply");
+    expect(s.asked).toEqual(["http://hub/info?session=s"]);
+    expect(s.text()).toBe(infoText(fullInfo(), NOW, en));
+    expect(field(s.reply(), "notify")).toBe(false);
   });
 
-  test("/info fetches Codex limits and tolerates failures", async () => {
+  test("the hub's failure text is the reply, as an error", async () => {
+    const s = runner(() => ({ status: 502, text: JSON.stringify({ failure: "rig could not read the session" }) }));
+    await s.r.poll();
+    await waitFor(() => s.reply(), 1000, "the failure reply");
+    expect(s.text()).toBe("rig could not read the session");
+    expect(field(s.reply(), "notify")).toBe(true);
+  });
+
+  test("an answer that is not rig's data gets the hub's bad-reply text, never drawn and never a parse error", async () => {
     const answers = [
-      () => ({ status: 200, text: JSON.stringify({ at: NOW, rateLimits: FRESH }) }),
-      () => ({ status: 500, text: "" }),
-      () => ({ status: 200, text: "{broken" }),
-      () => { throw new Error("offline"); },
+      { status: 200, text: JSON.stringify({ session: "s" }) },
+      { status: 500, text: "{}" },
+      { status: 200, text: "<html>not json</html>" },
+      { status: 502, text: "not json either" },
     ];
-    for (const [index, answer] of answers.entries()) {
-      const s = runner(() => ({ status: 200, text: "null" }), answer);
+    for (const answer of answers) {
+      const s = runner(() => answer);
       await s.r.poll();
-      await Bun.sleep(50);
-      expect(s.info()).toStartWith("**Claude limits**");
-      expect(s.info().includes("**Codex limits**")).toBe(index === 0);
+      await waitFor(() => s.reply(), 1000, "the failed reply");
+      expect(s.text()).toBe(en.infoHubBadReply({ status: answer.status }));
+      expect(s.text()).not.toContain("Claude limits");
+      expect(s.text()).not.toContain("JSON");
+      expect(field(s.reply(), "notify")).toBe(true);
     }
   });
 
-  test("/info asks both worker endpoints as its own session, with no path in the request", async () => {
-    const s = runner(() => ({ status: 200, text: "null" }));
+  test("a hub that cannot be reached is told in the hub's own text", async () => {
+    const s = runner(() => Promise.reject(new Error("connect refused")));
     await s.r.poll();
-    await Bun.sleep(50);
-    expect(s.asked.sort()).toEqual(["http://hub/codex-limits?session=s", "http://hub/volunteer-limits?session=s"]);
+    await waitFor(() => s.reply(), 1000, "the unreachable reply");
+    expect(s.text()).toBe(en.infoHubUnreachable({ error: "connect refused" }));
   });
 
-  test("/info shows the error line the hub gives for an available Codex without data", async () => {
-    const s = runner(() => ({ status: 200, text: "null" }), () => ({ status: 200, text: JSON.stringify({ kind: "error", reason: "no rollout" }) }));
+  test("the window waits for the hub as long as rig's query limit plus a margin, then says so", async () => {
+    const waits: number[] = [];
+    const sleep = (ms: number): Promise<void> => {
+      waits.push(ms);
+      return Promise.resolve();
+    };
+    const s = runner(() => new Promise<Answer>(() => undefined), sleep);
     await s.r.poll();
-    await Bun.sleep(50);
-    expect(s.info()).toContain("Codex limits: no data, no rollout");
+    await waitFor(() => s.reply(), 1000, "the timeout reply");
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toBeGreaterThan(RIG_QUERY_LIMIT_MS);
+    expect(s.text()).toBe(en.infoHubTimeout({ seconds: (waits[0] ?? 0) / MS_PER_SECOND }));
   });
 
-  test("/info fetches volunteer limits and tolerates failures", async () => {
-    const answers = [
-      () => ({ status: 200, text: JSON.stringify({ kind: "ok", at: NOW, dayPercent: 6, resetsAt: NOW + 15 * 60 * 60_000, providers: [] }) }),
-      () => ({ status: 500, text: "" }),
-      () => ({ status: 200, text: "{broken" }),
-      () => { throw new Error("offline"); },
-    ];
-    for (const [index, answer] of answers.entries()) {
-      const s = runner(() => ({ status: 200, text: "null" }), () => ({ status: 200, text: "null" }), answer);
-      await s.r.poll();
-      await Bun.sleep(50);
-      expect(s.info()).toStartWith("**Claude limits**");
-      expect(s.info().includes("**Volunteer limits**")).toBe(index === 0);
-    }
+  test("a no-data block of rig is drawn as no data, other codes as unavailable with rig's message", async () => {
+    const noData = fullInfo({ claude: blockError("no-data", "x"), context: blockError("no-data", "y") });
+    const s = runner(() => ({ status: 200, text: JSON.stringify(noData) }));
+    await s.r.poll();
+    await waitFor(() => s.reply(), 1000, "the no-data reply");
+    expect(s.text()).toContain(en.infoClaudeNoData);
+    expect(s.text()).toContain(`**Context**\n${en.infoNoData}`);
+    const failed = fullInfo({ claude: blockError("boom", "claude down"), context: blockError("boom", "ctx down") });
+    const f = runner(() => ({ status: 200, text: JSON.stringify(failed) }));
+    await f.r.poll();
+    await waitFor(() => f.reply(), 1000, "the unavailable reply");
+    expect(f.text()).toContain(en.infoClaudeUnavailable({ reason: "claude down" }));
+    expect(f.text()).toContain(en.infoContextUnavailable({ reason: "ctx down" }));
   });
 
-  test("without a reading in the hub /info shows the session's own", async () => {
-    for (const answer of [() => ({ status: 200, text: "null" }), () => ({ status: 500, text: "" }), () => ({ status: 200, text: "{\"at\":\"x\"}" })]) {
-      const s = runner(answer);
-      await s.r.poll();
-      await Bun.sleep(50);
-      expect(s.info()).toStartWith("**Claude limits**\n5 hours: 30%");
-    }
-  });
-
-  test("a reading of the session is posted to the hub; an empty one is not", async () => {
-    const s = runner(() => ({ status: 200, text: "null" }));
-    await s.r.measured([]);
-    await s.r.measured(FRESH);
-    expect(s.posted).toEqual([{ path: "/limits", body: { sessionId: "s", at: NOW, rateLimits: FRESH } }]);
+  test("an answer that breaks rig's contract in a field the window reads is not drawn", async () => {
+    const broken = { ...fullInfo(), codex: { at: null, limits: [] } };
+    const s = runner(() => ({ status: 200, text: JSON.stringify(broken) }));
+    await s.r.poll();
+    await waitFor(() => s.reply(), 1000, "the bad reply");
+    expect(s.text()).toBe(en.infoHubBadReply({ status: 200 }));
   });
 });
 
@@ -347,6 +353,7 @@ describe("/rename", () => {
         return { status: 200, text: JSON.stringify(list) };
       },
       now: () => NOW,
+      sleep: neverSleep,
     });
     const polls = async (n: number) => {
       for (let i = 0; i < n; i++) {
@@ -428,6 +435,7 @@ describe("/cleanup", () => {
         return { status: 200, text: JSON.stringify(list) };
       },
       now: () => NOW,
+      sleep: neverSleep,
     });
     const polls = async (n: number) => {
       for (let i = 0; i < n; i++) {
@@ -570,6 +578,7 @@ describe("language changes during a command", () => {
         return { status: 200, text: JSON.stringify(list) };
       },
       now: () => NOW,
+      sleep: neverSleep,
     });
     const text = (id: string) => {
       const reply = posted.find(p => field(p.body, "id") === id);
@@ -617,20 +626,5 @@ describe("language changes during a command", () => {
     release();
     await waitFor(() => s.text("c1.1"), 1000, "the result text");
     expect(s.text("c1.1")).toBe(en.commandDone({ command: "/rename Sprint" }));
-  });
-});
-
-describe("Codex limits of an unusual length", () => {
-  const limits = { at: NOW, rateLimits: [{ kind: "90m", percentUsed: 12, resetsAt: "2026-01-02T13:00:00.000Z" }, { kind: "weekly", percentUsed: 3 }] };
-
-  test("the length is written with the catalog's unit, in both languages", () => {
-    const text = (catalog: typeof en) => infoText(usage(), NOW, catalog, undefined, limits);
-    expect(text(en)).toContain(`1 ${en.unitHour} 30 ${en.unitMinute}: 12%`);
-    expect(text(ru)).toContain(`1 ${ru.unitHour} 30 ${ru.unitMinute}: 12%`);
-    expect(text(ru)).not.toContain("90m");
-  });
-
-  test("a kind that is not a length is shown as it is", () => {
-    expect(infoText(usage(), NOW, en, undefined, limits)).toContain("weekly: 3%");
   });
 });

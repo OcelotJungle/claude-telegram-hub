@@ -1,5 +1,5 @@
-// telegram-hub's function hooks module (hooks.json → modules): runs /info and
-// /compact sent to the session's topic, and gets the session ready for /stop. Claude Code delivers channel
+// telegram-hub's function hooks module (hooks.json → modules): draws /info (the hub gets the data from
+// rig) and runs /compact sent to the session's topic, and gets the session ready for /stop. Claude Code delivers channel
 // messages with slash commands skipped, so the hub keeps them, and this
 // module, inside the session, takes them over localhost HTTP. The logic is in
 // commands.ts; here are only the engine's `$` calls, which the engine allows
@@ -23,18 +23,12 @@ export const register: Register = on => {
       run: (command, args) => $.command.run({ command, args }),
       compact: instructions => $.session.compact(instructions === undefined ? undefined : { instructions }),
       http: (url, init) => $.http.fetch(url, init),
+      sleep: ms => $.clock.sleep(ms),
       now: () => Date.now(),
     });
     runner = r;
     $.clock.every(POLL_MS, () => void r.poll());
     return result;
-  });
-
-  // The account's rate limits as this session read them, for /info in the
-  // sessions that have been idle since.
-  on("session.measure", async ($, e, next) => {
-    void runner?.measured(e.rateLimits);
-    return next(e);
   });
 
   // The main loop's turns: a compaction from the topic waits for none to run.

@@ -192,16 +192,32 @@ export const en = {
   infoLimitLine: ({ name, percent, resetIn }: { name: string; percent: number; resetIn: string | undefined }) =>
     `${name}: ${percent}%${resetIn ? ` (resets in ${resetIn})` : ""}`,
   infoVolunteerDay: ({ percent, resetIn }: { percent: number; resetIn: string | undefined }) => resetIn ? `Day: ${percent}% (resets in ${resetIn})` : `Day: ${percent}%`,
-  infoVolunteerNoData: ({ reason }: { reason: string }) => `Volunteer limits: no data, ${reason}`,
-  infoCodexNoData: ({ reason }: { reason: string }) => `Codex limits: no data, ${reason}`,
-  limitsNoCodexRollout: "no Codex rollout with limits yet",
-  limitsScriptMissing: "volunteer-models.py not found",
-  limitsScriptExit: ({ code, stderr }: { code: number; stderr: string }) => `script exited with code ${code}: ${stderr || "no stderr"}`,
-  limitsScriptTimeout: "the script timed out",
-  limitsScriptBadJson: "bad JSON from script",
-  limitsNoSource: "no data source",
-  infoContext: "**Context**",
+  // A block of /info whose source failed: rig's own message follows.
+  infoClaudeUnavailable: ({ reason }: { reason: string }) => `Claude limits: unavailable, ${reason}`,
+  infoVolunteerUnavailable: ({ reason }: { reason: string }) => `Volunteer limits: unavailable, ${reason}`,
+  infoCodexUnavailable: ({ reason }: { reason: string }) => `Codex limits: unavailable, ${reason}`,
+  infoContextUnavailable: ({ reason }: { reason: string }) => `unavailable, ${reason}`,
+  infoContext: ({ age }: { age: string | undefined }) => age ? `**Context** (data ${age} old)` : "**Context**",
   infoNoData: "no data",
+  // The hub's own failures in /info, as the window meets them.
+  infoHubUnreachable: ({ error }: { error: string }) => `⚠️ /info failed: the hub does not answer (${error})`,
+  infoHubBadReply: ({ status }: { status: number }) => `⚠️ /info failed: the hub's answer is not readable (HTTP ${status})`,
+  infoHubTimeout: ({ seconds }: { seconds: number }) => `⚠️ /info failed: the hub did not answer within ${seconds} s`,
+  // The words of a rig card: its progress lines and its result.
+  rigProgressLockWaiting: "waiting for rig to be free",
+  rigProgressProgramInstall: ({ name, command }: { name: string; command: string }) => `installing ${name}: ${command}`,
+  rigProgressServiceStopping: "stopping the service",
+  // A step of rig this hub has no words for yet: its code is all there is to show.
+  rigProgressUnknown: ({ code }: { code: string }) => `rig: ${code}`,
+  rigFeatureEnabled: ({ name }: { name: string }) => `Feature ${name} enabled`,
+  rigFeatureDisabled: ({ name }: { name: string }) => `Feature ${name} disabled`,
+  rigUpdateComplete: ({ pending }: { pending: boolean }): string => pending ? "Pending update complete" : "Update complete",
+  rigUpdateChecked: ({ pending }: { pending: boolean }): string => pending ? "Pending update checked" : "Update checked",
+  rigUpdateDeferred: ({ pending }: { pending: boolean }): string => pending ? "Pending update check deferred: rig is busy" : "Update deferred: rig is busy",
+  rigLanguageIs: ({ language }: { language: string }) => `Language: ${language}`,
+  rigLanguageChanged: ({ language }: { language: string }) => `Language: ${language} (changed)`,
+  rigLanguageUnchanged: ({ language }: { language: string }) => `Language: ${language} (already set)`,
+  rigBadSession: "rig: the session id is not valid",
 
   // Subagent cards and API failures.
   subagentContinued: "⬇️ continued below",

@@ -45,7 +45,7 @@ function fixture(extra: Partial<HubOptions> = {}) {
   const menus: string[][] = [];
   const removed: number[] = [];
   let offline = false;
-  let output: RigOutput = { code: 0, stdout: "[]", stderr: "" };
+  let output: RigOutput = { code: 0, stdout: JSON.stringify({ features: [] }), stderr: "" };
   api.sendMessage = async (_chat, topic, text, silent) => {
     if (offline) throw new Error("offline");
     texts.push({ text, topic, silent }); order.push(text); return { message_id: texts.length };
@@ -142,7 +142,7 @@ test("a rig that cannot be launched answers with its own reason, not a fixed tex
 test("a slow JSON query neither delays the next update nor escapes the idle gate", async () => {
   let release: () => void = () => {};
   const slow = new Promise<void>(resolve => { release = resolve; });
-  const f = fixture({ runRig: async () => { await slow; return { code: 0, stdout: "[]", stderr: "" }; } });
+  const f = fixture({ runRig: async () => { await slow; return { code: 0, stdout: JSON.stringify({ features: [] }), stderr: "" }; } });
   await f.intake("/rig feature");
   expect(f.hub["machineQueries"]).toBe(1);
   expect(f.hub["rigIdle"]()).toBe(false);
@@ -167,7 +167,7 @@ test("a machine command that fails is logged and does not stop the intake", asyn
 test("feature refreshes are single-flight: one in flight, one more behind it", async () => {
   let runs = 0;
   const gates: (() => void)[] = [];
-  const f = fixture({ runRig: async () => { runs++; await new Promise<void>(resolve => { gates.push(resolve); }); return { code: 0, stdout: "[]", stderr: "" }; } });
+  const f = fixture({ runRig: async () => { runs++; await new Promise<void>(resolve => { gates.push(resolve); }); return { code: 0, stdout: JSON.stringify({ features: [] }), stderr: "" }; } });
   const first = f.hub["refreshFeatures"]();
   const second = f.hub["refreshFeatures"]();
   const third = f.hub["refreshFeatures"]();
@@ -437,7 +437,7 @@ test("events use General sound levels and features-changed updates the menu", as
   const hub = f.track(new Hub({ ...f.options, rigDir: f.dir, hubCommit: () => "d".repeat(40) }));
   hub["running"] = true;
   hub["botReady"] = true;
-  f.output({ code: 0, stderr: "", stdout: JSON.stringify([{ name: "pwsh", description: "PowerShell", enabled: true, platformAllowed: true }]) });
+  f.output({ code: 0, stderr: "", stdout: JSON.stringify({ features: [{ name: "pwsh", description: "PowerShell", enabled: true, platformAllowed: true }] }) });
   const events = ["info", "warn", "error"].map(level => ({ id: level, time: "2026-01-01T00:00:00Z", type: "future", level, text: level }));
   events.push({ id: "features", time: "2026-01-01T00:00:00Z", type: "features-changed", level: "info", text: "service" });
   writeFileSync(join(f.dir, "events.jsonl"), events.map(event => JSON.stringify(event) + "\n").join(""));
@@ -574,7 +574,7 @@ test("a fresh disable confirmation press starts rig", async () => {
 test("the run button of a disabled /pwsh asks the feature state again at the press", async () => {
   const f = fixture({ platform: platformFor("win32") });
   const features = (enabled: boolean): RigOutput => ({ code: 0, stderr: "",
-    stdout: JSON.stringify([{ name: "pwsh", description: "PowerShell", enabled, platformAllowed: true }]) });
+    stdout: JSON.stringify({ features: [{ name: "pwsh", description: "PowerShell", enabled, platformAllowed: true }] }) });
   f.output(features(true));
   await f.hub["rig"].refresh();
   await f.clock.advance(EXEC_MAX_AGE_MS + 1);

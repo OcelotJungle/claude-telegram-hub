@@ -167,7 +167,9 @@ The hub does not keep the child process itself. It starts a detached small runne
 (`bun hub/exec-runner.ts <id>`). The runner:
 
 1. starts the shell in the needed folder, stdin closed;
-2. writes stdout and stderr to `exec/<id>.log` as they arrive, in arrival order;
+2. writes stdout and stderr to `exec/<id>.log` as they arrive, in arrival order; a `rig` run is different: its spec names
+   a result file, stderr goes to the log and stdout to `exec/<id>.result`, each as whole lines only (the partial tail is
+   held back and written when the command ends), see `rig-integration-design.md`;
 3. while alive, every 10 s updates the modification time of the file `exec/<id>.alive` (the heartbeat);
 4. on completion, atomically writes `exec/<id>.exit.json`: `{code, endedAt}`.
 

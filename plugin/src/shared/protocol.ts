@@ -27,26 +27,6 @@ export type CommandReply = { sessionId: string; id: string; text: string; notify
 export type TerminateRequest = { sessionId: string; id: string };
 export type CleanupReport = { sessionId: string; id: string; before?: number; after?: number; error?: string };
 
-// Rate limits are the account's, but a session knows them only from its own
-// last API response. Each module posts its readings (POST /limits, `at` in
-// ms), and /info takes the freshest one of the sessions on its account
-// (GET /limits?session=<id>, answered with a reading or null).
-export type RateLimit = { kind: string; percentUsed: number; resetsAt?: string };
-export type LimitsReading = { at: number; rateLimits: RateLimit[] };
-// A worker that is available but has nothing to show: /info prints the reason instead of dropping the block.
-export type WorkerLimitsError = { kind: "error"; reason: string };
-export type VolunteerLimitsResult =
-  | { kind: "none" }
-  | { kind: "error"; reason: string }
-  | {
-      kind: "ok";
-      at: number;
-      dayPercent: number;
-      resetsAt?: number;
-      providers: { name: string; used: number; cap: number }[];
-    };
-export type LimitsPost = LimitsReading & { sessionId: string };
-
 export type ChannelMeta = Record<string, string>;
 
 export type QueuedFile = { path: string; name: string; size: number };

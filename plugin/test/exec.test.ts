@@ -9,7 +9,7 @@ import type { MessageKind } from "../src/shared/notification.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
-import { Execs, execCardText, HEARTBEAT_STALE_MS, logTail, MAX_EXECS } from "../src/hub/exec.ts";
+import { Execs, EXEC_CARD_LINES, execCardText, HEARTBEAT_STALE_MS, logTail, MAX_EXECS } from "../src/hub/exec.ts";
 import { loadExecs, saveExecs } from "../src/hub/exec-store.ts";
 import { HEARTBEAT_MS, runnerSpecSchema } from "../src/hub/exec-runner.ts";
 import { en } from "../src/shared/i18n/en.ts";
@@ -74,6 +74,7 @@ function setup(o: { messages?: () => Messages; dir?: string; sendOnSent?: boolea
   const files: { path: string; name: string; loud: boolean }[] = [];
   const reports: ReportCall[] = [];
   const machineCards: { text: string; final: boolean }[] = [];
+  const machineFiles: { path: string; kind: MessageKind }[] = [];
   const clock = { now: NOW };
   const log = memLogger();
   const deps: ExecDeps = {
@@ -98,6 +99,7 @@ function setup(o: { messages?: () => Messages; dir?: string; sendOnSent?: boolea
       if (o.sendOnSent !== false) onSent();
     },
     machineCard: (_record, text, final) => void machineCards.push({ text, final }),
+    machineFile: (_record, path, kind) => void machineFiles.push({ path, kind }),
     now: () => clock.now,
     checkMs: CHECK_MS,
     cardMs: CARD_MS,
@@ -118,7 +120,7 @@ function setup(o: { messages?: () => Messages; dir?: string; sendOnSent?: boolea
   };
   // The runner's last heartbeat, as its file's time.
   const beat = (n: number, at: number) => utimesSync(spec(n).alive, at / MS_PER_S, at / MS_PER_S);
-  return { dir, deps, execs, specs, alive, windows, killed, cards, machineCards, notices, files, reports, clock, log, spec, lastCard, finish, beat };
+  return { dir, deps, execs, specs, alive, windows, killed, cards, machineCards, machineFiles, notices, files, reports, clock, log, spec, lastCard, finish, beat };
 }
 
 // Moves the fake clock in steps short enough not to look like a sleep, a few
@@ -502,6 +504,138 @@ describe("rig run cards", () => {
     await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
     await Bun.sleep(SETTLE_MS);
     expect(t.machineCards.filter(c => c.final)).toHaveLength(1);
+  });
+
+  // What rig writes: progress on stderr and the result or the error on stdout, as JSON lines.
+  const progress = (code: string, data?: unknown) => JSON.stringify({ progress: { code, ...(data === undefined ? {} : { data }) } });
+  const resultFile = (t: ReturnType<typeof startRig>) => must(t.spec().result, "result file");
+
+  test("progress and the result are shown in words, never as JSON", async () => {
+    const t = startRig();
+    appendFileSync(t.spec().log, `${progress("lock-waiting")}\n${progress("update-step-output", { line: "fetching" })}\n`);
+    const waiting = await waitFor(() => t.machineCards.find(c => c.text.includes("fetching")), WAIT_MS, "card with the step line");
+    expect(waiting.text).toContain(en.rigProgressLockWaiting);
+    expect(waiting.text).not.toContain("{");
+    appendFileSync(resultFile(t), `${JSON.stringify({ mode: "server", outcome: "complete" })}\n`);
+    t.finish(0, 0);
+    const done = await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
+    expect(done.text).toContain(en.rigUpdateComplete({ pending: false }));
+    expect(done.text).not.toContain("{");
+    expect(done.text).not.toContain("outcome");
+  });
+
+  test("a rig run's runner keeps the result apart from the progress; a shell run's has no result file", () => {
+    const t = startRig();
+    expect(t.spec().result).toBe(t.spec().log.replace(/\.log$/, ".result"));
+    const shell = setup();
+    shell.execs.command(SID, "cmd", "npm run x", "C:\\proj", msg(1));
+    expect(shell.spec().result).toBeUndefined();
+  });
+
+  // The card's tail: the lines between its two fences.
+  const tailOf = (text: string) => {
+    const lines = text.split("\n");
+    return lines.slice(lines.indexOf("```") + 1, lines.lastIndexOf("```"));
+  };
+
+  test("a progress line still being written is not shown cut; it shows once whole", async () => {
+    const t = startRig();
+    const whole = progress("update-step-output", { line: "first" });
+    const half = progress("update-step-output", { line: "second" });
+    // The half line has no newline yet, in the same write as a whole line: the card with the whole line proves the read saw it.
+    appendFileSync(t.spec().log, `${whole}\n${half.slice(0, half.length - 5)}`);
+    const first = await waitFor(() => t.machineCards.find(c => c.text.includes("first")), WAIT_MS, "card with the whole line");
+    expect(first.text).not.toContain("{");
+    expect(first.text).not.toContain("progress");
+    expect(first.text).not.toContain("second");
+    appendFileSync(t.spec().log, `${half.slice(half.length - 5)}\n`);
+    const second = await waitFor(() => t.machineCards.find(c => c.text.includes("second")), WAIT_MS, "card with the second line");
+    expect(tailOf(second.text)).toEqual(["first", "second"]);
+  });
+
+  test("the result is the last line of the card even when progress is written after it", async () => {
+    const t = startRig();
+    appendFileSync(resultFile(t), `${JSON.stringify({ feature: "pwsh", enabled: true })}\n`);
+    appendFileSync(t.spec().log, `${progress("update-step-output", { line: "late step" })}\n`);
+    t.finish(0, 0);
+    const done = await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
+    expect(tailOf(done.text)).toEqual(["late step", en.rigFeatureEnabled({ name: "pwsh" })]);
+  });
+
+  test("a multi-line error shows its last lines on the card and all of them in the sent file", async () => {
+    const t = startRig();
+    const message = Array.from({ length: LOG_LINES }, (_, i) => `detail ${i}`).join("\n") + "\nthe real cause";
+    appendFileSync(resultFile(t), `${JSON.stringify({ error: { code: "update-failed", message } })}\n`);
+    t.finish(0, 1);
+    const done = await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
+    const shown = tailOf(done.text);
+    expect(shown).toHaveLength(EXEC_CARD_LINES);
+    expect(shown.at(-1)).toBe("the real cause");
+    expect(done.text).not.toContain("detail 0\n");
+    await waitFor(() => t.machineFiles.length === 1, WAIT_MS, "the log file");
+    const sent = readFileSync(must(t.machineFiles[0]).path, "utf8");
+    expect(sent).toContain("detail 0\n");
+    expect(sent.trimEnd().endsWith("the real cause")).toBe(true);
+    expect(sent).not.toContain("{");
+  });
+
+  test("a progress line with an empty code is no empty line; an unknown code is a catalog line", async () => {
+    const t = startRig();
+    appendFileSync(t.spec().log, `${progress("")}\n${progress("brand-new-step")}\n${progress("update-step-output", { line: "tail" })}\n`);
+    const card = await waitFor(() => t.machineCards.find(c => c.text.includes("tail")), WAIT_MS, "card with the last line");
+    expect(tailOf(card.text)).toEqual([en.rigProgressUnknown({ code: "brand-new-step" }), "tail"]);
+  });
+
+  test("a line that is not JSON (a traceback) is shown as text", async () => {
+    const t = startRig();
+    appendFileSync(t.spec().log, "Traceback (most recent call last):\n  File x\n");
+    const card = await waitFor(() => t.machineCards.find(c => c.text.includes("File x")), WAIT_MS, "card with the traceback");
+    expect(tailOf(card.text)).toEqual(["Traceback (most recent call last):", "  File x"]);
+  });
+
+  test("a failure is rig's message as it is, the exit code still decides the outcome", async () => {
+    const t = startRig();
+    appendFileSync(resultFile(t), `${JSON.stringify({ error: { code: "update-busy", message: "Another update is running" } })}\n`);
+    t.finish(0, 1);
+    const done = await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
+    expect(done.text).toContain("Another update is running");
+    expect(done.text).not.toContain("update-busy");
+    expect(done.text).toContain(en.execOutcomeCode({ code: 1 }));
+  });
+
+  test("the words are made when the card is drawn, in the language current then", async () => {
+    let current: Messages = en;
+    const t = setup({ messages: () => current });
+    t.execs.machine(INVOCATION, "rig update", "C:\\proj", { chatId: CHAT }, 1);
+    appendFileSync(t.spec().log, `${progress("service-stopping")}\n`);
+    await waitFor(() => t.machineCards.find(c => c.text.includes(en.rigProgressServiceStopping)), WAIT_MS, "English card");
+    current = ru;
+    t.finish(0, 0);
+    const done = await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
+    expect(done.text).toContain(ru.rigProgressServiceStopping);
+    expect(done.text).not.toContain(en.rigProgressServiceStopping);
+  });
+
+  test("a log that does not fit the card goes as a file of words, not of JSON", async () => {
+    const t = startRig();
+    const lines = Array.from({ length: LOG_LINES }, (_, i) => progress("update-step-output", { line: `step ${i}` }));
+    appendFileSync(t.spec().log, `${lines.join("\n")}\n`);
+    t.finish(0, 0);
+    await waitFor(() => t.machineFiles.length === 1, WAIT_MS, "the log file");
+    const sent = readFileSync(must(t.machineFiles[0]).path, "utf8");
+    expect(sent).toContain("step 0\n");
+    expect(sent).toContain(`step ${LOG_LINES - 1}`);
+    expect(sent).not.toContain("progress");
+    expect(sent).not.toContain("{");
+  });
+
+  test("a log that fits the card is not sent as a file even when its JSON lines are long", async () => {
+    const t = startRig();
+    appendFileSync(t.spec().log, `${progress("update-step-output", { line: "ok", note: "x".repeat(BIG_LINE_CHARS) })}\n`);
+    t.finish(0, 0);
+    await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
+    // end() draws the final card and hands over the file in one step, so the file list is already final.
+    expect(t.machineFiles).toEqual([]);
   });
 });
 

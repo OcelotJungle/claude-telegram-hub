@@ -4,7 +4,7 @@ import type { RunnerSpec } from "../src/hub/exec-runner.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
-import { exitInfoSchema, isAlive, killTree, spawnRunner } from "../src/hub/exec-runner.ts";
+import { exitInfoSchema, isAlive, killTree, lineSplitter, spawnRunner } from "../src/hub/exec-runner.ts";
 import { DEFAULT_BASH, findPowershell, shellRun, writeShellFiles } from "../src/hub/exec-shell.ts";
 import { tempDir, waitFor } from "./helpers.ts";
 import { PLATFORM } from "../src/shared/platform.ts";
@@ -72,7 +72,96 @@ const readExit = (path: string) => exitInfoSchema.parse(JSON.parse(readFileSync(
 const sizeOf = (path: string) => (existsSync(path) ? statSync(path).size : 0);
 const textOf = (path: string) => (existsSync(path) ? readFileSync(path, "utf8") : "");
 
+describe("line splitter", () => {
+  const bytes = (text: string) => Buffer.from(text);
+
+  test("a line split across chunks comes out once, whole, when its end arrives", () => {
+    const split = lineSplitter();
+    expect(split.push(bytes('{"progress":{"co')).toString()).toBe("");
+    expect(split.push(bytes('de":"x"}}\n{"progress"')).toString()).toBe('{"progress":{"code":"x"}}\n');
+    expect(split.push(bytes(':{"code":"y"}}\n')).toString()).toBe('{"progress":{"code":"y"}}\n');
+    expect(split.flush().toString()).toBe("");
+  });
+
+  test("a chunk with several lines comes out whole and the partial tail waits", () => {
+    const split = lineSplitter();
+    expect(split.push(bytes("a\nb\nc")).toString()).toBe("a\nb\n");
+    expect(split.push(bytes("d\n")).toString()).toBe("cd\n");
+  });
+
+  test("the tail without a newline is a line at the end of the stream", () => {
+    const split = lineSplitter();
+    split.push(bytes("last"));
+    expect(split.flush().toString()).toBe("last\n");
+    expect(split.flush().toString()).toBe("");
+  });
+
+  test("a multi-byte character cut between two chunks stays whole", () => {
+    const split = lineSplitter();
+    const word = bytes("é中\n");
+    expect(split.push(word.subarray(0, 1)).length).toBe(0);
+    expect(split.push(word.subarray(1, 3)).length).toBe(0);
+    expect(split.push(word.subarray(3)).toString()).toBe("é中\n");
+  });
+});
+
 describe("exec runner", () => {
+  // A rig-like child: its own script, its progress on stderr (one line much longer than a pipe's
+  // buffer, so it reaches the runner in several chunks), its result on stdout, written between the
+  // halves of that line, and a last stderr line with no newline at the end.
+  function rigLikeSpec(exitCode: number): { file: string; spec: RunnerSpec } {
+    const dir = tempDir("telegramhub-runner-rig-");
+    dirs.push(dir);
+    const script = join(dir, "child.ts");
+    const source = [
+      `const big = JSON.stringify({ progress: { code: "update-step-output", data: { line: "x".repeat(300_000) } } });`,
+      `process.stderr.write(big.slice(0, 150_000));`,
+      `process.stdout.write(${JSON.stringify(`{"feature":"pwsh","enabled":true}\n`)});`,
+      `process.stderr.write(big.slice(150_000) + "\\n");`,
+      `process.stderr.write("Traceback without newline");`,
+      `process.exit(${exitCode});`,
+    ].join("\n");
+    writeFileSync(script, source);
+    const spec: RunnerSpec = {
+      argv: [process.execPath, script],
+      verbatim: false,
+      cwd: dir,
+      env: hubEnv({}),
+      log: join(dir, "abcd1234.log"),
+      exit: join(dir, "abcd1234.exit.json"),
+      alive: join(dir, "abcd1234.alive"),
+      heartbeatMs: TEST_HEARTBEAT_MS,
+      result: join(dir, "abcd1234.result"),
+    };
+    const file = join(dir, "abcd1234.spec.json");
+    writeFileSync(file, JSON.stringify(spec));
+    return { file, spec };
+  }
+
+  test("with a result file the streams are kept apart, each as whole lines", async () => {
+    const { file, spec } = rigLikeSpec(0);
+    start(file);
+    await waitFor(() => existsSync(spec.exit), EXIT_WAIT_MS, "exit file");
+    expect(readExit(spec.exit).code).toBe(0);
+    const logLines = readFileSync(spec.log, "utf8").split("\n");
+    // Whole lines only: the long progress line intact, the tail flushed as a line, nothing after the last newline.
+    expect(logLines.pop()).toBe("");
+    expect(logLines).toHaveLength(2);
+    expect(logLines[0]).toBe(JSON.stringify({ progress: { code: "update-step-output", data: { line: "x".repeat(300_000) } } }));
+    expect(logLines[1]).toBe("Traceback without newline");
+    expect(readFileSync(spec.result ?? "", "utf8")).toBe('{"feature":"pwsh","enabled":true}\n');
+  });
+
+  test("a spec without a result file keeps today's raw log of both streams", async () => {
+    const { file, spec } = hostSpec("echo one && echo two 1>&2", "echo one; echo two 1>&2");
+    expect(spec.result).toBeUndefined();
+    start(file);
+    await waitFor(() => existsSync(spec.exit), EXIT_WAIT_MS, "exit file");
+    const log = readFileSync(spec.log, "utf8");
+    expect(log).toContain("one");
+    expect(log).toContain("two");
+  });
+
   test("the runner logs the output and writes the exit code", async () => {
     const { file, spec } = hostSpec("echo one && echo two 1>&2 && exit /b 5", "echo one; echo two 1>&2; exit 5");
     expect(start(file)).toBeGreaterThan(0);

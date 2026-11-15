@@ -1,4 +1,5 @@
 import type { Language, Messages } from "../shared/i18n/index.ts";
+import type { InfoData } from "../shared/info-data.ts";
 import type { Platform } from "../shared/platform.ts";
 
 import { spawn } from "child_process";
@@ -6,16 +7,23 @@ import { homedir } from "os";
 import { z } from "zod";
 import { en } from "../shared/i18n/en.ts";
 import { DEFAULT_LANGUAGE, isLanguage } from "../shared/i18n/index.ts";
+import { isBlockError, RIG_QUERY_LIMIT_MS } from "../shared/info-data.ts";
+import { infoDataSchema } from "./info-schema.ts";
+import { plainLines } from "./rig-output.ts";
 import { LANGUAGES } from "../shared/protocol.ts";
 import { PLATFORM } from "../shared/platform.ts";
 
 const MS_PER_SECOND = 1000;
 const FEATURE_NAME = /^[a-z][a-z0-9-]*$/;
-// rig feature --json, rig status --json and rig language --json take no lock, so they answer fast; a longer one is a failure.
-export const RIG_QUERY_LIMIT_MS = 30_000;
+// A session id reaches cmd.exe verbatim, so only the characters of an id are let through.
+const SESSION_ID = /^[A-Za-z0-9-]{1,100}$/;
+// rig feature, rig status, rig language and rig info take no lock, so they answer fast; a longer one is a failure.
+export { RIG_QUERY_LIMIT_MS };
 const languageSchema = z.strictObject({ language: z.enum(LANGUAGES) });
 const featureSchema = z.strictObject({ name: z.string().regex(FEATURE_NAME), description: z.string(), enabled: z.boolean(), platformAllowed: z.boolean() });
 export const featuresSchema = z.array(featureSchema);
+// rig feature answers {"features": [...]}.
+const featureReplySchema = z.strictObject({ features: featuresSchema });
 const eventSchema = z.object({ type: z.string(), time: z.string(), text: z.string() });
 export const statusSchema = z.strictObject({
   schemaVersion: z.literal(1), mode: z.enum(["dev", "server"]),
@@ -36,7 +44,10 @@ export type RigError =
   | { kind: "timeout"; seconds: number }
   | { kind: "exitCode"; code: number; output: string }
   | { kind: "invalidJson"; message: string }
-  | { kind: "failure"; message: string };
+  | { kind: "failure"; message: string }
+  // rig's own failure: its message is shown as it is, the code is kept for logs.
+  | { kind: "rig"; code: string; message: string }
+  | { kind: "badSession" };
 export type RigOutput = { code: number; stdout: string; stderr: string };
 export type FeatureState = { kind: "missing" } | { kind: "loading" } | { kind: "ready"; features: RigFeature[] } | { kind: "failed"; error: RigError };
 export type MachineCommand = { name: "rig"; args: string };
@@ -50,6 +61,18 @@ export function rigErrorText(error: RigError, m: Messages): string {
     case "exitCode": return m.rigExitCode({ code: error.code, output: error.output });
     case "invalidJson": return m.rigInvalidJson({ message: error.message });
     case "failure": return m.rigFailure({ message: error.message });
+    case "rig": return error.message;
+    case "badSession": return m.rigBadSession;
+  }
+}
+
+// The error object rig prints on stdout when it fails; undefined when the text is anything else.
+export function rigErrorObject(stdout: string): { code: string; message: string } | undefined {
+  try {
+    const value: unknown = JSON.parse(stdout);
+    return isBlockError(value) ? value.error : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -140,7 +163,11 @@ export class Rig {
     try {
       const output = await this.limited(invocation.value);
       if (output === "timeout") return { ok: false, error: { kind: "timeout", seconds: RIG_QUERY_LIMIT_MS / MS_PER_SECOND } };
-      if (output.code !== 0) return { ok: false, error: { kind: "exitCode", code: output.code, output: output.stderr || output.stdout } };
+      if (output.code !== 0) {
+        const failure = rigErrorObject(output.stdout);
+        if (failure) return { ok: false, error: { kind: "rig", code: failure.code, message: failure.message } };
+        return { ok: false, error: { kind: "exitCode", code: output.code, output: plainLines(output.stderr) || plainLines(output.stdout) } };
+      }
       const parsed = schema.safeParse(JSON.parse(output.stdout));
       return parsed.success ? { ok: true, value: parsed.data } : { ok: false, error: { kind: "invalidJson", message: parsed.error.message } };
     } catch (error) {
@@ -149,7 +176,8 @@ export class Rig {
   }
 
   async refresh(): Promise<RigResult<RigFeature[]>> {
-    const result = await this.query(["feature", "--json"], featuresSchema);
+    const reply = await this.query(["feature"], featureReplySchema);
+    const result: RigResult<RigFeature[]> = reply.ok ? { ok: true, value: reply.value.features } : reply;
     if (result.ok) this.state = { kind: "ready", features: result.value };
     else if (!this.deps.find()) this.state = { kind: "missing" };
     else if (!this.initialized) this.state = { kind: "failed", error: result.error };
@@ -158,11 +186,18 @@ export class Rig {
     return result;
   }
 
-  status(): Promise<RigResult<RigStatus>> { return this.query(["status", "--json"], statusSchema); }
+  status(): Promise<RigResult<RigStatus>> { return this.query(["status"], statusSchema); }
+
+  // What /info draws for one session; the id is checked here because it ends up in a command line.
+  async info(sessionId: string): Promise<RigResult<InfoData>> {
+    if (!SESSION_ID.test(sessionId)) return { ok: false, error: { kind: "badSession" } };
+    // The schema is rig's contract: an answer that breaks it fails as a whole, with the schema's message.
+    return this.query(["info", "--session", sessionId], infoDataSchema);
+  }
 
   // The language rig keeps; English when rig is missing or fails in any way.
   async language(): Promise<Language> {
-    const result = await this.query(["language", "--json"], languageSchema);
+    const result = await this.query(["language"], languageSchema);
     if (result.ok) return result.value.language;
     this.deps.warn(`language: ${rigErrorText(result.error, en)}; using ${DEFAULT_LANGUAGE}`);
     return DEFAULT_LANGUAGE;

@@ -64,7 +64,7 @@ The hub works fully without rig. `/rig` stays in the menu and answers
 that rig is not installed. Windows shells work as before in this case.
 The hub looks for `rig` in PATH and `~/.local/bin` (`rig.cmd` on Windows).
 
-- `/rig status` — machine state from `rig status --json`.
+- `/rig status` — machine state from `rig status`.
 - `/rig update` — update the machine.
 - `/rig feature` — list the features from the rig JSON contract.
 - `/rig feature <name> enable|disable` — switch a feature on or off.
@@ -180,14 +180,14 @@ This rule does not change the sound of the agent's text or of the end of its tur
   request the agent sends files as documents, so that Telegram does not compress screenshots.
   It works even if forwarding is off. It is enough that the session has a topic.
 - Commands in the topic (they are in the bot menu; the agent does not see them, and they do not change the mode):
-  - `/info` — the block "Claude limits": the percent of the five-hour and weekly limits with the time until reset
-    (the freshest from all sessions of the same account). Then "Codex limits", if there are readings
-    in the rollout logs in `$CODEX_HOME/sessions` (by default `~/.codex/sessions`): percents are rounded,
-    and after a reset it shows 0% without time until reset. Then "Volunteer limits", if the script
-    `~/.claude/tools/volunteer-models.py` returned data: the percent of the daily limit, the time until reset
-    (after a reset, 0% without a suffix), and the providers with a known limit (OpenRouter, Requesty, Groq and others),
-    each on its own line: "Requesty: 182/200". A provider without a limit (Zhipu) is not shown. All three blocks show the age of the data from 5 minutes.
-    Then the current context and the autocompact threshold, for example `36/250k`. Without a known threshold, only the size is shown.
+  - `/info` — what `rig info --session <id>` returns for this session. The block "Claude limits": the percent of the
+    five-hour and weekly limits with the time until reset. Then "Codex limits" and "Volunteer limits", if rig
+    allows them on this machine (otherwise the block is not shown): percents are rounded, and after a reset it shows
+    0% without time until reset; the volunteer block has the percent of the daily limit and the providers with a known
+    limit (OpenRouter, Requesty, Groq and others), each on its own line: "Requesty: 182/200". A provider without a
+    limit (Zhipu) is not shown. A block rig could not read shows "unavailable" with rig's reason. All blocks show the
+    age of the data from 5 minutes. Then the current context and the autocompact threshold, for example `36/250k`.
+    Without a known threshold, only the size is shown.
   - `/compact` (can take instructions, as in the terminal) — the silent message "🗜 Compaction is queued." changes
     to "🗜 Compaction is running…" at start. On success it is edited to "✅ Compaction done." On skip or error it is
     deleted, and a loud warning arrives as a new message.

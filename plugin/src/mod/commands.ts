@@ -2,34 +2,16 @@
 // The module runs inside Claude Code with no Node: everything outside comes
 // in as Deps (the engine's `$` calls), so this file imports only types and
 // plain helpers from shared/ that need nothing at run time.
-import type { CleanupReport, Language, LimitsReading, RateLimit, ResolutionKind, TopicCommand, VolunteerLimitsResult, WorkerLimitsError } from "../shared/protocol.ts";
+import type { CleanupReport, Language, ResolutionKind, TopicCommand } from "../shared/protocol.ts";
+import type { InfoData } from "../shared/info-data.ts";
 import type { MessageKind } from "../shared/notification.ts";
 import type { Messages } from "../shared/i18n/index.ts";
 
 import { catalogOf, DEFAULT_LANGUAGE, isLanguage } from "../shared/i18n/index.ts";
+import { isBlockError, parseInfoData, RIG_QUERY_LIMIT_MS } from "../shared/info-data.ts";
+import { field, str } from "../shared/guards.ts";
 import { notifies } from "../shared/notification.ts";
 import { MILLION, THOUSAND, tokens } from "../shared/tokens.ts";
-
-function isVolunteerLimitsResult(v: unknown): v is VolunteerLimitsResult {
-  if (typeof v !== "object" || v === null || !("kind" in v)) return false;
-  if (v.kind === "none") return true;
-  if (v.kind === "error") return "reason" in v && typeof v.reason === "string";
-  if (v.kind !== "ok") return false;
-  return (
-    "at" in v && typeof v.at === "number" &&
-    "dayPercent" in v && typeof v.dayPercent === "number" &&
-    (!("resetsAt" in v) || typeof v.resetsAt === "number") &&
-    "providers" in v && Array.isArray(v.providers) &&
-    v.providers.every((p: unknown) => {
-      if (typeof p !== "object" || p === null) return false;
-      return (
-        "name" in p && typeof p.name === "string" &&
-        "used" in p && typeof p.used === "number" &&
-        "cap" in p && typeof p.cap === "number"
-      );
-    })
-  );
-}
 
 // /stop of a session with more context than this compacts it first, so a
 // resume does not cache all of it again.
@@ -39,20 +21,37 @@ const LIMIT_ORDER = ["five_hour", "seven_day"];
 const MS_PER_MINUTE = 60_000;
 const MINUTES_PER_HOUR = 60;
 const HOURS_PER_DAY = 24;
+const FIVE_HOUR_MINUTES = 5 * MINUTES_PER_HOUR;
+const SEVEN_DAY_MINUTES = 7 * HOURS_PER_DAY * MINUTES_PER_HOUR;
+const HTTP_OK = 200;
+const MS_PER_SECOND = 1000;
+// The hub waits for rig up to RIG_QUERY_LIMIT_MS; the window waits that long and a margin for the hub itself, so a
+// slow rig is answered by the hub's own failure text and never cut off by the window first.
+const HUB_MARGIN_MS = 5000;
+const INFO_WAIT_MS = RIG_QUERY_LIMIT_MS + HUB_MARGIN_MS;
+// The code of a block rig has nothing to show for yet (before the model's first reply).
+const NO_DATA_CODE = "no-data";
+// rig gives the providers' raw names; these are shown with their own spelling.
+const PROVIDER_NAMES: Record<string, string> = {
+  openrouter: "OpenRouter",
+  requesty: "Requesty",
+  groq: "Groq",
+  // Not "Z.ai": Telegram turns a domain-like name into a link.
+  zhipu: "Zhipu",
+};
 // Limits read longer ago than this say how old they are.
 const STALE_LIMITS_MS = 300_000;
 // Polls in a row on which the compaction failed with no turn running before
 // the failure is reported: a turn may start just as it is tried.
 const COMPACT_TRIES = 3;
 
-// The part of the engine's SessionUsage that /info shows.
+// The part of the engine's SessionUsage that /stop looks at.
 export type Usage = {
   context: {
     tokens?: number;
     window: number;
     breakdown?: { totalTokens: number; rawMaxTokens: number; autoCompactThreshold?: number; isAutoCompactEnabled: boolean };
   };
-  rateLimits: RateLimit[];
 };
 
 // The part of the engine's session.compact result the report needs.
@@ -71,6 +70,8 @@ export type Deps = {
   // Compacts the conversation; rejects while a turn runs.
   compact(instructions: string | undefined): Promise<Compaction>;
   http(url: string, init?: { method?: string; body?: string }): Promise<{ status: number; text: string }>;
+  // Resolves after the given time; /info gives the hub this long to answer.
+  sleep(ms: number): Promise<void>;
   now(): number;
 };
 
@@ -120,18 +121,6 @@ export class Runner {
     }
   }
 
-  // Called from the module's session.measure hook: the session read the
-  // account's rate limits, which the hub keeps for the other sessions' /info.
-  async measured(rateLimits: RateLimit[]): Promise<void> {
-    if (!rateLimits.length) return;
-    try {
-      const sessionId = await this.deps.sessionId();
-      await this.deps.http(`${this.base}/limits`, { method: "POST", body: JSON.stringify({ sessionId, at: this.deps.now(), rateLimits }) });
-    } catch {
-      // The hub is down: /info shows the session's own reading.
-    }
-  }
-
   // Called from the module's turn hooks when a main-loop turn starts and ends.
   turn(runs: boolean): void {
     this.turnRuns = runs;
@@ -166,17 +155,7 @@ export class Runner {
     const m = catalogOf(this.language);
     if (cmd.name === "info") {
       try {
-        const usage = await this.deps.usage();
-        const [shared, codex, volunteer] = await Promise.all([
-          this.sharedLimits(sessionId),
-          this.codexLimits(sessionId),
-          this.volunteerLimits(sessionId),
-        ]);
-        await this.reply(
-          to,
-          infoText(shared ? { ...usage, rateLimits: shared.rateLimits } : usage, this.deps.now(), m, shared?.at, codex, volunteer),
-          "info"
-        );
+        await this.info(to, m);
       } catch (e) {
         await this.reply(to, m.commandFailed({ command: "/info", error: message(e) }), "error");
       }
@@ -197,6 +176,39 @@ export class Runner {
       return;
     }
     await this.compact(to, cmd.args, m, messages => messages.compactQueued, messages => messages.compactRunning);
+  }
+
+  // The hub asks rig for the data; a failure comes back as the text to show.
+  private async info(to: Target, m: Messages): Promise<void> {
+    const answer = await this.askHubForInfo(to.sessionId, m);
+    if ("data" in answer) await this.reply(to, infoText(answer.data, this.deps.now(), m), "info");
+    else await this.reply(to, answer.failure, "error");
+  }
+
+  // The hub's answer, or the text of the failure: the hub's own (rig failed) or the window's catalog text for a
+  // hub that is unreachable, too slow or answers something unreadable.
+  private async askHubForInfo(sessionId: string, m: Messages): Promise<{ data: InfoData } | { failure: string }> {
+    const timedOut = this.deps.sleep(INFO_WAIT_MS).then(() => "timeout" as const);
+    let res: Awaited<ReturnType<Deps["http"]>> | "timeout";
+    try {
+      res = await Promise.race([this.deps.http(`${this.base}/info?session=${encodeURIComponent(sessionId)}`), timedOut]);
+    } catch (e) {
+      return { failure: m.infoHubUnreachable({ error: message(e) }) };
+    }
+    if (res === "timeout") return { failure: m.infoHubTimeout({ seconds: INFO_WAIT_MS / MS_PER_SECOND }) };
+    const badReply = { failure: m.infoHubBadReply({ status: res.status }) };
+    let body: unknown;
+    try {
+      body = JSON.parse(res.text);
+    } catch {
+      return badReply;
+    }
+    if (res.status === HTTP_OK) {
+      const data = parseInfoData(body);
+      return data ? { data } : badReply;
+    }
+    const failure = str(field(body, "failure"));
+    return failure === undefined ? badReply : { failure };
   }
 
   // Resolves once the compaction is over and its result is handed to the hub.
@@ -315,41 +327,6 @@ export class Runner {
     await this.flush();
   }
 
-  // The freshest reading of the account's rate limits any session posted;
-  // undefined when the hub has none or cannot be asked.
-  private async sharedLimits(sessionId: string): Promise<LimitsReading | undefined> {
-    try {
-      const res = await this.deps.http(`${this.base}/limits?session=${encodeURIComponent(sessionId)}`);
-      if (res.status !== 200) return undefined;
-      const v: unknown = JSON.parse(res.text);
-      return isLimitsReading(v) && v.rateLimits.length ? v : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private async codexLimits(sessionId: string): Promise<LimitsReading | WorkerLimitsError | undefined> {
-    try {
-      const res = await this.deps.http(`${this.base}/codex-limits?session=${encodeURIComponent(sessionId)}`);
-      if (res.status !== 200) return undefined;
-      const value: unknown = JSON.parse(res.text);
-      return isLimitsReading(value) || isWorkerLimitsError(value) ? value : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private async volunteerLimits(sessionId: string): Promise<VolunteerLimitsResult | undefined> {
-    try {
-      const res = await this.deps.http(`${this.base}/volunteer-limits?session=${encodeURIComponent(sessionId)}`);
-      if (res.status !== 200) return undefined;
-      const value: unknown = JSON.parse(res.text);
-      return isVolunteerLimitsResult(value) ? value : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
   // The status line's figure, else the local estimate (right after a
   // compaction); undefined when the engine cannot tell.
   private async contextTokens(): Promise<number | undefined> {
@@ -390,70 +367,57 @@ export class Runner {
   }
 }
 
-// limitsAt: when the limits were read, if known.
-export function infoText(
-  u: Usage,
-  now: number,
-  m: Messages,
-  limitsAt?: number,
-  codex?: LimitsReading | WorkerLimitsError,
-  volunteer?: VolunteerLimitsResult
-): string {
+// The /info answer from rig's data. Ages and reset times come from the data's own times.
+export function infoText(d: InfoData, now: number, m: Messages): string {
   const lines: string[] = [];
-  const staleAge = (age: number) => (age >= STALE_LIMITS_MS ? duration(age, m) : undefined);
+  const staleAge = (at: string | null) => {
+    const age = at === null ? NaN : now - Date.parse(at);
+    return age >= STALE_LIMITS_MS ? duration(age, m) : undefined;
+  };
+  const resetLeft = (resetsAt: string | null) => (resetsAt === null ? NaN : Date.parse(resetsAt) - now);
   const resetIn = (left: number) => (left > 0 ? duration(left, m) : undefined);
-  if (!u.rateLimits.length) lines.push(m.infoClaudeNoData);
+  const order = (kind: string) => (LIMIT_ORDER.includes(kind) ? LIMIT_ORDER.indexOf(kind) : LIMIT_ORDER.length);
+  if (isBlockError(d.claude)) lines.push(d.claude.error.code === NO_DATA_CODE ? m.infoClaudeNoData : m.infoClaudeUnavailable({ reason: d.claude.error.message }));
+  else if (!d.claude.limits.length) lines.push(m.infoClaudeNoData);
   else {
-    const age = limitsAt === undefined ? 0 : now - limitsAt;
-    lines.push(m.infoClaudeLimits({ age: staleAge(age) }));
-    const order = (kind: string) => (LIMIT_ORDER.includes(kind) ? LIMIT_ORDER.indexOf(kind) : LIMIT_ORDER.length);
-    for (const l of [...u.rateLimits].sort((a, b) => order(a.kind) - order(b.kind))) {
-      const left = l.resetsAt ? Date.parse(l.resetsAt) - now : NaN;
-      lines.push(m.infoLimitLine({ name: limitName(l.kind, m), percent: l.percentUsed, resetIn: resetIn(left) }));
+    lines.push(m.infoClaudeLimits({ age: staleAge(d.claude.at) }));
+    for (const l of [...d.claude.limits].sort((a, b) => order(a.kind) - order(b.kind))) {
+      lines.push(m.infoLimitLine({ name: limitName(l.kind, m), percent: l.percentUsed, resetIn: resetIn(resetLeft(l.resetsAt)) }));
     }
   }
-  if (codex && "kind" in codex) {
-    lines.push("", m.infoCodexNoData({ reason: codex.reason }));
-  } else if (codex) {
-    const age = now - codex.at;
-    lines.push("", m.infoCodexLimits({ age: staleAge(age) }));
-    const order = (kind: string) => (LIMIT_ORDER.includes(kind) ? LIMIT_ORDER.indexOf(kind) : LIMIT_ORDER.length);
-    for (const limit of [...codex.rateLimits].sort((a, b) => order(a.kind) - order(b.kind))) {
-      const left = limit.resetsAt ? Date.parse(limit.resetsAt) - now : NaN;
-      const percent = left <= 0 ? 0 : Math.round(limit.percentUsed);
-      lines.push(m.infoLimitLine({ name: limitName(limit.kind, m), percent, resetIn: resetIn(left) }));
+  const codex = d.codex;
+  if (codex && isBlockError(codex)) lines.push("", m.infoCodexUnavailable({ reason: codex.error.message }));
+  else if (codex) {
+    lines.push("", m.infoCodexLimits({ age: staleAge(codex.at) }));
+    const named = codex.limits.map(l => ({ ...l, kind: codexKind(l.windowMinutes) }));
+    for (const l of named.sort((a, b) => order(a.kind) - order(b.kind))) {
+      const left = resetLeft(l.resetsAt);
+      // A window whose reset has passed is empty again.
+      lines.push(m.infoLimitLine({ name: limitName(l.kind, m), percent: left <= 0 ? 0 : Math.round(l.usedPercent), resetIn: resetIn(left) }));
     }
   }
-  if (volunteer) {
-    if (volunteer.kind === "ok") {
-      const age = now - volunteer.at;
-      lines.push("", m.infoVolunteerLimits({ age: staleAge(age) }));
-      const resetsLeft = volunteer.resetsAt ? volunteer.resetsAt - now : NaN;
-      if (resetsLeft > 0) {
-        lines.push(m.infoVolunteerDay({ percent: Math.round(volunteer.dayPercent), resetIn: duration(resetsLeft, m) }));
-      } else {
-        lines.push(m.infoVolunteerDay({ percent: 0, resetIn: undefined }));
-      }
-      for (const p of volunteer.providers) {
-        lines.push(`${p.name}: ${p.used}/${p.cap}`);
-      }
-    } else if (volunteer.kind === "error") {
-      lines.push("", m.infoVolunteerNoData({ reason: volunteer.reason }));
+  const volunteers = d.volunteers;
+  if (volunteers && isBlockError(volunteers)) lines.push("", m.infoVolunteerUnavailable({ reason: volunteers.error.message }));
+  else if (volunteers) {
+    lines.push("", m.infoVolunteerLimits({ age: staleAge(volunteers.at) }));
+    const left = resetLeft(volunteers.resetsAt);
+    if (left > 0) lines.push(m.infoVolunteerDay({ percent: Math.round(volunteers.dayPercent), resetIn: duration(left, m) }));
+    else lines.push(m.infoVolunteerDay({ percent: 0, resetIn: undefined }));
+    // A provider without a limit is not shown.
+    for (const [name, p] of Object.entries(volunteers.providers)) {
+      if (p.cap !== null) lines.push(`${PROVIDER_NAMES[name] ?? name}: ${p.used}/${p.cap}`);
     }
-    // kind === "none" produces no block
   }
-  lines.push("", m.infoContext);
-  const b = u.context.breakdown;
-  // The status line's figure; after a compaction it is gone until the next
-  // model response, and the local estimate stands in.
-  const used = u.context.tokens ?? b?.totalTokens;
-  const estimate = u.context.tokens === undefined && used !== undefined;
-  if (used === undefined) lines.push(m.infoNoData);
-  else if (b?.isAutoCompactEnabled && b.autoCompactThreshold !== undefined) {
-    const current = Math.round(used / THOUSAND);
-    const threshold = Math.round(b.autoCompactThreshold / THOUSAND);
-    lines.push(`${estimate ? "≈" : ""}${current}/${threshold}k`);
-  } else lines.push(`${estimate ? "≈" : ""}${tokens(used)}`);
+  const c = d.context;
+  // rig's context comes from its stored reading, so its age is shown like the limits'.
+  lines.push("", m.infoContext({ age: isBlockError(c) ? undefined : staleAge(c.at) }));
+  if (isBlockError(c)) lines.push(c.error.code === NO_DATA_CODE ? m.infoNoData : m.infoContextUnavailable({ reason: c.error.message }));
+  else {
+    // rig marks the figure as a local estimate when the status line's is gone (after a compaction).
+    const approx = c.estimated === true ? "≈" : "";
+    if (c.autocompact === true && c.threshold !== undefined) lines.push(`${approx}${Math.round(c.tokens / THOUSAND)}/${Math.round(c.threshold / THOUSAND)}k`);
+    else lines.push(`${approx}${tokens(c.tokens)}`);
+  }
   return lines.join("\n");
 }
 
@@ -483,8 +447,15 @@ function duration(ms: number, m: Messages): string {
   return h % HOURS_PER_DAY ? `${d} ${m.unitDay} ${h % HOURS_PER_DAY} ${m.unitHour}` : `${d} ${m.unitDay}`;
 }
 
-// Limits of other lengths are named by the minutes in the kind ("90m", from the Codex reader).
+// Limits of other lengths are named by the minutes in the kind ("90m").
 const MINUTES_KIND = /^(\d+)m$/;
+
+// Codex names its windows by length: the 5-hour and the 7-day ones are the Claude limits' kinds.
+function codexKind(windowMinutes: number): string {
+  if (windowMinutes === FIVE_HOUR_MINUTES) return "five_hour";
+  if (windowMinutes === SEVEN_DAY_MINUTES) return "seven_day";
+  return `${windowMinutes}m`;
+}
 
 function limitName(kind: string, m: Messages): string {
   if (kind === "five_hour") return m.limitFiveHour;
@@ -501,21 +472,6 @@ function message(e: unknown): string {
 function topicCommands(json: string): TopicCommand[] {
   const list: unknown = JSON.parse(json);
   return Array.isArray(list) ? list.filter(isTopicCommand) : [];
-}
-
-function isWorkerLimitsError(v: unknown): v is WorkerLimitsError {
-  return typeof v === "object" && v !== null && "kind" in v && v.kind === "error" && "reason" in v && typeof v.reason === "string";
-}
-
-function isLimitsReading(v: unknown): v is LimitsReading {
-  if (typeof v !== "object" || v === null || !("at" in v) || typeof v.at !== "number" || !("rateLimits" in v) || !Array.isArray(v.rateLimits)) return false;
-  return v.rateLimits.every(isRateLimit);
-}
-
-function isRateLimit(v: unknown): v is RateLimit {
-  if (typeof v !== "object" || v === null) return false;
-  if (!("kind" in v) || typeof v.kind !== "string" || !("percentUsed" in v) || typeof v.percentUsed !== "number") return false;
-  return !("resetsAt" in v) || v.resetsAt === undefined || typeof v.resetsAt === "string";
 }
 
 function isTopicCommand(v: unknown): v is TopicCommand {

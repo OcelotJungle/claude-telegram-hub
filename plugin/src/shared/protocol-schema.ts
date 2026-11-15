@@ -1,7 +1,7 @@
 // Runtime checks of the protocol messages, typed against protocol.ts: a
 // message type changed on one side and not here fails the type check.
 // protocol.ts itself has no value imports, so the function hooks module can use it.
-import type { AskQuestion, CleanupReport, CommandReply, EnableResult, HookBody, HubToPlugin, LimitsPost, PluginToHub, QuestionBody, QuestionDecision, QueuedFile, RateLimit, TerminateRequest, TurnEndBody } from "./protocol.ts";
+import type { AskQuestion, CleanupReport, CommandReply, EnableResult, HookBody, HubToPlugin, PluginToHub, QuestionBody, QuestionDecision, QueuedFile, TerminateRequest, TurnEndBody } from "./protocol.ts";
 
 import { z } from "zod";
 import { entitySchema } from "./markdown.ts";
@@ -100,7 +100,3 @@ export const cleanupReport: z.ZodType<CleanupReport> = z.object({
   after: z.number().optional(),
   error: z.string().optional(),
 });
-
-const rateLimit: z.ZodType<RateLimit> = z.object({ kind: z.string(), percentUsed: z.number(), resetsAt: z.string().optional() });
-
-export const limitsPost: z.ZodType<LimitsPost> = z.object({ sessionId: z.string(), at: z.number(), rateLimits: z.array(rateLimit) });

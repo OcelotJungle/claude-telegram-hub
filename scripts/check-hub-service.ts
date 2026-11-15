@@ -21,7 +21,7 @@ const TOPIC = 12;
 // Callback data prefix of the hub's rig disable confirmation button (plugin/src/hub/hub.ts).
 const CONFIRM_PREFIX = "rig-disable:";
 const MS_PER_SECOND = 1000;
-// The value of the fake rig's `status --json` (scripts/rig-service-process.ts); the hub shows it as the expected restart.
+// The value of the fake rig's `status` (scripts/rig-service-process.ts); the hub shows it as the expected restart.
 const PENDING_RESTART = "2026-01-01T00:00:00.000Z";
 // The window's reconnect delay; short, because the check waits for attempts, not for time.
 const WINDOW_RECONNECT_MS = 50;

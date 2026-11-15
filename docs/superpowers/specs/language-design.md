@@ -9,12 +9,12 @@ shared language setting is Russian.
 ## Contract with rig (rig 0.3.0)
 
 1. Only rig stores the language; the hub keeps no copy, in memory across restarts or on disk.
-   `rig language --json` prints exactly `{"language":"en"}` or `{"language":"ru"}`. When rig is missing, the command
+   `rig language` prints exactly `{"language":"en"}` or `{"language":"ru"}`. When rig is missing, the command
    fails (non-zero exit, timeout, output that does not match that schema), the language is English.
 2. The hub reads the language at start and on a `language-changed` event in `events.jsonl`. Like every other text
    event, the hub sends it to the shared topic as is: its text is already in the new language. Then the hub re-reads
-   the language and the feature list: `description` in `rig feature --json` is a string in the current language.
-3. `rig status --json` is unchanged; it has no language field.
+   the language and the feature list: `description` in `rig feature` is a string in the current language.
+3. `rig status` is unchanged; it has no language field.
 4. Output of rig commands is already in the current language; the hub shows it as is.
 5. `/rig language` shows the language, `/rig language en|ru` switches it. Accepted from allowFrom users exactly like
    `/rig status|update`: the hub runs rig and shows its output. Other arguments get the usage reply.
@@ -44,7 +44,7 @@ docs, code and comments.
 
 - The hub holds the current language (`en` or `ru`) and passes the matching catalog to the code that renders texts;
   render code takes the catalog as an argument rather than reading a global.
-- At start: one `rig language --json` query with a strict schema, through the same runner and time limit as the other
+- At start: one `rig language` query with a strict schema, through the same runner and time limit as the other
   rig queries. Any failure gives English and a log warning.
 - On `language-changed`: the event is a text event and is delivered like any other. It is also a service event: it is
   handled when read even while Telegram delivery is off, and its handling does not wait for delivery. Handling

@@ -1,3 +1,4 @@
+import type { RigInvocation, RigOutput } from "../src/hub/rig.ts";
 import type { VideoTools } from "../src/hub/video.ts";
 import type { Compaction, Usage } from "../src/mod/commands.ts";
 import type { Config } from "../src/shared/config.ts";
@@ -23,6 +24,7 @@ import { notifies } from "../src/shared/notification.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { hasFfmpeg, makeVideo, memLogger, must, NO_PACE, tempDir, waitFor, wsClient } from "./helpers.ts";
 import { manualClock } from "./manual-clock.ts";
+import { fullInfo, neverSleep } from "./info-fixtures.ts";
 import { PLATFORM, platformFor } from "../src/shared/platform.ts";
 
 const GROUP = "-1001";
@@ -90,8 +92,8 @@ type HubExtras = {
   cleanTranscript?: typeof cleanTranscript;
   catchUpMs?: number;
   rigDir?: string;
-  volunteerLimitsCommand?: string[];
-  volunteerLimitsTimeoutMs?: number;
+  findRig?(): string | undefined;
+  runRig?(invocation: RigInvocation): Promise<RigOutput>;
   pollOffsetFile?: string;
 };
 
@@ -103,7 +105,6 @@ async function startHub(o: StartOptions = {}): Promise<void> {
     platform: platformFor("win32"),
     accountsAvailable: () => true,
     port: o.port ?? 0,
-    codexSessionsDir: join(dir, "codex-sessions"),
     sessionsFile: join(dir, "sessions.json"),
     outboxFile: join(dir, "outbox.json"),
     cardsFile: join(dir, "cards.json"),
@@ -141,8 +142,8 @@ async function startHub(o: StartOptions = {}): Promise<void> {
     ...(o.sleep ? { sleep: o.sleep } : {}),
     ...(o.cleanTranscript ? { cleanTranscript: o.cleanTranscript } : {}),
     ...(o.rigDir ? { rigDir: o.rigDir, hubCommit: () => "invented-commit", repository: dir } : {}),
-    ...(o.volunteerLimitsCommand ? { volunteerLimitsCommand: o.volunteerLimitsCommand } : {}),
-    ...(o.volunteerLimitsTimeoutMs ? { volunteerLimitsTimeoutMs: o.volunteerLimitsTimeoutMs } : {}),
+    ...(o.findRig ? { findRig: o.findRig } : {}),
+    ...(o.runRig ? { runRig: o.runRig } : {}),
     defaultConfigDir: DEFAULT_DIR,
     defaultAccount: o.defaultAccount ?? (async () => undefined),
     execDir: join(dir, "exec"),
@@ -2454,10 +2455,24 @@ describe("idle exit", () => {
 describe("commands", () => {
   const USAGE: Usage = {
     context: { tokens: 128_400, window: 1_000_000, breakdown: { totalTokens: 130_000, rawMaxTokens: 333_000, autoCompactThreshold: 300_000, isAutoCompactEnabled: true } },
-    rateLimits: [{ kind: "five_hour", percentUsed: 30 }],
   };
 
   const COMPACTED: Compaction = { tokensBefore: 180_000, tokensAfter: 24_000 };
+
+  // A rig that answers `info` with the given output and every other query with an empty feature list.
+  const rigAnswering = (info: RigOutput = { code: 0, stdout: JSON.stringify(fullInfo()), stderr: "" }) => {
+    const asked: string[] = [];
+    return {
+      asked,
+      findRig: () => "/fake/rig",
+      runRig: async (invocation: RigInvocation): Promise<RigOutput> => {
+        const line = invocation.argv.join(" ");
+        if (!/ info --session /.test(line)) return { code: 0, stdout: JSON.stringify({ features: [] }), stderr: "" };
+        asked.push(line);
+        return info;
+      },
+    };
+  };
 
   // The mod of one window, with the engine faked: the commands it ran and
   // the compactions it asked for, and what `run` and `compact` answer.
@@ -2485,6 +2500,7 @@ describe("commands", () => {
         return { status: r.status, text: await r.text() };
       },
       now: () => Date.now(),
+      sleep: neverSleep,
     });
     return { runner, ran, compacted };
   }
@@ -2505,14 +2521,19 @@ describe("commands", () => {
     );
 
   test("/info is answered by the mod silently, never reaches the agent and leaves the mode as it was", async () => {
-    await startHub();
+    const rig = rigAnswering();
+    await startHub({ findRig: rig.findRig, runRig: rig.runRig });
     const a = await enabled("a");
     await req(a, { op: "disable" });
     const { runner } = mod("a");
     command("/info");
     const sent = await reply(runner, t => t.startsWith("Claude limits"));
     expect(sent).toMatchObject({ message_thread_id: 100, disable_notification: true });
-    expect(sent.text).toContain("128/300k");
+    expect(sent.text).toContain("120/300k");
+    expect(sent.text).toContain("Codex limits");
+    expect(sent.text).not.toContain("{");
+    expect(rig.asked).toHaveLength(1);
+    expect(rig.asked[0]).toContain(" info --session a");
     expect(arr(sent.entities)[0]).toEqual({ type: "bold", offset: 0, length: "Claude limits".length });
     expect(a.messages.some(m => m.type === "inbound")).toBe(false);
     expect(new SessionStore(join(dir, "sessions.json")).get("a")?.enabled).toBe(false);
@@ -2791,7 +2812,8 @@ describe("commands", () => {
   });
 
   test("a reply the mod could not deliver goes with the next poll, once", async () => {
-    await startHub();
+    const rig = rigAnswering();
+    await startHub({ findRig: rig.findRig, runRig: rig.runRig });
     await enabled("a");
     let down = true;
     const ran: string[] = [];
@@ -2807,6 +2829,7 @@ describe("commands", () => {
         return { status: r.status, text: await r.text() };
       },
       now: () => Date.now(),
+      sleep: neverSleep,
     });
     command("/info");
     await waitFor(async () => {
@@ -2820,163 +2843,72 @@ describe("commands", () => {
     expect(fake.texts().filter(p => p.text.startsWith("Claude limits")).length).toBe(1);
   });
 
-  test("/limits answers the freshest reading of the sessions on the account", async () => {
-    await startHub();
-    await plugin("a");
-    await plugin("b");
-    const other = await wsClient(port, { ...hello("c"), configDir: "C:\\p\\sessions\\1-other_mail.com" });
-    clients.push(other);
-    await other.next("state");
-    const reading = (at: number, percentUsed: number) => ({ at, rateLimits: [{ kind: "five_hour", percentUsed }] });
-    const post = (sessionId: string, at: number, percent: number) =>
-      fetch(`http://127.0.0.1:${port}/limits`, { method: "POST", body: JSON.stringify({ sessionId, ...reading(at, percent) }) });
-    const get = async (sessionId: string): Promise<unknown> => (await fetch(`http://127.0.0.1:${port}/limits?session=${sessionId}`)).json();
-    await post("a", 1000, 10);
-    await post("b", 5000, 50);
-    await post("c", 9000, 90);
-    expect(await get("a")).toEqual(reading(5000, 50));
-    expect(await get("b")).toEqual(reading(5000, 50));
-    expect(await get("c")).toEqual(reading(9000, 90));
-    expect(await get("nobody")).toBeNull();
-    expect((await fetch(`http://127.0.0.1:${port}/limits`, { method: "POST", body: "{}" })).status).toBe(400);
-  });
+  describe("GET /info", () => {
+    const get = (session: string) => fetch(`http://127.0.0.1:${port}/info?session=${session}`);
 
-  // The rig state, the rig clone and a session's Claude config dir, as the
-  // availability rule reads them: the feature flag in state.json, the agent
-  // file in <configDir>/agents, the script in <paths.repo>/features/volunteers/tools.
-  function workerRig(o: { codex?: boolean; volunteers?: boolean; codexAgent?: boolean; volunteerAgent?: boolean; script?: string }) {
-    const rigDir = join(dir, "rig");
-    const repo = join(dir, "rig-clone");
-    const configDir = join(dir, "worker-profile");
-    mkdirSync(rigDir, { recursive: true });
-    mkdirSync(join(configDir, "agents"), { recursive: true });
-    writeFileSync(join(rigDir, "state.json"), JSON.stringify({ paths: { repo }, features: { codex: o.codex ?? false, volunteers: o.volunteers ?? false } }));
-    if (o.codexAgent) writeFileSync(join(configDir, "agents", "codex.md"), "agent");
-    if (o.volunteerAgent) writeFileSync(join(configDir, "agents", "volunteer.md"), "agent");
-    if (o.script !== undefined) {
-      const tools = join(repo, "features", "volunteers", "tools");
-      mkdirSync(tools, { recursive: true });
-      writeFileSync(join(tools, "volunteer-models.py"), o.script);
-    }
-    return { rigDir, configDir };
-  }
+    test("answers rig's data of the session as it is, from `rig info --session <id>`", async () => {
+      const rig = rigAnswering();
+      await startHub({ findRig: rig.findRig, runRig: rig.runRig });
+      const res = await get("abc-1");
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual(fullInfo());
+      expect(rig.asked).toHaveLength(1);
+      expect(rig.asked[0]).toContain(" info --session abc-1");
+      expect(rig.asked[0]).not.toContain("--json");
+    });
 
-  const writeRollout = () => {
-    const day = join(dir, "codex-sessions", "2026", "01", "01");
-    mkdirSync(day, { recursive: true });
-    const timestamp = "2026-01-01T12:00:00.000Z";
-    writeFileSync(join(day, "rollout-test.jsonl"), JSON.stringify({ timestamp, type: "event_msg", payload: { type: "token_count", rate_limits: {
-      limit_id: "codex", primary: { used_percent: 41, window_minutes: 300 },
-    } } }));
-    return Date.parse(timestamp);
-  };
+    test("a block without its data and a block with rig's error pass through unchanged", async () => {
+      const claude = { error: { code: "claude-failed", message: "no session data" } };
+      const { codex, volunteers, ...rest } = fullInfo({ claude });
+      const rig = rigAnswering({ code: 0, stdout: JSON.stringify(rest), stderr: "" });
+      await startHub({ findRig: rig.findRig, runRig: rig.runRig });
+      const data = await (await get("s")).json();
+      expect(data).toEqual(rest);
+      expect(data).not.toHaveProperty("codex");
+      expect(data).not.toHaveProperty("volunteers");
+    });
 
-  const OK_SCRIPT = `#!/usr/bin/env python3
-import json
-print(json.dumps({
-  "checked_at": "2026-01-02T12:00:00Z",
-  "source": "proxy",
-  "day_percent": 6,
-  "used": 240,
-  "cap": 4200,
-  "reset_in_s": 56455,
-  "providers": {"openrouter": {"used": 39, "cap": 1000}, "requesty": {"used": 7, "cap": 200}, "groq": {"used": 194, "cap": 3000}, "zhipu": {"used": 4, "cap": None}},
-  "error": None
-}))
-`;
+    test("a command failure is rig's own message, with a failure status", async () => {
+      const failure = { error: { code: "session-unknown", message: "No such session: s" } };
+      const rig = rigAnswering({ code: 1, stdout: JSON.stringify(failure), stderr: "" });
+      await startHub({ findRig: rig.findRig, runRig: rig.runRig });
+      const res = await get("s");
+      expect(res.status).toBe(502);
+      expect(await res.json()).toEqual({ failure: "No such session: s" });
+    });
 
-  // Starts a hub on the fixture, connects a window of the session s1 with the fixture's config dir and asks one limits endpoint as that session.
-  async function askLimits(endpoint: "codex-limits" | "volunteer-limits", rig: ReturnType<typeof workerRig>, volunteerExtras: HubExtras = {}, language: "en" | "ru" = "en") {
-    await startHub({ rigDir: rig.rigDir, ...volunteerExtras });
-    hub["lang"] = language;
-    const c = await wsClient(port, { ...hello("s1"), configDir: rig.configDir });
-    clients.push(c);
-    await c.next("state");
-    const res = await fetch(`http://127.0.0.1:${port}/${endpoint}?session=s1`);
-    expect(res.status).toBe(200);
-    return res.json();
-  }
+    test("an answer that is not rig's data is a failure, not data", async () => {
+      const rig = rigAnswering({ code: 0, stdout: JSON.stringify({ session: "s" }), stderr: "" });
+      await startHub({ findRig: rig.findRig, runRig: rig.runRig });
+      const res = await get("s");
+      expect(res.status).toBe(502);
+      expect(await res.json()).toHaveProperty("failure");
+    });
 
-  test("/codex-limits: feature off gives no block even with a rollout on disk", async () => {
-    writeRollout();
-    expect(await askLimits("codex-limits", workerRig({ codex: false, codexAgent: true }))).toBeNull();
-  });
+    test("a session id that is not a plain id never reaches rig", async () => {
+      const rig = rigAnswering();
+      await startHub({ findRig: rig.findRig, runRig: rig.runRig });
+      for (const bad of ["", "a%20b", "a%3Bb", "..%2F..", "a%26b"]) {
+        const res = await get(bad);
+        expect(res.status).toBe(502);
+        expect(await res.json()).toEqual({ failure: en.rigBadSession });
+      }
+      expect(rig.asked).toEqual([]);
+    });
 
-  test("/codex-limits: feature on but no agent file in the session's config dir gives no block", async () => {
-    writeRollout();
-    expect(await askLimits("codex-limits", workerRig({ codex: true, codexAgent: false }))).toBeNull();
-  });
+    test("without rig the answer is the missing-rig text", async () => {
+      await startHub();
+      const res = await get("s");
+      expect(res.status).toBe(502);
+      expect(await res.json()).toEqual({ failure: en.rigMissing });
+    });
 
-  test("/codex-limits: an unknown session or no rig gives no block", async () => {
-    writeRollout();
-    await startHub();
-    expect(await (await fetch(`http://127.0.0.1:${port}/codex-limits?session=nobody`)).json()).toBeNull();
-  });
-
-  test("/codex-limits: an available worker returns the rollout reading", async () => {
-    const at = writeRollout();
-    expect(await askLimits("codex-limits", workerRig({ codex: true, codexAgent: true }))).toEqual({ at, rateLimits: [{ kind: "five_hour", percentUsed: 41 }] });
-  });
-
-  test("/codex-limits: an available worker without any rollout returns an error line, not nothing", async () => {
-    expect(await askLimits("codex-limits", workerRig({ codex: true, codexAgent: true }))).toEqual({ kind: "error", reason: en.limitsNoCodexRollout });
-  });
-
-  test("/codex-limits: the hub's own reason comes in the hub language", async () => {
-    expect(await askLimits("codex-limits", workerRig({ codex: true, codexAgent: true }), {}, "ru")).toEqual({ kind: "error", reason: ru.limitsNoCodexRollout });
-  });
-
-  test("/volunteer-limits: a missing script is reported in the hub language", async () => {
-    expect(await askLimits("volunteer-limits", workerRig({ volunteers: true, volunteerAgent: true }), {}, "ru")).toEqual({ kind: "error", reason: ru.limitsScriptMissing });
-  });
-
-  test("/volunteer-limits: bad JSON is reported in the hub language", async () => {
-    expect(await askLimits("volunteer-limits", workerRig({ volunteers: true, volunteerAgent: true, script: "print('not json')\n" }), {}, "ru")).toEqual({ kind: "error", reason: ru.limitsScriptBadJson });
-  });
-
-  test("/volunteer-limits: feature off gives none even with the script on disk", async () => {
-    expect(await askLimits("volunteer-limits", workerRig({ volunteers: false, volunteerAgent: true, script: OK_SCRIPT }))).toEqual({ kind: "none" });
-  });
-
-  test("/volunteer-limits: feature on but no agent file in the session's config dir gives none", async () => {
-    expect(await askLimits("volunteer-limits", workerRig({ volunteers: true, volunteerAgent: false, script: OK_SCRIPT }))).toEqual({ kind: "none" });
-  });
-
-  test("/volunteer-limits: an available worker runs the script found through paths.repo of the rig state", async () => {
-    const data = await askLimits("volunteer-limits", workerRig({ volunteers: true, volunteerAgent: true, script: OK_SCRIPT }));
-    expect(data.kind).toBe("ok");
-    if (data.kind === "ok") {
-      expect(data.dayPercent).toBe(6);
-      expect(data.providers).toEqual([
-        { name: "OpenRouter", used: 39, cap: 1000 },
-        { name: "Requesty", used: 7, cap: 200 },
-        { name: "Groq", used: 194, cap: 3000 },
-      ]);
-    }
-  });
-
-  test("/volunteer-limits: an available worker whose script is missing returns an error line", async () => {
-    const data = await askLimits("volunteer-limits", workerRig({ volunteers: true, volunteerAgent: true }));
-    expect(data.kind).toBe("error");
-  });
-
-  test("/volunteer-limits: an available worker whose script crashes returns the error", async () => {
-    const data = await askLimits("volunteer-limits", workerRig({ volunteers: true, volunteerAgent: true, script: "import sys\nsys.exit(1)\n" }));
-    expect(data.kind).toBe("error");
-    if (data.kind === "error") expect(data.reason).toContain("script exited with code 1");
-  });
-
-  test("/volunteer-limits: bad JSON from the script returns the error", async () => {
-    const data = await askLimits("volunteer-limits", workerRig({ volunteers: true, volunteerAgent: true, script: "print('not json')\n" }));
-    expect(data.kind).toBe("error");
-    if (data.kind === "error") expect(data.reason).toContain("JSON");
-  });
-
-  test("/volunteer-limits: the script's own error for source none is returned", async () => {
-    const script = `import json
-print(json.dumps({"checked_at": "2026-01-02T12:00:00Z", "source": "none", "day_percent": None, "used": None, "cap": None, "reset_in_s": None, "providers": None, "error": "no proxy configured"}))
-`;
-    expect(await askLimits("volunteer-limits", workerRig({ volunteers: true, volunteerAgent: true, script }))).toEqual({ kind: "error", reason: "no proxy configured" });
+    test("the removed limits endpoints are gone", async () => {
+      await startHub();
+      for (const path of ["limits?session=a", "codex-limits?session=a", "volunteer-limits?session=a"]) {
+        expect((await fetch(`http://127.0.0.1:${port}/${path}`)).status).toBe(404);
+      }
+    });
   });
 
   test("the same reply posted twice is sent once", async () => {
@@ -2990,7 +2922,7 @@ print(json.dumps({"checked_at": "2026-01-02T12:00:00Z", "source": "none", "day_p
     expect(fake.texts().filter(p => p.text === "once").length).toBe(1);
   });
 
-  const SMALL: Usage = { context: { tokens: 50_000, window: 1_000_000 }, rateLimits: [] };
+  const SMALL: Usage = { context: { tokens: 50_000, window: 1_000_000 } };
   const terminated = (c: { messages: { type: string }[] }) => c.messages.some(m => m.type === "terminate");
 
   // A compaction that ends when the test lets it.

@@ -25,12 +25,13 @@ function fixture(found = true) {
 }
 
 describe("rig language query", () => {
-  test("asks rig language --json and returns what rig answers", async () => {
+  test("asks rig language, without --json, and returns what rig answers", async () => {
     const f = fixture();
     expect(await f.rig.language()).toBe("en");
     f.output({ code: 0, stdout: JSON.stringify({ language: "ru" }), stderr: "" });
     expect(await f.rig.language()).toBe("ru");
-    expect(f.calls.map(argv => argv.join(" "))).toEqual([expect.stringContaining("language --json"), expect.stringContaining("language --json")]);
+    expect(f.calls.map(argv => argv.join(" "))).toEqual([expect.stringMatching(/language"$/), expect.stringMatching(/language"$/)]);
+    expect(f.calls.flat().join(" ")).not.toContain("--json");
     expect(f.warnings).toEqual([]);
   });
 
@@ -100,6 +101,15 @@ describe("rig errors are data, rendered in the language shown", () => {
     expect(rigErrorText({ kind: "invalidJson", message: "bad shape" }, ru)).toContain("bad shape");
     expect(rigErrorText({ kind: "missing" }, ru)).toBe(ru.rigMissing);
     expect(rigErrorText({ kind: "missing" }, en)).toBe(en.rigMissing);
+  });
+
+  test("rig's own failure shows its message as it is in any language; a bad session id is the hub's text", () => {
+    const failure: RigError = { kind: "rig", code: "feature-unknown", message: "No such feature: nope" };
+    expect(rigErrorText(failure, en)).toBe("No such feature: nope");
+    expect(rigErrorText(failure, ru)).toBe("No such feature: nope");
+    expect(rigErrorText({ kind: "badSession" }, en)).toBe(en.rigBadSession);
+    expect(rigErrorText({ kind: "badSession" }, ru)).toBe(ru.rigBadSession);
+    expect(ru.rigBadSession).not.toBe(en.rigBadSession);
   });
 
   test("the query results carry the kind, not text", async () => {

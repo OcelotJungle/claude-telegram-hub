@@ -20,6 +20,10 @@ import { notifies } from "../shared/notification.ts";
 import { SHELL_NAMES, shellRun, writeShellFiles } from "./exec-shell.ts";
 import { exitInfoSchema, HEARTBEAT_MS } from "./exec-runner.ts";
 import { catalogOf } from "../shared/i18n/index.ts";
+import { renderRigRun } from "./rig-output.ts";
+
+// What a run shows: its lines, and whether they start at the beginning of its output.
+type Shown = { lines: string[]; whole: boolean };
 
 export const EXEC_CARD_MS = 60_000;
 export const EXEC_CARD_LINES = 10;
@@ -265,6 +269,8 @@ export class Execs {
         exit: this.path(rec.id, "exit.json"),
         alive: this.path(rec.id, "alive"),
         heartbeatMs: HEARTBEAT_MS,
+        // A rig run keeps its progress (the log) and its result apart.
+        ...(rec.shell === "rig" ? { result: this.path(rec.id, "result") } : {}),
       };
       const specFile = this.path(rec.id, "spec.json");
       mkdirSync(this.deps.dir, { recursive: true });
@@ -372,9 +378,9 @@ export class Execs {
   private sendLog(rec: ExecRecord, end: NonNullable<ExecRecord["end"]>): void {
     const log = this.path(rec.id, "log");
     const kind = end.kind === "lost" ? "warning" : end.kind === "exit" && end.code !== 0 ? "error" : "info";
-    if (fitsCard(log)) return;
+    if (fitsCard(this.shown(rec, TAIL_BYTES))) return;
     try {
-      const file = this.fileToSend(rec.id, log);
+      const file = this.fileToSend(rec, log);
       if (rec.shell === "rig") this.deps.machineFile?.(rec, file, kind);
       else if (rec.sessionId !== undefined) this.deps.sendFile(rec.sessionId, file, `${rec.id}.log`, kind);
     } catch (e) {
@@ -384,11 +390,21 @@ export class Execs {
 
   // The log, or a copy of its last bytes with a note when Telegram would
   // refuse the whole of it.
-  private fileToSend(id: string, log: string): string {
+  private fileToSend(rec: ExecRecord, log: string): string {
+    const id = rec.id;
     const limit = this.deps.fileLimit ?? TELEGRAM_FILE_LIMIT;
+    const m = this.deps.messages();
+    // A rig run is never sent raw: it goes as the words the card shows, whole, not only its tail.
+    if (rec.shell === "rig") {
+      const shown = this.shown(rec, limit);
+      const size = fileSize(log) + fileSize(this.path(id, "result"));
+      const note = shown.whole ? "" : `${m.execLogTrimmed({ limit: mb(limit, m), size: mb(size, m) })}\n`;
+      const file = this.path(id, "view.log");
+      writeFileSync(file, `${note}${shown.lines.join("\n")}\n`);
+      return file;
+    }
     const size = statSync(log).size;
     if (size <= limit) return log;
-    const m = this.deps.messages();
     const note = Buffer.from(`${m.execLogTrimmed({ limit: mb(limit, m), size: mb(size, m) })}\n`);
     const copy = this.path(id, "tail.log");
     copyTail(log, copy, note, Math.max(0, limit - note.length));
@@ -416,14 +432,27 @@ export class Execs {
   // changes every check, which would edit the card every check).
   private refreshRigCard(rec: ExecRecord): void {
     const shown = this.rigShown.get(rec.id);
-    const tail = logTail(this.path(rec.id, "log"), EXEC_CARD_LINES);
+    const tail = tailText(this.shown(rec, TAIL_BYTES), EXEC_CARD_LINES);
     if (shown !== undefined && shown.tail === tail && this.deps.now() - shown.at < this.deps.cardMs) return;
     this.showCard(rec);
   }
 
+  // The one reading of a run's output: the card, the sent file and the report all come from it. A rig run
+  // is the whole lines of its progress, in words, then its result, in words, last; any other run is its log.
+  private shown(rec: ExecRecord, bytes: number): Shown {
+    const log = this.path(rec.id, "log");
+    if (rec.shell !== "rig") return readLines(log, bytes, false) ?? { lines: [], whole: true };
+    const progress = readLines(log, bytes, true);
+    const result = readLines(this.path(rec.id, "result"), bytes, true);
+    return {
+      lines: renderRigRun(progress?.lines ?? [], result?.lines ?? [], this.deps.messages()),
+      whole: (progress?.whole ?? true) && (result?.whole ?? true),
+    };
+  }
+
   private showCard(rec: ExecRecord): void {
     const m = this.deps.messages();
-    const tail = rec.state === "pending" ? "" : logTail(this.path(rec.id, "log"), EXEC_CARD_LINES);
+    const tail = rec.state === "pending" ? "" : tailText(this.shown(rec, TAIL_BYTES), EXEC_CARD_LINES);
     const buttons: Button[][] | undefined =
       rec.state === "running"
         ? [[{ text: m.execStopButton, data: `x:${rec.id}:stop` }]]
@@ -502,25 +531,41 @@ function readEnd(path: string, bytes: number): { text: string; whole: boolean } 
   }
 }
 
-export function logTail(path: string, lines: number): string {
-  const end = readEnd(path, TAIL_BYTES);
-  if (!end) return "";
-  const all = screenLines(end.text);
+function fileSize(path: string): number {
+  try {
+    return statSync(path).size;
+  } catch {
+    return 0;
+  }
+}
+
+// The last `bytes` of a file as lines. wholeLines: only the lines that ended with "\n", so a line still
+// being written (a rig file) is never shown cut.
+function readLines(path: string, bytes: number, wholeLines: boolean): Shown | undefined {
+  const end = readEnd(path, bytes);
+  if (!end) return undefined;
+  const text = wholeLines ? end.text.slice(0, end.text.lastIndexOf("\n") + 1) : end.text;
+  const lines = screenLines(text);
   // A read from the middle starts in the middle of a line.
-  if (!end.whole) all.shift();
-  return all
+  if (!end.whole) lines.shift();
+  return { lines, whole: end.whole };
+}
+
+// The card's text: the last lines, each cut to the width.
+function tailText(shown: Shown, lines: number): string {
+  return shown.lines
     .slice(-lines)
     .map(l => (l.length > LINE_MAX ? `${l.slice(0, LINE_MAX - 1)}…` : l))
     .join("\n");
 }
 
-// Whether the card's tail already shows the whole log.
-function fitsCard(path: string): boolean {
-  const end = readEnd(path, TAIL_BYTES);
-  if (!end) return true;
-  if (!end.whole) return false;
-  const lines = screenLines(end.text);
-  return lines.length <= EXEC_CARD_LINES && lines.every(l => l.length <= LINE_MAX);
+export function logTail(path: string, lines: number): string {
+  return tailText(readLines(path, TAIL_BYTES, false) ?? { lines: [], whole: true }, lines);
+}
+
+// Whether the card's tail already shows everything.
+function fitsCard(shown: Shown): boolean {
+  return shown.whole && shown.lines.length <= EXEC_CARD_LINES && shown.lines.every(l => l.length <= LINE_MAX);
 }
 
 export function duration(ms: number, m: Messages): string {

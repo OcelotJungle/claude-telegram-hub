@@ -368,42 +368,38 @@ terminal. Details are in `questions-design.md`.
   sound "⚠️ /<command> failed: the window did not pick it up within 10 s."
 - The module sends the reply with `POST /reply {sessionId, id, text, notify}`; the hub puts it in the topic's queue as
   agent text (Markdown); a retry with the same `id` is not duplicated.
-- `/info` — `$.session.usage({ breakdown: "summary" })`: the percentages of the five-hour and weekly window
-  with the time until reset ("no data" until the session has had a model reply); the current context in
-  thousands of tokens (the status line figure; after compact and before the first reply it is absent — then an estimate
-  with the sign "≈"); the autocompact window and trigger threshold; what percent of the threshold is used.
-  Autocompact off — it says so.
-- The limits are the account's, while `$.session.usage().rateLimits` comes from this session's last API reply: in a
-  session that was silent for an hour, they are an hour old. So on every `session.measure` (after
-  each turn and when the window moved by a whole percent) the module sends the hub `POST /limits {sessionId, at,
-  rateLimits}`, and `/info` asks `GET /limits?session=<id>` — the freshest reading from sessions of the same
-  cswap account (account unknown — only its own). The hub keeps the readings in memory. No reply
-  or no readings — the session's own numbers. A reading 5 minutes old or more gets in the header "**Claude limits** (data
-  N min ago)**."
-- Between the Claude block and "Context", `/info` shows "**Codex limits**" if `GET /codex-limits`
-  returned a reading (`LimitsReading`, otherwise `null`). The hub reads `$CODEX_HOME/sessions` (by default
-  `~/.codex/sessions`): up to 20 rollout files, newest dates first, within a date — by mtime.
-  It reads JSONL from the end in blocks; the last `event_msg/token_count` event with
-  `rate_limits.limit_id: "codex"` gives the reading time from `timestamp`. `premium`, `null` and
-  malformed lines are skipped; if there is no reading, the previous file is checked.
-  Results are cached by path, mtime and size. Windows of 300 and 10080 minutes are "5 hours" and "Week",
-  others show the length in minutes; percentages are rounded, `resets_at` is converted from Unix seconds.
-  After a reset — 0% without the reset suffix. An age of 5 minutes or more is shown by the same rule as for Claude.
-  Credits are not shown; missing data or a request error removes only the Codex block.
-- After the Codex block (or after the Claude block if there is no Codex), `/info` shows "**Volunteer limits**"
-  if `GET /volunteer-limits` returned `kind: "ok"`. The hub runs the script
-  `python -I ~/.claude/tools/volunteer-models.py limits --json` (the path and command are configurable through
-  `HubOptions.volunteerLimitsScript` and `volunteerLimitsCommand`, a 5 s timeout through
-  `volunteerLimitsTimeoutMs`). The script prints JSON with the fields `checked_at`, `source`, `day_percent`,
-  `reset_in_s`, `providers`. `source: "none"` → the block is not shown, `error` as text in the line
-  "Volunteer limits: no data, <reason>". With `ok`: a header with the age from 5 minutes, a line
-  `Day: X% (resets in <duration>)` (after a reset — `Day: 0%` without the suffix), then the providers,
-  each on its own line: names are mapped (openrouter→OpenRouter, requesty→Requesty, groq→Groq,
-  zhipu→Zhipu, not "Z.ai": Telegram makes a link out of it; the others as they are), format
-  `Name: used/cap`. A provider with `cap: null` is dropped by the hub: without a limit the number does not say how much
-  is left. A script error / timeout /
-  invalid JSON → an error line. No Claude data — "Claude limits: no data, they appear after the
-  model's first reply".
+- `/info` draws what `rig info --session <id>` returns; the hub collects no limits itself. The module takes the session
+  `id` from `$.session.id()` and asks `GET /info?session=<id>`; the hub runs `rig info --session <id>` through the
+  `Rig` class (the id must be a plain id, `[A-Za-z0-9-]`, up to 100 characters: anything else is refused before rig is
+  run) and answers rig's data (`InfoData`: `session`, `account`, `claude`, optional `codex`, optional
+  `volunteers`, `context`; the type is in `plugin/src/shared/info-data.ts`). rig's answer is untrusted: the hub
+  validates it with a strict zod schema of rig's contract (`plugin/src/hub/info-schema.ts`), and the window gets only
+  the validated object. A contract breach (an unknown field, a wrong type, a `null` time where rig promises a string)
+  fails the whole answer, not one block: rig is then broken and a half-drawn picture would hide it. The window
+  checks only the hub/window protocol shape (`parseInfoData`, the same type). The answer is a failure with status 502
+  and `{failure: <text>}` when rig is missing, when the command failed (the text is rig's own `message`), or when the
+  answer breaks the contract. The module shows that text.
+- The hub's own failures have their own texts in the language catalog, never a parse error or a bare status: the hub
+  does not answer ("/info failed: the hub does not answer (<error>)"), the answer is not readable (not JSON, or
+  not the hub's data or failure; with its HTTP status), the hub does not answer in time. The window waits
+  `RIG_QUERY_LIMIT_MS` (rig's query limit) plus a named margin.
+- Every block of the data is either its data or `{error: {code, message}}`. A block with the code `no-data` is shown
+  as "no data" ("Claude limits: no data, they appear after the model's first reply"; for the context: "no data"). A
+  block with another code is shown as "<Block> limits: unavailable, <rig's message>" (for the context:
+  "unavailable, <message>"). `codex` and `volunteers` are absent when rig does not allow them on this machine: then
+  the block is not shown at all. The account is not shown.
+- The Claude block shows the percentages of the five-hour and weekly window with the time until reset; no limits yet —
+  "Claude limits: no data, they appear after the model's first reply". "Context" shows the current context in
+  thousands of tokens (after compact and before the first reply an estimate with the sign "≈"), the autocompact window
+  and trigger threshold, and what percent of the threshold is used; autocompact off — it says so.
+- A block (the context included) whose `at` is 5 minutes old or more has in its header "(data N min old)". After a reset — 0% without the reset
+  suffix. "**Codex limits**" shows windows of 300 and 10080 minutes as "5 hours" and "Week", others as the length
+  in minutes. "**Volunteer limits**" shows the age, a line `Day: X% (resets in <duration>)` and the providers, each on
+  its own line, in the form `Name: used/cap`; names are mapped (openrouter→OpenRouter, requesty→Requesty, groq→Groq,
+  zhipu→Zhipu, not "Z.ai": Telegram makes a link out of it; the others as they are). A provider with `cap: null` is
+  dropped: without a limit the number does not say how much is left.
+- The hub no longer reads `usage.json`, `$CODEX_HOME/sessions` or the volunteer script, and the module no longer sends
+  limits on `session.measure`: the readings, their freshness and which account they belong to are rig's work.
 - `/compact` and `/compact <instructions>` — `$.command.run({ command: "compact" })`: like one typed in the
   terminal, it waits for the end of the current turn. Immediately — "🗜 Compaction is queued.", at start "🗜 Compaction is running…"; the result comes from the hook
   `session.compact`: "✅ Compaction done." or the reason it was skipped.
