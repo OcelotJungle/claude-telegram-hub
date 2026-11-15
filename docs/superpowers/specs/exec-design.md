@@ -175,14 +175,21 @@ the report to the agent are made from it. The whole log stays with rig (`rig exe
 The file that goes to Telegram is not made from that tail. When a run ends, the hub reads the log from byte 0 to its
 size, page by page (`exec-log.ts`, pages of at most 64 KiB), and writes it to a temporary file as it reads, so the
 whole log is never in memory; a hub restarted in the middle of the run sends the same file. A file over Telegram's
-50 MB limit (`TELEGRAM_FILE_LIMIT`) is cut from its start, begins with a note that says so (`execLogTrimmed`) and
-holds whole lines of the log (a rig run) or what is left of the cut (any other, a character cut in half is dropped).
+50 MB limit (`TELEGRAM_FILE_LIMIT`) is cut from its start, begins with a note that says so (`execLogTrimmed`) and then
+holds the log from the first line start at or after the cut, so it has whole lines only and no character cut in half (a
+line the cut lands in the middle of is not shown, for any run; a line the cut lands exactly at the start of is kept). When
+the kept part has no line break at all (one huge line), the file instead holds the last bytes of the log, starting at
+the first whole UTF-8 character.
 The temporary file is deleted once the hub has copied it. If rig cannot give the pages, the file holds what the hub
 keeps in memory instead, and the hub logs a warning. The work runs through `deps.spawn`, so the hub is busy until
-the file is sent. Carriage returns (progress bars) are collapsed: of a line, what is after the last `\r` remains.
+the file is sent. Carriage returns (progress bars) are collapsed (of a line, what is after the last `\r` remains) only for rig runs, whose
+progress lines use them; the log file of a shell run stays raw.
 The run store marks the file (`logFile`): `owed` is saved with the end of a run whose log does not fit the card, `sent` once
 the file was handed over. A restarted hub builds and sends the file of every ended run still `owed` (size and result
-read from rig again; with rig unreadable it stays owed) and never one marked `sent`: each file goes out once.
+read from rig again; with rig unreadable it stays owed) and not one marked `sent`. A file goes out at least once, not
+exactly once: it is marked `sent` only after the hand-over, so a hub that dies between the hand-over and the save sends
+it again after the restart. That is the intended trade-off: a duplicate file is better than a lost one, and Telegram
+has no idempotency key that would make the hand-over exactly-once.
 
 ### Card
 

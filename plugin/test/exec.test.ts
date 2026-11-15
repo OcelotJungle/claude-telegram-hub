@@ -46,7 +46,16 @@ const SMALL_PAGE_BYTES = 5;
 const ODD_PAGE_BYTES = 4097;
 // A file limit that a log of a few thousand bytes is over.
 const SMALL_FILE_LIMIT = 1000;
-const OVER_LIMIT_YA_COUNT = 2000;
+// Shell log lines over that limit: lines of two-byte characters, and lines of "step N" with dashes.
+const YA_LINE_COUNT = 200;
+const YA_LINES = 10;
+const STEP_LINES = 100;
+// A line of the exact-cut test: "L" + 3 digits + "xxxxx" + "\n".
+const EXACT_INDEX_DIGITS = 3;
+const EXACT_LINE_BYTES = 10;
+// A tail of a huge line is far longer than this (the limit is 1000 bytes of two-byte characters, minus the note).
+const YA_MIN_KEPT = 400;
+const STEP_DASHES = 60;
 const NAMES = platformFor("win32").shellNames;
 
 type CardCall = { sessionId: string; cardId: string; markdown: string; final: boolean; kind: MessageKind; buttons?: Button[][] };
@@ -933,18 +942,70 @@ describe("rig run cards", () => {
 });
 
 describe("a run's log file", () => {
-  // A log with a two-byte character at every position, over the small limit; the prefix moves the cut by a byte.
+  test("over the file limit, a shell log starts right after a line break and keeps its last line", async () => {
+    const t = setup({ fileLimit: SMALL_FILE_LIMIT });
+    const { runId } = await started(t);
+    const steps = Array.from({ length: STEP_LINES }, (_, i) => `step ${i} ${"-".repeat(STEP_DASHES)}`);
+    t.fake.write(runId, `${steps.join("\n")}\nlast line\n`);
+    t.fake.finish(runId, { kind: "exit", code: 0 });
+    const file = await t.until(() => t.files[0], "the log file");
+    expect(file.text).toStartWith("[log trimmed");
+    expect(Buffer.byteLength(file.text)).toBeLessThanOrEqual(SMALL_FILE_LIMIT);
+    expect(file.text.slice(file.text.indexOf("\n") + 1)).toMatch(/^step \d+ -+\n/);
+    expect(file.text).toEndWith("last line\n");
+  });
+
+  // Lines of two-byte characters over the small limit; the prefix moves the cut by a byte, so in one run it falls
+  // inside a character.
   for (const prefix of ["", "x"]) {
-    test(`over the file limit is cut from its start, says so, and holds no half a character (cut shifted by ${prefix.length})`, async () => {
+    test(`over the file limit, a shell log holds only whole lines and no half a character (cut shifted by ${prefix.length})`, async () => {
       const t = setup({ fileLimit: SMALL_FILE_LIMIT });
       const { runId } = await started(t);
-      t.fake.write(runId, `${prefix}${YA.repeat(OVER_LIMIT_YA_COUNT)}\nlast line\n`);
+      const line = YA.repeat(YA_LINE_COUNT);
+      const lines = Array.from({ length: YA_LINES }, () => line);
+      t.fake.write(runId, `${prefix}${lines.join("\n")}\nlast line\n`);
       t.fake.finish(runId, { kind: "exit", code: 0 });
       const file = await t.until(() => t.files[0], "the log file");
       expect(file.text).toStartWith("[log trimmed");
       expect(Buffer.byteLength(file.text)).toBeLessThanOrEqual(SMALL_FILE_LIMIT);
-      expect(file.text).toEndWith(`${YA}\nlast line\n`);
       expect(file.text).not.toContain("\uFFFD");
+      const body = file.text.slice(file.text.indexOf("\n") + 1).split("\n");
+      expect(body.slice(0, -2).every(l => l === line)).toBe(true);
+      expect(body.slice(-2)).toEqual(["last line", ""]);
+    });
+  }
+
+  // Lines of EXACT_LINE_BYTES bytes; a last line of `shift` bytes moves the cut over a whole line, so in one run it lands exactly at a line
+  // start. The note's size is read from the file (its first line), so the test finds the cut the same way the hub does.
+  for (let shift = 0; shift < EXACT_LINE_BYTES; shift++) {
+    test(`over the file limit, a line the cut lands exactly at the start of is kept (last line of ${shift} bytes)`, async () => {
+      const t = setup({ fileLimit: SMALL_FILE_LIMIT });
+      const { runId } = await started(t);
+      const lines = Array.from({ length: STEP_LINES }, (_, i) => `L${String(i).padStart(EXACT_INDEX_DIGITS, "0")}xxxxx`);
+      const log = `${lines.join("\n")}\n${"z".repeat(shift)}\n`;
+      t.fake.write(runId, log);
+      t.fake.finish(runId, { kind: "exit", code: 0 });
+      const file = await t.until(() => t.files[0], "the log file");
+      const noteBytes = Buffer.byteLength(file.text.slice(0, file.text.indexOf("\n") + 1));
+      const cut = Buffer.byteLength(log) - (SMALL_FILE_LIMIT - noteBytes);
+      const body = file.text.slice(file.text.indexOf("\n") + 1);
+      // The first line start at or after the cut; a line start is the log's start or the byte after a "\n".
+      const lineStart = cut === 0 || log[cut - 1] === "\n" ? cut : log.indexOf("\n", cut) + 1;
+      expect(body).toBe(log.slice(lineStart));
+    });
+  }
+
+  for (const prefix of ["", "x"]) {
+    test(`over the file limit, one huge line keeps its tail from a whole character (cut shifted by ${prefix.length})`, async () => {
+      const t = setup({ fileLimit: SMALL_FILE_LIMIT });
+      const { runId } = await started(t);
+      t.fake.write(runId, `${prefix}${YA.repeat(YA_LINE_COUNT * YA_LINES)}`);
+      t.fake.finish(runId, { kind: "exit", code: 0 });
+      const file = await t.until(() => t.files[0], "the log file");
+      expect(file.text).toStartWith("[log trimmed");
+      expect(Buffer.byteLength(file.text)).toBeLessThanOrEqual(SMALL_FILE_LIMIT);
+      expect(file.text).not.toContain("�");
+      expect(file.text.slice(file.text.indexOf("\n") + 1)).toMatch(new RegExp(`^${YA}{${YA_MIN_KEPT},}\\n?$`));
     });
   }
 
