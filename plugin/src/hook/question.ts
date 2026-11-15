@@ -5,7 +5,7 @@
 // (deny); otherwise, or on any error, prints nothing and the terminal shows
 // its own dialog.
 import { z } from "zod";
-import { isAlive } from "../hub/exec-runner.ts";
+import { isAlive } from "../shared/process-alive.ts";
 import { hubPort } from "../shared/config.ts";
 import { questionDecision } from "../shared/protocol-schema.ts";
 import { PARENT_CHECK_MS, QUESTION_DEADLINE_MS } from "./question-limits.ts";

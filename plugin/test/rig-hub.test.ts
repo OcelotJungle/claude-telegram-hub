@@ -2,11 +2,12 @@ import type { HubOptions } from "../src/hub/hub.ts";
 import type { RigOutput } from "../src/hub/rig.ts";
 
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { Hub } from "../src/hub/hub.ts";
-import { runnerSpecSchema } from "../src/hub/exec-runner.ts";
-import { EXEC_MAX_AGE_MS, HEARTBEAT_STALE_MS } from "../src/hub/exec.ts";
+import { saveRuns } from "../src/hub/exec-runs.ts";
+import { EXEC_CARD_MS, EXEC_CHECK_MS, EXEC_MAX_AGE_MS } from "../src/hub/exec.ts";
+import { FakeExec } from "./fake-exec.ts";
 import { buttonPress, topicMsg } from "./fake-telegram.ts";
 import { memLogger, must, offlineApi, tempDir } from "./helpers.ts";
 import { manualClock, turn } from "./manual-clock.ts";
@@ -18,7 +19,6 @@ const GROUP = "-1001";
 const USER = "1234";
 const STRANGER = "5678";
 const TOPIC = 12;
-const PID = 424242;
 const disposers: (() => void)[] = [];
 afterEach(() => { for (const dispose of disposers.splice(0)) dispose(); });
 
@@ -40,7 +40,9 @@ function fixture(extra: Partial<HubOptions> = {}) {
   const api = offlineApi();
   const texts: { text: string; topic?: number; silent?: boolean }[] = [];
   const order: string[] = [];
-  const spawned: string[] = [];
+  const exec = new FakeExec();
+  const startRig = exec.startRig.bind(exec);
+  exec.startRig = async args => { order.push("spawn"); return startRig(args); };
   const answers: string[] = [];
   const menus: string[][] = [];
   const removed: number[] = [];
@@ -56,17 +58,10 @@ function fixture(extra: Partial<HubOptions> = {}) {
   api.removeKeyboard = async (_chat, id) => { removed.push(id); return true; };
   const options: HubOptions = {
     port: 0, api, idleMs: 0, sessionsFile: join(dir, "sessions.json"), outboxFile: join(dir, "outbox.json"),
-    execDir: join(dir, "exec"), execsFile: join(dir, "execs.json"), filesDir: join(dir, "files"), inboxDir: dir,
+    execRunsFile: join(dir, "exec-runs.json"), execClient: exec, filesDir: join(dir, "files"), inboxDir: dir,
     repository: dir, findRig: () => "/fake/rig", runRig: async () => output,
-    execEnv: () => ({}),
     config: () => ({ groupId: GROUP, allowFrom: [USER], turnEndChime: "" }),
-    spawnRunner: file => {
-      order.push("spawn"); spawned.push(file);
-      const spec = runnerSpecSchema.parse(JSON.parse(readFileSync(file, "utf8")));
-      writeFileSync(spec.log, "Waiting for an invented resource\n");
-      return PID;
-    },
-    timers: clock, isAlive: () => true,
+    timers: clock,
     log: memLogger(), onExit() {}, ...extra,
   };
   const hub = track(new Hub(options));
@@ -75,7 +70,7 @@ function fixture(extra: Partial<HubOptions> = {}) {
   // `intake` is what the poll loop waits for; `update` also waits for the machine command it started.
   const intake = (text: string, from = USER, topic?: number) => hub["handleUpdate"](api, topicMsg({ chatId: GROUP, fromId: from, threadId: topic, text }));
   const update = async (text: string, from = USER, topic?: number) => { await intake(text, from, topic); await settled(hub); };
-  return { hub, options, api, dir, clock, texts, order, spawned, answers, menus, removed, update, intake, track,
+  return { hub, options, api, dir, clock, texts, order, exec, answers, menus, removed, update, intake, track,
     offline: (next: boolean) => { offline = next; }, output: (next: RigOutput) => { output = next; } };
 }
 
@@ -89,7 +84,7 @@ test("General routes only allowed machine commands and preserves a session topic
   await f.update("/rig feature", USER, 1);
   expect(f.texts.at(-1)?.topic).toBeUndefined();
   await f.update("/rig update", USER, TOPIC);
-  expect(f.spawned).toHaveLength(1);
+  expect(f.exec.rigStarts).toEqual([["update"]]);
   await f.hub["machineOutbox"].flush(f.api);
   expect(f.texts.some(message => message.topic === TOPIC)).toBe(true);
 });
@@ -99,7 +94,7 @@ test("/feature is no machine command: General ignores it and nothing runs", asyn
   await f.update("/feature", USER);
   await f.update("/feature telegram disable", USER);
   expect(f.texts).toEqual([]);
-  expect(f.spawned).toEqual([]);
+  expect(f.exec.rigStarts).toEqual([]);
   expect(f.hub["machineQueries"]).toBe(0);
   expect(f.hub["disableConfirmations"].size).toBe(0);
 });
@@ -109,9 +104,8 @@ test("/rig feature lists the features, and /rig feature <name> enable runs rig w
   await f.update("/rig feature", USER);
   expect(f.texts.at(-1)).toEqual({ text: en.featuresEmpty, topic: undefined, silent: true });
   await f.update("/rig feature cmd enable", USER);
-  const spec = runnerSpecSchema.parse(JSON.parse(readFileSync(must(f.spawned[0]), "utf8")));
-  // On Windows the rig call is one `cmd /c` string, elsewhere separate arguments: the joined line holds both.
-  expect(spec.argv.join(" ")).toContain("feature cmd enable");
+  // rig exec takes the arguments as they are, whatever the platform.
+  expect(f.exec.rigStarts).toEqual([["feature", "cmd", "enable"]]);
 });
 
 test("bad /rig and /rig feature arguments answer the usage of their own form", async () => {
@@ -184,56 +178,52 @@ test("feature refreshes are single-flight: one in flight, one more behind it", a
 
 test("rig wait output streams normally, has no timeout, and code 1 is visible after hub restart", async () => {
   const f = fixture();
+  must(f.hub["execs"]).start();
   await f.update("/rig update");
   const manager = must(f.hub["execs"]);
-  manager["check"]();
+  const id = f.exec.last();
+  f.exec.write(id, "Waiting for an invented resource\n");
+  await f.clock.advance(EXEC_CARD_MS);
   await f.hub["machineOutbox"].flush(f.api);
   expect(f.texts.some(message => message.text.includes("Waiting for an invented resource"))).toBe(true);
   expect(manager.running()).toBe(1);
-  // Waiting for rig is longer than the shell's stale-message and heartbeat settings.
-  await f.clock.advance(EXEC_MAX_AGE_MS + HEARTBEAT_STALE_MS);
-  manager["check"]();
+  // Waiting for rig is longer than the stale-message age: a rig run has no timeout.
+  await f.clock.advance(EXEC_MAX_AGE_MS * 2);
   expect(manager.running()).toBe(1);
-  const spec = runnerSpecSchema.parse(JSON.parse(readFileSync(must(f.spawned[0]), "utf8")));
-  writeFileSync(spec.exit, JSON.stringify({ code: 1, endedAt: f.clock.now() }));
   f.hub["running"] = false;
+  manager.stop();
+  f.exec.finish(id, { kind: "exit", code: 1 });
   const resumed = f.track(new Hub(f.options));
   resumed["running"] = true;
-  must(resumed["execs"]).restore();
+  must(resumed["execs"]).start();
+  await f.clock.advance(0);
   await resumed["machineOutbox"].flush(f.api);
   expect(f.texts.some(message => message.text.includes(en.execOutcomeCode({ code: 1 })))).toBe(true);
   expect(must(resumed["execs"]).running()).toBe(0);
-  expect(f.spawned).toHaveLength(1);
+  expect(f.exec.rigStarts).toHaveLength(1);
   resumed["running"] = false;
 });
 
 test("a rig busy line reaches the topic while the command runs and is not a failure", async () => {
   const busy = "Another rig command is running, waiting for it to end.";
-  const f = fixture({
-    spawnRunner: file => {
-      const spec = runnerSpecSchema.parse(JSON.parse(readFileSync(file, "utf8")));
-      writeFileSync(spec.log, "");
-      f.spawned.push(file);
-      return PID;
-    },
-  });
+  const f = fixture();
+  must(f.hub["execs"]).start();
   await f.update("/rig update");
   const manager = must(f.hub["execs"]);
-  const spec = runnerSpecSchema.parse(JSON.parse(readFileSync(must(f.spawned[0]), "utf8")));
-  // The runner prints the line some time after the start; the next check shows it.
+  const id = f.exec.last();
+  // rig prints the line some time after the start; the next card edit shows it.
   expect(f.texts.some(message => message.text.includes(busy))).toBe(false);
-  writeFileSync(spec.log, `${busy}\n`);
-  manager["check"]();
+  f.exec.write(id, `${busy}\n`);
+  await f.clock.advance(EXEC_CARD_MS);
   await f.hub["machineOutbox"].flush(f.api);
   const shown = f.texts.filter(message => message.text.includes(busy));
   expect(shown.length).toBeGreaterThan(0);
   // A running card is silent (edits carry no flag): the line is no failure alert.
   expect(f.texts.every(message => message.silent !== false)).toBe(true);
   expect(manager.running()).toBe(1);
-  writeFileSync(spec.log, `${busy}\nupdated\n`);
-  writeFileSync(spec.exit, JSON.stringify({ code: 0, endedAt: f.clock.now() }));
-  await f.clock.advance(1);
-  manager["check"]();
+  f.exec.write(id, "updated\n");
+  f.exec.finish(id, { kind: "exit", code: 0 });
+  await f.clock.advance(EXEC_CHECK_MS);
   await f.hub["machineOutbox"].flush(f.api);
   expect(manager.running()).toBe(0);
   expect(f.texts.some(message => message.text.startsWith(en.execOutcomeOk))).toBe(true);
@@ -246,10 +236,10 @@ test("telegram disable rejects a stranger and starts only after recovery instruc
   const key = must([...f.hub["disableConfirmations"].keys()][0]);
   const press = (fromId: string) => f.hub["handleUpdate"](f.api, buttonPress({ chatId: GROUP, fromId, messageId: 1, data: `rig-disable:${key}` }));
   await press(STRANGER);
-  expect(f.spawned).toEqual([]);
+  expect(f.exec.rigStarts).toEqual([]);
   f.offline(true);
   await press(USER);
-  expect(f.spawned).toEqual([]);
+  expect(f.exec.rigStarts).toEqual([]);
   // Crash window: the accepted intent is durable before its notice was queued.
   f.hub["machineOutbox"]["data"].items = [];
   f.hub["machineOutbox"]["save"]();
@@ -261,7 +251,7 @@ test("telegram disable rejects a stranger and starts only after recovery instruc
   // The recovery notice goes out only after the restarted hub passed getMe.
   resumed["botReady"] = true;
   await resumed["rigTick"]();
-  expect(f.spawned).toHaveLength(1);
+  expect(f.exec.rigStarts).toHaveLength(1);
   expect(f.order.findIndex(text => text.includes("rig feature telegram enable"))).toBeLessThan(f.order.indexOf("spawn"));
   resumed["running"] = false;
   resumed["clearTimer"](resumed["rigTimer"]);
@@ -301,7 +291,7 @@ test("each specified work category blocks update exit, while a pending shell doe
   const blockers: { name: string; add(): void; remove(): void }[] = [
     { name: "permissions", add: () => { hub["permissions"].set("p", { sessionId: "session", requestId: "p", text: "question", entities: [] }); }, remove: () => hub["permissions"].clear() },
     { name: "questions", add: () => { hub["polls"].set("q", pollOf()); }, remove: () => hub["polls"].clear() },
-    { name: "running shell or rig", add: () => { must(hub["execs"])["recs"].push({ id: "pending", shell: "bash", sessionId: "session", messageId: 0, text: "work", cwd: f.dir, state: "running", reported: false }); }, remove: () => { must(hub["execs"])["recs"] = []; } },
+    { name: "running shell or rig", add: () => { must(hub["execs"])["recs"].push({ id: "pending", shell: "bash", sessionId: "session", messageId: 0, text: "work", cwd: f.dir, state: "running", offset: 0, reported: false }); }, remove: () => { must(hub["execs"])["recs"] = []; } },
     { name: "launch", add: () => { hub["launches"].set("session", { account: "", held: [], timer }); }, remove: () => hub["launches"].clear() },
     { name: "held input", add: () => { hub["retained"].set("session", [held]); }, remove: () => hub["retained"].clear() },
     { name: "replay", add: () => { hub["replays"].set("session", { held: [held], inFlight: [], after: [] }); }, remove: () => hub["replays"].clear() },
@@ -328,7 +318,7 @@ test("each specified work category blocks update exit, while a pending shell doe
     blocker.remove();
     expect(hub["rigIdle"](), blocker.name).toBe(true);
   }
-  must(hub["execs"])["recs"].push({ id: "pending", shell: "bash", sessionId: "session", messageId: 0, text: "not started", cwd: f.dir, state: "pending", reported: false });
+  must(hub["execs"])["recs"].push({ id: "pending", shell: "bash", sessionId: "session", messageId: 0, text: "not started", cwd: f.dir, state: "pending", offset: 0, reported: false });
   expect(hub["rigIdle"]()).toBe(true);
 });
 
@@ -500,29 +490,32 @@ test("a failed menu registration is retried until Telegram accepts the current s
   expect(f.menus[0]).toContain("rig");
 });
 
-test("a rig command that ended while the hub was down delivers its whole log after the restart, once", async () => {
+test("a rig command that ended while the hub was down shows its end after the restart, once", async () => {
   const f = fixture();
+  must(f.hub["execs"]).start();
   await f.update("/rig update");
-  const spec = runnerSpecSchema.parse(JSON.parse(readFileSync(must(f.spawned[0]), "utf8")));
-  const full = Array.from({ length: 40 }, (_, index) => `invented line ${index}`).join("\n") + "\n";
-  writeFileSync(spec.log, full);
-  // The old hub saved the ended record and died before the log reached the outbox.
-  const records: unknown = JSON.parse(readFileSync(must(f.options.execsFile), "utf8"));
-  if (!Array.isArray(records)) throw new Error("execs.json is not a list");
-  writeFileSync(must(f.options.execsFile), JSON.stringify(records.map(record => ({ ...record, state: "ended", end: { kind: "exit", code: 0, at: f.clock.now() } }))));
+  const id = f.exec.last();
   f.hub["running"] = false;
-  const sent: string[] = [];
-  f.api.sendFiles = async (_chat, _topic, files) => { for (const file of files) sent.push(readFileSync(file.path, "utf8")); return undefined; };
+  must(f.hub["execs"]).stop();
+  // rig goes on without the hub: the log grows and the run ends.
+  const full = Array.from({ length: 40 }, (_, index) => `invented line ${index}`).join("\n") + "\n";
+  f.exec.write(id, full);
+  f.exec.finish(id, { kind: "exit", code: 0 });
   const resumed = f.track(new Hub(f.options));
   resumed["running"] = true;
-  must(resumed["execs"]).restore();
+  must(resumed["execs"]).start();
+  await f.clock.advance(0);
   await resumed["machineOutbox"].flush(f.api);
-  expect(sent).toEqual([full]);
-  // A later restore of the same record neither copies nor sends the log again.
-  must(resumed["execs"]).restore();
+  const ended = () => f.texts.filter(message => message.text.startsWith(en.execOutcomeOk));
+  expect(ended()).toHaveLength(1);
+  expect(must(ended()[0]).text).toContain("invented line 39");
+  // The run is ended in the record: later checks neither poll it nor show it again.
+  const polled = f.exec.statuses.length;
+  await f.clock.advance(EXEC_CARD_MS * 2);
   await resumed["machineOutbox"].flush(f.api);
-  expect(sent).toHaveLength(1);
-  expect(existsSync(join(f.dir, "files", "rig", `${must(records[0]).id}.log`))).toBe(false);
+  expect(ended()).toHaveLength(1);
+  expect(f.exec.statuses).toHaveLength(polled);
+  expect(f.exec.rigStarts).toHaveLength(1);
   resumed["running"] = false;
 });
 
@@ -534,7 +527,7 @@ test("a stale rig command is not run: its card waits for a button press", async 
   await f.clock.advance(EXEC_MAX_AGE_MS + 1);
   await f.hub["handleUpdate"](f.api, topicMsg({ chatId: GROUP, fromId: USER, text: "/rig update", extra: OLD_MESSAGE }));
   await settled(f.hub);
-  expect(f.spawned).toEqual([]);
+  expect(f.exec.rigStarts).toEqual([]);
   expect(must(f.hub["execs"])["recs"].map(rec => rec.state)).toEqual(["pending"]);
   await f.hub["machineOutbox"].flush(f.api);
   expect(f.texts.some(message => message.text.includes("rig update"))).toBe(true);
@@ -548,7 +541,7 @@ test("a stale disable confirmation button does not start rig", async () => {
   await f.clock.advance(EXEC_MAX_AGE_MS + 1);
   await f.hub["handleUpdate"](f.api, buttonPress({ chatId: GROUP, fromId: USER, messageId: 1, data: `rig-disable:${key}` }));
   expect(f.answers.at(-1)).toContain(en.rigConfirmOutdated);
-  expect(f.spawned).toEqual([]);
+  expect(f.exec.rigStarts).toEqual([]);
   expect(f.hub["disableConfirmations"].size).toBe(0);
   expect(f.hub["machineOutbox"].confirmations()).toEqual([]);
   expect(f.texts.some(message => message.text.includes("rig feature telegram enable"))).toBe(false);
@@ -559,7 +552,7 @@ test("a fresh disable confirmation press starts rig", async () => {
   await f.update("/rig feature telegram disable");
   const key = must([...f.hub["disableConfirmations"].keys()][0]);
   await f.hub["handleUpdate"](f.api, buttonPress({ chatId: GROUP, fromId: USER, messageId: 1, data: `rig-disable:${key}` }));
-  expect(f.spawned).toHaveLength(1);
+  expect(f.exec.rigStarts).toEqual([["feature", "telegram", "disable"]]);
 });
 
 test("the run button of a disabled /pwsh asks the feature state again at the press", async () => {
@@ -577,20 +570,20 @@ test("the run button of a disabled /pwsh asks the feature state again at the pre
   const press = () => f.hub["handleUpdate"](f.api, buttonPress({ chatId: GROUP, fromId: USER, messageId: 1, data: `x:${pending.id}:run` }));
   await press();
   expect(f.answers.at(-1)).toContain("/rig feature pwsh enable");
-  expect(f.spawned).toEqual([]);
+  expect(f.exec.starts).toEqual([]);
   expect(pending.state).toBe("pending");
   f.output(features(true));
   await f.hub["rig"].refresh();
   await press();
-  expect(f.spawned).toHaveLength(1);
+  expect(f.exec.starts).toHaveLength(1);
 });
 
 test("pruning old exec records cannot repeat an already handled machine command", async () => {
   const f = fixture();
   await f.update("/rig update");
   const original = must(must(f.hub["execs"])["recs"][0]);
-  writeFileSync(must(f.options.execsFile), "[]");
+  saveRuns(must(f.options.execRunsFile), []);
   const resumed = f.track(new Hub(f.options));
   resumed["launchRig"](["update"], { message_id: original.messageId }, { chatId: GROUP });
-  expect(f.spawned).toHaveLength(1);
+  expect(f.exec.rigStarts).toHaveLength(1);
 });

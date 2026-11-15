@@ -31,7 +31,7 @@ If the service is already installed, reinstall it with the same script. Otherwis
 Session actions require agent-rig. Rig chooses the terminal and builds the Claude launch command; on Linux it can use tmux when no graphical terminal is available. There is no `launch` section to configure in the hub. An existing `launch` key is ignored with an info log line.
 Claude may ask you to confirm the channel in the terminal. You can remove that question with managed settings (see "Optional: remove the channel question at start" below).
 cswap accounts are optional. Without cswap, use `/run` without a number; rig handles the launch.
-`/bash` uses `bash` from PATH as a login shell. `/pwsh` and `/cmd` are not available on Linux.
+`/bash` runs through `rig exec` (rig 0.7.1 or newer), which uses `bash` from PATH as a login shell. `/pwsh` and `/cmd` are not available on Linux.
 The end-of-turn sound in the terminal is off.
 
 Container files and the remaining checks: [docker/ubuntu-24.04](docker/ubuntu-24.04/README.md).
@@ -172,15 +172,16 @@ This rule does not change the sound of the agent's text or of the end of its tur
 
 All six session actions run asynchronously. While rig reports `session-waiting`, the topic shows that it is waiting for the turn to end. Rig's failure message is shown verbatim; a missing window module also tells you to restart the session. There is no fallback to a hub module or hub process-kill code.
 - `/pwsh <command>` — run a command in the session folder in PowerShell, `/cmd <command>` — in cmd (one
-  line), `/bash <command>` — in Git Bash. This does not need the session window. The environment is the same as in a new
+  line), `/bash <command>` — in Git Bash. This does not need the session window. The hub only passes the command to
+  `rig exec` (rig 0.7.1 or newer), which runs it, so the old runner and the `exec.bash` setting are gone. The environment is the same as in a new
   terminal window: variables from the registry, profiles are loaded. A chain stops at the first
   failed command, and its code becomes the result. This means the first non-zero exit code, including
   inside loops and blocks. If a non-zero code is expected (robocopy, `git diff --quiet`), wrap the
   command: `cmd /c "… & exit /b 0"`. One card appears in the topic with the time,
   the command, the last 10 lines of output and the button "⏹ Stop". The hub edits it once a minute. When the
   command finishes, the card shows the result (`✅ code 0`, `❌ code N`, `⏹ stopped`), and a log
-  longer than the card arrives as a file. The agent wakes up by itself with the result, the tail of the output and the path to the full
-  log (`exec\<id>.log` in the hub folder). If there is no window, the hub calls `rig session run` with the session's account and holds the result until the window connects. A hub restart does not interrupt the command.
+  longer than the card arrives as a file (the end of it: the hub keeps about 1 MiB). The agent wakes up by itself with the result, the tail of the output and the
+  `rig exec status <run id> --from 0` command that reads the full log. If there is no window, the hub calls `rig session run` with the session's account and holds the result until the window connects. A hub restart does not interrupt the command.
   A command that arrived more than 2 minutes ago while the hub was off is not started by the hub:
   the card has a "▶ Run" button. A command that waits for input hangs until it is stopped.
   There is no timeout.
@@ -245,12 +246,7 @@ message, so you do not need to restart anything.
 **Being in `allowFrom` means having a shell on this machine:** `/pwsh`, `/cmd` and `/bash` run
 any command, bypassing the Claude Code permission mode.
 
-The hub looks for Git Bash for `/bash` in `C:\Program Files\Git\bin\bash.exe`. If it is installed somewhere else,
-add the key `exec.bash` to `config.json`:
-
-```json
-"exec": { "bash": "D:\\Tools\\Git\\bin\\bash.exe" }
-```
+`rig exec` finds Git Bash for `/bash` itself; see the rig documentation if it is installed in an unusual place.
 
 The terminal sound at the end of a turn is set by the key `turnEndChime`: a shell command in which `{kind}`
 is replaced with `ask` or `done`. By default, on Windows the system Windows sound plays. A set

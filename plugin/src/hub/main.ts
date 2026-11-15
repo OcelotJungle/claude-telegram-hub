@@ -23,8 +23,7 @@ const hub = new Hub({
   spoolDir: p.spoolDir,
   filesDir: p.filesDir,
   inboxDir: p.inboxDir,
-  execDir: p.execDir,
-  execsFile: p.execsFile,
+  execRunsFile: p.execRunsFile,
   rigDir: join(homedir(), ".agent-rig"),
   repository: join(import.meta.dir, "..", "..", ".."),
   // Every cswap profile links its projects/ here.

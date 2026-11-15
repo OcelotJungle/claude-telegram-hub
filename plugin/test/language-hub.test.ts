@@ -3,15 +3,16 @@ import type { RigOutput } from "../src/hub/rig.ts";
 import type { Language } from "../src/shared/i18n/index.ts";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { runnerSpecSchema } from "../src/hub/exec-runner.ts";
+import { EXEC_CHECK_MS } from "../src/hub/exec.ts";
 import { Hub } from "../src/hub/hub.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { en } from "../src/shared/i18n/en.ts";
 import { ru } from "../src/shared/i18n/ru.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { platformFor } from "../src/shared/platform.ts";
+import { FakeExec } from "./fake-exec.ts";
 import { FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { memLogger, must, NO_PACE, offlineApi, tempDir, waitFor, wsClient } from "./helpers.ts";
 import { manualClock } from "./manual-clock.ts";
@@ -22,7 +23,6 @@ const ME = "123456789";
 const STRANGER = "5678";
 const SID = "session-a";
 const FEATURES_JSON = JSON.stringify({ features: [] });
-const PID = 424242;
 
 // What a fake rig answers to a query: the language file's content, or a failure.
 type FakeRig = { language: () => RigOutput; calls: string[] };
@@ -77,7 +77,7 @@ async function startHub(rig: FakeRig & { run(argv: string[]): RigOutput }, optio
   hub = new Hub({
     platform: platformFor("linux"), accountsAvailable: () => true, port: 0,
     sessionsFile: join(dir, "sessions.json"), outboxFile: join(dir, "outbox.json"), spoolDir: join(dir, "spool"), spoolScanMs: 50,
-    filesDir: join(dir, "outbox-files"), inboxDir: join(dir, "inbox"), execDir: join(dir, "exec"), execsFile: join(dir, "execs.json"),
+    filesDir: join(dir, "outbox-files"), inboxDir: join(dir, "inbox"), execRunsFile: join(dir, "exec-runs.json"), execClient: new FakeExec(),
     api: new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, sendAttemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500, groupPace: NO_PACE }),
     config: () => ({ groupId: GROUP, allowFrom: [ME], turnEndChime: "" }),
     idleMs: 60_000, pollTimeoutSec: 1, pollRetryBaseMs: 10, sendRetryBaseMs: 10, sendRetryMaxMs: 50,
@@ -207,7 +207,7 @@ function fixture(extra: { runRig?: HubOptions["runRig"]; setMyCommands?: Telegra
   const clock = manualClock();
   const api = offlineApi();
   const texts: string[] = [];
-  const spawned: string[] = [];
+  const exec = new FakeExec();
   api.sendMessage = async (_chat, _topic, text) => { texts.push(text); return { message_id: texts.length }; };
   api.editMessageText = async (_chat, _id, text) => { texts.push(text); };
   api.setMyCommands = extra.setMyCommands ?? (async () => true);
@@ -215,16 +215,10 @@ function fixture(extra: { runRig?: HubOptions["runRig"]; setMyCommands?: Telegra
   api.removeKeyboard = async () => true;
   const options: HubOptions = {
     port: 0, api, idleMs: 0, sessionsFile: join(root, "sessions.json"), outboxFile: join(root, "outbox.json"),
-    execDir: join(root, "exec"), execsFile: join(root, "execs.json"), filesDir: join(root, "files"), inboxDir: root,
+    execRunsFile: join(root, "exec-runs.json"), execClient: exec, filesDir: join(root, "files"), inboxDir: root,
     repository: root, findRig: () => "/fake/rig", runRig: extra.runRig ?? (async () => ({ code: 0, stdout: FEATURES_JSON, stderr: "" })),
-    execEnv: () => ({}), config: () => ({ groupId: GROUP, allowFrom: [USER], turnEndChime: "" }),
-    spawnRunner: file => {
-      spawned.push(file);
-      const spec = runnerSpecSchema.parse(JSON.parse(readFileSync(file, "utf8")));
-      writeFileSync(spec.log, "Language is now invented\n");
-      return PID;
-    },
-    timers: clock, isAlive: () => true,
+    config: () => ({ groupId: GROUP, allowFrom: [USER], turnEndChime: "" }),
+    timers: clock,
     log: memLogger(), onExit() {},
   };
   const machine = new Hub(options);
@@ -240,7 +234,7 @@ function fixture(extra: { runRig?: HubOptions["runRig"]; setMyCommands?: Telegra
     clock.dispose();
     rmSync(root, { recursive: true, force: true });
   };
-  return { machine, api, texts, spawned, update, stop };
+  return { machine, api, texts, exec, clock, update, stop };
 }
 
 function languageDeferred() {
@@ -337,17 +331,17 @@ describe("rig errors in Telegram follow the language", () => {
 
 // The command path, with the hub's own clock and an offline Telegram, like the rig tests.
 describe("/rig language", () => {
-  async function spec(file: string | undefined) {
-    return runnerSpecSchema.parse(JSON.parse(readFileSync(must(file), "utf8")));
-  }
-
   test("an allowed user runs rig with the language and sees its output", async () => {
     const f = fixture();
     try {
+      // The hub is not started here: the run manager is, so its checks follow the test clock.
+      must(f.machine["execs"]).start();
       await f.update("/rig language ru", USER);
-      expect(f.spawned).toHaveLength(1);
-      expect((await spec(f.spawned[0])).argv.join(" ")).toContain("language ru");
-      must(f.machine["execs"])["check"]();
+      expect(f.exec.rigStarts).toHaveLength(1);
+      expect(must(f.exec.rigStarts[0]).join(" ")).toContain("language ru");
+      f.exec.write(f.exec.last(), "Language is now invented\n");
+      f.exec.finish(f.exec.last(), { kind: "exit", code: 0 });
+      await f.clock.advance(EXEC_CHECK_MS);
       await f.machine["machineOutbox"].flush(f.api);
       expect(f.texts.some(text => text.includes("Language is now invented"))).toBe(true);
     } finally { f.stop(); }
@@ -357,8 +351,8 @@ describe("/rig language", () => {
     const f = fixture();
     try {
       await f.update("/rig language", USER);
-      expect(f.spawned).toHaveLength(1);
-      const command = (await spec(f.spawned[0])).argv.join(" ");
+      expect(f.exec.rigStarts).toHaveLength(1);
+      const command = must(f.exec.rigStarts[0]).join(" ");
       expect(command).toContain("language");
       expect(command).not.toContain("language ru");
       expect(command).not.toContain("language en");
@@ -369,7 +363,7 @@ describe("/rig language", () => {
     const f = fixture();
     try {
       await f.update("/rig language de", USER);
-      expect(f.spawned).toEqual([]);
+      expect(f.exec.rigStarts).toEqual([]);
       await f.machine["machineOutbox"].flush(f.api);
       expect(f.texts.some(text => text.includes(en.rigUsage))).toBe(true);
     } finally { f.stop(); }
@@ -380,7 +374,7 @@ describe("/rig language", () => {
     try {
       await f.update("/rig language ru", OTHER);
       await f.update("/rig language ru", STRANGER);
-      expect(f.spawned).toEqual([]);
+      expect(f.exec.rigStarts).toEqual([]);
       expect(f.texts).toEqual([]);
     } finally { f.stop(); }
   });

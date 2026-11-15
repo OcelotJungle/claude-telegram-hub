@@ -1,3 +1,4 @@
+import type { ExecClient } from "../src/hub/rig-exec.ts";
 import type { RigInvocation, RigOutput, RigProgress } from "../src/hub/rig.ts";
 import type { VideoTools } from "../src/hub/video.ts";
 import type { Config } from "../src/shared/config.ts";
@@ -14,12 +15,13 @@ import { RIG_SESSION_LIMIT_MS } from "../src/hub/rig-session.ts";
 import { en } from "../src/shared/i18n/en.ts";
 import { ru } from "../src/shared/i18n/ru.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
-import { saveExecs } from "../src/hub/exec-store.ts";
+import { saveRuns } from "../src/hub/exec-runs.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { toTelegram } from "../src/shared/markdown.ts";
 import { notifies } from "../src/shared/notification.ts";
+import { FakeExec } from "./fake-exec.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { hasFfmpeg, makeVideo, memLogger, must, NO_PACE, settled, tempDir, waitFor, wsClient } from "./helpers.ts";
 import { manualClock } from "./manual-clock.ts";
@@ -35,12 +37,14 @@ const DEFAULT_DIR = "C:\\Users\\me\\.claude";
 // time a test hub exits after, a pause for what must not come, the age of a
 // command from while the hub was off, a test file limit.
 const RUN_MS = 15_000;
+// A file limit that a log of forty lines is over.
+const FILE_LIMIT = 200;
+const LOG_LINES = 40;
 const WAIT_MS = 5000;
 const IDLE_MS = 300;
 const SETTLE_MS = 300;
 const OLD_COMMAND_S = 5 * 60;
 const MS_PER_S = 1000;
-const FILE_LIMIT = 200;
 // How long a test hub waits for windows before it delivers results of runs
 // that ended while it was off.
 const EXEC_GRACE_MS = 300;
@@ -101,10 +105,9 @@ const clients: { close(): void }[] = [];
 type HubExtras = {
   projectsDir?: string;
   defaultAccount?(): Promise<string | undefined>;
-  spawnRunner?(specFile: string): number;
-  execFileLimit?: number;
+  execClient?: ExecClient;
   execGraceMs?: number;
-  isAlive?(pid: number): boolean;
+  execFileLimit?: number;
   timers?: Timers;
   catchUpMs?: number;
   rigDir?: string;
@@ -146,20 +149,18 @@ async function startHub(o: StartOptions = {}): Promise<void> {
     catchUpMs: o.catchUpMs ?? CATCH_UP_MS,
     ...(o.batchMaxMs ? { batchMaxMs: o.batchMaxMs } : {}),
     ...(o.projectsDir ? { projectsDir: o.projectsDir } : {}),
-    ...(o.isAlive ? { isAlive: o.isAlive } : {}),
     ...(o.timers ? { timers: o.timers } : {}),
     ...(o.rigDir ? { rigDir: o.rigDir, hubCommit: () => "invented-commit", repository: dir } : {}),
     ...(o.findRig ? { findRig: o.findRig } : {}),
     ...(o.runRig ? { runRig: o.runRig } : {}),
     defaultConfigDir: DEFAULT_DIR,
     defaultAccount: o.defaultAccount ?? (async () => undefined),
-    execDir: join(dir, "exec"),
-    execsFile: join(dir, "execs.json"),
+    execRunsFile: join(dir, "exec-runs.json"),
+    execClient: o.execClient ?? new FakeExec(),
     execCheckMs: EXEC_CHECK_MS,
     execCardMs: EXEC_CARD_MS,
-    ...(o.spawnRunner ? { spawnRunner: o.spawnRunner } : {}),
-    ...(o.execFileLimit ? { execFileLimit: o.execFileLimit } : {}),
     execGraceMs: o.execGraceMs ?? EXEC_GRACE_MS,
+    ...(o.execFileLimit ? { execFileLimit: o.execFileLimit } : {}),
     log,
     onExit: () => {
       exited = true;
@@ -3138,13 +3139,8 @@ describe("topic commands", () => {
     arr(field(field(call, "reply_markup"), "inline_keyboard"))
       .flatMap(row => arr(row))
       .map(b => String(field(b, "callback_data")));
-  // Commands that really run: cmd on Windows, bash elsewhere (the hub is told
-  // where bash is; its cards still use the Windows platform's shell names).
-  const hostCommand = (cmdText: string, bashText: string) => (PLATFORM.windows ? `/cmd ${cmdText}` : `/bash ${bashText}`);
-  const HOST_CARD = PLATFORM.windows ? "cmd" : platformFor("win32").bashName;
   beforeEach(() => {
     rig = sessionRig();
-    if (!PLATFORM.windows) config = { ...config, exec: { bash: PLATFORM.bash } };
   });
   // The hub on the fake rig, its start-up questions answered.
   const startWithRig = async (extra: StartOptions = {}) => {
@@ -3154,57 +3150,76 @@ describe("topic commands", () => {
 
   // A session with a topic and no window, as the hub finds it on disk.
   const closedSession = () => new SessionStore(join(dir, "sessions.json")).set(SID, { topicId: 100, title: "T", project: "p", enabled: true, cwd: CWD, account: "2" });
+  const stopButton = (calls: Record<string, unknown>[]) => calls.find(c => buttonsOf(c).some(d => d.endsWith(":stop")));
 
-  test("/cmd runs in the session folder, shows a card and wakes the agent", async () => {
-    await startHub();
+  test("/cmd starts a rig run in the session folder, shows a card and wakes the agent", async () => {
+    const x = new FakeExec();
+    await startHub({ execClient: x });
     const a = await enabled(SID);
-    fake.pushUpdate(msg(hostCommand("echo \u043f\u0440\u0438\u0432\u0435\u0442 && cd && exit /b 3", "echo \u043f\u0440\u0438\u0432\u0435\u0442; pwd; exit 3")));
-    const inbound = await a.nextNew("inbound", m => m.meta.source === "exec", RUN_MS);
-    expect(inbound.meta.exit_code).toBe("3");
-    expect(inbound.content).toContain("❌ code 3");
-    expect(inbound.content).toContain("\u043f\u0440\u0438\u0432\u0435\u0442");
-    expect(inbound.content).toContain(CWD);
-    expect(inbound.content).toContain(join(dir, "exec", `${inbound.meta.exec_id}.log`));
-    await waitFor(() => shown().find(t => t.startsWith("❌ code 3") && t.includes("\u043f\u0440\u0438\u0432\u0435\u0442")), WAIT_MS, "final card");
-  }, RUN_MS + WAIT_MS);
+    fake.pushUpdate(msg("/cmd echo café && cd && exit /b 3"));
+    await waitFor(() => x.starts.length === 1, WAIT_MS, "the start");
+    expect(x.starts).toEqual([{ shell: "cmd", cwd: CWD, text: "echo café && cd && exit /b 3" }]);
+    const id = x.last();
+    await waitFor(() => shown().find(t => t.startsWith("▶ cmd")), WAIT_MS, "running card");
+    const inbound = a.nextNew("inbound", m => m.meta.source === "exec", WAIT_MS);
+    x.write(id, `café\n${CWD}\n`);
+    x.finish(id, { kind: "exit", code: 3 });
+    const report = await inbound;
+    expect(report.meta.exit_code).toBe("3");
+    expect(report.content).toContain("❌ code 3");
+    expect(report.content).toContain("café");
+    expect(report.content).toContain(CWD);
+    expect(report.content).toContain(`Full log: rig exec status ${id} --from 0`);
+    await waitFor(() => shown().find(t => t.startsWith("❌ code 3") && t.includes("café")), WAIT_MS, "final card");
+  });
 
-  test("a stop button ends a running command", async () => {
-    await startHub();
+  test("a start rig refuses shows rig's own message", async () => {
+    const x = new FakeExec();
+    x.startError = { kind: "rig", code: "exec-unavailable", message: "no shell of that name here" };
+    await startHub({ execClient: x });
     await enabled(SID);
-    fake.pushUpdate(msg(hostCommand("ping -n 30 127.0.0.1", "sleep 30")));
-    const card = await waitFor(() => fake.callsOf("sendMessage").find(c => buttonsOf(c).some(d => d.startsWith("x:"))), WAIT_MS, "card with a stop button");
+    fake.pushUpdate(msg("/bash ls"));
+    await waitFor(() => shown().find(t => t.includes("no shell of that name here")), WAIT_MS, "rig's message");
+  });
+
+  test("a stop button stops the rig run and ends the card", async () => {
+    const x = new FakeExec();
+    await startHub({ execClient: x });
+    await enabled(SID);
+    fake.pushUpdate(msg("/cmd ping -n 30 127.0.0.1"));
+    const card = await waitFor(() => stopButton(fake.callsOf("sendMessage")), WAIT_MS, "card with a stop button");
     const data = must(buttonsOf(card).find(d => d.endsWith(":stop")), "stop button");
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
     await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Stopping"), WAIT_MS, "answer");
+    expect(x.stops).toEqual([x.last()]);
+    x.finish(x.last(), { kind: "stopped" });
     const end = await waitFor(() => fake.callsOf("editMessageText").find(c => String(c.text).startsWith("⏹ stopped")), WAIT_MS, "stopped card");
     expect(field(end, "reply_markup")).toBeUndefined();
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
     await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "The command has already ended"), WAIT_MS, "second answer");
-  }, RUN_MS);
+  });
+
+  test("a button of a command the hub does not know answers not found", async () => {
+    await startHub();
+    await enabled(SID);
+    fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: 1, data: "x:abcd1234:stop" }));
+    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Run not found"), WAIT_MS, "answer");
+  });
 
   test("an old /pwsh waits for the run button", async () => {
-    let spawned = 0;
-    await startHub({
-      spawnRunner: () => {
-        spawned++;
-        return 1;
-      },
-    });
+    const x = new FakeExec();
+    await startHub({ execClient: x });
     await enabled(SID);
     fake.pushUpdate(msg("/pwsh npm run migrate", { date: Math.floor(Date.now() / MS_PER_S) - OLD_COMMAND_S }));
     const card = await waitFor(() => fake.callsOf("sendMessage").find(c => String(c.text).startsWith("⏸ The command arrived 5 min ago while the hub was off")), WAIT_MS, "pending card");
     expect(buttonsOf(card).some(d => d.endsWith(":run"))).toBe(true);
-    expect(spawned).toBe(0);
+    await settle();
+    expect(x.starts).toEqual([]);
   });
 
   test("the run button starts an old command", async () => {
-    const specs: string[] = [];
-    await startHub({
-      spawnRunner: file => {
-        specs.push(file);
-        return process.pid;
-      },
-    });
+    const x = new FakeExec();
+    await startHub({ execClient: x });
     await enabled(SID);
     fake.pushUpdate(msg("/pwsh npm run migrate", { date: Math.floor(Date.now() / MS_PER_S) - OLD_COMMAND_S }));
     const card = await waitFor(() => fake.callsOf("sendMessage").find(c => buttonsOf(c).some(d => d.endsWith(":run"))), WAIT_MS, "pending card");
@@ -3212,10 +3227,10 @@ describe("topic commands", () => {
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
     await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Starting"), WAIT_MS, "answer");
     await settle();
-    expect(specs).toHaveLength(1);
+    expect(x.starts).toEqual([{ shell: "pwsh", cwd: CWD, text: "npm run migrate" }]);
     const running = await waitFor(() => fake.callsOf("editMessageText").find(c => String(c.text).startsWith("▶ PowerShell")), WAIT_MS, "running card");
     expect(buttonsOf(running).some(d => d.endsWith(":stop"))).toBe(true);
-  }, 3 * WAIT_MS);
+  });
 
   test("multi-line /cmd is refused", async () => {
     await startHub();
@@ -3231,29 +3246,23 @@ describe("topic commands", () => {
     await waitFor(() => texts().includes("Write the command: /pwsh npm run migrate"), WAIT_MS, "hint");
   });
 
-  test("/bash without Git Bash says where it looked", async () => {
-    config = { ...config, exec: { bash: join(dir, "no-bash.exe") } };
-    await startHub();
-    await enabled(SID);
-    fake.pushUpdate(msg("/bash ls"));
-    await waitFor(() => texts().includes(`Git Bash not found: ${join(dir, "no-bash.exe")}. Set exec.bash in config.json`), WAIT_MS, "notice");
-  });
-
-  // A run that ended while no hub watched: running on disk, its exit file there.
-  const endedWhileOff = () => {
-    const id = "abcd1234";
-    const execDir = join(dir, "exec");
-    mkdirSync(execDir, { recursive: true });
-    writeFileSync(join(execDir, `${id}.log`), "hi\n");
-    writeFileSync(join(execDir, `${id}.exit.json`), JSON.stringify({ code: 0, endedAt: Date.now() }));
-    saveExecs(join(dir, "execs.json"), [{ id, sessionId: SID, messageId: 1, shell: "cmd", text: "echo hi", cwd: CWD, state: "running", startedAt: Date.now(), pid: 1, reported: false }]);
+  // A run that ended while no hub watched: the hub's file has it running, rig has it ended.
+  const endedWhileOff = async (x: FakeExec, ended: boolean) => {
+    const started = await x.start("cmd", CWD, "echo hi");
+    if (!started.ok) throw new Error("the fake start failed");
+    const runId = started.value.id;
+    x.write(runId, "hi\n");
+    if (ended) x.finish(runId, { kind: "exit", code: 0 });
+    saveRuns(join(dir, "exec-runs.json"), [{ id: "abcd1234", runId, sessionId: SID, messageId: 1, shell: "cmd", text: "echo hi", cwd: CWD, state: "running", startedAt: 0, offset: 0, reported: false }]);
+    return runId;
   };
 
   test("a result that came while the hub was off goes once to the window that reconnects", async () => {
     closedSession();
-    endedWhileOff();
+    const x = new FakeExec();
+    await endedWhileOff(x, true);
     const clock = newClock();
-    await startWithRig({ timers: clock });
+    await startWithRig({ timers: clock, execClient: x });
     const w = await plugin(SID);
     await passReadyDelay(clock);
     const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
@@ -3268,18 +3277,13 @@ describe("topic commands", () => {
 
   test("a run that ends during the start's grace waits for the reconnecting window", async () => {
     closedSession();
-    const id = "abcd1234";
-    const execDir = join(dir, "exec");
-    mkdirSync(execDir, { recursive: true });
-    writeFileSync(join(execDir, `${id}.log`), "hi\n");
-    // A live runner: our own pid, a fresh heartbeat.
-    writeFileSync(join(execDir, `${id}.alive`), "");
-    saveExecs(join(dir, "execs.json"), [{ id, sessionId: SID, messageId: 1, shell: "cmd", text: "echo hi", cwd: CWD, state: "running", startedAt: Date.now(), pid: process.pid, reported: false }]);
+    const x = new FakeExec();
+    const runId = await endedWhileOff(x, false);
     const clock = newClock();
-    await startWithRig({ execGraceMs: LONG_GRACE_MS, timers: clock });
+    await startWithRig({ execGraceMs: LONG_GRACE_MS, timers: clock, execClient: x });
     await clock.advance(EXEC_CARD_MS);
     await waitFor(() => shown().some(t => t.startsWith("▶ cmd")), WAIT_MS, "running card");
-    writeFileSync(join(execDir, `${id}.exit.json`), JSON.stringify({ code: 0, endedAt: Date.now() }));
+    x.finish(runId, { kind: "exit", code: 0 });
     await clock.advance(EXEC_CHECK_MS);
     await settle();
     await clock.advance(CARD_EDIT_MS);
@@ -3287,20 +3291,21 @@ describe("topic commands", () => {
     const w = await plugin(SID);
     await passReadyDelay(clock);
     const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
-    expect(inbound.meta.exec_id).toBe(id);
+    expect(inbound.meta.exec_id).toBe("abcd1234");
     await settle();
     // The grace ends: the sweep finds the result reported and sends nothing more.
     await clock.advance(LONG_GRACE_MS);
     await settle();
     expect(w.messages.filter(m => m.type === "inbound").length).toBe(1);
     expect(runCalls()).toEqual([]);
-  }, 3 * WAIT_MS);
+  });
 
   test("a result that came while the hub was off starts the session through rig once no window came", async () => {
     closedSession();
-    endedWhileOff();
+    const x = new FakeExec();
+    await endedWhileOff(x, true);
     const clock = newClock();
-    await startWithRig({ timers: clock });
+    await startWithRig({ timers: clock, execClient: x });
     await clock.advance(EXEC_GRACE_MS - 1);
     await settle();
     expect(runCalls()).toEqual([]);
@@ -3311,9 +3316,10 @@ describe("topic commands", () => {
 
   test("a result that came while the hub was off and no rig to start the session says so once no window came", async () => {
     closedSession();
-    endedWhileOff();
+    const x = new FakeExec();
+    await endedWhileOff(x, true);
     const clock = newClock();
-    await startHub({ timers: clock });
+    await startHub({ timers: clock, execClient: x });
     await settle();
     await clock.advance(EXEC_GRACE_MS - 1);
     await settle();
@@ -3325,37 +3331,70 @@ describe("topic commands", () => {
 
   test("a result for a session without a window and without rig says it waits for the next start", async () => {
     closedSession();
-    await startHub();
-    fake.pushUpdate(msg(hostCommand("echo hi", "echo hi")));
-    await waitFor(() => texts().includes(en.rigMissing), RUN_MS, "notice");
+    const x = new FakeExec();
+    await startHub({ execClient: x });
+    fake.pushUpdate(msg("/cmd echo hi"));
+    await waitFor(() => x.starts.length === 1, WAIT_MS, "the start");
+    x.write(x.last(), "hi\n");
+    x.finish(x.last(), { kind: "exit", code: 0 });
+    await waitFor(() => texts().includes(en.rigMissing), WAIT_MS, "notice");
     expect(texts()).toContain(en.pendingDelivery({ count: 1 }));
-    // The final card is an edit, cardEditMs after the end.
     await waitFor(() => shown().some(t => t.startsWith("✅ code 0")), WAIT_MS, "final card");
-  }, RUN_MS + WAIT_MS);
+  });
+
+  test("a result for a closed session starts it through rig and reaches the agent once", async () => {
+    closedSession();
+    const x = new FakeExec();
+    await startWithRig({ execClient: x });
+    fake.pushUpdate(msg("/cmd echo hi"));
+    await waitFor(() => x.starts.length === 1, WAIT_MS, "the start");
+    x.write(x.last(), "hi\n");
+    x.finish(x.last(), { kind: "exit", code: 0 });
+    await waitFor(() => runCalls().length === 1, WAIT_MS, "session start");
+    expect(runCalls()).toEqual([{ sub: "run", sid: SID, args: ["--account", "2"] }]);
+    const w = await plugin(SID);
+    const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
+    expect(inbound.meta.exit_code).toBe("0");
+    await settle();
+    expect(w.messages.filter(m => m.type === "inbound").length).toBe(1);
+    expect(texts()).not.toContain(en.rigMissing);
+  });
 
   test("the hub does not exit idle while a command runs", async () => {
     closedSession();
-    fake.pushUpdate(msg(hostCommand("ping -n 3 127.0.0.1", "sleep 3")));
-    await startHub({ idleMs: IDLE_MS });
-    await waitFor(() => shown().some(t => t.startsWith(`▶ ${HOST_CARD}`)), WAIT_MS, "running card");
-    await Bun.sleep(IDLE_MS * 2);
+    const x = new FakeExec();
+    const clock = newClock();
+    fake.pushUpdate(msg("/cmd sleep 3"));
+    await startHub({ idleMs: IDLE_MS, timers: clock, execClient: x });
+    await waitFor(() => x.starts.length === 1, WAIT_MS, "the start");
+    await clock.advance(IDLE_MS * 2);
     expect(exited).toBe(false);
-    await waitFor(() => shown().some(t => t.startsWith("✅ code 0")), RUN_MS, "final card");
+    x.finish(x.last(), { kind: "exit", code: 0 });
+    await clock.advance(EXEC_CHECK_MS);
+    await settle();
+    await clock.advance(CARD_EDIT_MS);
+    await waitFor(() => shown().some(t => t.startsWith("✅ code 0")), WAIT_MS, "final card");
+    await clock.advance(IDLE_MS);
     await waitFor(() => exited, WAIT_MS, "idle exit once the command ended");
-  }, RUN_MS + WAIT_MS);
+  });
 
-  test("a log over the Telegram limit goes as its last 50 MB", async () => {
-    await startHub({ execFileLimit: FILE_LIMIT });
+  test("a log over the Telegram limit goes as its last part, made from rig's whole log", async () => {
+    const x = new FakeExec();
+    await startHub({ execClient: x, execFileLimit: FILE_LIMIT });
     await enabled(SID);
-    fake.pushUpdate(msg(hostCommand("for /l %i in (1,1,40) do @echo line %i", "for i in $(seq 1 40); do echo line $i; done")));
-    const doc = await waitFor(() => fake.callsOf("sendDocument")[0], RUN_MS, "log file");
+    fake.pushUpdate(msg("/cmd for /l %i in (1,1,40) do @echo line %i"));
+    await waitFor(() => x.starts.length === 1, WAIT_MS, "the start");
+    const id = x.last();
+    x.write(id, Array.from({ length: LOG_LINES }, (_, i) => `line ${i + 1}`).join("\n") + "\n");
+    x.finish(id, { kind: "exit", code: 0 });
+    const doc = await waitFor(() => fake.callsOf("sendDocument")[0], WAIT_MS, "log file");
     const file = field(doc, "document");
     expect(String(field(file, "file"))).toEndWith(".log");
     const body = String(field(file, "body"));
     expect(body).toStartWith("[log trimmed");
-    expect(body).toContain("line 40");
+    expect(body).toContain(`line ${LOG_LINES}`);
     expect(Number(field(file, "size"))).toBeLessThanOrEqual(FILE_LIMIT);
-  }, RUN_MS + WAIT_MS);
+  });
 });
 
 describe("questions", () => {

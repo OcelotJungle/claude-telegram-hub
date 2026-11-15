@@ -100,7 +100,7 @@ export const en = {
   // Shell commands from the topic.
   execUsage: ({ name }: { name: string }) => `Write the command: \`/${name} npm run migrate\``,
   execCmdOneLine: "/cmd runs one line. For several use /pwsh or /bash",
-  execShellNotFound: ({ shell, path }: { shell: string; path: string }) => `${shell} not found: ${path}. Set exec.bash in config.json`,
+  execCwdUnsafe: "The folder name has a quote or a percent sign, which a Windows command line cannot carry",
   execNoCwd: "⚠️ I do not know which folder to run the command in: it is neither in the hub's record nor in the transcript",
   execNotSet: "⚠️ Shell commands are not set up in this hub",
   execNotFound: "Run not found",
@@ -117,9 +117,9 @@ export const en = {
   execOutcomeOk: "✅ code 0",
   execOutcomeCode: ({ code }: { code: number | undefined }) => `❌ code ${code}`,
   execLostProcessGone: "the process disappeared",
-  execLostNoRigCommand: "no rig command",
-  execLostSaveFailed: "could not save the run",
+  execRigNoResult: ({ reason }: { reason: string }) => `rig printed no usable answer (${reason})`,
   execLostNotStarted: ({ error }: { error: string }) => `did not start: ${error}`,
+  execStartUnknown: "⚠️ The hub restarted while starting this command: it is not known whether it started",
   execPending: ({ minutes }: { minutes: number }) => `⏸ The command arrived ${minutes} min ago while the hub was off`,
 
   // Session actions run by rig: what the topic sees while and after rig works.

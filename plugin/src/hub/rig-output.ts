@@ -1,5 +1,5 @@
-// What a rig card shows. The runner keeps rig's two streams apart, each as whole lines: the progress
-// (stderr) in the run's log, the result or the error (stdout) in its result file. The words are made
+// What a rig card shows. `rig exec` keeps rig's two streams apart: the progress is the run's log lines,
+// the result or the error is the run's `result` that rig reports when it ends. The words are made
 // here, when the card is drawn, from the catalog current at that moment: all progress first, the result
 // last. A line that is not a JSON object (a traceback, cmd.exe text) is text and is shown as it is.
 import type { Messages } from "../shared/i18n/index.ts";

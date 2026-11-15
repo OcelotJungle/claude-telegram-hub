@@ -77,7 +77,8 @@ The session mechanism, queue, process checks and transcript cleanup are specifie
 bypassing the agent (`/rig language` follows the same access and output rules as `/rig status|update`; details in `language-design.md`). They work in the shared topic of the group and in any session topic, and the answer comes to the same place. The other commands stay in session topics.
 
 - `rig` is looked up in `PATH`, then in `~/.local/bin`. On Windows it is `rig.cmd`, started through `cmd.exe`. The feature name is checked against a
-  whitelist pattern before the start, and the arguments go separately.
+  whitelist pattern before the start, and the arguments go separately. Rig mutations need a rig that has `rig exec`
+  (0.7.1 and newer).
 - The hub reads rig through its JSON API and never with `--json`: success is one JSON line on stdout with exit code 0; a
   failure is `{"error": {"code", "message"}}` on stdout with exit code 1, and the hub shows rig's `message` as it is
   (its own failures, such as rig missing or a time limit, keep the hub's texts); progress is JSON Lines
@@ -85,30 +86,34 @@ bypassing the agent (`/rig language` follows the same access and output rules as
 - `/rig feature` shows the list from `rig feature` (the `features` field of its answer). A bad form of `/rig` or `/rig feature` answers its usage text, which lists the forms. The fields of the contract are parsed; the text is not parsed.
 - `/rig status` takes versions from the `releases` and `versions` fields in `rig status` and shows them as `0.2.0 (<commit>)`. If
   `releases` is `null`, only the commit is shown.
-- Changing commands are started as a separate process with the output written to a file, like `/bash`, and show the output as it appears.
-  If `rig` is busy updating, it prints a progress line about it, and the hub shows it as normal output. Waiting is not a failure, and there is no time
-  limit. A failure is only a non-zero exit code.
-  The card shows progress and the result in words, never raw JSON. For a rig run the runner keeps rig's two streams
-  apart and cuts each into whole lines (the partial tail waits for its newline and is flushed when the command ends):
-  the progress (stderr) goes to `exec/<id>.log`, the result or the error (stdout) to `exec/<id>.result`. So a line cut by
-  a chunk boundary or by a refresh in the middle of a run is never stored or shown, and a restored run reads the same
-  two files. The card text, the final text and the log file that is sent all come from one renderer
+- Changing commands (`rig update`, `rig feature <name> enable|disable`, `rig language <code>`) run as a `rig exec` run:
+  `rig exec start rig -- <arguments>`, the same mechanism as `/bash` (see `exec-design.md`). The hub starts no process
+  of its own for them and writes no log; it polls `rig exec status <id> --from <offset>` and shows the output as it
+  appears. If `rig` is busy updating, it prints a progress line about it, and the hub shows it as normal output. Waiting
+  is not a failure, and there is no time limit. A failure is only a non-zero exit code of the run.
+  The card shows progress and the result in words, never raw JSON. rig keeps the two streams apart: the progress lines
+  are the run's log, and the result or the error is the `result` object that rig reports when the run ends. The hub
+  reads the log in whole pages and renders only whole lines, so a line cut by a page boundary or by a refresh in the
+  middle of a run is not shown, and a restored run goes on from its saved byte offset. The card text, the final text and
+  the log file that is sent all come from one renderer
   (`plugin/src/hub/rig-output.ts`), made when they are drawn, in the language current at that moment: all progress
-  first, the result always last, whichever pipe was drained first. A progress code is shown by its words
+  first, the result always last. A progress code is shown by its words
   (`lock-waiting`, `service-stopping`, `program-install`; the output line of `update-step-output` as it is); an
   empty code shows nothing; a code the hub has no words for, or a known one without its data, is the catalog line
   `rig: <code>`. A result is shown by its words (a feature switched, an update outcome, the language), an error by
   rig's `message` split into its lines (the cause of a failed child is at its end, so the card keeps the last lines
-  and the sent file holds all of them). A line that is not JSON (a traceback, cmd.exe text) stays as text. The exit
-  code, not the text, decides OK or failed in the head line. A query that fails with a non-zero exit code and no error
-  object shows the hub's own text with the exit code and only the stderr lines that are not JSON objects, never raw
-  JSON. A rig-like process writes progress to stderr only; stdout holds only the result.
+  and the sent file holds all of them). A line that is not JSON (a traceback, cmd.exe text) stays as text. The end of
+  the run, not the text, decides OK or failed in the head line. A run that ended without a usable result (rig's
+  reasons `empty-result` and `invalid-result`) shows the hub's own line saying so. A query (`rig status` and the like)
+  that fails with a non-zero exit code and no error object shows the hub's own text with the exit code and only the
+  stderr lines that are not JSON objects, never raw JSON.
   The card of a running `rig` command is checked once a second, but redrawn at once only when the output changed (the line about
   waiting for the lock appears at the moment the wait starts); without new output the seconds counter updates it once per `EXEC_CARD_MS`.
 - The requests `rig feature`, `rig status` and `rig info --session <id>` take no lock, so they have a time limit of 30 seconds and do not delay
   receiving messages. Exceeding it counts as a request failure.
-- A running command survives a hub restart, and its result arrives after the start in full, with the complete log.
-- A stale command and a stale confirmation button are not executed; the limit is the same as for `/bash`. The `/pwsh` and `/cmd` launch button
+- A running command survives a hub restart: the hub resumes it by its run id from `exec-runs.json`, and its end arrives after
+  the start. The card shows the end of the log the hub holds (about 1 MiB), not the whole log.
+- A stale command and a stale confirmation button are not executed; the limit is the same as for `/bash` (`EXEC_MAX_AGE_MS`, 2 minutes). The `/pwsh` and `/cmd` launch button
   checks the feature state again at the moment of the press.
 - A permanent Telegram error when answering a command does not hold the queue: a card that cannot be edited is sent again, and an answer
   that cannot be delivered is dropped with a log entry.

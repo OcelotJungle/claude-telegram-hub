@@ -21,10 +21,8 @@ afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: tru
 test("platform values keep Windows defaults and select Linux bash", () => {
   const windows = platformFor("win32");
   const linux = platformFor("linux");
-  expect(windows.bash).toBe("C:\\Program Files\\Git\\bin\\bash.exe");
   expect(windows.shellNames.bash).toBe("Git Bash");
   expect(windows.sound).toBe(true);
-  expect(linux.bash).toBe("bash");
   expect(linux.shellNames.bash).toBe("bash");
   expect(linux.sound).toBe(false);
 });

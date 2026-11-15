@@ -43,52 +43,24 @@ topic. The user sees how it goes, and the agent learns the result itself and tak
 |---|---|
 | `/pwsh <text>` | PowerShell: `pwsh` if it is in PATH, otherwise `powershell.exe` |
 | `/cmd <text>` | `cmd.exe /s /c` |
-| `/bash <text>` | Git Bash, `bash -lc`. The path is `exec.bash` in `config.json`, by default `C:\Program Files\Git\bin\bash.exe` |
+| `/bash <text>` | Git Bash, `bash -lc` |
 
-The text after the command is passed to the shell as is. For `/pwsh` and `/bash` it can be multi-line. For
+The hub does not run a shell itself: it is a thin client of `rig exec` (rig 0.7.1 and newer). rig finds the shell, builds
+the environment, wraps the text and runs the process; the hub sends the text on stdin and reads the answers.
+
+The text after the command is passed to rig as is. For `/pwsh` and `/bash` it can be multi-line. For
 `/cmd` it is a single line only: cmd.exe with `/c` executes the text only up to the first newline, and a
 `.cmd` file behaves differently from lines typed in a window. For a multi-line `/cmd` the hub replies with
-a refusal and advises `/pwsh` or `/bash`. Empty text → a reply to the topic "`/pwsh npm run migrate`". No Git Bash file → "Git Bash not found: <path>. Set exec.bash in
-config.json". All three commands are added to the bot menu next to `/info`.
+a refusal and advises `/pwsh` or `/bash`. Empty text → a reply to the topic "`/pwsh npm run migrate`". If rig is not
+found, or is older than the version with `rig exec`, the topic gets the usual "rig is not installed" answer. A shell
+that rig cannot find is reported with rig's own message. All three commands are added to the bot menu next to `/info`.
 
-### Environment — as in a new terminal window
+### Environment, fail on the first error, encoding
 
-The command must behave the same as if typed in a fresh terminal window. Therefore:
-
-- `PATH` and the other variables are built anew, as at login: machine ones from the registry,
-  then `HKCU\Volatile Environment`, then user ones; `Path` is machine plus user.
-  From the hub only a fixed list of system variables is taken that are not in these keys
-  (`SystemRoot`, `windir`, `USERPROFILE`, `APPDATA`, `ProgramFiles*`, `PROCESSOR_*`, `PATHEXT`,
-  `ComSpec` and similar), and nothing else. The hub's environment may be old, from the time of
-  login, or carry variables of the Claude Code window: `CLAUDE_CONFIG_DIR`, a redirected `TEMP`/`TMPDIR` and
-  similar. If the registry cannot be read, the command gets the hub's environment without the Claude Code and hub variables.
-- Profiles are loaded as in an interactive window: `$PROFILE` for PowerShell, the login profile for Git
-  Bash, AutoRun for cmd (without `/d`).
-
-### Fail on the first error
-
-A chain of commands stops at the first failed one, and the final exit code is its code. Otherwise
-`npm run build; npm run migrate` after a failed build would give "✅ code 0", and the agent would believe in success.
-
-- PowerShell: `$ErrorActionPreference = 'Stop'`. After each external command with a non-zero
-  `$LASTEXITCODE`, execution is aborted with that code. Windows PowerShell 5.1 cannot do this by itself, so the
-  wrapper rewrites the script: after each statement in any block, nested ones (loops, `if`, functions)
-  too, a `$LASTEXITCODE` check is inserted, and the rewritten script runs as a whole, so `using`,
-  `param`, functions and scopes work as written. In pwsh 7.3+ the same check replaces
-  `$PSNativeCommandUseErrorActionPreference`, which would turn a command's code into an error with code 1.
-  If external commands did not fail but a cmdlet did, the code is 1. Output of an external command to stderr is not
-  counted as a failure: a statement that redirects stderr (`2>&1`, `2>$null`) runs with
-  `'Continue'`, because 5.1 with `'Stop'` aborts it on the first stderr line; for it only the
-  exit code counts, and after it the preference value that was before it is restored (including one
-  set by the user). The `begin`/`process`/`end` blocks work as written. Statements
-  inside `data { }` are not checked: the restricted language of that block does not allow insertions. To get
-  past an expected non-zero code (robocopy, `git diff --quiet`), the command is wrapped:
-  `cmd /c "… & exit /b 0"`.
-- Git Bash: `set -eo pipefail` before the user's text.
-- cmd: one line, so the code is the code of that line; `&&` and `||` are written by the user.
-
-Test requirement: `false-command; echo next` (its own in each shell) does not print "next" and
-ends with the code of the failed command.
+These are rig's work and are described in rig's `rig-exec-design.md`: the environment as in a new terminal window
+(registry variables, profiles), a chain that stops at the first failed command with its exit code, and UTF-8 output.
+The hub no longer has its own copy of any of them, and the key `exec.bash` of `config.json` is no longer read.
+The hub only chooses the shell and the working folder (`rig exec start <shell> --cwd <folder>`).
 
 ### Old and repeated commands
 
@@ -96,8 +68,9 @@ The hub keeps the `getUpdates` offset in `poll-offset.json`, but a command the h
 commands that arrived while it was off, come after start from the Telegram queue, where they stay for up to 24 h. The same
 command can arrive twice.
 
-- Every launch is recorded in `execs.json` with the chat and the command's `message_id`. If this message is already
-  recorded, the command is not run a second time, and the hub log notes that a repeat was skipped.
+- Every launch is recorded in `exec-runs.json` with the chat and the command's `message_id`. If this message is already
+  recorded, the command is not run a second time, and the hub log notes that a repeat was skipped. The record is saved
+  before `rig exec start` is asked, not after.
 - A command older than `EXEC_MAX_AGE = 2 min` (by the message's `date`) does not run by itself. A card
   "⏸ The command arrived N min ago while the hub was off" with a "▶ Run" button arrives in the topic. Pressing it
   runs it as usual.
@@ -129,14 +102,13 @@ When the command finishes, the card is edited at once, the button is removed:
 ‹last 10 lines›
 ```
 
-If the log is longer than the tail in the card, it follows as a file (`<id>.log`). Telegram does not accept files over 50 MB, so from such a log the last 50 MB are sent, with a
-note about it.
+If the log is longer than the tail in the card, it follows as a file (`<id>.log`): the run's whole log, read from rig
+page by page (see "The log").
 
-The "Stop" button kills the process tree (`taskkill /T /F /PID` on Windows). Only senders from `allowFrom`
+The "Stop" button calls `rig exec stop <id>`; rig kills the process tree. Only senders from `allowFrom`
 (`routeCallback`) can press it. A command that managed to finish before the press
-is not killed and shows its code. "⏹ stopped" is shown when after the press the runner disappeared without
-`.exit.json` or wrote a non-zero code (most likely from the kill itself); code 0 after the press is
-shown as "✅ code 0".
+is not killed and shows its code. "⏹ stopped" is shown when rig reports the end `stopped`; a run that ended with its own
+exit code after the press shows that code.
 
 ### What the agent gets
 
@@ -147,7 +119,7 @@ the agent wakes up, and if a turn is running, it gets the record in that turn.
 A command from the topic finished: ❌ code 1 in 4 min 05 s.
 Shell: PowerShell, folder: C:\code\app
 Command: npm run migrate
-Full log: <home folder>\.claude\channels\telegram-hub\exec\<id>.log
+Full log: rig exec status <run id> --from 0
 Last 30 lines:
 ‹…›
 ```
@@ -161,87 +133,100 @@ If the session has no window, the result wakes it like a message: the hub calls 
 
 ### The process does not depend on the hub
 
-The hub does not keep the child process itself. It starts a detached small runner
-(`bun hub/exec-runner.ts <id>`). The runner:
+The hub does not start a shell, does not keep a child process and does not write a run log. `rig exec` (rig 0.7.1 and
+newer) owns all of it: `rig exec start <shell> --cwd <folder>` takes the command text on stdin, starts the run detached
+from the hub and answers `{id, shell, cwd, pid, startedAt}`. A rig mutation is the same call with
+`rig exec start rig -- <arguments>`. Every call is one async rig process, timed out, reported as data and never thrown;
+a call in flight counts for `hub.busy()`. The client is `plugin/src/hub/rig-exec.ts`, the run bookkeeping
+`plugin/src/hub/exec.ts`.
 
-1. starts the shell in the needed folder, stdin closed;
-2. writes stdout and stderr to `exec/<id>.log` as they arrive, in arrival order; a `rig` run is different: its spec names
-   a result file, stderr goes to the log and stdout to `exec/<id>.result`, each as whole lines only (the partial tail is
-   held back and written when the command ends), see `rig-integration-design.md`;
-3. while alive, every 10 s updates the modification time of the file `exec/<id>.alive` (the heartbeat);
-4. on completion, atomically writes `exec/<id>.exit.json`: `{code, endedAt}`.
+The hub learns the state **only from `rig exec status <id> --from <offset>`**: `state` (`running` or `ended`), the
+`end` (`exit` with a code, `stopped`, or `lost` with a reason), for a rig run the `result` object rig printed, and a page
+of the log (`from`, `to`, `size`, `text`; at most 64 KiB, offsets in bytes). The hub polls a running run once a second
+(`EXEC_CHECK_MS`, an injected timer) and reads pages until it has all of the log. The usual case and the case "the hub
+restarted while the command was running" are the same code.
 
-The hub learns the state **only from files**: the log size and tail, the heartbeat, whether `.exit.json` appeared. So
-the usual case and the case "the hub restarted while the command was running" are the same code. The list of launches
-the hub keeps in `execs.json` in the state folder (modeled on `cards.json`): `id`, `sessionId`, id of the
-message with the command, the shell, the text, `cwd`, the runner's `pid`, `startedAt`, how it ended, whether the
-result was delivered to the agent. The launch card lives in `cards.json` together with the buttons. A restarted hub reads
-`execs.json` and goes on watching unfinished launches. "Stop" kills the runner's process tree:
-in it are the shell and everything it started.
+The hub's own state is `exec-runs.json` in the state folder: for each launch its id, the rig run id, the session, the
+message `message_id`, the shell, the text, the folder, the state, the byte offset it has read to, how it ended, and whether
+the result was delivered to the agent. Nothing is migrated from the old `execs.json`, `exec/` folder or runner files; the
+hub ignores them. A restarted hub reads `exec-runs.json` and goes on with every unfinished run by its run id: it reads
+the log again from a little before the saved offset (64 KiB), so the card has a tail at once. A run that ended while the
+hub was down gets its final card at the start. "Stop" is `rig exec stop <id>`.
 
-A result that did not reach the agent (the session was starting and the start failed; the hub crashed between the end of the
-command and the delivery) is sent again when the session connects.
+A result that did not reach the agent (the session was starting and the start failed; the hub crashed between the end of
+the command and the delivery) is sent again when the session connects.
 
-A command that finished while the hub was down gets the final card and the log at hub start
-at once, but its result does not go to the agent at once: session windows are just reconnecting at that moment, and
-starting a second copy of the session or "not delivered" would be a mistake. The window gets the result when it
-connects. A command that finished in the first 10 s after the hub start waits the same way if
-its session has no window at that moment; with a window it goes at once. After 10 s from the start (the window's reconnect pause plus the readiness delay) the results
-of sessions that still have no window go the normal way: `rig session run <id>`, holding the result until the window connects. No hub launch setting is required.
+A command that finished while the hub was down gets the final card at hub start at once, but its result does not go to
+the agent at once: session windows are just reconnecting at that moment, and starting a second copy of the session or
+"not delivered" would be a mistake. The window gets the result when it connects. A command that finished in the first
+10 s after the hub start waits the same way if its session has no window at that moment; with a window it goes at once.
+After 10 s from the start the results of sessions that still have no window go the normal way: `rig session run <id>`, holding the result until the window connects. No hub launch setting is required.
 
-The process vanished and there is no `.exit.json` (the machine was rebooted, the runner was killed) → card "⚠️ interrupted:
-the process disappeared", and the agent gets the same with the log tail. The runner counts as alive only while its pid is alive
-**and** the heartbeat is fresher than 30 s: after a reboot, a logout or a shutdown with Fast Startup the same pid
-may go to a foreign process, and such a launch ends as "the process disappeared" instead of hanging forever.
-"⏹ Stop" kills the tree only with a fresh heartbeat; without it, and if `.exit.json` already exists, nothing
-is killed. If the hub itself noticed a gap in its checks of more than 10 s (the machine slept together with the
-runners), the old heartbeat is forgiven for another 30 s until the runner updates it.
+A run rig reports as `lost` (the process disappeared) shows "⚠️ interrupted: <reason>", and the agent gets the same with
+the log tail. rig answers "unknown run" for a run it no longer keeps: the hub ends it as lost too. If rig cannot be
+reached for longer than a minute (`POLL_FAILURE_MS`), the run is ended as lost with the failure as the reason; a shorter
+failure is only logged and the polling goes on.
 
-### Encoding
+### The log
 
-Output to the log and to Telegram is UTF-8. cmd and Windows PowerShell 5.1 on a Russian Windows write
-in the OEM encoding (cp866) by default. The runner turns on UTF-8 before the user's command. For PowerShell this is
-`[Console]::OutputEncoding = [Text.Encoding]::UTF8` in the wrapper. cmd reads the code page once per
-line, so `chcp 65001 & echo <Russian word>` in one line still prints "??????". The outer cmd
-switches the console to UTF-8 and starts the user's cmd, and gives it the text through an environment variable
-(`!TG_EXEC_LINE!`), so it does not parse it itself. Requirement: Cyrillic in the output of `dotnet ef`, `npm` and
-`echo <Russian word>` reads correctly in the card.
+The hub keeps in memory the end of each running run's log, at most about 1 MiB of text (`LOG_KEEP_CHARS`): the card and
+the report to the agent are made from it. The whole log stays with rig (`rig exec status <id> --from 0`).
+The file that goes to Telegram is not made from that tail. When a run ends, the hub reads the log from byte 0 to its
+size, page by page (`exec-log.ts`, pages of at most 64 KiB), and writes it to a temporary file as it reads, so the
+whole log is never in memory; a hub restarted in the middle of the run sends the same file. A file over Telegram's
+50 MB limit (`TELEGRAM_FILE_LIMIT`) is cut from its start, begins with a note that says so (`execLogTrimmed`) and
+holds whole lines of the log (a rig run) or what is left of the cut (any other, a character cut in half is dropped).
+The temporary file is deleted once the hub has copied it. If rig cannot give the pages, the file holds what the hub
+keeps in memory instead, and the hub logs a warning. The work runs through `deps.spawn`, so the hub is busy until
+the file is sent. Carriage returns (progress bars) are collapsed: of a line, what is after the last `\r` remains.
+The run store marks the file (`logFile`): `owed` is saved with the end of a run whose log does not fit the card, `sent` once
+the file was handed over. A restarted hub builds and sends the file of every ended run still `owed` (size and result
+read from rig again; with rig unreadable it stays owed) and never one marked `sent`: each file goes out once.
 
 ### Card
 
 Uses the same message queue and edit logic as subagent cards (outbox, throttling, "not
 modified" is not an error, `cards.json`). The tail is the last lines of the log, trimmed by length so that the
-card fits in a message. Carriage returns (progress bars) are collapsed: of a line, what is
-after the last `\r` remains.
+card fits in a message.
 
-### Logs
+## Known gaps of the move
 
-`exec/` in the state folder. The last 50 launches are kept; older ones are deleted together with their entry in
-`execs.json` when a new one starts.
+- A running run costs one rig process per second (the poll). Fine for a few runs, not for dozens.
+- The log the card and the report show is capped in memory (see "The log"); the file is not.
+- A hub that dies while `rig exec start` is in flight: the record (chat, message id, `pending`, `starting`, no rig id) is
+  saved before every start (shell commands, rig mutations, the Run button) and gets the rig id once start answers; a
+  failed start ends the record with rig's message. A restarted hub finds a record still `starting`, marks it
+  `startUnknown` and does not start it again, nor on redelivery; its card says the outcome is unknown because the hub
+  restarted while starting it. Such a run, if rig did start it, stays an orphan in rig. The Run button on that card may
+  start it again (an explicit user action).
+- A file over Telegram's 50 MB limit is cut from its start with a note, as before the move.
+- The `/bash` smoke commands in `scripts/check-hub-service.ts` need a rig that has `rig exec`.
 
 ## Security
 
 `/pwsh` is execution of arbitrary commands on the machine, bypassing Claude Code's permission mode. The boundary is
 the same as for messages and buttons: the group from the config plus `allowFrom`. This adds no new way around it;
-the README says plainly that getting into `allowFrom` now means getting a shell. The command text is never
-substituted into a quoted template: it is passed to the shell as a separate argument.
+the README says plainly that getting into `allowFrom` now means getting a shell. The command text goes to rig on stdin,
+never into an argument or a quoted template. The working folder goes as the argument `--cwd`; a folder with a quote,
+`%` or a line break is refused on Windows, where the call is one `cmd /c` line.
 
 ## Decisions made
 
-- The hub starts the process through a detached runner, not a Claude Code window: the window kills its processes
-  on reload, and a reload happens on every plugin edit.
+- The hub starts no process itself: `rig exec` runs the command detached from the hub and keeps its log, so a hub or
+  plugin reload never kills it, and the hub holds no shell, environment or kill code.
 - Three commands instead of a shell-choice flag: each is visible in the menu, and no prefix needs parsing.
 - PowerShell is the default shell (`/pwsh`): it also runs what is usually written for cmd.
 - No timeout; several commands can run at the same time.
 - Card edit once a minute, 10 lines in the card, 30 lines to the agent, 50 logs kept.
 - The agent gets only the result, it does not learn about the start.
 - A multi-line `/cmd` is not run, the hub advises `/pwsh` or `/bash`.
-- Environment as in a new window: variables from the registry, profiles are loaded.
-- Fail on the first error in PowerShell and Git Bash (more reliable: a false success is more dangerous than a stop).
+- Environment as in a new window and fail on the first error are rig's (see its `rig-exec-design.md`); the hub holds no
+  copy.
 - A command older than 2 minutes does not run by itself, only by the button; a repeat of the same message is not run.
 
 ## Implementation details
 
-- How the runner is built and how it detaches from the hub on Windows.
-- How to find `pwsh` and check the path to Git Bash; the error text if the shell is missing.
-- Module names.
+- Modules: `rig-exec.ts` (the client of `rig exec`), `exec-runs.ts` (the store `exec-runs.json`), `exec.ts` (runs, polling,
+  cards, results to the agent), `exec-log.ts` (the log file made from rig's pages), `rig-output.ts` (words of a rig run).
+- Shells that rig cannot start are reported with rig's message; `unavailable(shell)` still hides `/pwsh` and `/cmd`
+  while their feature is off.

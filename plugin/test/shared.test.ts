@@ -168,16 +168,9 @@ describe("config", () => {
     expect(loadConfig()).toEqual({ allowFrom: [], turnEndChime: defaultTurnEndChime() });
   });
 
-  test("exec.bash is read", () => {
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], exec: { bash: "D:\\Git\\bin\\bash.exe" } }));
-    expect(loadConfig().exec).toEqual({ bash: "D:\\Git\\bin\\bash.exe" });
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], exec: { bash: 5 } }));
-    expect(loadConfig().exec).toBeUndefined();
-  });
 
-  test("the exec folder and runs file are in the state dir", () => {
-    expect(paths().execDir).toBe(join(dir, "exec"));
-    expect(paths().execsFile).toBe(join(dir, "execs.json"));
+  test("the exec runs file is in the state dir", () => {
+    expect(paths().execRunsFile).toBe(join(dir, "exec-runs.json"));
   });
 
   test("legacy launch values are ignored and logged once even across config reloads", () => {

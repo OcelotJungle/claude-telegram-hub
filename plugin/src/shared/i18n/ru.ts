@@ -90,7 +90,7 @@ export const ru: Messages = {
 
   execUsage: ({ name }) => `Напиши команду: \`/${name} npm run migrate\``,
   execCmdOneLine: "/cmd выполняет одну строку. Для нескольких — /pwsh или /bash",
-  execShellNotFound: ({ shell, path }) => `${shell} не найден: ${path}. Укажи exec.bash в config.json`,
+  execCwdUnsafe: "В имени папки есть кавычка или знак процента, командная строка Windows их не передаст",
   execNoCwd: "⚠️ Не знаю, в какой папке запускать команду: её нет ни в записи хаба, ни в транскрипте",
   execNotSet: "⚠️ Команды оболочки в этом хабе не настроены",
   execNotFound: "Запуск не найден",
@@ -107,9 +107,9 @@ export const ru: Messages = {
   execOutcomeOk: "✅ код 0",
   execOutcomeCode: ({ code }) => `❌ код ${code}`,
   execLostProcessGone: "процесс исчез",
-  execLostNoRigCommand: "нет команды rig",
-  execLostSaveFailed: "не удалось сохранить запуск",
+  execRigNoResult: ({ reason }) => `rig не вывел пригодный ответ (${reason})`,
   execLostNotStarted: ({ error }) => `не запустилось: ${error}`,
+  execStartUnknown: "⚠️ Хаб перезапустился, пока запускал эту команду: неизвестно, запустилась ли она",
   execPending: ({ minutes }) => `⏸ Команда пришла ${minutes} мин назад, пока хаб был выключен`,
 
   renameHint: "Напиши имя: /rename новое имя",

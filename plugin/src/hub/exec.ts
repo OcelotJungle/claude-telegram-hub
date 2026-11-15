@@ -1,43 +1,52 @@
-// Topic command runs: starts them through the detached runner, follows them by
-// their files only, keeps their cards and hands each result to the agent. A
-// restarted hub loads execs.json and goes on as if it never stopped.
-import type { ExecRecord } from "./exec-store.ts";
-import type { ExecShell, ShellPaths } from "./exec-shell.ts";
-import type { RunnerSpec } from "./exec-runner.ts";
+// Topic command runs, as Telegram sees them: rig runs the command (`rig exec`), the hub starts it, reads its
+// log page by page, keeps its card and buttons, and hands each result to the agent. What it keeps on disk is
+// only which run belongs to which card (exec-runs.ts); a restarted hub goes on polling a running run by its id.
+import type { ExecRun } from "./exec-runs.ts";
+import type { ExecClient, ExecError, ExecShellName, ExecStatus } from "./rig-exec.ts";
 import type { Button } from "./telegram.ts";
 import type { ChannelMeta } from "../shared/protocol.ts";
 import type { Logger } from "../shared/log.ts";
 import type { MessageKind } from "../shared/notification.ts";
 import type { MachineDestination } from "./machine-outbox.ts";
-import type { RigInvocation } from "./rig.ts";
 import type { Messages } from "../shared/i18n/index.ts";
 import type { Timers } from "../shared/timers.ts";
 
 import { randomBytes, randomUUID } from "crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 import { join } from "path";
-import { loadExecs, saveExecs } from "./exec-store.ts";
-import { notifies } from "../shared/notification.ts";
-import { SHELL_NAMES, shellRun, writeShellFiles } from "./exec-shell.ts";
-import { exitInfoSchema, HEARTBEAT_MS } from "./exec-runner.ts";
+import { buildLogFile } from "./exec-log.ts";
+import { loadRuns, saveRuns } from "./exec-runs.ts";
+import { isGone } from "./rig-exec.ts";
+import { rigErrorText } from "./rig.ts";
 import { catalogOf } from "../shared/i18n/index.ts";
-import { renderRigRun } from "./rig-output.ts";
+import { PLATFORM } from "../shared/platform.ts";
+import { renderRigLine, renderRigLines } from "./rig-output.ts";
 
 // What a run shows: its lines, and whether they start at the beginning of its output.
 type Shown = { lines: string[]; whole: boolean };
+type RunEnd = NonNullable<ExecRun["end"]>;
 
 export const EXEC_CARD_MS = 60_000;
 export const EXEC_CARD_LINES = 10;
 export const EXEC_AGENT_LINES = 30;
 export const MAX_EXECS = 50;
 export const EXEC_MAX_AGE_MS = 120_000;
+// How often a running run's log is read. Each read is one rig process.
 export const EXEC_CHECK_MS = 1000;
-export const TELEGRAM_FILE_LIMIT = 50 * 1024 * 1024;
-// A runner is gone once its heartbeat is this old: a few missed beats.
-export const HEARTBEAT_STALE_MS = 3 * HEARTBEAT_MS;
-const SPEC_FILE_MODE = 0o600;
 const ID_BYTES = 4;
+// The part of a log a restarted hub reads again before it goes on: what a rig status answer holds at most.
 const TAIL_BYTES = 64 * 1024;
+// The most of a log the hub keeps in memory for the card and the report: the end of it. The file that goes
+// to Telegram is made from rig's whole log (exec-log.ts), not from this.
+const LOG_KEEP_CHARS = 1024 * 1024;
+// The largest file Telegram takes from a bot.
+export const TELEGRAM_FILE_LIMIT = 50 * 1024 * 1024;
+const LOG_DIR_PREFIX = "hub-exec-log-";
+// A burst of pages one poll may read at most (a run that wrote a lot while the hub was off); the next poll goes on.
+const PAGES_PER_POLL = 16;
+// How long rig may fail to answer about a running run before the run counts as lost.
+const POLL_FAILURE_MS = 60_000;
 const LINE_MAX = 300;
 const TEXT_MAX = 200;
 const MIN_FENCE = 3;
@@ -45,39 +54,33 @@ const MS_PER_SECOND = 1000;
 const SECONDS_PER_MINUTE = 60;
 const MINUTES_PER_HOUR = 60;
 const MS_PER_MINUTE = MS_PER_SECOND * SECONDS_PER_MINUTE;
-const COPY_CHUNK = 1024 * 1024;
 const BYTES_PER_MB = 1024 * 1024;
-// The first bytes of a UTF-8 character's continuation: 10xxxxxx.
-const UTF8_CONT_MASK = 0xc0;
-const UTF8_CONT = 0x80;
+const SIZE_DECIMALS = 1;
 const LOST_PROCESS_GONE = "process-gone";
-const LOST_NO_RIG_COMMAND = "no-rig-command";
-const LOST_SAVE_FAILED = "save-failed";
 const LOST_START_FAILED = "start-failed";
+const SAVE_FAILED = "hub-save-failed";
+// rig's end.reason of a rig run that exited with no usable answer.
+const NO_RESULT_REASONS = new Set(["empty-result", "invalid-result"]);
 
 export type ExecDeps = {
   // The hub's current language: cards and answers are rendered in it each time.
   messages(): Messages;
-  dir: string;
   file: string;
-  shells(): ShellPaths;
-  shellNames?: Record<ExecShell, string>;
-  // The environment of a command: at once, or later when it is read from the system.
-  env(): Record<string, string> | Promise<Record<string, string>>;
-  spawnRunner(specFile: string): number;
-  alive(pid: number): boolean;
-  kill(pid: number): void;
+  rig: ExecClient;
+  shellNames?: Record<ExecShellName, string>;
   card(sessionId: string, cardId: string, markdown: string, final: boolean, kind: MessageKind, buttons?: Button[][]): void;
-  notice(sessionId: string, text: string, kind: MessageKind): void;
-  // Copies the file before it returns: the copy is what goes.
+  // A log that does not fit the card: the file at `path` goes as a file called `name`. The file is deleted when
+  // this returns, so the hub makes its own copy.
   sendFile(sessionId: string, path: string, name: string, kind: MessageKind): void;
+  // The largest file Telegram takes; TELEGRAM_FILE_LIMIT when not given.
+  fileLimit?: number;
   report(sessionId: string, content: string, meta: ChannelMeta, onSent: () => void): void;
+  // Runs background work so that the hub counts it as busy until it is done.
+  spawn(work: Promise<unknown>): void;
   timers: Timers;
   checkMs: number;
   cardMs: number;
   maxAgeMs: number;
-  // The largest file Telegram takes; TELEGRAM_FILE_LIMIT when not given.
-  fileLimit?: number;
   // Whether the session has a window connected now.
   hasWindow(sessionId: string): boolean;
   // How long after the start windows get to reconnect before results of runs
@@ -85,49 +88,60 @@ export type ExecDeps = {
   graceMs?: number;
   log: Logger;
   // Why a shell may not start now (its feature is off), or undefined; asked again when a stale Run button is pressed.
-  unavailable?(shell: ExecRecord["shell"]): string | undefined;
-  machineCard?(record: ExecRecord, text: string, final: boolean, kind: MessageKind, buttons?: Button[][]): void;
-  machineFile?(record: ExecRecord, path: string, kind: MessageKind): void;
+  unavailable?(shell: ExecRun["shell"]): string | undefined;
+  machineCard?(run: ExecRun, text: string, final: boolean, kind: MessageKind, buttons?: Button[][]): void;
+  // As sendFile, for a rig run.
+  machineFile?(run: ExecRun, path: string, name: string, kind: MessageKind): void;
+};
+
+// What the hub holds of a running run in memory: the end of its log, and how the polling stands.
+type Live = {
+  text: string;
+  // Whether `text` starts at the beginning of the run's output.
+  whole: boolean;
+  // rig's log size on the last read, in bytes.
+  size: number;
+  // The byte to read next.
+  next: number;
+  result?: unknown;
+  polling: boolean;
+  failingSince?: number;
+  // The log grew since the card was drawn last.
+  changed: boolean;
+  shownTail?: string;
+  shownAt?: number;
 };
 
 export class Execs {
-  private recs: ExecRecord[] = [];
+  private recs: ExecRun[] = [];
+  private live = new Map<string, Live>();
   private repeaters: ReturnType<typeof setInterval>[] = [];
-  // The last check, and till when a stale heartbeat still counts: after a
-  // gap in the checks the machine slept, and the runners slept with it.
-  private lastCheck: number | undefined;
-  private graceUntil = 0;
+  private stopped = false;
   // Runs that ended at start or in its grace with no window: their results
   // wait for the windows to reconnect, then for sweep().
   private deferred = new Set<string>();
-  // What the card of a running rig run last showed: its output and when.
-  private rigShown = new Map<string, { tail: string; at: number }>();
   private deferUntil = 0;
-  // Runs waiting for their environment.
+  // Runs whose start is in flight.
   private launching = new Set<string>();
   private sweepTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private deps: ExecDeps) {}
 
   start(): void {
-    this.repeaters.push(this.deps.timers.setRepeat(() => this.check(), this.deps.checkMs));
+    this.stopped = false;
+    this.recs = loadRuns(this.deps.file);
+    // A run goes on after a hub restart: its log is read again from a little before where the last read stopped.
+    for (const rec of this.recs) if (rec.state === "running") this.resumeLive(rec);
+    this.markUnknownStarts();
+    this.resendLogs();
+    this.repeaters.push(this.deps.timers.setRepeat(() => this.poll(), this.deps.checkMs));
     this.repeaters.push(this.deps.timers.setRepeat(() => this.editCards(), this.deps.cardMs));
     const grace = this.deps.graceMs ?? 0;
     this.deferUntil = this.deps.timers.now() + grace;
-    // At once: a run gone while no hub watched never gets a stop button press.
-    // Its result is not reported yet: a window about to reconnect gets it.
-    this.restore();
     this.sweepTimer = this.deps.timers.setTimer(() => this.sweep(), grace);
-  }
-
-  restore(): void {
-    this.recs = loadExecs(this.deps.file);
-    this.check(true);
-    for (const rec of this.recs) {
-      if (rec.shell !== "rig" || rec.state !== "ended") continue;
-      this.showCard(rec);
-      if (rec.end) this.sendLog(rec, rec.end);
-    }
+    // At once: a run that ended while no hub watched is found now. Its result is not reported yet: a window
+    // about to reconnect gets it.
+    this.poll();
   }
 
   // After the start's grace: deferred results go to the sessions that still
@@ -141,33 +155,34 @@ export class Execs {
     this.deferred.clear();
   }
 
-  // Only the timers: the runners go on and a next manager picks them up.
+  // Only the timers: the runs go on in rig and a next manager picks them up.
   stop(): void {
+    this.stopped = true;
     for (const t of this.repeaters) this.deps.timers.clearTimer(t);
     this.repeaters = [];
     if (this.sweepTimer !== undefined) this.deps.timers.clearTimer(this.sweepTimer);
   }
 
-  // A run still waiting for its environment counts: it is about to run, so the hub must not go idle under it.
+  // A run still starting counts: it is about to run, so the hub must not go idle under it.
   running(): number {
     return this.recs.filter(r => r.state === "running" || this.launching.has(r.id)).length;
   }
 
-  // Runs whose start is in flight inside the hub (the environment read), as opposed to runners that already run.
+  // Runs whose start is in flight.
   starting(): number {
     return this.launching.size;
   }
 
-  command(sessionId: string, shell: ExecShell, text: string, cwd: string, msg: { chatId: string; messageId: number; date: number }): void {
+  command(sessionId: string, shell: ExecShellName, text: string, cwd: string, msg: { chatId: string; messageId: number; date: number }): void {
     // Telegram may hand a restarted hub the same message again. Message ids
-    // count per chat; a run saved without its chat matches any.
+    // count per chat.
     const same = this.recs.find(r => r.messageId === msg.messageId && (r.chatId ?? msg.chatId) === msg.chatId);
     if (same) {
       this.deps.log.info(`exec: message ${msg.messageId} in chat ${msg.chatId} already ran as ${same.id}, skipped`);
       return;
     }
     const sentAt = msg.date * MS_PER_SECOND;
-    const rec: ExecRecord = {
+    const rec: ExecRun = {
       id: randomBytes(ID_BYTES).toString("hex"),
       sessionId,
       chatId: msg.chatId,
@@ -177,35 +192,38 @@ export class Execs {
       cwd,
       state: "pending",
       sentAt,
+      offset: 0,
       reported: false,
     };
     this.recs.push(rec);
     this.prune();
-    if (this.deps.timers.now() - sentAt > this.deps.maxAgeMs) {
-      this.save();
-      this.showCard(rec);
-      return;
-    }
-    this.launch(rec);
+    this.begin(rec, sentAt);
   }
 
-  // `sentAt` (ms) is when the user sent the command; one older than the age limit waits for the button like a stale /bash.
-  // A command the user confirmed later passes none: the confirmation press had its own age check.
-  machine(invocation: RigInvocation, text: string, cwd: string, destination: MachineDestination, messageId: number, sentAt?: number): void {
+  // A rig command (rig update, rig feature … enable|disable, rig language …) the user sent or confirmed. `sentAt` (ms)
+  // is when the user sent it; one older than the age limit waits for the button like a stale /bash. A command the
+  // user confirmed later passes none: the confirmation press had its own age check.
+  machine(args: string[], text: string, destination: MachineDestination, messageId: number, sentAt?: number): void {
     if (this.recs.some(rec => rec.messageId === messageId && rec.chatId === destination.chatId)) return;
-    const rec: ExecRecord = { id: randomUUID().replaceAll("-", ""), shell: "rig", invocation,
-      destination, chatId: destination.chatId, messageId, text, cwd, state: "pending", sentAt, reported: false };
+    const rec: ExecRun = {
+      id: randomUUID().replaceAll("-", ""),
+      shell: "rig",
+      args,
+      destination,
+      chatId: destination.chatId,
+      messageId,
+      text,
+      state: "pending",
+      sentAt,
+      offset: 0,
+      reported: false,
+    };
     this.recs.push(rec);
     this.prune();
-    if (sentAt !== undefined && this.deps.timers.now() - sentAt > this.deps.maxAgeMs) {
-      this.save();
-      this.showCard(rec);
-      return;
-    }
-    this.launch(rec);
+    this.begin(rec, sentAt);
   }
 
-  press(id: string, action: "stop" | "run"): string {
+  async press(id: string, action: "stop" | "run"): Promise<string> {
     const m = this.deps.messages();
     const rec = this.recs.find(r => r.id === id);
     if (!rec) return m.execNotFound;
@@ -218,17 +236,11 @@ export class Execs {
       this.launch(rec);
       return m.execStarting;
     }
-    if (rec.state === "pending" || rec.pid === undefined) return m.execNotStarted;
-    // A run that ended, or whose runner is gone, is not killed: its pid may
-    // belong to another process by now.
-    if (existsSync(this.path(rec.id, "exit.json")) || !this.beating(rec)) {
-      this.check();
-      return m.execAlreadyEnded;
-    }
-    rec.stopping = true;
-    this.save();
-    this.deps.kill(rec.pid);
-    return m.execStopping;
+    if (rec.state === "pending" || rec.runId === undefined) return m.execNotStarted;
+    // rig stops the run; the next poll reads how it ended.
+    const stopped = await this.deps.rig.stop(rec.runId);
+    if (!stopped.ok) return rigErrorText(stopped.error, m);
+    return stopped.value.state === "ended" ? m.execAlreadyEnded : m.execStopping;
   }
 
   // Results the agent has not got go again once its session is back.
@@ -238,24 +250,9 @@ export class Execs {
     }
   }
 
-  // Whether the run's runner touched its heartbeat file lately.
-  private beating(rec: ExecRecord): boolean {
-    const now = this.deps.timers.now();
-    if (now < this.graceUntil) return true;
-    try {
-      return now - statSync(this.path(rec.id, "alive")).mtimeMs < HEARTBEAT_STALE_MS;
-    } catch {
-      return false;
-    }
-  }
-
-  private path(id: string, ext: string): string {
-    return join(this.deps.dir, `${id}.${ext}`);
-  }
-
   private save(): boolean {
     try {
-      saveExecs(this.deps.file, this.recs);
+      saveRuns(this.deps.file, this.recs);
       return true;
     } catch (e) {
       this.deps.log.error(`exec: saving runs failed: ${e}`);
@@ -263,236 +260,319 @@ export class Execs {
     }
   }
 
-  // The environment may come later (a registry read): the run waits for it as "pending", and a second
-  // press of its button meanwhile does not start it twice.
-  private launch(rec: ExecRecord): void {
-    if (this.launching.has(rec.id)) return;
-    let env: Record<string, string> | Promise<Record<string, string>>;
-    try {
-      env = this.deps.env();
-    } catch (e) {
-      return this.startFailed(rec, e);
-    }
-    if (!(env instanceof Promise)) return this.begin(rec, env);
-    this.launching.add(rec.id);
-    // The run leaves `launching` before it begins or fails: what those report (an end, the hub going idle) already
-    // sees the run as started or gone, not as still waiting.
-    void env.then(
-      resolved => {
-        this.launching.delete(rec.id);
-        if (rec.state === "pending") this.begin(rec, resolved);
-      },
-      e => {
-        this.launching.delete(rec.id);
-        this.startFailed(rec, e);
-      },
-    );
-  }
-
-  private begin(rec: ExecRecord, hubEnv: Record<string, string>): void {
-    try {
-      const run = rec.shell === "rig"
-        ? rec.invocation && { ...rec.invocation, files: [], env: {} }
-        : shellRun(rec.shell, rec.text, this.deps.dir, rec.id, this.deps.shells());
-      if (!run) return this.end(rec, { kind: "lost", at: this.deps.timers.now(), reason: LOST_NO_RIG_COMMAND });
-      writeShellFiles(run);
-      const spec: RunnerSpec = {
-        argv: run.argv,
-        verbatim: run.verbatim,
-        cwd: rec.cwd,
-        env: { ...hubEnv, ...run.env },
-        log: this.path(rec.id, "log"),
-        exit: this.path(rec.id, "exit.json"),
-        alive: this.path(rec.id, "alive"),
-        heartbeatMs: HEARTBEAT_MS,
-        // A rig run keeps its progress (the log) and its result apart.
-        ...(rec.shell === "rig" ? { result: this.path(rec.id, "result") } : {}),
-      };
-      const specFile = this.path(rec.id, "spec.json");
-      mkdirSync(this.deps.dir, { recursive: true });
-      // The first beat, so a runner still starting counts as alive.
-      const at = this.deps.timers.now() / MS_PER_SECOND;
-      writeFileSync(spec.alive, "");
-      utimesSync(spec.alive, at, at);
-      // The spec carries the environment (tokens among it): the owner only.
-      writeFileSync(specFile, JSON.stringify(spec), { mode: SPEC_FILE_MODE });
-      rec.state = "running";
-      rec.startedAt = this.deps.timers.now();
-      if (!this.save()) {
-        this.end(rec, { kind: "lost", at: this.deps.timers.now(), reason: LOST_SAVE_FAILED });
-        return;
-      }
-      rec.pid = this.deps.spawnRunner(specFile);
-      this.deps.log.info(`exec ${rec.id}: started ${rec.shell} in ${rec.cwd}, runner ${rec.pid}`);
+  // A command too old waits for its button; any other starts at once.
+  private begin(rec: ExecRun, sentAt: number | undefined): void {
+    if (sentAt !== undefined && this.deps.timers.now() - sentAt > this.deps.maxAgeMs) {
       this.save();
       this.showCard(rec);
-    } catch (e) {
-      this.startFailed(rec, e);
+      return;
     }
+    this.launch(rec);
   }
 
-  private startFailed(rec: ExecRecord, e: unknown): void {
-    this.deps.log.error(`exec ${rec.id}: start failed: ${e}`);
+  // A second press of the Run button while the start is in flight does not start the run twice.
+  private launch(rec: ExecRun): void {
+    if (this.launching.has(rec.id)) return;
+    this.launching.add(rec.id);
+    this.deps.spawn(this.startRun(rec));
+  }
+
+  // A record saved as starting whose answer never came: the hub died in the start. Whether rig started the run is not
+  // known, so it is neither started nor re-run on redelivery; its card says so and the Run button may start it.
+  private markUnknownStarts(): void {
+    const unknown = this.recs.filter(r => r.state === "pending" && r.starting === true);
+    if (unknown.length === 0) return;
+    for (const rec of unknown) {
+      delete rec.starting;
+      rec.startUnknown = true;
+    }
+    this.save();
+    for (const rec of unknown) this.showCard(rec);
+  }
+
+  private async startRun(rec: ExecRun): Promise<void> {
+    // The record is on disk before rig is asked: a hub that dies in the start must not run the command twice.
+    rec.starting = true;
+    delete rec.startUnknown;
+    if (!this.save()) {
+      this.launching.delete(rec.id);
+      delete rec.starting;
+      return this.startFailed(rec, { kind: "rig", code: SAVE_FAILED, message: "the run could not be recorded" });
+    }
+    const started = rec.shell === "rig"
+      ? await this.deps.rig.startRig(rec.args ?? [])
+      : await this.deps.rig.start(rec.shell, rec.cwd ?? "", rec.text);
+    // The run leaves `launching` before it begins or fails: what those report (an end, the hub going idle) already
+    // sees the run as started or gone, not as still starting.
+    this.launching.delete(rec.id);
+    delete rec.starting;
+    if (rec.state !== "pending") return;
+    if (!started.ok) return this.startFailed(rec, started.error);
+    rec.runId = started.value.id;
+    rec.state = "running";
     rec.startedAt = this.deps.timers.now();
-    this.end(rec, { kind: "lost", at: this.deps.timers.now(), reason: LOST_START_FAILED, detail: e instanceof Error ? e.message : String(e) });
+    rec.offset = 0;
+    this.live.set(rec.id, newLive(0));
+    this.save();
+    this.deps.log.info(`exec ${rec.id}: started ${rec.shell} as rig run ${rec.runId}`);
+    this.showCard(rec);
   }
 
-  // Drops the oldest ended runs, with their files, past MAX_EXECS.
+  private startFailed(rec: ExecRun, error: ExecError): void {
+    const text = execErrorText(error, this.deps.messages());
+    this.deps.log.error(`exec ${rec.id}: start failed: ${text}`);
+    rec.startedAt = this.deps.timers.now();
+    this.end(rec, { kind: "lost", at: this.deps.timers.now(), reason: LOST_START_FAILED, detail: text });
+  }
+
+  private resumeLive(rec: ExecRun): void {
+    this.live.set(rec.id, newLive(Math.max(0, rec.offset - TAIL_BYTES)));
+  }
+
+  // Drops the oldest ended runs past MAX_EXECS.
   private prune(): void {
     let extra = this.recs.length - MAX_EXECS;
     if (extra <= 0) return;
-    let names: string[] = [];
-    try {
-      names = readdirSync(this.deps.dir);
-    } catch {}
     this.recs = this.recs.filter(r => {
       if (extra <= 0 || r.state !== "ended") return true;
       extra--;
-      for (const n of names) {
-        if (n.startsWith(`${r.id}.`)) rmSync(join(this.deps.dir, n), { force: true });
-      }
       return false;
     });
   }
 
-  // quiet: the runs that ended are not reported; see start().
-  private check(quiet = false): void {
-    const now = this.deps.timers.now();
-    if (this.lastCheck !== undefined && now - this.lastCheck > HEARTBEAT_MS) this.graceUntil = now + HEARTBEAT_STALE_MS;
-    this.lastCheck = now;
+  private poll(): void {
+    if (this.stopped) return;
     for (const rec of this.recs) {
-      if (rec.state !== "running") continue;
-      const exit = this.path(rec.id, "exit.json");
-      if (existsSync(exit)) {
-        this.ended(rec, exit, quiet);
-        continue;
+      if (rec.state !== "running" || rec.runId === undefined) continue;
+      let live = this.live.get(rec.id);
+      if (!live) {
+        this.resumeLive(rec);
+        live = this.live.get(rec.id);
       }
-      // A runner without a fresh heartbeat is gone, whoever has its pid now
-      // (after a reboot, a sign-out, a Fast Startup shutdown): that one is
-      // neither waited for nor killed.
-      if (this.beating(rec) && (rec.pid === undefined || this.deps.alive(rec.pid))) {
-        if (rec.shell === "rig") this.refreshRigCard(rec);
-        continue;
-      }
-      // The runner may have written the file just before it exited.
-      if (existsSync(exit)) this.ended(rec, exit, quiet);
-      else this.end(rec, rec.stopping ? { kind: "stopped", at: this.deps.timers.now() } : { kind: "lost", at: this.deps.timers.now(), reason: LOST_PROCESS_GONE }, quiet);
+      if (live && !live.polling) this.deps.spawn(this.follow(rec, rec.runId, live));
     }
   }
 
-  private ended(rec: ExecRecord, exitFile: string, quiet: boolean): void {
-    let info;
+  // Reads the run's log from where it stopped until rig has no more, then the end.
+  private async follow(rec: ExecRun, runId: string, live: Live): Promise<void> {
+    live.polling = true;
+    const offset = rec.offset;
     try {
-      info = exitInfoSchema.parse(JSON.parse(readFileSync(exitFile, "utf8")));
-    } catch (e) {
-      this.deps.log.warn(`exec ${rec.id}: unreadable exit file: ${e}`);
-      return;
+      for (let page = 0; page < PAGES_PER_POLL; page++) {
+        const got = await this.deps.rig.status(runId, live.next);
+        if (this.stopped || rec.state !== "running") return;
+        if (!got.ok) return this.pollFailed(rec, live, got.error);
+        live.failingSince = undefined;
+        const status = got.value;
+        const progressed = this.absorb(rec, live, status);
+        const drained = status.log.to >= status.log.size;
+        // An ended run whose log stops in the middle of a character has nothing more to give.
+        if (status.state === "ended" && (drained || !progressed)) return this.finish(rec, live, status);
+        if (drained || !progressed) break;
+      }
+      if (rec.offset !== offset) this.save();
+      if (rec.shell === "rig") this.refreshRigCard(rec, live);
+    } finally {
+      live.polling = false;
     }
-    const at = info.endedAt;
-    if (info.error !== undefined) this.end(rec, { kind: "lost", at, reason: LOST_START_FAILED, detail: info.error }, quiet);
-    // After a stop, a non-zero code is most likely the kill's; a run that
-    // ended before the press never got killed (see press).
-    else if (rec.stopping && info.code !== 0) this.end(rec, { kind: "stopped", at }, quiet);
-    else if (info.code === null) this.end(rec, { kind: "lost", at, reason: LOST_PROCESS_GONE }, quiet);
-    else this.end(rec, { kind: "exit", code: info.code, at }, quiet);
   }
 
-  private end(rec: ExecRecord, end: NonNullable<ExecRecord["end"]>, quiet = false): void {
+  // Adds a page to what the hub holds; whether the page moved the reading on.
+  private absorb(rec: ExecRun, live: Live, status: ExecStatus): boolean {
+    const { log } = status;
+    live.size = log.size;
+    if (status.result !== undefined) live.result = status.result;
+    if (log.to <= live.next) return false;
+    live.text += log.text;
+    if (live.text.length > LOG_KEEP_CHARS) {
+      live.text = live.text.slice(-LOG_KEEP_CHARS);
+      live.whole = false;
+    }
+    live.next = log.to;
+    live.changed = true;
+    rec.offset = log.to;
+    return true;
+  }
+
+  private pollFailed(rec: ExecRun, live: Live, error: ExecError): void {
+    const now = this.deps.timers.now();
+    if (isGone(error)) return this.end(rec, { kind: "lost", at: now, reason: LOST_PROCESS_GONE });
+    if (live.failingSince === undefined) {
+      live.failingSince = now;
+      this.deps.log.warn(`exec ${rec.id}: reading the run failed: ${rigErrorText(error.kind === "cwdUnsafe" ? { kind: "badSession" } : error, catalogOf("en"))}`);
+    }
+    if (now - live.failingSince > POLL_FAILURE_MS) this.end(rec, { kind: "lost", at: now, reason: execErrorText(error, this.deps.messages()) });
+  }
+
+  private finish(rec: ExecRun, live: Live, status: ExecStatus): void {
+    if (status.result !== undefined) live.result = status.result;
+    this.end(rec, runEnd(status, this.deps.timers.now()));
+  }
+
+  private end(rec: ExecRun, end: RunEnd): void {
+    const live = this.live.get(rec.id);
     rec.state = "ended";
     rec.end = end;
     this.deps.log.info(`exec ${rec.id}: ended ${end.kind}${end.code === undefined ? "" : ` ${end.code}`}`);
-    this.save();
     this.showCard(rec);
     this.sendLog(rec, end);
+    if (rec.shell !== "rig") rec.reportTail = tailText(this.shown(rec, live), EXEC_AGENT_LINES);
+    this.live.delete(rec.id);
+    this.save();
     // In the start's grace a session without a window may be reconnecting:
     // reporting now would launch a second copy of it or say "not delivered".
     if (rec.shell === "rig") return;
     const inGrace = this.deps.timers.now() < this.deferUntil && (rec.sessionId === undefined || !this.deps.hasWindow(rec.sessionId));
-    if (quiet || inGrace) this.deferred.add(rec.id);
+    if (inGrace) this.deferred.add(rec.id);
     else this.report(rec);
   }
 
-  // A log that does not fit the card goes as a file. Also called on restore for
-  // a rig record: the hub may have died between saving the end and handing the
-  // file over, and the machine outbox ignores a log it already knows.
-  private sendLog(rec: ExecRecord, end: NonNullable<ExecRecord["end"]>): void {
-    const log = this.path(rec.id, "log");
+  // A log that does not fit the card goes as a file: a rig run as the words the card shows, any other as its text.
+  // The file is the run's whole log, read from rig page by page (the hub holds only its end), cut from the start
+  // when it is over the file limit. What the hub holds goes instead when rig cannot be read.
+  private sendLog(rec: ExecRun, end: RunEnd): void {
+    const live = this.live.get(rec.id);
+    if (!live || rec.runId === undefined) return;
+    const shown = this.shown(rec, live);
+    if (fitsCard(shown)) return;
+    const m = this.deps.messages();
+    const note = shown.whole ? "" : `${m.execLogTrimmed({ limit: mb(Buffer.byteLength(live.text), m), size: mb(live.size, m) })}\n`;
+    const held = rec.shell === "rig" ? `${note}${shown.lines.join("\n")}\n` : `${note}${live.text}`;
+    // Saved with the end (end() saves after this): a hub that dies before the file went out sends it at its start.
+    rec.logFile = "owed";
+    this.deps.spawn(this.deliverLog(rec, end, { runId: rec.runId, size: live.size, result: live.result, held }));
+  }
+
+  // At start: the file of an ended run that was owed and did not go out. The hub holds no log of it, so the size and
+  // the result come from rig; with rig unreadable the file stays owed for the next start.
+  private resendLogs(): void {
+    for (const rec of this.recs) {
+      if (rec.state !== "ended" || rec.logFile !== "owed" || rec.runId === undefined || rec.end === undefined) continue;
+      this.deps.spawn(this.resendLog(rec, rec.runId, rec.end));
+    }
+  }
+
+  private async resendLog(rec: ExecRun, runId: string, end: RunEnd): Promise<void> {
+    const got = await this.deps.rig.status(runId, 0);
+    if (this.stopped) return;
+    if (!got.ok) {
+      this.deps.log.warn(`exec ${rec.id}: the log file stays unsent, rig could not be read: ${rigErrorText(got.error, catalogOf("en"))}`);
+      return;
+    }
+    await this.deliverLog(rec, end, { runId, size: got.value.log.size, result: got.value.result });
+  }
+
+  // `held`: what the hub holds of the log, for when rig cannot give the pages; a file resent after a restart has none.
+  private async deliverLog(rec: ExecRun, end: RunEnd, log: { runId: string; size: number; result: unknown; held?: string }): Promise<void> {
+    const m = this.deps.messages();
+    const limit = this.deps.fileLimit ?? TELEGRAM_FILE_LIMIT;
     const kind = end.kind === "lost" ? "warning" : end.kind === "exit" && end.code !== 0 ? "error" : "info";
-    if (fitsCard(this.shown(rec, TAIL_BYTES))) return;
+    const name = `${rec.id}.log`;
+    let dir: string | undefined;
     try {
-      const file = this.fileToSend(rec, log);
-      if (rec.shell === "rig") this.deps.machineFile?.(rec, file, kind);
-      else if (rec.sessionId !== undefined) this.deps.sendFile(rec.sessionId, file, `${rec.id}.log`, kind);
+      dir = mkdtempSync(join(tmpdir(), LOG_DIR_PREFIX));
+      const path = join(dir, name);
+      const built = await buildLogFile({
+        rig: this.deps.rig,
+        runId: log.runId,
+        size: log.size,
+        path,
+        limit,
+        note: `${m.execLogTrimmed({ limit: mb(limit, m), size: mb(log.size, m) })}\n`,
+        ...(rec.shell === "rig" ? { line: (raw: string) => renderRigLine(screenLine(raw), m) } : {}),
+        closing: rec.shell === "rig" ? this.rigClosing(rec, log.result) : [],
+        aborted: () => this.stopped,
+      });
+      if (built.kind === "aborted") return;
+      if (built.kind === "unreadable") {
+        if (log.held === undefined) {
+          this.deps.log.warn(`exec ${rec.id}: rig could not give the log, the file stays unsent`);
+          return;
+        }
+        this.deps.log.warn(`exec ${rec.id}: rig could not give the whole log, the file holds its end`);
+        writeFileSync(path, log.held);
+      }
+      let handedOver = false;
+      if (rec.shell === "rig" && this.deps.machineFile) {
+        this.deps.machineFile(rec, path, name, kind);
+        handedOver = true;
+      } else if (rec.shell !== "rig" && rec.sessionId !== undefined) {
+        this.deps.sendFile(rec.sessionId, path, name, kind);
+        handedOver = true;
+      }
+      // Only after the hand-over succeeded: a throw above leaves the file owed.
+      if (handedOver) {
+        rec.logFile = "sent";
+        this.save();
+      }
     } catch (e) {
       this.deps.log.warn(`exec ${rec.id}: sending the log failed: ${e}`);
+    } finally {
+      if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
     }
   }
 
-  // The log, or a copy of its last bytes with a note when Telegram would
-  // refuse the whole of it.
-  private fileToSend(rec: ExecRecord, log: string): string {
-    const id = rec.id;
-    const limit = this.deps.fileLimit ?? TELEGRAM_FILE_LIMIT;
+  // What a rig run shows after its progress: its result in words, and why it has none.
+  private rigClosing(rec: ExecRun, result: unknown): string[] {
     const m = this.deps.messages();
-    // A rig run is never sent raw: it goes as the words the card shows, whole, not only its tail.
-    if (rec.shell === "rig") {
-      const shown = this.shown(rec, limit);
-      const size = fileSize(log) + fileSize(this.path(id, "result"));
-      const note = shown.whole ? "" : `${m.execLogTrimmed({ limit: mb(limit, m), size: mb(size, m) })}\n`;
-      const file = this.path(id, "view.log");
-      writeFileSync(file, `${note}${shown.lines.join("\n")}\n`);
-      return file;
-    }
-    const size = statSync(log).size;
-    if (size <= limit) return log;
-    const note = Buffer.from(`${m.execLogTrimmed({ limit: mb(limit, m), size: mb(size, m) })}\n`);
-    const copy = this.path(id, "tail.log");
-    copyTail(log, copy, note, Math.max(0, limit - note.length));
-    return copy;
+    const lines = result === undefined ? [] : renderRigLine(JSON.stringify(result), m);
+    const reason = rec.end?.kind === "exit" ? rec.end.reason : undefined;
+    if (reason !== undefined && NO_RESULT_REASONS.has(reason)) lines.push(m.execRigNoResult({ reason }));
+    return lines;
   }
 
-  private report(rec: ExecRecord): void {
+  private report(rec: ExecRun): void {
     if (rec.sessionId === undefined || rec.shell === "rig") return;
-    const log = this.path(rec.id, "log");
     const meta: ChannelMeta = { source: "exec", exec_id: rec.id, ts: new Date(rec.end?.at ?? this.deps.timers.now()).toISOString() };
     if (rec.end?.kind === "exit" && rec.end.code !== undefined) meta.exit_code = String(rec.end.code);
-    this.deps.report(rec.sessionId, execReportText(rec, logTail(log, EXEC_AGENT_LINES), log, this.deps.shellNames), meta, () => {
+    this.deps.report(rec.sessionId, execReportText(rec, rec.reportTail ?? "", this.deps.shellNames), meta, () => {
       rec.reported = true;
+      delete rec.reportTail;
       this.save();
     });
   }
 
-  // Rig cards are paced by check(): see refreshRigCard.
+  // Cards of the other runs are paced by the poll: see refreshRigCard.
   private editCards(): void {
     for (const rec of this.recs) if (rec.state === "running" && rec.shell !== "rig") this.showCard(rec);
   }
 
   // A rig card shows its output as it arrives, so it is redrawn at once when the
   // output changed; otherwise only at the card pace (the seconds counter alone
-  // changes every check, which would edit the card every check).
-  private refreshRigCard(rec: ExecRecord): void {
-    const shown = this.rigShown.get(rec.id);
-    const tail = tailText(this.shown(rec, TAIL_BYTES), EXEC_CARD_LINES);
-    if (shown !== undefined && shown.tail === tail && this.deps.timers.now() - shown.at < this.deps.cardMs) return;
+  // changes every poll, which would edit the card every poll).
+  private refreshRigCard(rec: ExecRun, live: Live): void {
+    if (!live.changed && live.shownAt !== undefined && this.deps.timers.now() - live.shownAt < this.deps.cardMs) return;
+    const tail = tailText(this.shown(rec, live), EXEC_CARD_LINES);
+    if (live.shownTail === tail && live.shownAt !== undefined && this.deps.timers.now() - live.shownAt < this.deps.cardMs) {
+      live.changed = false;
+      return;
+    }
     this.showCard(rec);
   }
 
   // The one reading of a run's output: the card, the sent file and the report all come from it. A rig run
   // is the whole lines of its progress, in words, then its result, in words, last; any other run is its log.
-  private shown(rec: ExecRecord, bytes: number): Shown {
-    const log = this.path(rec.id, "log");
-    if (rec.shell !== "rig") return readLines(log, bytes, false) ?? { lines: [], whole: true };
-    const progress = readLines(log, bytes, true);
-    const result = readLines(this.path(rec.id, "result"), bytes, true);
-    return {
-      lines: renderRigRun(progress?.lines ?? [], result?.lines ?? [], this.deps.messages()),
-      whole: (progress?.whole ?? true) && (result?.whole ?? true),
-    };
+  private shown(rec: ExecRun, live: Live | undefined): Shown {
+    if (!live) return { lines: [], whole: true };
+    if (rec.shell !== "rig") {
+      const lines = screenLines(live.text);
+      // A read from the middle starts in the middle of a line.
+      if (!live.whole) lines.shift();
+      return { lines, whole: live.whole };
+    }
+    // A line still being written is never shown cut; an ended run has no such line.
+    const text = rec.state === "ended" ? live.text : live.text.slice(0, live.text.lastIndexOf("\n") + 1);
+    const progress = screenLines(text);
+    if (!live.whole) progress.shift();
+    const lines = [...renderRigLines(progress, this.deps.messages()), ...this.rigClosing(rec, live.result)];
+    return { lines, whole: live.whole };
   }
 
-  private showCard(rec: ExecRecord): void {
+  private showCard(rec: ExecRun): void {
     const m = this.deps.messages();
-    const tail = rec.state === "pending" ? "" : tailText(this.shown(rec, TAIL_BYTES), EXEC_CARD_LINES);
+    const live = this.live.get(rec.id);
+    const now = this.deps.timers.now();
+    const tail = rec.state === "pending" ? "" : tailText(this.shown(rec, live), EXEC_CARD_LINES);
     const buttons: Button[][] | undefined =
       rec.state === "running"
         ? [[{ text: m.execStopButton, data: `x:${rec.id}:stop` }]]
@@ -502,93 +582,55 @@ export class Execs {
     const kind = rec.state !== "ended" || rec.end?.kind === "stopped" || (rec.end?.kind === "exit" && rec.end.code === 0)
       ? "info"
       : rec.end?.kind === "exit" ? "error" : "warning";
-    const text = execCardText(rec, tail, this.deps.timers.now(), m, this.deps.shellNames);
-    if (rec.shell === "rig") {
-      if (rec.state === "running") this.rigShown.set(rec.id, { tail, at: this.deps.timers.now() });
-      else this.rigShown.delete(rec.id);
-      this.deps.machineCard?.(rec, text, rec.state === "ended", kind, rec.state === "pending" ? buttons : undefined);
-    } else if (rec.sessionId !== undefined) this.deps.card(rec.sessionId, `exec-${rec.id}`, text, rec.state === "ended", kind, buttons);
-  }
-}
-
-function mb(bytes: number, m: Messages): string {
-  return `${Math.round(bytes / BYTES_PER_MB)} ${m.unitMegabyte}`;
-}
-
-// The note, then the last `bytes` of the file, from a character's start.
-function copyTail(src: string, dest: string, note: Buffer, bytes: number): void {
-  const size = statSync(src).size;
-  const inFd = openSync(src, "r");
-  const outFd = openSync(dest, "w");
-  try {
-    writeSync(outFd, note);
-    let pos = Math.max(0, size - bytes);
-    const buf = Buffer.alloc(COPY_CHUNK);
-    let first = true;
-    while (pos < size) {
-      const n = readSync(inFd, buf, 0, Math.min(COPY_CHUNK, size - pos), pos);
-      if (n <= 0) break;
-      let start = 0;
-      if (first) {
-        while (start < n && ((buf[start] ?? 0) & UTF8_CONT_MASK) === UTF8_CONT) start++;
-        first = false;
-      }
-      writeSync(outFd, buf, start, n - start);
-      pos += n;
+    const text = execCardText(rec, tail, now, m, this.deps.shellNames);
+    if (live) {
+      live.shownTail = tail;
+      live.shownAt = now;
+      live.changed = false;
     }
-  } finally {
-    closeSync(inFd);
-    closeSync(outFd);
+    if (rec.shell === "rig") this.deps.machineCard?.(rec, text, rec.state === "ended", kind, rec.state === "pending" ? buttons : undefined);
+    else if (rec.sessionId !== undefined) this.deps.card(rec.sessionId, `exec-${rec.id}`, text, rec.state === "ended", kind, buttons);
   }
+}
+
+function newLive(next: number): Live {
+  return { text: "", whole: next === 0, size: 0, next, polling: false, changed: false };
+}
+
+// rig's end of a run as the hub keeps it. An exit with no code (the process was killed) and a run rig lost are lost.
+function runEnd(status: ExecStatus, now: number): RunEnd {
+  const end = status.end;
+  if (!end) return { kind: "lost", at: now, reason: LOST_PROCESS_GONE };
+  const parsed = Date.parse(end.at);
+  const at = Number.isNaN(parsed) ? now : parsed;
+  if (end.kind === "stopped") return { kind: "stopped", at };
+  if (end.kind === "exit" && typeof end.code === "number") {
+    return end.reason === undefined ? { kind: "exit", code: end.code, at } : { kind: "exit", code: end.code, at, reason: end.reason };
+  }
+  return { kind: "lost", at, reason: end.reason ?? LOST_PROCESS_GONE };
+}
+
+function execErrorText(error: ExecError, m: Messages): string {
+  return error.kind === "cwdUnsafe" ? m.execCwdUnsafe : rigErrorText(error, m);
+}
+
+// A size in megabytes, to one decimal.
+function mb(bytes: number, m: Messages): string {
+  return `${Number((bytes / BYTES_PER_MB).toFixed(SIZE_DECIMALS))} ${m.unitMegabyte}`;
+}
+
+// One log line as a terminal would leave it.
+function screenLine(l: string): string {
+  const line = l.endsWith("\r") ? l.slice(0, -1) : l;
+  return line.slice(line.lastIndexOf("\r") + 1);
 }
 
 // The log's lines as a terminal would leave them: a progress bar's line is
 // what follows its last carriage return.
 function screenLines(text: string): string[] {
-  const lines = text.split("\n").map(l => {
-    const line = l.endsWith("\r") ? l.slice(0, -1) : l;
-    return line.slice(line.lastIndexOf("\r") + 1);
-  });
+  const lines = text.split("\n").map(screenLine);
   while (lines.length > 0 && lines.at(-1) === "") lines.pop();
   return lines;
-}
-
-function readEnd(path: string, bytes: number): { text: string; whole: boolean } | undefined {
-  let fd: number;
-  try {
-    fd = openSync(path, "r");
-  } catch {
-    return undefined;
-  }
-  try {
-    const size = statSync(path).size;
-    const n = Math.min(size, bytes);
-    const buf = Buffer.alloc(n);
-    const read = readSync(fd, buf, 0, n, size - n);
-    return { text: buf.subarray(0, read).toString("utf8"), whole: n === size };
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function fileSize(path: string): number {
-  try {
-    return statSync(path).size;
-  } catch {
-    return 0;
-  }
-}
-
-// The last `bytes` of a file as lines. wholeLines: only the lines that ended with "\n", so a line still
-// being written (a rig file) is never shown cut.
-function readLines(path: string, bytes: number, wholeLines: boolean): Shown | undefined {
-  const end = readEnd(path, bytes);
-  if (!end) return undefined;
-  const text = wholeLines ? end.text.slice(0, end.text.lastIndexOf("\n") + 1) : end.text;
-  const lines = screenLines(text);
-  // A read from the middle starts in the middle of a line.
-  if (!end.whole) lines.shift();
-  return { lines, whole: end.whole };
 }
 
 // The card's text: the last lines, each cut to the width.
@@ -597,10 +639,6 @@ function tailText(shown: Shown, lines: number): string {
     .slice(-lines)
     .map(l => (l.length > LINE_MAX ? `${l.slice(0, LINE_MAX - 1)}…` : l))
     .join("\n");
-}
-
-export function logTail(path: string, lines: number): string {
-  return tailText(readLines(path, TAIL_BYTES, false) ?? { lines: [], whole: true }, lines);
 }
 
 // Whether the card's tail already shows everything.
@@ -637,19 +675,17 @@ function inlineCode(text: string): string {
 }
 
 // Why a run was lost, in the catalog's language; a reason that is not a known
-// code (a file saved by an older hub holds text) is shown as it is.
-function lostReason(end: NonNullable<ExecRecord["end"]>, m: Messages): string {
+// code (rig's own text) is shown as it is.
+function lostReason(end: RunEnd, m: Messages): string {
   switch (end.reason) {
     case undefined:
     case LOST_PROCESS_GONE: return m.execLostProcessGone;
-    case LOST_NO_RIG_COMMAND: return m.execLostNoRigCommand;
-    case LOST_SAVE_FAILED: return m.execLostSaveFailed;
     case LOST_START_FAILED: return m.execLostNotStarted({ error: end.detail ?? "" });
     default: return end.reason;
   }
 }
 
-function outcome(rec: ExecRecord, m: Messages): string {
+function outcome(rec: ExecRun, m: Messages): string {
   const end = rec.end;
   if (!end) return "";
   if (end.kind === "stopped") return m.execOutcomeStopped;
@@ -657,13 +693,17 @@ function outcome(rec: ExecRecord, m: Messages): string {
   return end.code === 0 ? m.execOutcomeOk : m.execOutcomeCode({ code: end.code });
 }
 
-export function execCardText(rec: ExecRecord, tail: string, now: number, m: Messages, names = SHELL_NAMES): string {
+function shellName(rec: ExecRun, names: Record<ExecShellName, string>): string {
+  return rec.shell === "rig" ? "rig" : names[rec.shell];
+}
+
+export function execCardText(rec: ExecRun, tail: string, now: number, m: Messages, names = PLATFORM.shellNames): string {
   let head: string;
   if (rec.state === "pending") {
     const minutes = Math.round((now - (rec.sentAt ?? now)) / MS_PER_MINUTE);
-    head = m.execPending({ minutes });
+    head = rec.startUnknown === true ? m.execStartUnknown : m.execPending({ minutes });
   } else if (rec.state === "running") {
-    head = `▶ ${rec.shell === "rig" ? "rig" : names[rec.shell]} · ${duration(now - (rec.startedAt ?? now), m)}`;
+    head = `▶ ${shellName(rec, names)} · ${duration(now - (rec.startedAt ?? now), m)}`;
   } else {
     head = `${outcome(rec, m)} · ${duration((rec.end?.at ?? now) - (rec.startedAt ?? now), m)}`;
   }
@@ -676,14 +716,15 @@ export function execCardText(rec: ExecRecord, tail: string, now: number, m: Mess
 }
 
 // The report to the agent: always English, whatever the hub's language.
-export function execReportText(rec: ExecRecord, tail: string, logPath: string, names = SHELL_NAMES): string {
+export function execReportText(rec: ExecRun, tail: string, names = PLATFORM.shellNames): string {
   const m = catalogOf("en");
   const took = duration((rec.end?.at ?? 0) - (rec.startedAt ?? rec.end?.at ?? 0), m);
   return [
     `The topic command has ended: ${outcome(rec, m)} in ${took}.`,
-    `Shell: ${rec.shell === "rig" ? "rig" : names[rec.shell]}, folder: ${rec.cwd}`,
+    // A rig mutation runs in no folder of its own.
+    rec.cwd === undefined ? `Shell: ${shellName(rec, names)}` : `Shell: ${shellName(rec, names)}, folder: ${rec.cwd}`,
     `Command: ${rec.text}`,
-    `Full log: ${logPath}`,
+    ...(rec.runId === undefined ? [] : [`Full log: rig exec status ${rec.runId} --from 0`]),
     tail ? `Last ${EXEC_AGENT_LINES} lines:\n${tail}` : "There was no output.",
   ].join("\n");
 }

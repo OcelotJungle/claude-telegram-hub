@@ -5,7 +5,7 @@ import { join, resolve } from "path";
 import { PLATFORM } from "../src/shared/platform.ts";
 import { z } from "zod";
 import { QUESTION_DEADLINE_MS } from "../src/hook/question-limits.ts";
-import { isAlive } from "../src/hub/exec-runner.ts";
+import { isAlive } from "../src/shared/process-alive.ts";
 import { Hub } from "../src/hub/hub.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { freePort, memLogger, must, tempDir, waitFor, wsClient } from "./helpers.ts";

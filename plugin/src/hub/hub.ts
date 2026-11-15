@@ -14,7 +14,7 @@ import type { RichMessage } from "./rich.ts";
 import type { HubCommand } from "./router.ts";
 import type { SessionOutcome } from "./session-outcome.ts";
 import type { VideoTools } from "./video.ts";
-import type { ExecShell } from "./exec-shell.ts";
+import type { ExecClient } from "./rig-exec.ts";
 import type { MessageKind } from "../shared/notification.ts";
 import type { Platform } from "../shared/platform.ts";
 import type { MachineCommand, RigInvocation, RigOutput, RigProgress, RigResult } from "./rig.ts";
@@ -52,9 +52,7 @@ import { answerLine, CANCEL_REASON, checkedLabels, parsePollPress, POLL_PREFIX, 
 import { richPieces } from "./rich-out.ts";
 import { DEFAULT_VIDEO_TOOLS, probeVideo, thumbPath } from "./video.ts";
 import { EXEC_CARD_MS, EXEC_CHECK_MS, EXEC_MAX_AGE_MS, Execs } from "./exec.ts";
-import { freshEnv } from "./exec-env.ts";
-import { isAlive, killTree, spawnRunner } from "./exec-runner.ts";
-import { findPowershell } from "./exec-shell.ts";
+import { RigExec } from "./rig-exec.ts";
 import { formatPermission } from "./format-permission.ts";
 import { PLATFORM } from "../shared/platform.ts";
 import { realTimers } from "../shared/timers.ts";
@@ -227,27 +225,24 @@ export type HubOptions = {
   // The clock and every timer of the hub; tests drive them by hand.
   timers?: Timers;
   readyDelayMs?: number;
-  // How an exec run's process is told to be alive.
-  isAlive?(pid: number): boolean;
   // A window in this config dir runs on the default login, whose account is
   // asked of defaultAccount (cswap by default).
   defaultConfigDir?: string;
   defaultAccount?(): Promise<string | undefined>;
   platform?: Platform;
   accountsAvailable?(): boolean;
-  // Topic commands (/exec, /cmd, /bash): their logs and runs; without them
-  // the commands answer that they are not set up.
-  execDir?: string;
-  execsFile?: string;
+  // Topic commands (/pwsh, /cmd, /bash) and rig mutations run on `rig exec`;
+  // this file maps rig's run ids to Telegram cards. Without it the commands
+  // answer that they are not set up.
+  execRunsFile?: string;
   execCheckMs?: number;
   execCardMs?: number;
   execMaxAgeMs?: number;
   execGraceMs?: number;
   // The largest log file sent whole; Telegram's limit by default.
   execFileLimit?: number;
-  // Starts a command's runner; the detached exec-runner by default.
-  spawnRunner?(specFile: string): number;
-  execEnv?(): Record<string, string>;
+  // The `rig exec` client; the real one (through the rig runner) by default.
+  execClient?: ExecClient;
   log: Logger;
   rigDir?: string;
   repository?: string;
@@ -444,40 +439,35 @@ export class Hub {
         });
       }
     }
-    if (opts.execDir && opts.execsFile) {
+    if (opts.execRunsFile) {
       this.execs = new Execs({
-        dir: opts.execDir,
-        file: opts.execsFile,
-        shells: () => ({ powershell: findPowershell(), bash: this.bashPath() }),
+        file: opts.execRunsFile,
+        rig: opts.execClient ?? new RigExec(this.rig, (opts.platform ?? PLATFORM).windows),
         shellNames: (opts.platform ?? PLATFORM).shellNames,
-        env: opts.execEnv ?? (() => freshEnv(this.log)),
-        spawnRunner: opts.spawnRunner ?? spawnRunner,
-        alive: opts.isAlive ?? isAlive,
-        kill: killTree,
         card: (sid, cardId, markdown, final, kind, buttons) => { const f = toTelegram(markdown); this.upsertCard(sid, cardId, f.text, f.entities, final, buttons, false, undefined, kind); },
-        notice: (sid, text, kind) => this.notice(sid, text, kind),
+        spawn: work => this.spawn(work),
         sendFile: (sid, path, name, kind) => this.sendExecFile(sid, path, name, kind),
+        ...(opts.execFileLimit ? { fileLimit: opts.execFileLimit } : {}),
         report: (sid, content, meta, onSent) => this.reportExec(sid, { content, meta, onSent }),
         timers: this.timers,
         checkMs: opts.execCheckMs ?? EXEC_CHECK_MS,
         cardMs: opts.execCardMs ?? EXEC_CARD_MS,
         maxAgeMs: opts.execMaxAgeMs ?? EXEC_MAX_AGE_MS,
-        ...(opts.execFileLimit ? { fileLimit: opts.execFileLimit } : {}),
         hasWindow: sid => this.connOf(sid) !== undefined,
         graceMs: opts.execGraceMs ?? EXEC_GRACE_MS,
         log: opts.log,
         messages: () => this.m(),
-        unavailable: shell => shell === "powershell" ? this.rig.unavailable("pwsh") : shell === "cmd" ? this.rig.unavailable("cmd") : undefined,
+        unavailable: shell => shell === "pwsh" || shell === "cmd" ? this.rig.unavailable(shell) : undefined,
         machineCard: (record, text, final, kind, buttons) => {
           if (record.destination) this.machineOutbox.post(`rig-${record.id}`, record.destination, text, !notifies(kind), buttons, true);
           if (record.destination && final && kind !== "info") this.machineOutbox.post(`rig-failed-${record.id}`, record.destination, text.split("\n").slice(0, 2).join("\n"), false);
           if (this.botReady && opts.api) this.spawn(this.machineOutbox.flush(opts.api));
         },
-        machineFile: (record, path, kind) => {
+        machineFile: (record, path, name, kind) => {
           const id = `rig-log-${record.id}`;
-          // A restore offers the log again: a copy for a log already queued or sent would stay on disk.
+          // A log already queued or sent is not written again.
           if (record.destination && !this.machineOutbox.known(id)) {
-            const copy = join(opts.filesDir, "rig", `${record.id}.log`);
+            const copy = join(opts.filesDir, "rig", name);
             mkdirSync(dirname(copy), { recursive: true });
             copyFileSync(path, copy);
             this.machineOutbox.post(id, record.destination, "", !notifies(kind), undefined, false, copy);
@@ -2665,7 +2655,7 @@ ${msg.text}`);
       this.machineOutbox.post(`rig-error-${destination.chatId}-${message.message_id}`, destination, invocation.ok ? this.m().execNotSet : rigErrorText(invocation.error, this.m()), false);
       return;
     }
-    this.execs.machine(invocation.value, `rig ${args.join(" ")}`, this.opts.repository ?? join(import.meta.dir, "..", "..", ".."), destination, message.message_id, sentAt);
+    this.execs.machine(args, `rig ${args.join(" ")}`, destination, message.message_id, sentAt);
     this.machineOutbox.markHandled(id);
   }
 
@@ -2704,10 +2694,6 @@ ${msg.text}`);
     }
   }
 
-  private bashPath(): string {
-    return this.opts.config().exec?.bash ?? (this.opts.platform ?? PLATFORM).bash;
-  }
-
   private hasAccounts(): boolean {
     return this.opts.accountsAvailable?.() ?? (Bun.which((this.opts.platform ?? PLATFORM).cswapName) !== null);
   }
@@ -2725,20 +2711,20 @@ ${msg.text}`);
     if (!text) return this.enqueue(sessionId, `hub-${randomUUID()}`, this.m().execUsage({ name }), notifies("info"));
     // cmd /c runs only up to the first line break.
     if (name === "cmd" && /[\r\n]/.test(text)) return this.notice(sessionId, this.m().execCmdOneLine, "error");
-    const bash = this.bashPath();
-    if (name === "bash" && !Bun.which(bash)) return this.notice(sessionId, this.m().execShellNotFound({ shell: platform.bashName, path: bash }), "error");
     const rec = this.store.get(sessionId);
     const cwd = rec?.cwd ?? (this.opts.projectsDir ? sessionCwd(sessionId, this.opts.projectsDir) : undefined);
     if (!cwd) return this.notice(sessionId, this.m().execNoCwd, "warning");
-    const shell: ExecShell = name === "pwsh" ? "powershell" : name;
     this.log.info(`/${name} for session ${sessionId}, message ${m.message_id}`);
-    this.execs.command(sessionId, shell, text, cwd, { chatId: String(m.chat.id), messageId: m.message_id, date: m.date });
+    this.execs.command(sessionId, name, text, cwd, { chatId: String(m.chat.id), messageId: m.message_id, date: m.date });
   }
 
   private async onExecPress(api: TelegramApi, press: { id: string; data: string; fromId: string }): Promise<void> {
     const m = press.data.match(/^x:(\w+):(stop|run)$/);
     const action = m?.[2] === "stop" || m?.[2] === "run" ? m[2] : undefined;
-    const answer = !m?.[1] || !action ? this.m().execNotFound : this.execs ? this.execs.press(m[1], action) : this.m().execNotSet;
+    // A stop is a rig call: tracked, so the hub is busy until rig has answered.
+    const pressed = !m?.[1] || !action ? Promise.resolve(this.m().execNotFound) : this.execs ? this.execs.press(m[1], action) : Promise.resolve(this.m().execNotSet);
+    this.spawn(pressed);
+    const answer = await pressed;
     if (m?.[1] && action) this.log.info(`exec ${m[1]}: ${action} pressed by ${press.fromId}: ${answer}`);
     await api.answerCallbackQuery(press.id, answer).catch(e => this.log.warn(`answering a button press failed: ${e}`));
   }

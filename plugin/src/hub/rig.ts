@@ -41,7 +41,8 @@ export const statusSchema = z.strictObject({
 });
 export type RigFeature = z.infer<typeof featureSchema>;
 export type RigStatus = z.infer<typeof statusSchema>;
-export type RigInvocation = { argv: string[]; verbatim: boolean };
+// stdin: text written to the child's standard input before it is closed (rig exec start reads a command from it).
+export type RigInvocation = { argv: string[]; verbatim: boolean; stdin?: string };
 export type RigResult<T, E = RigError> = { ok: true; value: T } | { ok: false; error: E };
 // Why a rig call failed, as data: the text is made from it by the catalog current when it is shown.
 export type RigError =
@@ -56,6 +57,8 @@ export type RigError =
   | { kind: "badSession" };
 export type RigOutput = { code: number; stdout: string; stderr: string };
 export type RigProgress = (line: string) => void;
+// stdin: text the command reads; limit: its own time limit; progress: each stderr line as it arrives.
+export type RigQueryOptions = { stdin?: string; limit?: number; progress?: RigProgress };
 export type FeatureState = { kind: "missing" } | { kind: "loading" } | { kind: "ready"; features: RigFeature[] } | { kind: "failed"; error: RigError };
 export type MachineCommand = { name: "rig"; args: string };
 export type RigAction = { kind: "features" } | { kind: "status" } | { kind: "mutate"; args: string[]; confirm: boolean };
@@ -127,7 +130,10 @@ export function runRig(invocation: RigInvocation, signal?: AbortSignal, progress
   return new Promise(resolve => {
     const [file, ...args] = invocation.argv;
     if (!file) return resolve({ code: 1, stdout: "", stderr: "empty rig invocation" });
-    const child = spawn(file, args, { windowsHide: true, windowsVerbatimArguments: invocation.verbatim, signal, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(file, args, { windowsHide: true, windowsVerbatimArguments: invocation.verbatim, signal, stdio: ["pipe", "pipe", "pipe"] });
+    // A child that exits before reading its input closes the pipe: that is not an error of this call.
+    child.stdin.on("error", () => undefined);
+    child.stdin.end(invocation.stdin);
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     const decoder = new StringDecoder("utf8");
@@ -162,12 +168,13 @@ export class Rig {
     if (deps.find()) this.state = { kind: "loading" };
   }
 
-  invocation(args: string[]): RigResult<RigInvocation> {
+  invocation(args: string[], stdin?: string): RigResult<RigInvocation> {
     const file = this.deps.find();
     if (!file) return { ok: false, error: { kind: "missing" } };
     // cmd.exe expands %NAME% even inside quotes, so such a path cannot be passed safely.
     if (this.deps.platform.windows && file.includes("%")) return { ok: false, error: { kind: "percentPath", file } };
-    return { ok: true, value: rigInvocation(file, args, this.deps.platform) };
+    const invocation = rigInvocation(file, args, this.deps.platform);
+    return { ok: true, value: stdin === undefined ? invocation : { ...invocation, stdin } };
   }
 
   // A query that runs longer than the limit is aborted and counts as a failure.
@@ -184,8 +191,10 @@ export class Rig {
     finally { if (timer !== undefined) this.deps.clearTimer(timer); }
   }
 
-  private async query<T>(args: string[], schema: z.ZodType<T>, limit = RIG_QUERY_LIMIT_MS, progress?: RigProgress): Promise<RigResult<T>> {
-    const invocation = this.invocation(args);
+  // One rig call whose stdout is JSON: the parsed value, or why it failed. stdin is the text a command reads.
+  async query<T>(args: string[], schema: z.ZodType<T>, options: RigQueryOptions = {}): Promise<RigResult<T>> {
+    const { stdin, limit = RIG_QUERY_LIMIT_MS, progress } = options;
+    const invocation = this.invocation(args, stdin);
     if (!invocation.ok) return invocation;
     try {
       const output = await this.limited(invocation.value, limit, progress);
@@ -226,7 +235,7 @@ export class Rig {
     const progress = (line: string) => {
       if (!waiting && isSessionWaiting(line)) { waiting = true; onWaiting?.(); }
     };
-    return this.query(["session", ...args.slice(0, 1), sessionId, ...args.slice(1)], schema, RIG_SESSION_LIMIT_MS, progress);
+    return this.query(["session", ...args.slice(0, 1), sessionId, ...args.slice(1)], schema, { limit: RIG_SESSION_LIMIT_MS, progress });
   }
 
   compact(sessionId: string, instructions?: string, onWaiting?: () => void): Promise<RigResult<RigCompact>> {
