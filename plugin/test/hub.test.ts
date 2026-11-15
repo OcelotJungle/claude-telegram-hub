@@ -3266,6 +3266,16 @@ describe("topic commands", () => {
     await waitFor(() => shown().find(t => t.includes("no shell of that name here")), WAIT_MS, "rig's message");
   });
 
+  test("a /pwsh goes to rig even when the feature list failed to load: whether it may run is rig's answer", async () => {
+    const x = new FakeExec();
+    await startHub({ execClient: x, findRig: () => "rig-file", runRig: async () => ({ code: 1, stdout: "", stderr: "features are broken" }) });
+    await enabled(SID);
+    fake.pushUpdate(msg("/pwsh ls"));
+    await waitFor(() => x.starts.length > 0 || undefined, WAIT_MS, "the start reaches rig");
+    expect(x.starts).toEqual([{ shell: "pwsh", cwd: CWD, text: "ls" }]);
+    expect(shown().some(t => t.includes("features are broken"))).toBe(false);
+  });
+
   test("a stop button stops the rig run and ends the card", async () => {
     const x = new FakeExec();
     await startHub({ execClient: x });
@@ -3314,6 +3324,20 @@ describe("topic commands", () => {
     expect(x.starts).toEqual([{ shell: "pwsh", cwd: CWD, text: "npm run migrate" }]);
     const running = await waitFor(() => fake.callsOf("editMessageText").find(c => String(c.text).startsWith("▶ PowerShell")), WAIT_MS, "running card");
     expect(buttonsOf(running).some(d => d.endsWith(":stop"))).toBe(true);
+  });
+
+  test("the run button of a disabled shell reaches rig and shows rig's refusal, not a hub-side one", async () => {
+    const x = new FakeExec();
+    await startHub({ execClient: x, findRig: () => "rig-file", runRig: async () => ({ code: 1, stdout: "", stderr: "features are broken" }) });
+    await enabled(SID);
+    fake.pushUpdate(msg("/pwsh npm run migrate", { date: Math.floor(Date.now() / MS_PER_S) - OLD_COMMAND_S }));
+    const card = await waitFor(() => fake.callsOf("sendMessage").find(c => buttonsOf(c).some(d => d.endsWith(":run"))), WAIT_MS, "pending card");
+    const data = must(buttonsOf(card).find(d => d.endsWith(":run")), "run button");
+    x.startError = { kind: "rig", code: "exec-unavailable", message: "The pwsh feature is off; run: rig feature pwsh enable" };
+    fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
+    await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Starting"), WAIT_MS, "answer");
+    await waitFor(() => shown().find(t => t.includes("The pwsh feature is off; run: rig feature pwsh enable")), WAIT_MS, "rig's message");
+    expect(x.starts).toHaveLength(1);
   });
 
   test("multi-line /cmd is refused", async () => {

@@ -38,7 +38,7 @@ Container files and the remaining checks: [docker/ubuntu-24.04](docker/ubuntu-24
 
 ### rig commands
 
-The hub forwards messages and runs shell commands without rig. `/info` and session actions (`/compact`, `/rename`, `/stop`, `/cleanup`, `/run`, `/mode`) require rig and answer that it is not installed when it is missing. Windows shells work as before in this case.
+The hub forwards messages without rig. `/info`, the session actions (`/compact`, `/rename`, `/stop`, `/cleanup`, `/run`, `/mode`) and the shell commands `/pwsh`, `/cmd` and `/bash` run only through rig (`rig session`, `rig exec`); when rig is missing they answer that it is not installed.
 The hub looks for `rig` in PATH and `~/.local/bin` (`rig.cmd` on Windows).
 
 - `/rig status` — machine state from `rig status`.
@@ -58,10 +58,10 @@ and has no timeout. A running command survives a hub restart.
 
 `/rig feature telegram disable` needs a button confirmation from a user in `allowFrom`.
 Before it runs, the hub delivers the command that turns it back on: `rig feature telegram enable` on the server.
-On Windows, `/pwsh` and `/cmd` are shown only when the feature is on and available.
-If reading the features fails at start, they are closed. If it fails later, the
+On Windows, `/pwsh` and `/cmd` are shown in the bot command menu only when the feature is on and available.
+If reading the features fails at start, they are hidden from the menu. If it fails later, the
 last known state is kept. `/bash` does not depend on these two features.
-Their unavailable reply tells the user to turn them on with `/rig feature <name> enable`.
+The menu is only a display: the hub does not refuse a shell command itself. Every start goes to `rig exec`, and when the shell may not run (its feature is off, or the platform has no such shell) rig's own refusal is shown as it is.
 
 rig events from `~/.agent-rig/events.jsonl` arrive in General after the hub starts,
 including those collected while it was stopped. `info` is silent. `warn` and `error` come with a sound.
@@ -163,7 +163,7 @@ This rule does not change the sound of the agent's text or of the end of its tur
     limit (Zhipu) is not shown. A block rig could not read shows "unavailable" with rig's reason. All blocks show the
     age of the data from 5 minutes. Then the current context and the autocompact threshold, for example `36/250k`.
     Without a known threshold, only the size is shown.
-  - `/compact [instructions]` — call `rig session compact`. The result shows the tokens before and after compaction, or the hook's skip reason. Instructions are passed to rig unchanged; numeric arguments are instructions too.
+  - `/compact [instructions]` — call `rig session compact`. The result shows the tokens before and after compaction, or the hook's skip reason. Instructions are passed to rig unchanged. `/compact <N>` (a token count such as `120000`, `333k` or `1.5m`, any case) and `/compact auto` set the session's autocompact window through `rig session autocompact` instead; a count that does not round to a whole number of at least 1 is refused with a notice and no rig call. Any other text is instructions.
   - `/rename <name>` — call `rig session rename`. An empty name shows the usage text. The topic gets its new title when Claude Code writes the session title, through the usual title watcher.
 - `/run` — call `rig session run` for the topic's session; `/run N` selects cswap account N. A message to a stopped session also starts it through rig, and messages wait for the window to connect.
 - `/stop` — call `rig session stop`. Rig compacts above 120k context tokens before stopping and returns that outcome. A skip or compact error is shown along with the stop result. An already stopped session is reported without starting it.

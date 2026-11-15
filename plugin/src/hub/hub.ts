@@ -455,7 +455,6 @@ export class Hub {
         graceMs: opts.execGraceMs ?? EXEC_GRACE_MS,
         log: opts.log,
         messages: () => this.m(),
-        unavailable: shell => shell === "pwsh" || shell === "cmd" ? this.rig.unavailable(shell) : undefined,
         machineCard: (record, text, final, kind, buttons) => {
           if (record.destination) this.machineOutbox.post(`rig-${record.id}`, record.destination, text, !notifies(kind), buttons, true);
           if (record.destination && final && kind !== "info") this.machineOutbox.post(`rig-failed-${record.id}`, record.destination, text.split("\n").slice(0, 2).join("\n"), false);
@@ -2720,12 +2719,7 @@ ${msg.text}`);
   // /pwsh, /cmd or /bash: the text runs in the session's folder, with or
   // without its window.
   private onExecCommand(sessionId: string, name: "pwsh" | "cmd" | "bash", text: string, m: Message): void {
-    const platform = this.opts.platform ?? PLATFORM;
-    if (name !== "bash" && !platform.windows) return this.notice(sessionId, this.m().commandUnavailable({ name }), "warning");
-    if (name !== "bash") {
-      const why = this.rig.unavailable(name);
-      if (why) return this.notice(sessionId, why, "warning");
-    }
+    // Whether the shell may run is rig's answer: the start goes to rig and its refusal is shown as it is.
     if (!this.execs) return this.notice(sessionId, this.m().execNotSet, "error");
     if (!text) return this.enqueue(sessionId, `hub-${randomUUID()}`, this.m().execUsage({ name }), notifies("info"));
     // cmd /c runs only up to the first line break.

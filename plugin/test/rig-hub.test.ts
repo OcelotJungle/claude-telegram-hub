@@ -555,29 +555,6 @@ test("a fresh disable confirmation press starts rig", async () => {
   expect(f.exec.rigStarts).toEqual([["feature", "telegram", "disable"]]);
 });
 
-test("the run button of a disabled /pwsh asks the feature state again at the press", async () => {
-  const f = fixture({ platform: platformFor("win32") });
-  const features = (enabled: boolean): RigOutput => ({ code: 0, stderr: "",
-    stdout: JSON.stringify({ features: [{ name: "pwsh", description: "PowerShell", enabled, platformAllowed: true }] }) });
-  f.output(features(true));
-  await f.hub["rig"].refresh();
-  await f.clock.advance(EXEC_MAX_AGE_MS + 1);
-  await f.hub["handleUpdate"](f.api, topicMsg({ chatId: GROUP, fromId: USER, threadId: TOPIC, text: "/pwsh echo invented", extra: OLD_MESSAGE }));
-  const pending = must(must(f.hub["execs"])["recs"][0]);
-  expect(pending.state).toBe("pending");
-  f.output(features(false));
-  await f.hub["rig"].refresh();
-  const press = () => f.hub["handleUpdate"](f.api, buttonPress({ chatId: GROUP, fromId: USER, messageId: 1, data: `x:${pending.id}:run` }));
-  await press();
-  expect(f.answers.at(-1)).toContain("/rig feature pwsh enable");
-  expect(f.exec.starts).toEqual([]);
-  expect(pending.state).toBe("pending");
-  f.output(features(true));
-  await f.hub["rig"].refresh();
-  await press();
-  expect(f.exec.starts).toHaveLength(1);
-});
-
 test("pruning old exec records cannot repeat an already handled machine command", async () => {
   const f = fixture();
   await f.update("/rig update");

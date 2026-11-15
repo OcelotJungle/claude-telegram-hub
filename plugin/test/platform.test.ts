@@ -56,7 +56,7 @@ test("without cswap /run uses plain launch and /run 2 explains missing accounts"
   expect(notices).toEqual([en.noAccounts]);
 });
 
-test("Linux shell commands stay unavailable even with no exec manager", () => {
+test("Linux shell commands are not refused by the hub: without an exec manager they say so, rig decides otherwise", () => {
   const dir = tempDir();
   dirs.push(dir);
   const notices: string[] = [];
@@ -70,5 +70,5 @@ test("Linux shell commands stay unavailable even with no exec manager", () => {
   const message: Message = { message_id: MESSAGE, date: 0, chat: { id: CHAT, type: "supergroup", title: "Test" } };
   hub["onExecCommand"]("session", "pwsh", "echo hello", message);
   hub["onExecCommand"]("session", "cmd", "echo hello", message);
-  expect(notices).toEqual([en.commandUnavailable({ name: "pwsh" }), en.commandUnavailable({ name: "cmd" })]);
+  expect(notices).toEqual([en.execNotSet, en.execNotSet]);
 });

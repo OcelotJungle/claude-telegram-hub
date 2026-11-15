@@ -94,8 +94,6 @@ export type ExecDeps = {
   // that ended meanwhile go on without them; none when not given.
   graceMs?: number;
   log: Logger;
-  // Why a shell may not start now (its feature is off), or undefined; asked again when a stale Run button is pressed.
-  unavailable?(shell: ExecRun["shell"]): string | undefined;
   machineCard?(run: ExecRun, text: string, final: boolean, kind: MessageKind, buttons?: Button[][]): void;
   // As sendFile, for a rig run.
   machineFile?(run: ExecRun, path: string, name: string, kind: MessageKind): void;
@@ -248,9 +246,6 @@ export class Execs {
     if (rec.state === "ended") return m.execAlreadyEnded;
     if (action === "run") {
       if (rec.state === "running") return m.execAlreadyRunning;
-      // The button may be old: the feature could have been switched off since the card was shown.
-      const why = this.deps.unavailable?.(rec.shell);
-      if (why) return why;
       this.launch(rec);
       return m.execStarting;
     }

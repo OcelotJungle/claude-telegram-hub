@@ -78,7 +78,7 @@ afterEach(() => {
 // Fake deps over a FakeExec: rig's side is played by the test (it writes the run's log and ends it), the hub's
 // side (cards, files, reports) is recorded. dir / fake: reuse those of an earlier setup, for a restarted hub.
 // windows: sessions with a window; graceMs: the start's grace, none by default.
-function setup(o: { messages?: () => Messages; dir?: string; fake?: FakeExec; sendOnSent?: boolean; windows?: string[]; graceMs?: number; fileLimit?: number; unavailable?: ExecDeps["unavailable"] } = {}) {
+function setup(o: { messages?: () => Messages; dir?: string; fake?: FakeExec; sendOnSent?: boolean; windows?: string[]; graceMs?: number; fileLimit?: number; } = {}) {
   const dir = o.dir ?? tempDir("telegramhub-exec-");
   if (o.dir === undefined) dirs.push(dir);
   const fake = o.fake ?? new FakeExec();
@@ -130,7 +130,6 @@ function setup(o: { messages?: () => Messages; dir?: string; fake?: FakeExec; se
     graceMs: o.graceMs,
     ...(o.fileLimit !== undefined ? { fileLimit: o.fileLimit } : {}),
     log,
-    unavailable: o.unavailable,
   };
   const execs = new Execs(deps);
   managers.push(execs);
@@ -432,19 +431,15 @@ describe("the Stop and Run buttons", () => {
     expect(t.fake.starts).toHaveLength(1);
   });
 
-  test("Run asks again whether the shell may start: its feature could have been switched off", async () => {
-    let why: string | undefined;
-    const t = setup({ unavailable: () => why });
+  test("Run of a command whose shell is now off shows rig's refusal as it is, with no hub-side check", async () => {
+    const t = setup();
     t.execs.command(SID, "pwsh", "x", "C:\\proj", msg(1, 3 * MIN_MS));
     const id = idOf(t.lastCard().cardId);
-    why = "The pwsh feature is off";
-    expect(await t.execs.press(id, "run")).toBe("The pwsh feature is off");
-    await t.settle();
-    expect(t.fake.starts).toEqual([]);
-    why = undefined;
+    t.fake.startError = rigError("exec-unavailable", "The pwsh feature is off; run: rig feature pwsh enable");
     expect(await t.execs.press(id, "run")).toBe(en.execStarting);
     await t.settle();
     expect(t.fake.starts).toHaveLength(1);
+    expect(t.lastCard().markdown).toStartWith(en.execOutcomeFailed({ error: "The pwsh feature is off; run: rig feature pwsh enable" }));
   });
 
   test("a failed start of a stale command ends it; a button of the old store finds nothing", async () => {
