@@ -28,31 +28,9 @@ The install puts a `service-managed` file in `~/.claude/channels/telegram-hub/`.
 only wait for the hub and connect to it. They do not start the hub themselves (the service keeps it running and restarts it).
 If the service is already installed, reinstall it with the same script. Otherwise the file will not exist.
 
-Example `launch` in `config.json` for plain Claude without cswap:
-
-```json
-{
-  "launch": {
-    "command": ["tmux", "new-session", "-d", "-s", "claude-{session}", "-c", "{cwd}", "--", "claude", "--dangerously-load-development-channels", "plugin:telegram-hub@telegram-hub", "--resume", "{session}", "{mode}"],
-    "timeoutSec": 90
-  }
-}
-```
-
-Add this section to the existing config that has `groupId` and `allowFrom`. One tmux session
-matches one Claude window and stays alive after an SSH disconnect or a hub restart.
-The name to attach to is `claude-<session id>` (`tmux attach -t claude-<session id>`).
-Claude may ask you to confirm the channel right in tmux. It is not verified on Linux whether the question repeats on every start
-or only on the first one (this needs a check with a logged-in Claude). While the session
-waits for an answer, it does not connect to the hub. After `timeoutSec`, the topic says that the session may be waiting
-for confirmation in tmux and names the command `tmux attach -t claude-<session id>`. Answer the question there.
-You can remove the question completely with managed settings (see the section "Optional: remove the channel question
-at start" below).
-If the launch command fails in the first two seconds, the launch counts as failed. The topic gets
-"⚠️ Cannot start the session: <reason>" with the command's error text, held messages are kept, and the hub does not wait for
-`timeoutSec`. If tmux answers `duplicate session`, the session is already alive in tmux (most likely
-it waits for an answer in a dialog), and the topic asks you to attach with `tmux attach -t claude-<session id>`.
-cswap accounts are optional. Without cswap, use `/run` without a number.
+Session actions require agent-rig. Rig chooses the terminal and builds the Claude launch command; on Linux it can use tmux when no graphical terminal is available. There is no `launch` section to configure in the hub. An existing `launch` key is ignored with an info log line.
+Claude may ask you to confirm the channel in the terminal. You can remove that question with managed settings (see "Optional: remove the channel question at start" below).
+cswap accounts are optional. Without cswap, use `/run` without a number; rig handles the launch.
 `/bash` uses `bash` from PATH as a login shell. `/pwsh` and `/cmd` are not available on Linux.
 The end-of-turn sound in the terminal is off.
 
@@ -60,8 +38,7 @@ Container files and the remaining checks: [docker/ubuntu-24.04](docker/ubuntu-24
 
 ### rig commands
 
-The hub works fully without rig. `/rig` stays in the menu and answers
-that rig is not installed. Windows shells work as before in this case.
+The hub forwards messages and runs shell commands without rig. `/info` and session actions (`/compact`, `/rename`, `/stop`, `/cleanup`, `/run`, `/mode`) require rig and answer that it is not installed when it is missing. Windows shells work as before in this case.
 The hub looks for `rig` in PATH and `~/.local/bin` (`rig.cmd` on Windows).
 
 - `/rig status` — machine state from `rig status`.
@@ -106,9 +83,7 @@ window C ─┘  (one per window)            └─ topic "proj · session B"
   forwards the agent's text. It passes messages from the topic to the session.
 - The **hub** is the only process that polls the bot. The first window that finds no running hub
   starts it. Closing any window, including the one that started the hub, does not affect the others. The hub
-  exits by itself 5 minutes after the last window closes, but not before it has sent everything
-  in its queue. A hub started from a Task Scheduler task (`scripts/install-hub-task.ps1`), with
-  `TELEGRAM_HUB_IDLE_MS=0`, or with a `launch` section in `config.json` never exits.
+  stays always on so messages to stopped sessions can start them through rig. A Task Scheduler task (`scripts/install-hub-task.ps1`) or the Linux service starts it after login or reboot.
 - State lives in `~/.claude/channels/telegram-hub/`, one for all `cswap` profiles.
 
 ## How to use
@@ -188,54 +163,14 @@ This rule does not change the sound of the agent's text or of the end of its tur
     limit (Zhipu) is not shown. A block rig could not read shows "unavailable" with rig's reason. All blocks show the
     age of the data from 5 minutes. Then the current context and the autocompact threshold, for example `36/250k`.
     Without a known threshold, only the size is shown.
-  - `/compact` (can take instructions, as in the terminal) — the silent message "🗜 Compaction is queued." changes
-    to "🗜 Compaction is running…" at start. On success it is edited to "✅ Compaction done." On skip or error it is
-    deleted, and a loud warning arrives as a new message.
-  - `/compact 333k` (or a number of tokens, or `auto`) — the same as `/autocompact` in the terminal.
-  - `/rename <name>` — rename the session. Spaces, tabs and line breaks in the name are collapsed to one space,
-    and leading and trailing spaces are removed. `/rename <name>` runs in its terminal as soon as the turn
-    ends. In the topic, first the silent "🏷 Rename is queued.", then it changes to "✅ /rename
-    <name> done.", or on refusal to the loud "⚠️ /rename <name> failed: …". The topic gets the
-    new title when Claude Code writes it, as with any change of the session title. `/rename` without
-    a name answers "Write the name: /rename new name" and runs nothing.
-  - `/mode` — show the current Claude Code mode and the mode buttons. `/mode <mode>` restarts
-    the session at once with `manual`, `auto`, `acceptEdits`, `plan` or `dontAsk` (the argument is case-insensitive).
-    `bypassPermissions` is not available. The restart interrupts the current turn, does not start the module and does not run
-    a compact. The mode applies only to this launch. The next normal `/run` uses the configuration of
-    the launch command.
-  - `/info`, `/compact`, `/rename` and `/cleanup` need the session window. If there is no window and `launch` is
-    set in `config.json`, the hub starts the session in the usual way, shows the usual launch notifications and
-    runs the command after the window connects. For module commands it waits until the module picks the command up.
-    Without `launch`, module commands answer "the session is not active right now", and `/cleanup` answers "Session is not
-    running". `/stop` for a closed session answers "Session is not running" and does not start it. `/run` and
-    shell commands do not need an open window and keep their behavior.
-  The commands are run by the function hooks module of the plugin (an early access API of Claude Code): a new version of Claude Code may break it. A window without the module gets, after 10 s, in the topic
-  "⚠️ /<command> failed: the window did not pick it up within 10 s.".
-- `/run` — start the session of the topic (see "Starting sessions from a topic"), `/run N` — on `cswap` account N.
-  `/stop` — end the session: the hub closes the Claude Code process of this window, and the topic shows "⏹ Session
-  ended". First the plugin module waits for a compact started from the topic. The silent message about the
-  start of the compact changes to "🗜 Compaction is running…", then it is edited to the success result, or on skip or error it is deleted and replaced by a
-  loud warning. The notice "⏳ I will end the session after the compaction. A second /stop ends it right away." turns into "⏹ Session
-  ended". Otherwise "⏹ Session ended" comes as a separate message. If the context has
-  more than 120k tokens, it compacts it by itself (after the current turn), so that `/run` later does not cache
-  the whole context again. A second `/stop` ends it at once. A window without the module ends after 10 s. These two
-  commands are run by the hub.
-- `/mode [mode]` — show the current mode and the buttons, or immediately close the window and start the same
-  session with an allowed Claude Code mode: `manual`, `auto`, `acceptEdits`, `plan`, `dontAsk`.
-  The buttons do the same. This interrupts the current turn and does not go through the module. Before closing, the hub
-  checks the launch command. It must contain `{mode}`. The new window starts when the old Claude Code
-  process has ended. If it does not end, the topic shows "⚠️ Mode not changed". The choice is not saved for
-  future `/run` commands.
-- `/cleanup [instructions]` — compress the context (the instructions go to the compact, as with `/compact`), remove the
-  skills that Claude Code keeps in the context after every compact, and end the session. The next
-  start (`/run` or a message to the topic) is the same session: the id, topic and history do not change. The silent message
-  "🧹 Cleanup is queued." changes to "🧹 Cleanup is running…" at start. On success it is edited
-  to "🧹 Cleanup done, skills removed: …" (or "🧹 Cleanup
-  done."). On error or cancel it is deleted and the warning arrives as a new message, loud
-  by the kind of the message. The end and restart of the session are announced by the usual separate notices. `/stop` during the compression cancels `/cleanup` and ends the window at once. The hub saves the original transcript lines next to it in `<id>.cleanup-<time>.jsonl`. It needs the
-  plugin module of this version. Messages that arrive during `/cleanup` go, after any outcome, the usual
-  way of a message to the topic of a stopped session, in order, with no limit on the number. They are kept in the hub's memory. For details see
-  `docs/superpowers/specs/cleanup-design.md`.
+  - `/compact [instructions]` — call `rig session compact`. The result shows the tokens before and after compaction, or the hook's skip reason. Instructions are passed to rig unchanged; numeric arguments are instructions too.
+  - `/rename <name>` — call `rig session rename`. An empty name shows the usage text. The topic gets its new title when Claude Code writes the session title, through the usual title watcher.
+- `/run` — call `rig session run` for the topic's session; `/run N` selects cswap account N. A message to a stopped session also starts it through rig, and messages wait for the window to connect.
+- `/stop` — call `rig session stop`. Rig compacts above 120k context tokens before stopping and returns that outcome. A skip or compact error is shown along with the stop result. An already stopped session is reported without starting it.
+- `/mode [mode]` — show the current mode and buttons, or call `rig session mode` with `manual`, `auto`, `acceptEdits`, `plan` or `dontAsk`. The buttons do the same. Rig owns stopping and restarting the session, and the next `/run` uses its recorded mode unless overridden. An unchanged mode is reported without a restart.
+- `/cleanup` — call `rig session cleanup`: compact, remove accumulated skill attachments and end the session. Rig requires the context to shrink; otherwise it stops nothing and leaves the transcript untouched. Rig saves the backup and performs the transcript edit. The next start uses the same id, topic and history. Messages received during cleanup are held in order and then follow the usual delivery/autolaunch path. See `docs/superpowers/specs/cleanup-design.md`.
+
+All six session actions run asynchronously. While rig reports `session-waiting`, the topic shows that it is waiting for the turn to end. Rig's failure message is shown verbatim; a missing window module also tells you to restart the session. There is no fallback to a hub module or hub process-kill code.
 - `/pwsh <command>` — run a command in the session folder in PowerShell, `/cmd <command>` — in cmd (one
   line), `/bash <command>` — in Git Bash. This does not need the session window. The environment is the same as in a new
   terminal window: variables from the registry, profiles are loaded. A chain stops at the first
@@ -245,8 +180,7 @@ This rule does not change the sound of the agent's text or of the end of its tur
   the command, the last 10 lines of output and the button "⏹ Stop". The hub edits it once a minute. When the
   command finishes, the card shows the result (`✅ code 0`, `❌ code N`, `⏹ stopped`), and a log
   longer than the card arrives as a file. The agent wakes up by itself with the result, the tail of the output and the path to the full
-  log (`exec\<id>.log` in the hub folder). If there is no window, the hub starts the session when
-  `launch` is configured. Otherwise the topic gets "⚠️ The session is not running: the command result was not delivered to the agent". A hub restart does not interrupt the command.
+  log (`exec\<id>.log` in the hub folder). If there is no window, the hub calls `rig session run` with the session's account and holds the result until the window connects. A hub restart does not interrupt the command.
   A command that arrived more than 2 minutes ago while the hub was off is not started by the hub:
   the card has a "▶ Run" button. A command that waits for input hangs until it is stopped.
   There is no timeout.
@@ -404,68 +338,32 @@ is kept, and the new hub delivers it).
 
 ### 7. Optional: starting sessions from a topic
 
-You need a hub that is always on (item 6) and a start without the channel question (the next section). Otherwise
-the new window will stop at this question. Add a `launch` section to `config.json`:
+You need a hub that is always on (item 6), agent-rig on the machine and a start without the channel question (the
+next section). Otherwise the new window will stop at this question. There is nothing to configure in the hub: rig
+chooses the terminal, builds the Claude command and checks the folder and the account (`rig session run`). A
+`launch` section left in an old `config.json` is ignored; the hub writes one info line about it to its log.
 
-```json
-"launch": {
-  "command": ["cmd.exe", "/c", "start", "", "wt.exe", "-w", "new", "-d", "{cwd}", "cmd.exe", "/c",
-              "cswap.exe run {account} --share-history -- --channels plugin:telegram-hub@telegram-hub --resume {session} {mode} & exit /b 0"],
-  "timeoutSec": 90
-}
-```
+A message in the topic of a session without a window: "🚀 Starting the session (account N)…", a new terminal window
+in the session folder, and when the window has connected, the same message is edited to "✅ Session started", and the
+message goes to the agent. Messages that arrived before that wait and go in order. A second start of the same
+session is not made. If rig is not installed or refuses to start the session, the topic gets rig's own text (for
+the missing rig: "rig is not installed on this machine"), and the messages are kept for the next start. If the window
+did not connect within 90 s, the loud "⚠️ The session did not start within 90 s" arrives.
 
-For Linux, for example with `xterm` and `cswap`, the command is passed as separate arguments:
+`/mode` shows the mode of this launch and marks an older record as "Last known mode". Switching is one
+`rig session mode` call: rig restarts the session in the new mode, 🔁 is reported, and messages that arrive meanwhile
+wait for the new window and go in order after it connects. Both forms of `/mode` and `/run` answer "Session is already
+starting" during a start. `/stop`, `/compact`, `/rename` and `/cleanup` are `rig session` calls as well; a rig error
+is shown in the topic with rig's own text.
 
-```json
-"launch": {
-  "command": ["xterm", "-e", "cswap", "run", "{account}", "--share-history", "--", "--channels", "plugin:telegram-hub@telegram-hub", "--resume", "{session}", "{mode}"],
-  "timeoutSec": 90
-}
-```
-
-A message in the topic of a session without a window: "🚀 Starting the session (account N)…", a new Windows Terminal tab
-in the session folder with `cswap run N … --resume`, and when the window has connected, the same message is edited to
-"✅ Session started", and the message goes to the agent. Messages that arrived before that wait and go
-in order. A second start of the same session is not made. When the agent starts working, the start message
-is deleted from the topic. If the window did not connect within `timeoutSec`, the message is also deleted, and the loud
-"⚠️ The session did not start within N s" arrives.
-
-After a window with the pid of a finishing Claude Code closes, and after the hub ends a window,
-any start waits for a common process-exit barrier. If the pid is unknown, the pause is longer than the maximum
-plugin reconnect backoff together with jitter. A process that is still alive after the timeout keeps the barrier closed:
-the mode change is canceled with one warning, and messages wait for the exit and then go the usual way.
-A returning window lifts the barrier and gets the held items. `/mode` shows the mode of this launch
-and marks an older record as "Last known mode". A closed session starts even
-with the same mode. Both forms of `/mode` answer "Session is already starting" during a restart.
-A restart reports 🔁, without the notice "⏹ Session ended".
-
-From the start of a restart, message queues, attachment preparation and command results wait for the new window
-and are delivered in order after it is ready. Open polls end at once. If the checks refuse, the launch fails, or the connection times out,
-the held items are kept until the next start,
-and the topic gets the number of waiting items. `/stop` cancels the start at any stage. If the process
-is already running, its window ends when it connects. Items held after the exit is confirmed go the
-usual way of a message to a stopped session.
-
-- Account: from `/run N`, otherwise the one the session last ran on. If it is unknown (the window
-  of this session never connected to a hub of this version), the session does not start, and the topic gets
-  "⚠️ The session's account is unknown, use /run N.".
+- Account: from `/run N`, otherwise the one the session last ran on. Without cswap, `/run` takes no number.
 - A window in a `cswap` profile names the account by the profile folder. A window on the main login (`~/.claude`:
-  plain `claude`, and also `cswap run N` when N is the main login) does not name it. The hub asks `cswap status` for its account, and for a session
-  it started it takes the account it started it on.
+  plain `claude`, and also `cswap run N` when N is the main login) does not name it. The hub asks `cswap status` for
+  its account, and for a session it started it takes the account it started it on.
 - `--share-history` in `cswap run` gives all accounts one history. Without it, `--resume` on another
-  account will not find the session (`/run 2` for a session started on the first account). On Windows it needs Developer Mode
-  (Windows developer mode).
-- `{cwd}`, `{account}`, `{session}` are substituted into every element of the command. `{mode}` is replaced with
-  `--permission-mode <mode>` for `/mode`, otherwise with an empty string. A separate `{mode}` element then
-  expands to two arguments or is removed. The hub accepts only `manual`, `auto`, `acceptEdits`,
-  `plan` and `dontAsk`. Before the start it checks the session id (UUID), the account (only letters, digits, `.@-_`),
-  that the folder exists and that it has none of the characters
-  `"%&|<>^`. The text of messages never goes into the command.
-- `cmd.exe /c start "" wt.exe`: Bun cannot start `wt.exe` directly (it is an app alias from
-  WindowsApps), but `start` can. `& exit /b 0` closes the tab when Claude Code has ended, including
-  by `/stop`.
-- The config is reread by itself. A section with an error shows in the topic "⚠️ Autolaunch is not set up" with the reason.
+  account will not find the session (`/run 2` for a session started on the first account). On Windows it needs Developer Mode.
+- The hub accepts only the modes `manual`, `auto`, `acceptEdits`, `plan` and `dontAsk`. The text of messages never
+  goes into the launch command.
 
 ### Optional: remove the channel question at start
 

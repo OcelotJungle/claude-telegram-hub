@@ -9,11 +9,9 @@ import { z } from "zod";
 import { version } from "../../package.json";
 import { hubPort, isServiceManaged, paths } from "../shared/config.ts";
 import { createLogger } from "../shared/log.ts";
-import { findClaudePid, processInfoFor } from "./claude-process.ts";
 import { spawnHubDetached } from "./hub-client.ts";
 import { sendInterrupt } from "./interrupt.ts";
 import { PluginCore } from "./plugin.ts";
-import { PLATFORM } from "../shared/platform.ts";
 
 // A closing window gives queued text this long to reach the hub, and the
 // process this long to exit in any case.
@@ -94,22 +92,6 @@ const core = sessionId
       },
       answerPermission: (requestId, behavior) => {
         mcp.notification({ method: "notifications/claude/channel/permission", params: { request_id: requestId, behavior } }).catch(e => log.error(`permission answer failed: ${e}`));
-      },
-      // The process lookup asks the OS and so is asynchronous; nobody waits for the end of Claude Code.
-      terminate: exiting => {
-        const info = processInfoFor(PLATFORM.windows ? "win32" : "linux");
-        findClaudePid(process.ppid, info, process.env.CLAUDE_PID)
-          .then(pid => {
-            if (!pid) return log.error("terminate: no Claude Code process among the parents of this plugin");
-            log.info(`terminate: ending Claude Code ${pid}`);
-            exiting(pid);
-            try {
-              process.kill(pid);
-            } catch (e) {
-              log.error(`terminate: could not end ${pid}: ${e}`);
-            }
-          })
-          .catch(e => log.error(`terminate: process lookup failed: ${e}`));
       },
       log,
     })

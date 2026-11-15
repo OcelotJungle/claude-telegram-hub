@@ -30,7 +30,7 @@ const hub = new Hub({
   // Every cswap profile links its projects/ here.
   projectsDir: join(homedir(), ".claude", "projects"),
   api: token ? new TelegramApi({ token, base: apiBase(), log }) : undefined,
-  config: loadConfig,
+  config: () => loadConfig(text => log.info(text)),
   // --always-on: started by the Task Scheduler (scripts/install-hub-task.ps1).
   idleMs: process.argv.includes("--always-on") ? 0 : idleMs(),
   pollTimeoutSec: Number(process.env.TELEGRAM_HUB_POLL_TIMEOUT) || undefined,

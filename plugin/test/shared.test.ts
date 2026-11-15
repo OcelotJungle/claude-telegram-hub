@@ -163,9 +163,9 @@ describe("config", () => {
     expect(idleMs()).toBe(300_000);
   });
 
-  test("a launch section is read, with a default timeout", () => {
+  test("a legacy launch section is ignored without changing the rest of the config", () => {
     writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], launch: { command: ["cswap.exe", "run", "{account}"] } }));
-    expect(loadConfig().launch).toEqual({ command: ["cswap.exe", "run", "{account}"], timeoutSec: 90 });
+    expect(loadConfig()).toEqual({ allowFrom: [], turnEndChime: defaultTurnEndChime() });
   });
 
   test("exec.bash is read", () => {
@@ -180,11 +180,13 @@ describe("config", () => {
     expect(paths().execsFile).toBe(join(dir, "execs.json"));
   });
 
-  test("a broken launch section is reported, not used", () => {
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ allowFrom: [], launch: { command: "cswap.exe run 1" } }));
-    const cfg = loadConfig();
-    expect(cfg.launch).toBeUndefined();
-    expect(cfg.launchError).toContain("command");
+  test("legacy launch values are ignored and logged once even across config reloads", () => {
+    const messages: string[] = [];
+    for (const launch of [{ command: "cswap.exe run 1" }, null, false, "unused"]) {
+      writeFileSync(join(dir, "config.json"), JSON.stringify({ groupId: "-1001", allowFrom: ["1"], launch }));
+      expect(loadConfig(text => messages.push(text))).toEqual({ groupId: "-1001", allowFrom: ["1"], turnEndChime: defaultTurnEndChime() });
+    }
+    expect(messages).toEqual(["Ignoring launch in config.json; rig session manages session launches"]);
   });
 
   test("missing or corrupt config gives empty allowFrom", () => {

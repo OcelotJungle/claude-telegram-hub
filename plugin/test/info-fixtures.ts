@@ -65,6 +65,3 @@ export const blockError = (code: string, message: string): { error: { code: stri
 
 // The object rig prints on stdout, with exit code 1, when the command itself fails.
 export const commandFailure = (code: string, message: string): string => JSON.stringify({ error: { code, message } });
-
-// A wait that never ends: the tests of the window give the hub no deadline unless they say so.
-export const neverSleep = (): Promise<void> => new Promise<void>(() => undefined);

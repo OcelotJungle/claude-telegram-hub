@@ -310,23 +310,6 @@ describe("language reads and the bot menu", () => {
   });
 });
 
-describe("the language for the plugin's module", () => {
-  test("GET /language answers the language the hub has now", async () => {
-    const f = fixture();
-    try {
-      expect(f.machine.start()).toBe(true);
-      const port = f.machine["server"]?.port;
-      const ask = async () => (await fetch(`http://127.0.0.1:${port}/language`)).json();
-      expect(await ask()).toEqual({ language: "en" });
-      f.machine["lang"] = "ru";
-      expect(await ask()).toEqual({ language: "ru" });
-    } finally {
-      f.machine["server"]?.stop(true);
-      f.stop();
-    }
-  });
-});
-
 describe("rig errors in Telegram follow the language", () => {
   test("a failing /rig status is answered in the current language, at the time of the answer", async () => {
     for (const [language, catalog] of [["en", en], ["ru", ru]] as const) {

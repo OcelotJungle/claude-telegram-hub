@@ -37,7 +37,7 @@ topic. The user sees how it goes, and the agent learns the result itself and tak
 
 ## What the user sees
 
-### Commands (handled by the hub, like `/run` and `/stop`)
+### Commands (executed by the hub)
 
 | Command | Shell |
 |---|---|
@@ -155,9 +155,7 @@ Last 30 lines:
 `meta` has `source: "exec"`, `exec_id`, `exit_code`, so that it is not confused with user text. The agent is
 not told about the start of a command.
 
-If the session has no window, the result wakes it like a message: with `launch` configured, the hub starts the
-session and holds the result until it connects (the `held` mechanism). Without `launch`, the result stays
-only in the card, plus a notification to the topic "⚠️ The session is not running: the command result was not delivered to the agent".
+If the session has no window, the result wakes it like a message: the hub calls `rig session run <id>` with the session's account and holds the result until it connects (the `held` mechanism). A rig failure is shown verbatim; the undelivered result remains available for delivery when the session connects. The shell command itself still runs through the hub's detached runner, independently of rig session actions.
 
 ## How it works
 
@@ -189,8 +187,7 @@ at once, but its result does not go to the agent at once: session windows are ju
 starting a second copy of the session or "not delivered" would be a mistake. The window gets the result when it
 connects. A command that finished in the first 10 s after the hub start waits the same way if
 its session has no window at that moment; with a window it goes at once. After 10 s from the start (the window's reconnect pause plus the readiness delay) the results
-of sessions that still have no window go the normal way: a session launch if `launch` is configured, otherwise the
-"not delivered" notification.
+of sessions that still have no window go the normal way: `rig session run <id>`, holding the result until the window connects. No hub launch setting is required.
 
 The process vanished and there is no `.exit.json` (the machine was rebooted, the runner was killed) → card "⚠️ interrupted:
 the process disappeared", and the agent gets the same with the log tail. The runner counts as alive only while its pid is alive
@@ -231,7 +228,7 @@ substituted into a quoted template: it is passed to the shell as a separate argu
 
 ## Decisions made
 
-- The hub starts the process through a detached runner, not the session module: the module kills its processes
+- The hub starts the process through a detached runner, not a Claude Code window: the window kills its processes
   on reload, and a reload happens on every plugin edit.
 - Three commands instead of a shell-choice flag: each is visible in the menu, and no prefix needs parsing.
 - PowerShell is the default shell (`/pwsh`): it also runs what is usually written for cmd.

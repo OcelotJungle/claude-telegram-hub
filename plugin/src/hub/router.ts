@@ -1,5 +1,4 @@
 import type { Config } from "../shared/config.ts";
-import type { TopicCommand } from "../shared/protocol.ts";
 import type { SessionStore } from "./sessions.ts";
 import type { Message, Update } from "./telegram.ts";
 import type { MachineCommand } from "./rig.ts";
@@ -65,21 +64,14 @@ export function routeCallback(u: Update, cfg: Config): CallbackRoute | undefined
   return { action: "press", id: q.id, data: q.data ?? "", messageId: q.message.message_id, fromId: String(q.from.id) };
 }
 
-// A command the plugin's function hooks module runs instead of the agent:
-// `/info`, `/compact` or `/rename`, maybe `@<this bot>`, then arguments.
-// Anything else, a command for another bot included, is a plain message.
-export function commandOf(text: string, botUsername: string | undefined): Omit<TopicCommand, "id"> | undefined {
-  const c = parseCommand(text, botUsername);
-  return c && (c.name === "info" || c.name === "compact" || c.name === "rename") ? { name: c.name, args: c.args } : undefined;
-}
+// A command the hub runs itself, maybe `@<this bot>`, then arguments. Anything else,
+// a command for another bot included, is a plain message. The session actions
+// (`/run [account]`, `/mode [mode]`, `/stop`, `/cleanup`, `/compact`, `/rename`) are
+// one `rig session` call each; `/info` renders `rig info`. `/pwsh`, `/cmd` and
+// `/bash` run their text in a shell in the session's folder.
+export type HubCommand = { name: "run" | "stop" | "cleanup" | "mode" | "info" | "compact" | "rename" | "pwsh" | "cmd" | "bash"; args: string };
 
-// A command the hub runs itself: `/run [account]` starts the topic's session,
-// `/mode [mode]` restarts it with a permission mode, `/stop` ends it, and
-// `/cleanup` compacts it and starts it again without its remembered skills.
-// `/pwsh`, `/cmd` and `/bash` run their text in a shell in the session's folder.
-export type HubCommand = { name: "run" | "stop" | "cleanup" | "mode" | "pwsh" | "cmd" | "bash"; args: string };
-
-const HUB_COMMANDS: readonly HubCommand["name"][] = ["run", "stop", "cleanup", "mode", "pwsh", "cmd", "bash"];
+const HUB_COMMANDS: readonly HubCommand["name"][] = ["run", "stop", "cleanup", "mode", "info", "compact", "rename", "pwsh", "cmd", "bash"];
 
 function isHubCommandName(name: string): name is HubCommand["name"] {
   return HUB_COMMANDS.some(n => n === name);

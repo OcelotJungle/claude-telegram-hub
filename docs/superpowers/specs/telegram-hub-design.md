@@ -4,9 +4,8 @@ The platform layer is described in `rig-integration-design.md`. On Linux, `/bash
 `bash` from PATH as a login shell, and `/pwsh` and `/cmd` are hidden and answer that they are unavailable.
 There is no turn-end sound in the terminal. The user service `telegram-hub.service` starts
 the hub with `--always-on`, `Restart=always`, `KillMode=process` and package installation through
-`--frozen-lockfile`; SIGTERM calls the usual `stop()`. Without cswap, `/run` uses
-plain Claude with no account number. On Linux, tmux is used for autostart,
-and the CMD metacharacter checks apply only to a template whose first element is cmd/cmd.exe.
+`--frozen-lockfile`; SIGTERM calls the usual `stop()`. Starting a session, its terminal, the account
+and the Claude command are rig's work (`rig session run`): the hub has no launch template.
 
 The machine command `/rig` (with its `feature`, `status`, `update` and `language` forms) is accepted by the hub from `allowFrom` in General and in session
 topics, without passing it to the agent. Feature state comes from rig's JSON; the hub config is not changed.
@@ -112,7 +111,7 @@ Agent tools:
 
 There is no separate "reply" tool: all agent text is delivered by forwarding (see below).
 
-The plugin's function hooks module runs commands from the topic (see "Commands from the topic").
+Commands from the topic that act on a session are `rig session` calls made by the hub (see "Commands from the topic").
 
 **Hub** — the only process that polls the bot. It creates topics, routes incoming messages
 by `message_thread_id` → session, sends outgoing ones, and keeps the session table.
@@ -187,10 +186,11 @@ goes into the topic name when it is created.
   after the first. Messages in the notification are separated by an empty line. Files are named in the text after
   the message text: a photo — "(photo: path)", the rest — "(document: name, file_id: …)" and so on.
   The meta (chat, user, time) is taken from the first message. A batch of one message goes as before, with the attachment in the meta.
-  A module command and a hub command first send the waiting batch, then run. A message starting with `!`
+  A hub command first sends the waiting batch, then runs (`/mode` and `/stop` do not send it: they capture it into the
+  hold of the session action). A message starting with `!`
   sends the waiting batch and starts a new one: only the first message of a batch can interrupt the agent. ✍ is put on
   every message of the batch; the plugin reports the first, and the hub removes ✍ from all. Messages held
-  during startup or `/cleanup` are joined the same way: consecutive ones go as one batch; a batch waiting during that
+  during startup or a mode restart are joined the same way: consecutive ones go as one batch; a batch waiting during that
   time takes its place among them in order of arrival. If the window closed while the batch was waiting, its
   messages go as to an inactive session (hold for launch, launch, or say "not
   active"). On stop, the hub first stops taking updates, then sends all waiting batches;
@@ -351,38 +351,64 @@ goes back to Claude Code (details in `hub-iteration-2-design.md`).
 with buttons and returns the answers, and the hook gives them to Claude Code as `updatedInput`. Mode off — a dialog in the
 terminal. Details are in `questions-design.md`.
 
-**Commands from the topic.** `/info`, `/compact`, `/compact <N>` — the same as the status line, `/compact` and
-`/autocompact N` in this session's terminal, `/rename <name>` — `/rename` in the terminal. Claude Code queues messages from the channel with
-`skipSlashCommands`, so a command cannot be run through the channel. It is run by the plugin's function hooks module
-(`hooks.json` → `modules`, Claude Code's early-access API; it has
-`$.session.usage`, `$.command.run`, the hook `session.compact`).
-- The hub recognizes a command in a topic message: the text `/info`, `/compact` or `/rename`, optionally with
-  `@<bot name>` (with another name it is a normal message) and arguments. The command is not delivered to the agent,
-  does not enter the context, does not change the mode. Other `/…` are normal messages. If the window is closed,
-  module commands start the session when `launch` is configured; the command waits for the window to connect, then the module
-  picks it up. Without `launch` the reply "the session is not active right now" remains.
-- The hub keeps the command in memory (not on disk: it is interactive) and gives it to the module through
-  `GET /commands?session=<id>`; the module polls the hub once a second and takes the session `id` from
-  `$.session.id()` on every poll (after `/clear` it is different). If the module did not pick up the command in 10 s
-  (old Claude Code, the module did not load, the window is still on the old plugin) — the hub writes to the topic with
-  sound "⚠️ /<command> failed: the window did not pick it up within 10 s."
-- The module sends the reply with `POST /reply {sessionId, id, text, notify}`; the hub puts it in the topic's queue as
-  agent text (Markdown); a retry with the same `id` is not duplicated.
-- `/info` draws what `rig info --session <id>` returns; the hub collects no limits itself. The module takes the session
-  `id` from `$.session.id()` and asks `GET /info?session=<id>`; the hub runs `rig info --session <id>` through the
-  `Rig` class (the id must be a plain id, `[A-Za-z0-9-]`, up to 100 characters: anything else is refused before rig is
-  run) and answers rig's data (`InfoData`: `session`, `account`, `claude`, optional `codex`, optional
-  `volunteers`, `context`; the type is in `plugin/src/shared/info-data.ts`). rig's answer is untrusted: the hub
-  validates it with a strict zod schema of rig's contract (`plugin/src/hub/info-schema.ts`), and the window gets only
-  the validated object. A contract breach (an unknown field, a wrong type, a `null` time where rig promises a string)
-  fails the whole answer, not one block: rig is then broken and a half-drawn picture would hide it. The window
-  checks only the hub/window protocol shape (`parseInfoData`, the same type). The answer is a failure with status 502
-  and `{failure: <text>}` when rig is missing, when the command failed (the text is rig's own `message`), or when the
-  answer breaks the contract. The module shows that text.
-- The hub's own failures have their own texts in the language catalog, never a parse error or a bare status: the hub
-  does not answer ("/info failed: the hub does not answer (<error>)"), the answer is not readable (not JSON, or
-  not the hub's data or failure; with its HTTP status), the hub does not answer in time. The window waits
-  `RIG_QUERY_LIMIT_MS` (rig's query limit) plus a named margin.
+**Commands from the topic.** `/info`, `/compact`, `/compact <instructions>`, `/rename <name>`, `/stop`, `/cleanup`, `/run`,
+`/mode`, and `/pwsh`, `/cmd`, `/bash`. The hub recognizes a command in a topic message: the text `/<command>`, optionally with
+`@<bot name>` (with another name it is a normal message) and arguments. The command is not delivered to the agent,
+does not enter the context, does not change the mode. Other `/…` are normal messages. Messages before the command reach
+the agent first.
+
+The hub is a thin client over rig for every action on a Claude Code session: `/compact`, `/rename`, `/stop`,
+`/cleanup`, `/run` and `/mode` are one `rig session …` call each, and nothing else (no fallback to a hub-side path).
+The table of the commands, the error codes, the autolaunch and the always-on hub are in `rig-integration-design.md`;
+the sound of the results and the `/cleanup` texts are in `cleanup-design.md`. `/pwsh`, `/cmd` and `/bash` run in the hub
+(`exec-design.md`).
+
+- Each call is shown as one message the result replaces in place: quiet "🗜 Compaction is running…" (`/compact`),
+  "🏷 Renaming…", "⏹ Ending the session…", "🧹 Cleanup is running…". While rig reports
+  `{"progress":{"code":"session-waiting"}}` on stderr (it waits for the turn to end) the message shows "⏳ Waiting for
+  the turn to end…". Success edits the message into the result ("✅ Compaction done: <before> → <after> tokens.",
+  "✅ Renamed: <name>", "⏹ Session ended" with the outcome of the compaction, the cleanup result). A rig error
+  deletes the running message and sends rig's own `message` as a new loud one. `session-no-module` (the window has no rig
+  module) adds the restart hint; the other codes (`session-ended`, `session-unknown`, `session-timeout`,
+  `session-cleanup-not-compacted`, `launch-unavailable`) show rig's message verbatim. Rig missing: the missing-rig text.
+- `/compact <text>` passes the text to the compact as its instructions. The former `/compact <N>` and `/compact auto` (autocompact settings of
+  the window) have no rig equivalent: such a text is just instructions.
+- `/rename <name>`: the name is trimmed and its spaces collapsed; without a name — "Write the name: /rename new name"
+  and no call. The topic changes its name when Claude Code writes the new name into the transcript — by the same path
+  as any session name change (`retitle`).
+- `/stop` of a session rig finds not running: "Session is not running"; what the hub kept for it is released like a
+  new message (the session is not being ended).
+- **Holding while a session is being stopped, cleaned, switched or started.** One mechanism serves `/stop`, `/cleanup`,
+  `/mode` (and the mode buttons) and `/run`, and every autolaunch (a message, `/cleanup`, an exec result), because all of
+  them are a `rig session …` call. From the moment the call starts, whatever arrives for the session is held, in order of
+  arrival: ordinary messages and attachments, exec results and their acknowledgements, answers to polls and buttons. What
+  was already half-way is captured at the same moment, so nothing reaches the window that is going away: the waiting
+  message batch (its messages join the held ones; a batch whose attachments are still being prepared is dropped from
+  the send and held instead), an open poll (it ends with no decision and the answer typed next is held, not swallowed),
+  and a replay in progress (what it had in flight or still held goes back to the hold). A `/cleanup` first sends the
+  waiting batch, so what was written before it is cleaned with the session; only later items are held.
+- The hold is released into the next window once it connects, in one ordered replay with the messages and exec results
+  that came while the window was starting. `/stop` and `/cleanup` (`ended`) wait until the old window is gone: the hold
+  is released when it disconnects, or after `WINDOW_CLOSE_WAIT_MS` (30 s) if it stays connected (a safety timer; the
+  number is an estimate, not a measurement). With no window at all, a message that arrives later is a normal start.
+- Nothing held is dropped. If rig fails (`rig` missing, an error answer, a launch that never connects within
+  `CONNECT_WAIT_MS`), the held items are kept for the next start of the session and the topic is told they are kept
+  (the delivery notice). They are never sent to the ending window. Exception: when rig refuses the stop or cleanup while the old
+  window is still connected, the items go back to that window, because the session is still running; the same for `/mode`
+  that changed nothing (`changed: false`) and `/stop` that found nothing running. An open decision: whether a refused stop
+  with the window open should keep the items for the next start instead.
+- A button press that is stale (its message no longer current), malformed or from a user who is not authorised never
+  reaches `rig session stop|run|mode`: it is answered and ignored. A second `/run`, `/mode`, a mode button or `/stop` while
+  one of these actions is in progress answers "Session is already starting" and makes no second call. `/compact` and
+  `/rename` do not hold.
+- `/info` draws what `rig info --session <id>` returns (`InfoData`: `session`, `account`, `claude`, optional `codex`,
+  optional `volunteers`, `context`; the type is in `plugin/src/shared/info-data.ts`) through `infoText`
+  (`plugin/src/hub/info-text.ts`); the hub collects no limits itself. The id must be a plain id, `[A-Za-z0-9-]`, up to
+  100 characters: anything else is refused before rig is run. rig's answer is untrusted: the hub validates it with a
+  strict zod schema of rig's contract (`plugin/src/hub/info-schema.ts`). A contract breach (an unknown field, a wrong
+  type, a `null` time where rig promises a string) fails the whole answer, not one block: rig is then broken and a
+  half-drawn picture would hide it. When rig is missing, the command failed (the text is rig's own `message`), or the
+  answer breaks the contract, the topic gets a loud warning with that text.
 - Every block of the data is either its data or `{error: {code, message}}`. A block with the code `no-data` is shown
   as "no data" ("Claude limits: no data, they appear after the model's first reply"; for the context: "no data"). A
   block with another code is shown as "<Block> limits: unavailable, <rig's message>" (for the context:
@@ -398,54 +424,21 @@ terminal. Details are in `questions-design.md`.
   its own line, in the form `Name: used/cap`; names are mapped (openrouter→OpenRouter, requesty→Requesty, groq→Groq,
   zhipu→Zhipu, not "Z.ai": Telegram makes a link out of it; the others as they are). A provider with `cap: null` is
   dropped: without a limit the number does not say how much is left.
-- The hub no longer reads `usage.json`, `$CODEX_HOME/sessions` or the volunteer script, and the module no longer sends
-  limits on `session.measure`: the readings, their freshness and which account they belong to are rig's work.
-- `/compact` and `/compact <instructions>` — `$.command.run({ command: "compact" })`: like one typed in the
-  terminal, it waits for the end of the current turn. Immediately — "🗜 Compaction is queued.", at start "🗜 Compaction is running…"; the result comes from the hook
-  `session.compact`: "✅ Compaction done." or the reason it was skipped.
-  If it did not start — the reason.
-- `/compact <N>` (a number of tokens, `333k` and `1m` are allowed) and `/compact auto` — `/autocompact` with that
-  value; the reply is the command's text. It acts the same as `/autocompact` in this session's terminal.
-- `/rename <name>` — `$.command.run({ command: "rename", args: "<name>" })` with the name as typed (the hub
-  trims spaces at the edges). Like `/compact`, it waits for the end of the current turn: at once a quiet "🏷 Rename is
-  queued." (`awaitsResult`), success edits it into "✅ /rename <name> done.", a refusal of `run` is
-  a loud "⚠️ /rename <name> failed: <reason>" in its place (`replaces`, kind `warning`). `/rename`
-  without a name — "Write the name: /rename new name", `run` is not called. The hub renames nothing itself:
-  the topic will change its name when Claude Code writes the new name into the transcript — by the same path as
-  any session name change (`retitle`).
-- `/mode` shows the mode of this launch: the mode of the successful launch and the later transcript records,
-  or a record after the window connected (the hub remembers the transcript size on connect). A
-  older mode is labeled "Last known mode" and does not forbid switching. The buttons offered are `manual`, `auto`, `acceptEdits`, `plan`,
-  `dontAsk`. `default` in the transcript means `manual`; an unknown or forbidden current mode
-  is shown as it is, with no button marked. `/mode <mode>` and the buttons accept only these values,
-  case-insensitively. Switching ends the window at once, does not call the module and does not start a compact;
-  the turn is interrupted. Before ending it, the hub checks the account, the cwd and the launch command. It requires
-  `{mode}` in `launch.command`, which is substituted as `--permission-mode <mode>`; a separate `{mode}`
-  element expands into two argv elements, and on a normal launch it is removed. If the
-  setting is missing or fails, the command warns without closing the window or removing the buttons. A closed session
-  is launched even with the previous mode. The switch starts before the cosmetic Telegram requests.
-  After the link to the window is lost, the hub waits for the shared Claude Code exit barrier in `launch()`: a second process
-  on the same transcript would break it. The barrier is mandatory for all launch paths, including `/run`, `/mode`,
-  topic messages, command results, `releaseHeld` and the `/cleanup` route. It is created when a
-  window with an exiting pid closes, or a window the hub ends. An unknown pid waits longer than the shared maximum
-  reconnect backoff with jitter; a window that returns lifts the barrier and cancels the switch with the warning
-  "⚠️ Mode not changed: the session was reopened". Then the
-  session is launched with the chosen mode, and messages and command results from the restart period
-  are held and delivered in order once the new window is ready. From the start of the restart, waiting
-  batches/replays, a batch with attachment preparation and command results are held as well;
-  after the asynchronous preparation the state is checked again. New results after the connection
-  join the same readiness queue. Open polls end at once. While the wait lasts, `/run` and both `/mode` variants
-  answer "Session is already starting". An exit timeout keeps the previous window and gives it the held items;
-  a process that did not exit within `CLEANUP_EXIT_MS` cancels the mode switch with one warning
-  but keeps the barrier: no launches until the process exits. After the exit, held items go the usual way.
-  A spawn error, failed checks and a connection timeout keep the held items until the next launch;
-  the topic gets the number of waiting items, and exec confirmations are called after delivery.
-  `/stop` cancels any launch, including an already spawned process: a window that connected is ended,
-  held items wait for its exit and go the usual way. A restart writes 🔁 without "⏹ Session ended".
-  The mode is saved only after a successful spawn; a missing `{mode}` on a launch with a mode is a refusal.
-  A normal launch, including after `/cleanup`, clears the mode and the offset. An offset beyond the size
-  of a shortened transcript is not read; a missing transcript at launch does not make old records
-  newer than the launch mode. The mode search reads the transcript backwards in blocks until a record or the offset.
+- The hub does not read `usage.json`, `$CODEX_HOME/sessions` or the volunteer script: the readings, their freshness
+  and which account they belong to are rig's work.
+- `/mode` shows the mode of this launch: the mode of the successful launch and the later transcript records, or a
+  record after the window connected (the hub remembers the transcript size on connect). An older mode is labeled "Last
+  known mode" and does not forbid switching. The buttons offered are `manual`, `auto`, `acceptEdits`, `plan`,
+  `dontAsk`. `default` in the transcript means `manual`; an unknown or forbidden current mode is shown as it is, with no
+  button marked. `/mode <mode>` and the buttons accept only these values, case-insensitively; the current mode answers
+  "already in this mode". Switching is one `rig session mode <id> <mode>` call: rig restarts the session in the mode
+  (or says it is in it already, `changed: false`) and the new window connects like one of a start. The hub has no
+  process-exit gate, no launch template and no mode restart of its own. What comes in the meantime is held for the new
+  window and delivered in order once it connects; a rig failure keeps the held items for the next start and shows rig's
+  message (see "Holding while a session is being stopped, cleaned, switched or started"). `/run` and
+  `/mode` during a start or a stop answer "Session is already starting". The mode is saved after a successful call; a normal
+  launch clears the mode and the offset. An offset beyond the size of a shortened transcript is not read; the mode
+  search reads the transcript backwards in blocks until a record or the offset.
 - At start the hub registers the topic commands in the bot menu (`setMyCommands`); a failure is a WARN in the log.
 
 ### Hub lifecycle and failures
@@ -529,8 +522,13 @@ Automated tests (`bun test`):
   sends the waiting batch at once; `!` starts its own batch; "seen" of the first removes ✍ from all;
   messages held at launch are joined; an album with a caption starting with `!` interrupts and starts
   from the caption without `!`;
-  messages held on `/cleanup` and a waiting batch on `!` go in order of arrival; a batch of a closed window
-  launches the session, and without a launch gives "not active";
+  messages held at a mode restart and a waiting batch on `!` go in order of arrival; a batch of a closed window
+  launches the session through `rig session run`, and with rig missing says so and that the messages wait;
+- holding across session actions (`describe "holding across session actions"` in `hub.test.ts`, with the fake rig and
+  the manual clock): `/stop`, `/cleanup`, `/mode` and the mode buttons, `/run` and the three autolaunches hold in arrival
+  order and release to the next window; a waiting batch, an open poll, an attachment being prepared and a replay in
+  flight are captured; a rig refusal and a start that never connects keep the items; stale, malformed and
+  unauthorised presses never reach rig; the old window never receives a held item;
 - `rich_message` → Markdown: each kind of block and text, nested lists, a table, media with `file_id`
   and the path of a downloaded photo, unknown kinds; photos to download are the largest size of each,
   wherever it lies; the hub downloads them to `inbox`, and one that failed to download stays with its `file_id`;
@@ -539,9 +537,12 @@ Automated tests (`bun test`):
 - formatting: each mapping from "Formatting" on both paths; tags, `$` and line breaks
   stay; splitting rich text by bytes and by block count; a block above the limit as plain text;
   splitting with an entity on the boundary; after a refusal — plain text with entities, then without them;
-- commands: recognition (`@bot`, another bot, arguments), not reaching the agent, handing to the module and
-  the reply to the topic, 10 s without the module, the `/info` text in all cases (no limits, no context figure,
-  autocompact off), the choice between `compact` and `autocompact`, the compact result from the hook;
+- commands: recognition (`@bot`, another bot, arguments), not reaching the agent; for each of `/compact`, `/rename`,
+  `/stop`, `/cleanup`, `/run`, `/mode` the fixture rig answers with success and failure JSON (codes
+  `session-no-module`, `session-cleanup-not-compacted`, `launch-unavailable` and the rest, `{skip}`, `stopped: false`,
+  the `session-waiting` progress line, rig missing) and the topic shows the matching text; the `/info` text in all
+  cases (no limits, no context figure, autocompact off); autolaunch through `rig session run` for a message and for
+  a command result of a session with no window;
 - sending files: checks before sending, type by extension, albums and their boundaries, caption, order
   with text, sound by mode, retry after reconnect without a duplicate, photos as documents after a refusal,
   a refusal and a missing copy, deleting copies;
@@ -639,14 +640,8 @@ claude.
   turned it off at every background task completion; the hook was dropped.
 - Hooks of type `mcp_tool` substitute the hook input fields into `input` through `${…}`; a missing field
   becomes an empty string (for the main agent `${agent_id}` → `""`).
-- Function hooks (checked with `claude plugin validate` and `claude -p --plugin-dir` with
-  a fake hub): `hooks.json` can hold both `hooks` and `modules`; a module path can lead out of
-  `hooks/` (`../src/mod/register.ts`). `$` may be passed only to top-level functions
-  of the same file, closures over `$` are allowed; so the logic in `commands.ts` gets the engine calls
-  as closures and is tested in bun. `$.http.fetch` to localhost goes without `Origin`, `$.session.id()`
-  matches the `session_id` of the SessionStart hook. `rateLimits` are empty until the first model reply; for a
-  200k window the autocompact threshold is 167k. `$.command.run` in `-p` after a turn is unavailable ("no session is
-  bound"), so `/compact` is checked only in a real window. `claude plugin test` runs
+- Function hooks (`modules` in `hooks.json`, Claude Code's early-access API): the hub plugin does not ship one any
+  more; the module that runs `/compact` and `/rename` in a window belongs to rig. `claude plugin test` runs
   all `*.test.ts` in the plugin folder, including bun tests — it is not used.
 
 ## Out of scope

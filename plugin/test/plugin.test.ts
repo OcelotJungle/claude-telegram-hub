@@ -58,9 +58,6 @@ let pluginClock: ReturnType<typeof manualClock>;
 // The hub's typing repeat, moved by hand; the hub's one-shot timers stay real and short.
 let hubClock: ReturnType<typeof manualClock>;
 let interruptFails: boolean;
-let terminated: number;
-// The pid the fake terminate reports as the Claude Code process it ends.
-let claudePid: number | undefined;
 let hubLog: ReturnType<typeof memLogger>;
 let spoolDir: string;
 let state: string;
@@ -170,10 +167,6 @@ function makeCore(sessionId = SID, entrypoint?: string) {
       if (interruptFails) throw new Error("inbox is gone");
     },
     answerPermission: (requestId, behavior) => answers.push({ requestId, behavior }),
-    terminate: exiting => {
-      terminated++;
-      if (claudePid !== undefined) exiting(claudePid);
-    },
     log: pluginLog,
     chime: kind => chimes.push(kind),
     timers: pluginClock,
@@ -205,8 +198,6 @@ beforeEach(async () => {
     timers: { ...realTimers, setRepeat: hubClock.setRepeat, clearTimer: handle => { hubClock.clearTimer(handle); clearTimeout(handle); } },
     reactionDelayMs: 50,
     batchQuietMs: BATCH_QUIET_MS,
-    // No module polls here: /stop ends the window once nobody takes it.
-    commandPickupMs: 100,
     log: (hubLog = memLogger()),
     onExit() {},
   });
@@ -222,8 +213,6 @@ beforeEach(async () => {
   interrupts = [];
   interruptGate = undefined;
   interruptFails = false;
-  terminated = 0;
-  claudePid = undefined;
   spoolDir = join(state, "spool");
   spawned = 0;
   pluginLog = memLogger();
@@ -671,19 +660,6 @@ describe("PluginCore", () => {
     await pluginClock.advance(SUBAGENT_SCAN_MS);
     await flushed();
     expect(sent()).toEqual([]);
-  });
-
-  test("/stop in the topic ends Claude Code", async () => {
-    await enabledCore();
-    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "/stop" }));
-    await waitFor(() => terminated === 1, 3000, "terminate");
-  });
-
-  test("terminate tells the hub the pid it is about to end", async () => {
-    claudePid = 4242;
-    await enabledCore();
-    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "/stop" }));
-    await waitFor(() => hubLog.lines.includes(`INFO session ${SID}: the plugin ends Claude Code 4242`), 3000, "exiting");
   });
 
   test("text written before a question reaches the topic before the poll", async () => {

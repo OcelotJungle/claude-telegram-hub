@@ -88,7 +88,12 @@ describe("rig contract", () => {
     expect(lookedUp).toEqual(["rig", "/home/test/.local/bin/rig"]);
     expect(file).toBe("/home/test/.local/bin/rig");
     expect(rigInvocation("/bin/rig", ["feature", "cmd", "enable"], platformFor("linux")).argv).toEqual(["/bin/rig", "feature", "cmd", "enable"]);
-    expect(rigInvocation("C:\\rig tools\\rig.cmd", ["update"], platformFor("win32"))).toEqual({ argv: ["cmd.exe", "/d", "/s", "/c", '""C:\\rig tools\\rig.cmd" update"'], verbatim: true });
+    expect(rigInvocation("C:\\rig tools\\rig.cmd", ["update"], platformFor("win32"))).toEqual({ argv: ["cmd.exe", "/d", "/v:off", "/s", "/c", '""C:\\rig tools\\rig.cmd" update"'], verbatim: true });
+  });
+
+  test("Windows free text stays one quoted argument and its cmd.exe metacharacters are escaped twice", () => {
+    const { argv } = rigInvocation("C:\\rig.cmd", ["session", "rename", "a & b %PATH%"], platformFor("win32"));
+    expect(argv[5]).toBe('""C:\\rig.cmd" session rename ^^^"a^^^ ^^^&^^^ b^^^ ^^^%PATH^^^%^^^""');
   });
 
   test("status shows a release next to its commit and the commit alone without a release", async () => {

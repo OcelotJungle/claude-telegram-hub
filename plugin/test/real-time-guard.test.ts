@@ -16,7 +16,6 @@ const TEST_ALLOWED: Record<string, Allowed> = {
   "manual-clock.ts": { count: 1, reason: "makes a unique timer handle and cancels it at once; nothing waits" },
   "election.test.ts": { count: 1, reason: "a real hub process must outlive its own idle limit with plugins connected; its timer is in another process" },
   "packaging.test.ts": { count: 2, reason: "a slow reader against a real OS pipe, and a child process that stays alive in the packaged-hook scenario" },
-  "launch.test.ts": { count: 2, reason: "makes a timer handle for an injected timer that never fires; nothing waits" },
   "hub.test.ts": { count: 1, reason: "a real ping process runs for seconds while the hub must not exit idle; the process end is the subject" },
 };
 
@@ -31,10 +30,9 @@ const SRC_ALLOWED: Record<string, Allowed> = {
   "hook/question.ts": { count: 2, reason: "a hook process that is its own composition root: a deadline and a heartbeat" },
   "plugin/main.ts": { count: 2, reason: "the plugin process entry: shutdown deadline and its interval" },
   "hub/exec-runner.ts": { count: 4, reason: "the detached runner is its own process: wall clock of its heartbeat and end time" },
-  "mod/register.ts": { count: 1, reason: "the mod's clock at its entry point" },
   "hub/cards.ts": { count: 1, reason: "file-name suffix of a corrupt file set aside, not timing" },
   "hub/exec-store.ts": { count: 1, reason: "file-name suffix of a corrupt file set aside, not timing" },
-  "hub/hub.ts": { count: 2, reason: "a corrupt-file name suffix, and the wall-clock stamp handed to the pure transcript cleaner" },
+  "hub/hub.ts": { count: 1, reason: "a corrupt-file name suffix" },
   "hub/machine-outbox.ts": { count: 1, reason: "file-name suffix of a corrupt file set aside, not timing" },
   "hub/outbox.ts": { count: 1, reason: "file-name suffix of a corrupt file set aside, not timing" },
   "hub/poll-offset.ts": { count: 1, reason: "file-name suffix of a corrupt file set aside, not timing" },

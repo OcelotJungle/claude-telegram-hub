@@ -17,8 +17,8 @@ Hub texts quoted below are English by default and Russian when rig's language is
 4. **Autostart.** A message to the topic of a session that has no window starts Claude Code on the right
    account (`cswap run N`) in the right folder with `--resume`, and the message reaches the agent. A command
    that needs a window also starts the session and runs after the window connects. The hub runs
-   always. A handle to start a topic on any account, and a handle to end a session. The launch command is
-   in the config. Double launch of one session is excluded.
+   always. A handle to start a topic on any account, and a handle to end a session. The launch is rig's
+   work (`rig session run`). Double launch of one session is excluded.
 
 ## 1. Plain text or rich (`hub/message-kind.ts`)
 
@@ -170,43 +170,28 @@ Claude Code writes a subagent to `<transcript folder>/<sessionId>/subagents/agen
 
 ### Launch
 
-`config.json`:
+The hub has no launch command of its own and no `launch` config section (an old one is ignored with an info log
+line). A session is started by `rig session run <id> [--account <n>]`; rig owns the terminal, the Claude command, the
+checks of the folder and the account, and the process. See `rig-integration-design.md`.
 
-```json
-"launch": {
-  "command": ["cmd.exe", "/c", "start", "", "wt.exe", "-w", "new", "-d", "{cwd}", "cmd.exe", "/c",
-              "cswap.exe run {account} --share-history -- --channels plugin:telegram-hub@telegram-hub --resume {session} & exit /b 0"],
-  "timeoutSec": 90
-}
-```
-
-Substitutions: `{cwd}`, `{account}`, `{session}` in every element. The values are checked:
-`session` is a UUID, `account` is `[\w.@-]+`, `cwd` is an existing folder. The message text never
-goes into the command. `& exit /b 0` closes the tab after `/stop` too.
-
-- A message (or file) to the topic of a session without a window: no `launch` in the config: as before, "the session is
-  not active right now". With it, the hub answers "🚀 Starting the session (account N)…", runs the command, and the message
-  waits in memory. When the session connects, the hub delivers the waiting messages (after `READY_DELAY_MS =
-  1500` from hello, so Claude Code has time to register the channel) and writes "✅ Session started".
-  If it did not connect within `timeoutSec`: "⚠️ The session did not start within N s", the waiting messages
-  are dropped (the log has their count).
+- A message (or file) to the topic of a session without a window: the hub answers "🚀 Starting the session
+  (account N)…", calls `rig session run`, and the message waits in memory. When the session connects, the hub
+  delivers the waiting messages (after `READY_DELAY_MS = 1500` from hello, so Claude Code has time to register the
+  channel) and writes "✅ Session started". If it did not connect within `CONNECT_WAIT_MS = 90000`: "⚠️ The session
+  did not start within 90 s", the waiting messages are kept for the next start (the topic gets their count). If rig is
+  missing or refuses, the topic gets rig's text and the messages are kept the same way.
 - Lock: while a session is starting, no second launch is made, and new messages wait together with the
   first. A session window is connected: no launch.
-- Account: `/run N` → N; otherwise the last known; otherwise the session is not started, and the topic gets
-  "⚠️ The session's account is unknown, use /run N.". There is no default account.
+- Account: `/run N` → N; otherwise the last known one of the session; without accounts none is passed.
 
 ### Commands in the topic (handled by the hub)
 
 - `/run [N]` — start the topic's session (on account N). Already running: "Session is already running".
-- `/stop` — end the session: the hub sends `terminate` to the plugin, and the plugin ends the Claude Code process
-  (`CLAUDE_PID` or the parent of the `bun run` process, checking the name `claude.exe`). The window disconnected:
-  "⏹ Session ended"; not within `STOP_TIMEOUT_MS = 15000`: "⚠️ Could not end the session within N s".
-- `/cleanup [instructions]` — compact, stop, clean `invoked_skills` in the transcript and start the same
-  session. Described in `cleanup-design.md`.
-- `/cleanup` needs a window: if the session is closed and `launch` is configured, the hub starts it the usual way,
-  shows the usual launch notices and queues cleanup after the window connects. Without `launch`
-  the answer "Session is not running" stays. A closed session is not started for `/stop`: the command
-  answers "Session is not running".
+- `/stop`, `/cleanup [instructions]`, `/compact [instructions]`, `/rename <name>`, `/mode [mode]` — one `rig session`
+  call each; the hub shows the result and rig's errors. See `telegram-hub-design.md`, "Commands from the topic", and
+  `cleanup-design.md`.
+- A `/cleanup` for a session without a window starts it as a message would, and runs once the window connects.
+  `/stop` of a session rig finds not running answers "Session is not running".
 
 The commands are added to the bot menu.
 
@@ -220,12 +205,13 @@ would stall on it. The user puts this once into managed settings
 { "channelsEnabled": true, "allowedChannelPlugins": [{ "plugin": "telegram-hub", "marketplace": "telegram-hub" }] }
 ```
 
-and launches with `--channels plugin:telegram-hub@telegram-hub` (in the template and in `telegram-hub-profile.ps1`).
+and rig launches with `--channels plugin:telegram-hub@telegram-hub`.
 
 ## Security
 
 - Permission buttons, `/run`, `/stop` and autostart are accepted only from `allowFrom` in the group
   `groupId`, the same filter as for messages.
-- The launch command comes only from the config, substitutions are checked, and user text does not go into it.
+- The launch command is rig's; user text never goes into it, and the hub passes only a session id and an account that
+  passed its own checks.
 - A permission from Telegram is a deliberate weakening: whoever writes to the topic as the user can
   approve commands. This risk is accepted.

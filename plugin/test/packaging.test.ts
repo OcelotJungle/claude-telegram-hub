@@ -341,7 +341,6 @@ describe("plugin packaging", () => {
   const pkgJson = z.object({ scripts: z.record(z.string(), z.string()) });
   const hooksJson = z.object({
     hooks: z.record(z.string(), z.array(z.object({ matcher: z.string().optional(), hooks: z.array(z.looseObject({ command: z.string().optional() })) }))),
-    modules: z.array(z.string()),
   });
   const json = <T>(p: string, schema: z.ZodType<T>) => schema.parse(JSON.parse(readFileSync(p, "utf8")));
 
@@ -371,9 +370,13 @@ describe("plugin packaging", () => {
     expect(question.hooks[0]).toMatchObject({ type: "command", timeout: 86400, statusMessage: "Waiting for an answer in Telegram" });
     expect(question.hooks[0].command).toContain("src/hook/question.ts");
     expect(existsSync(QUESTION_HOOK)).toBe(true);
-    // The function hooks module that runs commands from the topic.
-    expect(hooks.modules).toEqual(["../src/mod/register.ts"]);
-    expect(existsSync(join(PLUGIN, "hooks", hooks.modules[0]))).toBe(true);
+  });
+
+  // Session actions are rig's job: the plugin ships no hooks module of its own.
+  test("no hooks module", () => {
+    const raw = JSON.parse(readFileSync(join(PLUGIN, "hooks", "hooks.json"), "utf8"));
+    expect(raw.modules).toBeUndefined();
+    expect(existsSync(join(PLUGIN, "src", "mod"))).toBe(false);
   });
 
   // The mode turns off only by request, so no hook notes a change of the mode to the agent.

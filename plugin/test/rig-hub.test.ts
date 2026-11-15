@@ -92,7 +92,6 @@ test("General routes only allowed machine commands and preserves a session topic
   expect(f.spawned).toHaveLength(1);
   await f.hub["machineOutbox"].flush(f.api);
   expect(f.texts.some(message => message.topic === TOPIC)).toBe(true);
-  expect(f.hub["commands"].size).toBe(0);
 });
 
 test("/feature is no machine command: General ignores it and nothing runs", async () => {
@@ -304,19 +303,12 @@ test("each specified work category blocks update exit, while a pending shell doe
     { name: "questions", add: () => { hub["polls"].set("q", pollOf()); }, remove: () => hub["polls"].clear() },
     { name: "running shell or rig", add: () => { must(hub["execs"])["recs"].push({ id: "pending", shell: "bash", sessionId: "session", messageId: 0, text: "work", cwd: f.dir, state: "running", reported: false }); }, remove: () => { must(hub["execs"])["recs"] = []; } },
     { name: "launch", add: () => { hub["launches"].set("session", { account: "", held: [], timer }); }, remove: () => hub["launches"].clear() },
-    { name: "window restart", add: () => { hub["modeRestarts"].set("session", { mode: "plan", held: [] }); }, remove: () => hub["modeRestarts"].clear() },
-    { name: "exit gate", add: () => { hub["exitGates"].set("session", { expired: false, settled: Promise.resolve("exited"), done: Promise.resolve("exited"), reconnect() {}, cancel() {} }); }, remove: () => hub["exitGates"].clear() },
     { name: "held input", add: () => { hub["retained"].set("session", [held]); }, remove: () => hub["retained"].clear() },
-    { name: "dying window input", add: () => { hub["dyingHeld"].set("session", [held]); }, remove: () => hub["dyingHeld"].clear() },
     { name: "replay", add: () => { hub["replays"].set("session", { held: [held], inFlight: [], after: [] }); }, remove: () => hub["replays"].clear() },
     { name: "session outbox", add: () => { hub["outbox"].add("waiting", "session", [{ text: "waiting", silent: true }]); }, remove: () => { for (const item of hub["outbox"].items()) hub["outbox"].remove(item.id); } },
     { name: "General outbox", add: () => hub["machineOutbox"].post("waiting", { chatId: GROUP }, "waiting"), remove: () => { hub["machineOutbox"]["data"].items = []; } },
     { name: "question catching up", add: () => { hub["catchUps"].set("q", () => {}); }, remove: () => hub["catchUps"].clear() },
     { name: "question being sent", add: () => { hub["questionSends"].add(pending); }, remove: () => hub["questionSends"].clear() },
-    { name: "queued launch", add: () => { hub["gatedLaunches"].set("session", { account: undefined, held: [], announce: false }); }, remove: () => hub["gatedLaunches"].clear() },
-    { name: "cleanup", add: () => { hub["cleanups"].set("session", { id: "c", phase: "compacting", held: [] }); }, remove: () => hub["cleanups"].clear() },
-    { name: "stop waiting for the window", add: () => { hub["stops"].set("session", timer); }, remove: () => hub["stops"].clear() },
-    { name: "stop waiting for the module", add: () => { hub["stopping"].set("session", "stop"); }, remove: () => hub["stopping"].clear() },
     { name: "ready timer", add: () => { hub["readyTimers"].add(timer); }, remove: () => hub["readyTimers"].clear() },
     { name: "batch of messages", add: () => { hub["batches"].set("session", { api: f.api, messages: [], quietTimer: timer, maxTimer: timer }); }, remove: () => hub["batches"].clear() },
     { name: "batch being sent", add: () => { hub["batchSends"].set("session", pending); }, remove: () => hub["batchSends"].clear() },
@@ -327,7 +319,6 @@ test("each specified work category blocks update exit, while a pending shell doe
     { name: "disable awaiting recovery notice", add: () => { hub["disableConfirmations"].set("k", { message: { message_id: 1 }, destination: { chatId: GROUP }, recovery: "recovery" }); }, remove: () => hub["disableConfirmations"].clear() },
     { name: "JSON query", add: () => { hub["machineQueries"]++; }, remove: () => { hub["machineQueries"]--; } },
     { name: "machine command in flight", add: () => { hub["machineTasks"].add(pending); }, remove: () => hub["machineTasks"].clear() },
-    { name: "command not yet taken by a window", add: () => { hub["commands"].set("session", [{ cmd: { id: "c", name: "info", args: "" }, timer }]); }, remove: () => hub["commands"].clear() },
     { name: "incoming update", add: () => { hub["updatesInFlight"]++; }, remove: () => { hub["updatesInFlight"]--; } },
   ];
   expect(hub["rigIdle"]()).toBe(true);

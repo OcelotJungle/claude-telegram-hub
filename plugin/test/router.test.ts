@@ -2,7 +2,7 @@ import type { Update } from "../src/hub/telegram.ts";
 
 import { describe, expect, test } from "bun:test";
 import { join } from "path";
-import { commandOf, hubCommandOf, machineCommandOf, routeUpdate } from "../src/hub/router.ts";
+import { hubCommandOf, machineCommandOf, routeUpdate } from "../src/hub/router.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
 import { topicMsg } from "./fake-telegram.ts";
 import { tempDir } from "./helpers.ts";
@@ -104,29 +104,29 @@ describe("routeUpdate", () => {
   });
 });
 
-describe("commandOf", () => {
+describe("window commands as hub commands", () => {
   test("/info and /compact, with arguments", () => {
-    expect(commandOf("/info", "test_bot")).toEqual({ name: "info", args: "" });
-    expect(commandOf("/compact", "test_bot")).toEqual({ name: "compact", args: "" });
-    expect(commandOf("/compact 333k", "test_bot")).toEqual({ name: "compact", args: "333k" });
-    expect(commandOf("/compact  keep the plan\nand the tests ", "test_bot")).toEqual({ name: "compact", args: "keep the plan\nand the tests" });
+    expect(hubCommandOf("/info", "test_bot")).toEqual({ name: "info", args: "" });
+    expect(hubCommandOf("/compact", "test_bot")).toEqual({ name: "compact", args: "" });
+    expect(hubCommandOf("/compact 333k", "test_bot")).toEqual({ name: "compact", args: "333k" });
+    expect(hubCommandOf("/compact  keep the plan\nand the tests ", "test_bot")).toEqual({ name: "compact", args: "keep the plan\nand the tests" });
   });
 
   test("/rename with the new name, bare /rename with none", () => {
-    expect(commandOf("/rename new name", "test_bot")).toEqual({ name: "rename", args: "new name" });
-    expect(commandOf("/rename  \u0421\u043f\u0440\u0438\u043d\u0442 3 ", "test_bot")).toEqual({ name: "rename", args: "\u0421\u043f\u0440\u0438\u043d\u0442 3" });
-    expect(commandOf("/rename", "test_bot")).toEqual({ name: "rename", args: "" });
+    expect(hubCommandOf("/rename new name", "test_bot")).toEqual({ name: "rename", args: "new name" });
+    expect(hubCommandOf("/rename  \u0421\u043f\u0440\u0438\u043d\u0442 3 ", "test_bot")).toEqual({ name: "rename", args: "\u0421\u043f\u0440\u0438\u043d\u0442 3" });
+    expect(hubCommandOf("/rename", "test_bot")).toEqual({ name: "rename", args: "" });
   });
 
   test("addressed to this bot, in any case", () => {
-    expect(commandOf("/info@test_bot", "test_bot")).toEqual({ name: "info", args: "" });
-    expect(commandOf("/compact@Test_Bot 200k", "test_bot")).toEqual({ name: "compact", args: "200k" });
-    expect(commandOf("/INFO", "test_bot")).toEqual({ name: "info", args: "" });
-    expect(commandOf("/rename@test_bot new name", "test_bot")).toEqual({ name: "rename", args: "new name" });
+    expect(hubCommandOf("/info@test_bot", "test_bot")).toEqual({ name: "info", args: "" });
+    expect(hubCommandOf("/compact@Test_Bot 200k", "test_bot")).toEqual({ name: "compact", args: "200k" });
+    expect(hubCommandOf("/INFO", "test_bot")).toEqual({ name: "info", args: "" });
+    expect(hubCommandOf("/rename@test_bot new name", "test_bot")).toEqual({ name: "rename", args: "new name" });
   });
 
   test("another bot, another command or text around it is a plain message", () => {
-    for (const text of ["/info@other_bot", "/rename@other_bot new name", "/start", "/compactor", "/renamed x", "see /info", " /info", "/", "", "/run"]) expect(commandOf(text, "test_bot")).toBeUndefined();
+    for (const text of ["/info@other_bot", "/rename@other_bot new name", "/start", "/compactor", "/renamed x", "see /info", " /info", "/", ""]) expect(hubCommandOf(text, "test_bot")).toBeUndefined();
   });
 });
 
@@ -153,13 +153,12 @@ describe("hubCommandOf", () => {
   });
 
   test("other commands, other bots and text are not hub commands", () => {
-    for (const text of ["/info", "/stop@other_bot", "/runner", "please /run", ""]) expect(hubCommandOf(text, "test_bot")).toBeUndefined();
+    for (const text of ["/rig status", "/stop@other_bot", "/runner", "please /run", ""]) expect(hubCommandOf(text, "test_bot")).toBeUndefined();
   });
 
-  test("/mode is a hub command and never a module command", () => {
+  test("/mode is a hub command", () => {
     expect(hubCommandOf("/mode acceptedits", "test_bot")).toEqual({ name: "mode", args: "acceptedits" });
     expect(hubCommandOf("/mode", "test_bot")).toEqual({ name: "mode", args: "" });
-    expect(commandOf("/mode plan", "test_bot")).toBeUndefined();
   });
 
   test("/feature is no machine command: only /rig is", () => {
@@ -167,6 +166,5 @@ describe("hubCommandOf", () => {
     expect(machineCommandOf("/feature", "test_bot")).toBeUndefined();
     expect(machineCommandOf("/feature telegram disable", "test_bot")).toBeUndefined();
     expect(hubCommandOf("/feature", "test_bot")).toBeUndefined();
-    expect(commandOf("/feature", "test_bot")).toBeUndefined();
   });
 });

@@ -4,21 +4,20 @@ import type { Logger } from "../shared/log.ts";
 import type { Entity, Formatted } from "../shared/markdown.ts";
 import type { OutFile } from "../shared/media.ts";
 import type { Language, Messages } from "../shared/i18n/index.ts";
-import type { AskQuestion, ChannelMeta, EnableResult, HookBody, HubToPlugin, PermissionBehavior, PluginToHub, QuestionDecision, ResolutionKind, TopicCommand } from "../shared/protocol.ts";
-import type { PermissionMode } from "./launch.ts";
+import type { AskQuestion, ChannelMeta, EnableResult, HookBody, HubToPlugin, PermissionBehavior, PluginToHub, QuestionDecision, ResolutionKind } from "../shared/protocol.ts";
+import type { PermissionMode } from "./rig-session.ts";
 import type { OutItem, Piece } from "./outbox.ts";
 import type { Poll } from "./questions.ts";
 import type { SessionRecord } from "./sessions.ts";
 import type { Button, Message, TelegramApi, Update } from "./telegram.ts";
 import type { RichMessage } from "./rich.ts";
 import type { HubCommand } from "./router.ts";
+import type { SessionOutcome } from "./session-outcome.ts";
 import type { VideoTools } from "./video.ts";
 import type { ExecShell } from "./exec-shell.ts";
-import type { CleanupResult } from "./skill-cleanup.ts";
 import type { MessageKind } from "../shared/notification.ts";
-import type { ExitGate } from "./exit-gate.ts";
 import type { Platform } from "../shared/platform.ts";
-import type { MachineCommand, RigInvocation, RigOutput } from "./rig.ts";
+import type { MachineCommand, RigInvocation, RigOutput, RigProgress, RigResult } from "./rig.ts";
 import type { MachineDestination, RigConfirmation } from "./machine-outbox.ts";
 import type { Timers } from "../shared/timers.ts";
 
@@ -34,14 +33,17 @@ import { catalogOf, DEFAULT_LANGUAGE } from "../shared/i18n/index.ts";
 import { toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
-import { cleanupReport, commandReply, hookBody, pluginToHub, questionBody, sendFilesMessage, sendMessage, terminateRequest, turnEndBody } from "../shared/protocol-schema.ts";
+import { hookBody, pluginToHub, questionBody, sendFilesMessage, sendMessage, turnEndBody } from "../shared/protocol-schema.ts";
 import { loadCards, saveCards } from "./cards.ts";
 import { loadPollOffset, savePollOffset } from "./poll-offset.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
 import { messageKind } from "./message-kind.ts";
 import { Outbox } from "./outbox.ts";
-import { hasModePlaceholder, isTmuxCommand, LAUNCH_EXIT_GRACE_MS, launchCommand, LaunchError, LaunchExitError, PERMISSION_MODES, sessionCwd, sessionTranscript, spawnDetached, tmuxAttachHint, transcriptMode } from "./launch.ts";
-import { commandOf, hubCommandOf, machineCommandOf, routeCallback, routeUpdate } from "./router.ts";
+import { PERMISSION_MODES, RIG_SESSION_LIMIT_MS } from "./rig-session.ts";
+import { sessionCwd, sessionTranscript, transcriptMode } from "./transcript.ts";
+import { infoText } from "./info-text.ts";
+import { cleanupOutcome, compactOutcome, failureOutcome, renameOutcome, stopOutcome } from "./session-outcome.ts";
+import { hubCommandOf, machineCommandOf, routeCallback, routeUpdate } from "./router.ts";
 import { accountOf, SessionStore, topicName } from "./sessions.ts";
 import { isThreadNotFound, TelegramError } from "./telegram.ts";
 import { media, richPhotos, richToMarkdown } from "./rich.ts";
@@ -53,10 +55,7 @@ import { EXEC_CARD_MS, EXEC_CHECK_MS, EXEC_MAX_AGE_MS, Execs } from "./exec.ts";
 import { freshEnv } from "./exec-env.ts";
 import { isAlive, killTree, spawnRunner } from "./exec-runner.ts";
 import { findPowershell } from "./exec-shell.ts";
-import { cleanTranscript, CleanupError } from "./skill-cleanup.ts";
 import { formatPermission } from "./format-permission.ts";
-import { exitGate } from "./exit-gate.ts";
-import { MAX_RECONNECT_PAUSE_MS } from "../shared/reconnect.ts";
 import { PLATFORM } from "../shared/platform.ts";
 import { realTimers } from "../shared/timers.ts";
 import { featureText, findRig, Rig, rigAction, rigErrorText, runRig, statusText } from "./rig.ts";
@@ -66,8 +65,6 @@ import { hubCommit, RigLifecycle, startedCommit } from "./rig-lifecycle.ts";
 
 // The queue id prefix of the start notice, "starting the session".
 const LAUNCH_NOTICE = "launch-";
-// The status of /info when rig could not give the data.
-const INFO_FAILED_STATUS = 502;
 // CLAUDE_CODE_ENTRYPOINT of a window started in the terminal; such a window is on by default.
 const CLI_ENTRYPOINT = "cli";
 // After a launched session says hello, Claude Code still registers the
@@ -77,16 +74,6 @@ const READY_DELAY_MS = 1500;
 // runs that ended while it was off: a window's longest reconnect pause
 // (5 s and jitter), then the ready delay, with room.
 const EXEC_GRACE_MS = 10_000;
-const STOP_TIMEOUT_MS = 15_000;
-// /cleanup edits the transcript only once Claude Code has exited: it waits
-// this long for the process, checking this often; with the process unknown,
-// it gives the window this long to go.
-const CLEANUP_EXIT_MS = 30_000;
-const EXIT_POLL_MS = 200;
-// Leave one polling interval beyond the plugin's longest reconnect pause.
-export const CLEANUP_SETTLE_MS = MAX_RECONNECT_PAUSE_MS + EXIT_POLL_MS;
-// How long /cleanup waits for the module to report its compact.
-const CLEANUP_COMPACT_MS = 600_000;
 // A topic message starting with it interrupts a working agent; it reaches a
 // compacting window at once. The hub strips it and tells the window by a flag.
 const INTERRUPT_PREFIX = "!";
@@ -95,7 +82,13 @@ const INTERRUPT_MARK = /^\s*!\s*/;
 // The outbox id of a poll's question: poll:<key>:<index>#<piece>.
 const POLL_ITEM = /^poll:([0-9a-f]+):(\d+)#/;
 const MS_PER_SECOND = 1000;
-const MS_PER_MINUTE = 60_000;
+// After rig reports a start, the window has this long to say hello. It is the
+// longest the old launch command was given (config `timeoutSec` default, 90 s).
+const CONNECT_WAIT_MS = 90_000;
+// After `rig session stop|cleanup` reports the process ended, its window's connection should drop at
+// once; this is the safety net that lets the held items go on if it never does (30 s is a guess at "much
+// longer than a socket close", not a measured value).
+const WINDOW_CLOSE_WAIT_MS = 30_000;
 const HOOK_TTL_MS = 60_000;
 const SPOOL_SCAN_MS = 5000;
 const POLL_TIMEOUT_SEC = 25;
@@ -105,7 +98,6 @@ const SEND_RETRY_BASE_MS = 1000;
 const SEND_RETRY_MAX_MS = 30_000;
 // Telegram's answer to an upload over its size limit: Request Entity Too Large.
 const TOO_LARGE = 413;
-const COMMAND_PICKUP_MS = 10_000;
 // How much of a message the hub cannot read goes into the log.
 const LOGGED_MESSAGE_CHARS = 200;
 // How much of a tool's input a permission message shows.
@@ -161,11 +153,8 @@ function botCommands(m: Messages, bashName: string): { command: string; descript
   ];
 }
 
-// exitingPid: the Claude Code process the plugin said it is ending.
-type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; configDir?: string; entrypoint?: string; busy?: boolean; reportsSeen?: boolean; exitingPid?: number; attachedOffset?: number; launchedMode?: PermissionMode };
+type Conn = { windowKey?: string; sessionId?: string; cwd?: string; account?: string; configDir?: string; entrypoint?: string; busy?: boolean; reportsSeen?: boolean; attachedOffset?: number; launchedMode?: PermissionMode };
 type WS = ServerWebSocket<Conn>;
-// cancelled: /stop won; held items still wait for the ending process.
-type ModeRestart = { mode: PermissionMode; held: Held[]; cancelled?: boolean };
 type Card = {
   text: string;
   entities: Entity[];
@@ -184,28 +173,22 @@ type Inbound = { content: string; meta: ChannelMeta; onSent(): void };
 // What a starting session gets once it connects: topic messages and the
 // results of topic commands.
 type Held = { message: Message } | { inbound: Inbound };
-type GatedLaunch = { account: string | undefined; held: Held[]; announce: boolean; mode?: PermissionMode };
 type QueuedBatch = { messages: Message[]; captured: boolean };
 type Replay = { held: Held[]; inFlight: Held[]; after: (() => void)[] };
+// A rig action that ends the session's window is running (a stop or a cleanup): `actions` of them are in
+// flight; `stopped` is set once one ended the process, `failed` once one failed, `closing` once all are done
+// and what is left is the window's connection dropping.
+type Ending = { actions: number; stopped: boolean; failed: boolean; closing: boolean };
+// A rig session action is holding the session's incoming items: a start (a run or a mode change: what it
+// will get once its window says hello, the mode it was started in, the account it runs on, and the timer
+// that gives up on a window that never comes) or an `ending` (a stop or a cleanup: the items wait until the
+// old window is gone, then go the way a new topic message would).
+type Launch = { held: Held[]; mode?: PermissionMode; account?: string; timer?: ReturnType<typeof setTimeout>; ending?: Ending };
+// How a stop or a cleanup came out for the hold it set.
+type EndingResult = "ended" | "failed" | "not-running";
 // Topic messages of a session waiting to go to its window together.
 type AnswerGroup = { api: TelegramApi; poll: Poll; index: number; messages: Message[]; parts: string[]; timer: ReturnType<typeof setTimeout> };
 type Batch = { api: TelegramApi; messages: Message[]; quietTimer: ReturnType<typeof setTimeout>; maxTimer: ReturnType<typeof setTimeout> };
-// A /cleanup under way: the id of its command and whether the window is
-// compacting or exiting. held: topic messages for the session from the start
-// of the compact on, the window still open or not.
-// compactTimer: gives up on a compact the module never reports.
-type Cleanup = {
-  id: string;
-  phase: "compacting" | "exiting";
-  held: Held[];
-  compactTimer?: ReturnType<typeof setTimeout>;
-  ended?: boolean;
-};
-
-// The queue item of a /cleanup's first module reply, the "will compact" one:
-// reply 0 to the command, its first piece.
-const cleanupStartKey = (c: Cleanup) => `cmd-${c.id}.0#0`;
-
 export type HubOptions = {
   port: number;
   sessionsFile: string;
@@ -225,8 +208,6 @@ export type HubOptions = {
   videoTools?: VideoTools;
   config: () => Config;
   idleMs: number;
-  // How long a command from the topic waits for the plugin's module to take it.
-  commandPickupMs?: number;
   pollTimeoutSec?: number;
   pollRetryBaseMs?: number;
   // Pause between attempts to deliver the head of a session's queue.
@@ -243,21 +224,11 @@ export type HubOptions = {
   // Where Claude Code keeps transcripts, to find the cwd of a session the hub
   // has not recorded one for.
   projectsDir?: string;
-  // Runs a launch command; by default a detached process.
-  spawn?(command: string[]): void | Promise<void>;
   // The clock and every timer of the hub; tests drive them by hand.
   timers?: Timers;
   readyDelayMs?: number;
-  stopTimeoutMs?: number;
-  // /cleanup: how long it waits for the compact, for Claude Code to exit,
-  // and with the process unknown; how it tells the process is still there,
-  // and what empties the skills in the transcript.
-  cleanupCompactMs?: number;
-  cleanupExitMs?: number;
-  cleanupSettleMs?: number;
-  exitPollMs?: number;
+  // How an exec run's process is told to be alive.
   isAlive?(pid: number): boolean;
-  cleanTranscript?: typeof cleanTranscript;
   // A window in this config dir runs on the default login, whose account is
   // asked of defaultAccount (cswap by default).
   defaultConfigDir?: string;
@@ -281,7 +252,7 @@ export type HubOptions = {
   rigDir?: string;
   repository?: string;
   findRig?(): string | undefined;
-  runRig?(invocation: RigInvocation, signal?: AbortSignal): Promise<RigOutput>;
+  runRig?(invocation: RigInvocation, signal?: AbortSignal, progress?: RigProgress): Promise<RigOutput>;
   hubCommit?(): string | undefined;
   onExit(code?: number): void;
 };
@@ -329,8 +300,6 @@ export class Hub {
   // Results for windows that were not connected when their files went out
   // (the hub restarted meanwhile), by session; given out on hello.
   private heldResults = new Map<string, HubToPlugin[]>();
-  // Commands from the topic the plugin's module has not taken yet, by session.
-  private commands = new Map<string, { cmd: TopicCommand; timer: ReturnType<typeof setTimeout> }[]>();
   private botUsername: string | undefined;
   private botId: number | undefined;
   // The language of every text sent to Telegram: rig holds it, the hub reads it at start and when rig says it changed.
@@ -369,27 +338,14 @@ export class Hub {
   private batchSends = new Map<string, Promise<void>>();
   private batchItems = new Map<string, Set<QueuedBatch>>();
   private deliveredItems = new WeakSet<object>();
-  // Sessions being started from the topic, with the messages they will get.
-  private launches = new Map<string, { account: string; held: Held[]; timer: ReturnType<typeof setTimeout>; mode?: PermissionMode; cancelled?: boolean }>();
-  private exitGates = new Map<string, ExitGate>();
-  private gatedLaunches = new Map<string, GatedLaunch>();
+  // Sessions being started by rig (a run or a mode change), with the messages
+  // they will get once their window says hello. timer gives up on a window
+  // that never connects after rig reported the start.
+  private launches = new Map<string, Launch>();
   private retained = new Map<string, Held[]>();
   private execs: Execs | undefined;
-  // Sessions told to end, until their window goes.
-  private stops = new Map<string, ReturnType<typeof setTimeout>>();
-  // Sessions whose /stop waits for the module's terminate request: the id of
-  // the stop command.
-  private stopping = new Map<string, string>();
-  // The /stop command that ended a session, until its window is gone: that
-  // command's "after the compact" notice turns into the ended notice.
-  private stopIds = new Map<string, string>();
-  private cleanups = new Map<string, Cleanup>();
   // Held messages being handed to a window; later topic messages join them.
   private replays = new Map<string, Replay>();
-  // Messages kept for a stopped window, including a cancelled launch or cleanup.
-  private dyingHeld = new Map<string, Held[]>();
-  // A mode restart keeps inbound traffic until the replacement window connects.
-  private modeRestarts = new Map<string, ModeRestart>();
   // The start notices sent to a session's topic: Telegram message id and the
   // text it shows. They go once its agent starts working.
   private launchNotices = new Map<string, { id: number; text: string }[]>();
@@ -578,7 +534,6 @@ export class Hub {
     if (!this.running) return;
     this.running = false;
     this.clearTimer(this.rigTimer);
-    for (const gate of this.exitGates.values()) gate.cancel();
     // Polling stops first, so no batch starts after the flush.
     this.abort.abort();
     // Waiting answers answer at once, before the polls go to the terminal.
@@ -596,11 +551,8 @@ export class Hub {
     if (this.idleTimer) this.clearTimer(this.idleTimer);
     if (this.spoolTimer) this.clearTimer(this.spoolTimer);
     if (this.typingTimer) this.clearTimer(this.typingTimer);
-    for (const queued of this.commands.values()) for (const e of queued) this.clearTimer(e.timer);
     for (const card of this.cards.values()) this.clearTimer(card.timer);
     for (const l of this.launches.values()) this.clearTimer(l.timer);
-    for (const t of this.stops.values()) this.clearTimer(t);
-    for (const c of this.cleanups.values()) this.clearTimer(c.compactTimer);
     for (const t of this.readyTimers) this.clearTimer(t);
     for (const t of this.reactionTimers.values()) this.clearTimer(t);
     // The commands go on; the next hub picks them up.
@@ -642,30 +594,6 @@ export class Hub {
       this.send(target, { type: "turnEnd", final, ...(kind ? { kind } : {}) });
       return new Response("ok");
     }
-    if (url.pathname === "/commands" && req.method === "GET") {
-      const session = url.searchParams.get("session") ?? "";
-      return Response.json(this.takeCommands(session, url.searchParams.get("stop") === "1", url.searchParams.get("cleanup") === "1"));
-    }
-    if (url.pathname === "/terminate" && req.method === "POST") {
-      const r = terminateRequest.safeParse(await req.json().catch(() => undefined));
-      if (!r.success) return new Response("bad terminate request", { status: 400 });
-      if (this.stopping.get(r.data.sessionId) === r.data.id) this.terminate(r.data.sessionId, r.data.id);
-      return new Response("ok");
-    }
-    if (url.pathname === "/cleanup" && req.method === "POST") {
-      const r = cleanupReport.safeParse(await req.json().catch(() => undefined));
-      if (!r.success) return new Response("bad cleanup report", { status: 400 });
-      this.onCleanupReport(r.data.sessionId, r.data.id, r.data.before, r.data.error);
-      return new Response("ok");
-    }
-    if (url.pathname === "/language" && req.method === "GET") return Response.json({ language: this.lang });
-    if (url.pathname === "/info" && req.method === "GET") return await this.infoFor(url.searchParams.get("session") ?? "");
-    if (url.pathname === "/reply" && req.method === "POST") {
-      const r = commandReply.safeParse(await req.json().catch(() => undefined));
-      if (!r.success) return new Response("bad reply", { status: 400 });
-      this.enqueue(r.data.sessionId, `cmd-${r.data.id}`, r.data.text, r.data.notify, true, r.data.replaces, r.data.awaitsResult);
-      return new Response("ok");
-    }
     if (url.pathname === "/question" && req.method === "POST") {
       const r = questionBody.safeParse(await req.json().catch(() => undefined));
       if (!r.success) return new Response("bad question body", { status: 400 });
@@ -684,48 +612,6 @@ export class Hub {
   }
 
   // --- commands from the topic ---------------------------------------------
-
-  // Waits for the session's module; a window without one (an older Claude
-  // Code, a window still on the old plugin) never takes it, and the user is
-  // told so.
-  // A stop not taken in time ends the window at once.
-  private queueCommand(sessionId: string, c: Omit<TopicCommand, "id">): string {
-    const cmd = { id: randomUUID(), ...c };
-    const ms = this.opts.commandPickupMs ?? COMMAND_PICKUP_MS;
-    const timer = this.setTimer(() => {
-      this.commands.set(sessionId, (this.commands.get(sessionId) ?? []).filter(e => e.cmd !== cmd));
-      this.log.warn(`/${cmd.name} for session ${sessionId} was not taken in ${ms} ms`);
-      if (cmd.name === "stop") {
-        if (this.stopping.get(sessionId) === cmd.id) this.terminate(sessionId);
-        return;
-      }
-      if (cmd.name === "cleanup" && this.cleanups.get(sessionId)?.id === cmd.id) this.dropCleanup(sessionId);
-      this.enqueue(sessionId, `cmd-${cmd.id}-lost`, this.m().commandLost({ name: cmd.name, seconds: ms / MS_PER_SECOND }), notifies("error"), false);
-    }, ms);
-    this.commands.set(sessionId, [...(this.commands.get(sessionId) ?? []), { cmd, timer }]);
-    this.log.info(`/${cmd.name} for session ${sessionId}`);
-    return cmd.id;
-  }
-
-  // What /info draws, from rig: the session's limits and context. The window renders it. A rig failure
-  // goes back as its text, which the window shows as the answer.
-  private async infoFor(sessionId: string): Promise<Response> {
-    const result = await this.rig.info(sessionId);
-    if (result.ok) return Response.json(result.value);
-    return Response.json({ failure: rigErrorText(result.error, this.m()) }, { status: INFO_FAILED_STATUS });
-  }
-
-  // An older module does not know stop or cleanup: it stays queued for its
-  // timeout.
-  private takeCommands(sessionId: string, takesStop: boolean, takesCleanup: boolean): TopicCommand[] {
-    const queued = this.commands.get(sessionId) ?? [];
-    const taken = queued.filter(e => (takesStop || e.cmd.name !== "stop") && (takesCleanup || e.cmd.name !== "cleanup"));
-    const left = queued.filter(e => !taken.includes(e));
-    if (left.length) this.commands.set(sessionId, left);
-    else this.commands.delete(sessionId);
-    for (const e of taken) this.clearTimer(e.timer);
-    return taken.map(e => ({ ...e.cmd, language: this.lang }));
-  }
 
   private m(): Messages {
     return catalogOf(this.lang);
@@ -787,57 +673,21 @@ export class Hub {
     const sid = ws.data.sessionId;
     if (!this.running) return;
     if (sid) this.log.info(`window for session ${sid} disconnected`);
+    // Without its window the session cannot take an answer any more.
     if (sid && !this.connOf(sid)) {
-      if (ws.data.exitingPid !== undefined || this.stops.has(sid) || this.modeRestarts.has(sid) || this.dyingHeld.has(sid)) this.gateExit(sid, ws.data.exitingPid);
-      this.stopping.delete(sid);
-      // Without its window the session cannot take an answer any more.
       for (const p of this.polls.values()) if (p.sessionId === sid) this.spawn(this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal));
-    }
-    const cleanup = sid ? this.cleanups.get(sid) : undefined;
-    if (sid && cleanup && !this.connOf(sid)) {
-      if (cleanup.phase === "exiting") {
-        // The cleanup's summary tells the topic instead of "session ended".
-        const t = this.stops.get(sid);
-        if (t) this.clearTimer(t);
-        this.stops.delete(sid);
-        this.spawn(this.finishCleanup(sid, cleanup, ws.data.exitingPid));
-      } else {
-        this.log.info(`window for session ${sid} closed while compacting for /cleanup; /cleanup dropped`);
-        this.cleanupOutcome(sid, cleanup, this.m().cleanupWindowClosed, "warning", "warning");
-        this.dropCleanup(sid);
-      }
-    }
-    const stop = sid ? this.stops.get(sid) : undefined;
-    if (sid && stop && !this.connOf(sid)) {
-      this.clearTimer(stop);
-      this.stops.delete(sid);
-      const stopId = this.stopIds.get(sid);
-      this.stopIds.delete(sid);
-      if (!this.modeRestarts.has(sid) || this.modeRestarts.get(sid)?.cancelled) {
-        if (stopId) this.enqueue(sid, `hub-${randomUUID()}`, this.m().sessionEnded, notifies("info"), false, { id: `${stopId}.0`, kind: "success" });
-        else this.notice(sid, this.m().sessionEnded, "info");
-      }
-    }
-    const restart = sid && !this.connOf(sid) ? this.modeRestarts.get(sid) : undefined;
-    if (sid && restart) {
-      this.modeRestarts.delete(sid);
-      if (restart.cancelled) this.releaseHeld(sid, restart.held);
-      else this.launch(sid, ws.data.account, restart.held, true, restart.mode);
-    }
-    const dying = sid && !this.connOf(sid) ? this.dyingHeld.get(sid) : undefined;
-    if (sid && dying) {
-      this.dyingHeld.delete(sid);
-      this.log.info(`window for session ${sid} ended: ${dying.length} held message(s) go the way of new topic messages`);
-      this.releaseHeld(sid, dying);
+      // The window a stop or a cleanup ended is gone: what was held meanwhile goes the way a new topic message would.
+      const l = this.launches.get(sid);
+      if (l?.ending?.closing) this.finishEnding(sid, l);
     }
     this.armIdle();
   }
 
-  // With idleMs 0, or a launch command to start sessions from the topic, the
-  // hub stays up with no window at all; and while a topic command runs, so
-  // its result reaches the topic.
+  // With idleMs 0 (the service's --always-on) the hub stays up with no window
+  // at all, so rig can start sessions from the topic; and while a topic
+  // command runs, so its result reaches the topic.
   private alwaysOn(): boolean {
-    return this.opts.idleMs <= 0 || this.opts.config().launch !== undefined || (this.execs?.running() ?? 0) > 0 || this.machineQueries > 0 || this.rigLifecycle?.waiting === true;
+    return this.opts.idleMs <= 0 || (this.execs?.running() ?? 0) > 0 || this.machineQueries > 0 || this.rigLifecycle?.waiting === true;
   }
 
   private armIdle(): void {
@@ -986,10 +836,6 @@ ${msg.text}`);
         this.showTyping(ws);
         if (sid) this.dropLaunchNotices(sid);
         return;
-      case "exiting":
-        this.log.info(`session ${sid}: the plugin ends Claude Code ${msg.pid}`);
-        ws.data.exitingPid = msg.pid;
-        return;
       case "caughtUp":
         this.catchUps.get(msg.id)?.();
         return;
@@ -1121,7 +967,6 @@ ${msg.text}`);
     const transcript = this.transcriptOf(msg.sessionId);
     const attachedOffset = transcript ? statSync(transcript).size : undefined;
     ws.data = { ...ws.data, sessionId: msg.sessionId, cwd: msg.cwd, account, configDir: msg.configDir ?? ws.data.configDir, entrypoint, attachedOffset, launchedMode: undefined };
-    this.exitGates.get(msg.sessionId)?.reconnect();
     this.applyDefaultMode({ sessionId: msg.sessionId, cwd: msg.cwd, entrypoint, title: msg.title });
     this.store.setWhere(msg.sessionId, msg.cwd, account);
     const title = msg.title;
@@ -1206,7 +1051,7 @@ ${msg.text}`);
   // with "none" when the call goes back to the terminal (the hook gave up,
   // the window left, the hub stops). A newer poll of the session ends the old one.
   private askQuestion(sessionId: string, questions: AskQuestion[], signal: AbortSignal): Promise<QuestionDecision> {
-    if (this.isStarting(sessionId) || this.dyingHeld.has(sessionId)) return Promise.resolve({ decision: "none" });
+    if (this.isStarting(sessionId)) return Promise.resolve({ decision: "none" });
     for (const old of this.polls.values()) if (old.sessionId === sessionId) this.spawn(this.finishPoll(old, { decision: "none" }, this.m().pollMovedToTerminal));
     const key = randomUUID().replaceAll("-", "").slice(0, PERMISSION_KEY_CHARS);
     return new Promise(resolve => {
@@ -1931,7 +1776,7 @@ ${msg.text}`);
     if (hubCmd) {
       // The messages before the command reach the agent first.
       if (hubCmd.name !== "mode" && hubCmd.name !== "stop") await this.flushBatch(route.sessionId);
-      if (route.action === "inactive" && hubCmd.name === "cleanup" && this.opts.config().launch) {
+      if (route.action === "inactive" && hubCmd.name === "cleanup") {
         return this.toInactive(api, route.sessionId, [m]);
       }
       return this.onHubCommand(route.sessionId, hubCmd, m);
@@ -1939,7 +1784,6 @@ ${msg.text}`);
     const rest = await this.toPoll(api, route.sessionId, m);
     if (!rest) return;
     if (route.action === "inactive") return this.toInactive(api, route.sessionId, [rest]);
-    if (this.holdForCleanup(route.sessionId, rest)) return;
     await this.deliver(api, route.sessionId, rest);
   }
 
@@ -1997,7 +1841,7 @@ ${msg.text}`);
     this.clearTimer(g.timer);
     const p = g.poll;
     if (p.done || p.index !== g.index) {
-      for (const m of g.messages) if (!this.holdForCleanup(p.sessionId, m)) await this.deliver(g.api, p.sessionId, m);
+      for (const m of g.messages) await this.deliver(g.api, p.sessionId, m);
       return;
     }
     this.log.info(`question poll ${key}: answered by message(s) ${g.messages.map(m => m.message_id).join(", ")}`);
@@ -2012,41 +1856,15 @@ ${msg.text}`);
   }
 
   // Messages for a session without a window: kept for its start under way,
-  // else they start it, else the user is told it is not active.
-  private async toInactive(api: TelegramApi, sessionId: string, messages: Message[]): Promise<void> {
+  // else `rig session run` starts it with them held until it connects.
+  private async toInactive(_api: TelegramApi, sessionId: string, messages: Message[]): Promise<void> {
     const rest = messages.filter(m => !this.hold(sessionId, { message: m }));
     if (!rest.length) return;
-    const cfg = this.opts.config();
-    if (cfg.launch) return this.launch(sessionId, undefined, rest.map(m => ({ message: m })));
-    const text = cfg.launchError ? this.m().sessionInactiveLaunchBroken : this.m().sessionInactive;
-    const topicId = this.store.get(sessionId)?.topicId;
-    if (!cfg.groupId || topicId === undefined) return;
-    await api.sendMessage(cfg.groupId, topicId, text, false).catch(e => this.log.warn(`inactive notice failed: ${e}`));
+    return this.launch(sessionId, undefined, rest.map(m => ({ message: m })));
   }
 
-  // A /cleanup under way keeps topic messages for the session it starts
-  // again; a module command still goes to the window, and so does a message
-  // that interrupts the agent.
-  private holdForCleanup(sessionId: string, m: Message): boolean {
-    if (!this.cleanups.has(sessionId)) return false;
-    if (m.text !== undefined && commandOf(m.text, this.botUsername)) return false;
-    if (isInterrupt(m)) return false;
-    return this.keepForCleanup(sessionId, { message: m });
-  }
-
-  // Puts a message or a command result on the held list of the /cleanup under
-  // way; false when there is none.
-  private keepForCleanup(sessionId: string, h: Held): boolean {
-    const c = this.cleanups.get(sessionId);
-    if (!c) return false;
-    const what = "message" in h ? `message ${h.message.message_id}` : "a command result";
-    this.keepInOrder(c.held, h);
-    this.log.info(`${what} for session ${sessionId} held until /cleanup ends`);
-    return true;
-  }
-
-  // A topic message joins the session's waiting batch. A module command goes
-  // after the batch; a "!" message sends it and starts its own.
+  // A topic message joins the session's waiting batch; a "!" message sends it
+  // and starts its own.
   private async deliver(api: TelegramApi, sessionId: string, m: Message): Promise<void> {
     if (this.hold(sessionId, { message: m })) return;
     if (!this.connOf(sessionId)) return this.toInactive(api, sessionId, [m]);
@@ -2054,13 +1872,6 @@ ${msg.text}`);
     // older ones.
     const open = this.replays.get(sessionId);
     if (open) return void this.keepInOrder(open.held, { message: m });
-    const cmd = m.text !== undefined ? commandOf(m.text, this.botUsername) : undefined;
-    if (cmd) {
-      await this.flushBatch(sessionId);
-      if (this.hold(sessionId, { message: m })) return;
-      this.queueCommand(sessionId, cmd);
-      return;
-    }
     if (isInterrupt(m)) this.spawn(this.flushBatch(sessionId));
     const quietMs = this.opts.batchQuietMs ?? BATCH_QUIET_MS;
     const b = this.batches.get(sessionId);
@@ -2239,52 +2050,75 @@ ${msg.text}`);
   // the session is not starting.
   private hold(sessionId: string, h: Held): boolean {
     if (this.deliveredItems.has("message" in h ? h.message : h.inbound)) return true;
-    const cleanup = this.cleanups.get(sessionId);
-    const restart = this.modeRestarts.get(sessionId);
-    const dying = this.dyingHeld.get(sessionId);
-    if (dying) { this.keepInOrder(dying, h); return true; }
-    const pending = restart ?? this.gatedLaunches.get(sessionId) ?? this.launches.get(sessionId) ?? (cleanup && (cleanup.phase === "exiting" || !this.connOf(sessionId)) ? cleanup : undefined);
+    const pending = this.launches.get(sessionId);
     if (!pending) return false;
     this.keepInOrder(pending.held, h);
     return true;
   }
 
+  // Every session action is one `rig session` call; rig does the work, the hub shows what it said.
   private onHubCommand(sessionId: string, cmd: HubCommand, m: Message): void {
-    if (cmd.name === "pwsh" || cmd.name === "cmd" || cmd.name === "bash") return this.onExecCommand(sessionId, cmd.name, cmd.args, m);
-    if (cmd.name === "run") {
-      if (cmd.args && !this.hasAccounts()) return this.notice(sessionId, this.m().noAccounts, "warning");
-      if (this.cleanups.has(sessionId)) return this.notice(sessionId, this.m().cleanupBusy, "info");
-      if (this.isStarting(sessionId)) return this.notice(sessionId, this.m().sessionAlreadyStarting, "info");
-      if (this.connOf(sessionId)) return this.notice(sessionId, this.m().sessionAlreadyRunning, "info");
-      return this.launch(sessionId, cmd.args || undefined, []);
+    const msg = this.m();
+    switch (cmd.name) {
+      case "pwsh":
+      case "cmd":
+      case "bash":
+        return this.onExecCommand(sessionId, cmd.name, cmd.args, m);
+      case "run":
+        if (cmd.args && !this.hasAccounts()) return this.notice(sessionId, msg.noAccounts, "warning");
+        if (this.isStarting(sessionId)) return this.notice(sessionId, msg.sessionAlreadyStarting, "info");
+        if (this.connOf(sessionId)) return this.notice(sessionId, msg.sessionAlreadyRunning, "info");
+        return this.launch(sessionId, cmd.args || undefined, []);
+      case "mode":
+        return this.onModeCommand(sessionId, cmd.args);
+      case "info":
+        return this.spawn(this.rig.info(sessionId).then(result => {
+          const m2 = this.m();
+          if (result.ok) this.notice(sessionId, infoText(result.value, this.timers.now(), m2), "info");
+          else this.notice(sessionId, rigErrorText(result.error, m2), "warning");
+        }));
+      case "stop": {
+        // Whatever comes for the session meanwhile is held until its window is gone.
+        const hold = this.beginEnding(sessionId);
+        return this.sessionAction(sessionId, msg.stopRunning, onWaiting => this.rig.stop(sessionId, onWaiting), stopOutcome,
+          result => this.endingDone(sessionId, hold, !result.ok ? "failed" : result.value.stopped ? "ended" : "not-running"));
+      }
+      case "cleanup": {
+        const hold = this.beginEnding(sessionId);
+        // A cleanup ends the process whenever it succeeds; one that refuses (not compacted) touched nothing.
+        return this.sessionAction(sessionId, msg.cleanupRunning, onWaiting => this.rig.cleanup(sessionId, onWaiting), cleanupOutcome,
+          result => this.endingDone(sessionId, hold, result.ok ? "ended" : "failed"));
+      }
+      case "compact":
+        return this.sessionAction(sessionId, msg.compactRunning, onWaiting => this.rig.compact(sessionId, cmd.args || undefined, onWaiting), compactOutcome);
+      case "rename": {
+        const name = cmd.args.replace(/\s+/g, " ").trim();
+        if (!name) return this.enqueue(sessionId, `hub-${randomUUID()}`, msg.renameHint, notifies("info"), false);
+        return this.sessionAction(sessionId, msg.renameRunning, onWaiting => this.rig.rename(sessionId, name, onWaiting), renameOutcome);
+      }
     }
-    if (cmd.name === "cleanup") return this.startCleanup(sessionId, cmd.args);
-    if (cmd.name === "mode") return this.onModeCommand(sessionId, cmd.args);
-    const cleanup = this.cleanups.get(sessionId);
-    if (cleanup) return this.stopDuringCleanup(sessionId, cleanup);
-    const restart = this.modeRestarts.get(sessionId);
-    if (restart) restart.cancelled = true;
-    const gated = this.gatedLaunches.get(sessionId);
-    if (gated) {
-      gated.mode = undefined;
-      if (!gated.held.length) this.gatedLaunches.delete(sessionId);
-    }
-    const launching = this.launches.get(sessionId);
-    if (launching) {
-      launching.cancelled = true;
-      this.clearTimer(launching.timer);
-      return this.notice(sessionId, this.m().launchCancelledWindowEnds, "info");
-    }
-    if (!this.connOf(sessionId)) return this.notice(sessionId, gated ? this.m().launchCancelledWaitingExit : this.exitGates.has(sessionId) ? this.m().sessionAlreadyEnding : this.m().sessionNotRunning, "info");
-    if (this.stops.has(sessionId)) return this.notice(sessionId, this.m().sessionAlreadyEnding, "info");
-    this.dyingHeld.set(sessionId, this.dyingHeld.get(sessionId) ?? []);
-    this.capturePending(sessionId);
-    if (this.stopping.has(sessionId)) {
-      this.log.info(`second /stop for session ${sessionId}: not waiting for the module`);
-      return this.terminate(sessionId);
-    }
-    // The module compacts the session first if it has to.
-    this.stopping.set(sessionId, this.queueCommand(sessionId, { name: "stop", args: cmd.args }));
+  }
+
+  // One start message that the result replaces in place: "running…" while rig works (and "waiting for the
+  // turn to end" while it reports that), then the outcome. A rig failure is shown as rig worded it.
+  private sessionAction<T>(
+    sessionId: string,
+    startText: string,
+    call: (onWaiting: () => void) => Promise<RigResult<T>>,
+    outcome: (value: T, m: Messages) => SessionOutcome,
+    settle?: (result: RigResult<T>) => void,
+  ): void {
+    const id = randomUUID();
+    const startId = `${id}.0`;
+    this.enqueue(sessionId, `cmd-${startId}`, startText, notifies("info"), false, undefined, true);
+    const waiting = () => this.enqueue(sessionId, `cmd-${id}.wait`, this.m().sessionWaiting, false, false, { id: startId, kind: "progress" });
+    this.spawn(call(waiting).then(result => {
+      settle?.(result);
+      const m = this.m();
+      if (!result.ok && result.error.kind === "rig") this.log.warn(`session ${sessionId}: rig refused (${result.error.code}): ${result.error.message}`);
+      const done = result.ok ? outcome(result.value, m) : failureOutcome(result.error, m);
+      this.enqueue(sessionId, `cmd-${id}.1`, done.text, notifies(done.kind), false, { id: startId, kind: done.kind === "info" ? "success" : "warning" });
+    }));
   }
 
   private onModeCommand(sessionId: string, args: string): void {
@@ -2293,28 +2127,39 @@ ${msg.text}`);
     const requested = PERMISSION_MODES.find(mode => mode.toLowerCase() === args.toLowerCase());
     if (args && !requested) return this.notice(sessionId, msg.modeList({ modes: PERMISSION_MODES.join(", ") }), "info");
     if (!requested) return this.spawn(this.showModes(sessionId));
-    const current = this.knownMode(sessionId);
-    if (current === requested) return this.notice(sessionId, msg.modeAlready({ mode: requested }), "info");
-    const cfg = this.opts.config();
-    if (!cfg.launch) return this.notice(sessionId, msg.autolaunchNotConfigured({ launchError: cfg.launchError }), "warning");
-    if (!hasModePlaceholder(cfg.launch)) return this.notice(sessionId, msg.addModePlaceholder, "warning");
-    const location = this.launchLocation(sessionId, this.connOf(sessionId)?.data.account);
-    if ("error" in location) return this.notice(sessionId, location.error === "account" ? msg.accountUnknown : msg.directoryUnknown, "warning");
-    const { account, cwd } = location;
-    try {
-      launchCommand(cfg.launch, { cwd, account, session: sessionId, mode: requested }, this.opts.platform ?? PLATFORM);
-    } catch (e) {
-      const why = e instanceof LaunchError ? e.render(msg) : String(e);
-      return this.notice(sessionId, msg.restartPrepareFailed({ why }), "warning");
-    }
-    if (this.cleanups.has(sessionId)) return this.notice(sessionId, msg.cleanupBusy, "info");
-    if (this.stops.has(sessionId) || this.stopping.has(sessionId)) return this.notice(sessionId, msg.sessionAlreadyEnding, "info");
-    if (this.launches.has(sessionId) || this.modeRestarts.has(sessionId)) return this.notice(sessionId, msg.sessionAlreadyStarting, "info");
-    const ws = this.connOf(sessionId);
-    if (!ws) return this.launch(sessionId, account, [], true, requested);
-    this.modeRestarts.set(sessionId, { mode: requested, held: [] });
-    this.notice(sessionId, msg.restartingInMode({ mode: requested }), "info");
-    this.terminate(sessionId);
+    if (this.knownMode(sessionId) === requested) return this.notice(sessionId, msg.modeAlready({ mode: requested }), "info");
+    this.changeMode(sessionId, requested);
+  }
+
+  // One `rig session mode` call: rig restarts the session in the mode (or says it is in it already) and the
+  // new window connects like one of a start. What comes meanwhile is held for that window.
+  private changeMode(sessionId: string, mode: PermissionMode): void {
+    const entry: Launch = { held: [], mode, ...this.accountOf(sessionId) };
+    this.launches.set(sessionId, entry);
+    this.capturePending(sessionId);
+    this.launchEnds.delete(sessionId);
+    this.launchNotice(sessionId, this.m().restartingInMode({ mode }));
+    // The mode record to look for later starts where the transcript is now.
+    const transcript = this.transcriptOf(sessionId);
+    const offset = transcript ? statSync(transcript).size : undefined;
+    this.spawn(this.rig.mode(sessionId, mode, () => this.launchNotice(sessionId, this.m().sessionWaiting)).then(result => {
+      const m = this.m();
+      if (!result.ok) {
+        this.abandonLaunch(sessionId, entry);
+        return this.notice(sessionId, failureOutcome(result.error, m).text, "error");
+      }
+      if ("changed" in result.value) {
+        this.abandonLaunch(sessionId, entry);
+        return this.notice(sessionId, m.modeAlready({ mode }), "info");
+      }
+      this.store.setLaunchedMode(sessionId, mode, offset);
+      this.awaitWindow(sessionId, entry);
+    }));
+  }
+
+  private accountOf(sessionId: string): { account?: string } {
+    const account = this.connOf(sessionId)?.data.account;
+    return account ? { account } : {};
   }
 
   private currentMode(sessionId: string): string | undefined {
@@ -2337,16 +2182,6 @@ ${msg.text}`);
     return (path && offset !== undefined ? transcriptMode(path, offset) : undefined) ?? ws.data.launchedMode;
   }
 
-  private launchLocation(sessionId: string, account: string | undefined): { account: string; cwd: string } | { error: "account" | "cwd" | "record" } {
-    const rec = this.store.get(sessionId);
-    if (!rec) return { error: "record" };
-    const resolvedAccount = this.hasAccounts() ? account ?? rec.account : "";
-    if (resolvedAccount === undefined) return { error: "account" };
-    const cwd = rec.cwd ?? (this.opts.projectsDir ? sessionCwd(sessionId, this.opts.projectsDir) : undefined);
-    if (!cwd) return { error: "cwd" };
-    return { account: resolvedAccount, cwd };
-  }
-
   private async showModes(sessionId: string): Promise<void> {
     const api = this.opts.api;
     const cfg = this.opts.config();
@@ -2361,196 +2196,100 @@ ${msg.text}`);
     if (this.outbox.add(`modes-${randomUUID()}`, sessionId, [{ text, silent: true, buttons }])) this.spawn(this.pump(sessionId));
   }
 
-  private terminate(sessionId: string, stopId?: string): void {
-    this.stopping.delete(sessionId);
-    const queued = this.commands.get(sessionId) ?? [];
-    for (const e of queued.filter(e => e.cmd.name === "stop")) this.clearTimer(e.timer);
-    this.commands.set(sessionId, queued.filter(e => e.cmd.name !== "stop"));
-    const ws = this.connOf(sessionId);
-    if (!ws || this.stops.has(sessionId)) return;
-    if (!this.modeRestarts.has(sessionId) && !this.cleanups.has(sessionId) && !this.dyingHeld.has(sessionId)) this.dyingHeld.set(sessionId, []);
+  // The start or mode change of a session is over without a window: its timer stops, the start notice goes
+  // as a failed one, and the messages it held go to the open window or are kept for the next start. With
+  // `entry` given, only that very start is ended.
+  private abandonLaunch(sessionId: string, entry?: Launch): void {
+    const l = this.launches.get(sessionId);
+    if (!l || (entry && l !== entry)) return;
+    this.clearTimer(l.timer);
+    this.launches.delete(sessionId);
+    if (!l.ending) this.launchEnded(sessionId, "failed");
+    if (this.connOf(sessionId)) this.releaseHeld(sessionId, l.held);
+    else this.retainHeld(sessionId, l.held);
+  }
+
+  // A stop or a cleanup begins: everything of the session that is on its way to the window (open polls,
+  // batches, an open replay) is taken into the hold, and what comes later joins it, until the old window
+  // is gone. A start already under way keeps its own hold.
+  private beginEnding(sessionId: string): Launch {
+    let entry = this.launches.get(sessionId);
+    if (!entry) {
+      entry = { held: [], ending: { actions: 0, stopped: false, failed: false, closing: false } };
+      this.launches.set(sessionId, entry);
+    }
+    if (entry.ending) entry.ending.actions++;
     this.capturePending(sessionId);
-    this.log.info(`stopping session ${sessionId} from the topic`);
-    this.send(ws, { type: "terminate" });
-    if (stopId) this.stopIds.set(sessionId, stopId);
-    const ms = this.opts.stopTimeoutMs ?? STOP_TIMEOUT_MS;
-    this.stops.set(
-      sessionId,
-      this.setTimer(() => {
-        this.stops.delete(sessionId);
-        this.stopIds.delete(sessionId);
-        const restart = this.modeRestarts.get(sessionId);
-        if (restart) {
-          this.modeRestarts.delete(sessionId);
-          this.log.warn(`session ${sessionId} did not end for a mode restart; ${restart.held.length} held message(s) go to its window`);
-          this.releaseHeld(sessionId, restart.held);
-        }
-        const dying = this.dyingHeld.get(sessionId);
-        if (dying) {
-          // The window stays: what a dropped /cleanup held goes to it.
-          this.dyingHeld.delete(sessionId);
-          this.log.warn(`session ${sessionId} did not end; ${dying.length} held message(s) go to its window`);
-          this.releaseHeld(sessionId, dying);
-        }
-        if (this.cleanups.has(sessionId)) {
-          this.log.warn(`session ${sessionId} did not end for /cleanup; /cleanup dropped`);
-          this.dropCleanup(sessionId);
-        }
-        this.notice(sessionId, this.m().couldNotEnd({ seconds: ms / MS_PER_SECOND }), "warning");
-      }, ms),
-    );
+    return entry;
   }
 
-  // --- /cleanup ---------------------------------------------------------------
-
-  // The module compacts the session, the window ends, the hub empties the
-  // skills Claude Code remembers in the transcript; the session stays ended.
-  private startCleanup(sessionId: string, args: string): void {
-    if (this.cleanups.has(sessionId)) return this.notice(sessionId, this.m().cleanupBusy, "info");
-    if (!this.connOf(sessionId)) return this.notice(sessionId, this.m().sessionNotRunning, "info");
-    if (this.stops.has(sessionId) || this.stopping.has(sessionId)) return this.notice(sessionId, this.m().sessionAlreadyEnding, "info");
-    const c: Cleanup = { id: this.queueCommand(sessionId, { name: "cleanup", args }), phase: "compacting", held: [] };
-    const ms = this.opts.cleanupCompactMs ?? CLEANUP_COMPACT_MS;
-    c.compactTimer = this.setTimer(() => {
-      if (this.cleanups.get(sessionId) !== c || c.phase !== "compacting") return;
-      this.log.warn(`/cleanup of session ${sessionId}: no compact report in ${ms} ms; /cleanup dropped`);
-      this.cleanupOutcome(sessionId, c, this.m().cleanupCompactTimeout({ minutes: ms / MS_PER_MINUTE }), "warning", "warning");
-      this.dropCleanup(sessionId);
-    }, ms);
-    this.cleanups.set(sessionId, c);
-  }
-
-  // The outcome of a /cleanup resolves its "queued" message: a success edits it
-  // in place (silent); any other outcome deletes it and arrives as a new message,
-  // loud by its kind. One still
-  // queued or being sent goes once it is in the topic.
-  private cleanupOutcome(sessionId: string, c: Cleanup, text: string, kind: MessageKind, outcome: "success" | "warning"): void {
-    c.ended = true;
-    const key = cleanupStartKey(c);
-    const pieces = textPieces(text, false).map((piece, index) => ({
-      ...piece,
-      silent: !notifies(kind),
-      ...(index === 0 ? { resolution: { id: key, kind: outcome } } : {}),
-    }));
-    if (this.outbox.add(`cleanup-result-${c.id}`, sessionId, pieces)) this.spawn(this.pump(sessionId));
-  }
-
-  // /stop ends a compacting window at once, the /cleanup dropped and the
-  // transcript untouched; an exiting one is ending already.
-  private stopDuringCleanup(sessionId: string, c: Cleanup): void {
-    if (c.phase === "compacting") {
-      this.dyingHeld.set(sessionId, this.dyingHeld.get(sessionId) ?? []);
-      this.log.info(`/stop during the /cleanup compact of session ${sessionId}: ending the window, the transcript untouched`);
-      this.cleanupOutcome(sessionId, c, this.m().cleanupCancelled, "info", "warning");
-      this.dropCleanup(sessionId, true);
-      this.capturePending(sessionId);
-    }
-    this.terminate(sessionId);
-  }
-
-  // A /cleanup given up before the window ended: the messages it held go to
-  // the window still open, else as to a stopped session. A window about to be
-  // terminated does not get them: they wait for it to go and then start the
-  // session, as a message to a stopped session does.
-  private dropCleanup(sessionId: string, windowDies = false): void {
-    const c = this.cleanups.get(sessionId);
-    if (c) this.clearTimer(c.compactTimer);
-    // An ended one keeps its entry until its "will compact" message is there.
-    this.cleanups.delete(sessionId);
-    const queued = this.commands.get(sessionId) ?? [];
-    for (const e of queued.filter(e => e.cmd.name === "cleanup")) this.clearTimer(e.timer);
-    const left = queued.filter(e => e.cmd.name !== "cleanup");
-    if (left.length) this.commands.set(sessionId, left);
-    else this.commands.delete(sessionId);
-    if (!c?.held.length) return;
-    if (windowDies && this.connOf(sessionId)) {
-      this.log.info(`/cleanup of session ${sessionId} dropped: ${c.held.length} held message(s) wait for the ending window to go`);
-      this.dyingHeld.set(sessionId, c.held);
-    } else {
-      this.log.info(`/cleanup of session ${sessionId} dropped: ${c.held.length} held message(s) go the way of new topic messages`);
-      this.releaseHeld(sessionId, c.held);
-    }
-  }
-
-  private onCleanupReport(sessionId: string, id: string, before: number | undefined, error: string | undefined): void {
-    const c = this.cleanups.get(sessionId);
-    if (!c || c.id !== id || c.phase !== "compacting") {
-      this.log.info(`/cleanup report ${id} for session ${sessionId} ignored: that /cleanup was dropped or is unknown`);
+  // The rig call of a stop or a cleanup is over. Once none runs: a process that ended hands the held items
+  // on when its window is gone; a failure keeps them for the next start (or gives them to a window still
+  // open); a session that was not running just lets them go the way a new message would.
+  private endingDone(sessionId: string, entry: Launch, result: EndingResult): void {
+    const ending = entry.ending;
+    if (!ending) {
+      // A start under way that rig stopped is over: what it held goes back to the topic's queue.
+      if (result === "ended") this.abandonLaunch(sessionId, entry);
       return;
     }
-    this.clearTimer(c.compactTimer);
-    if (error !== undefined) {
-      this.log.warn(`/cleanup of session ${sessionId}: the compact failed: ${error}`);
-      this.cleanupOutcome(sessionId, c, this.m().cleanupCompactFailed({ error }), "error", "warning");
-      return this.dropCleanup(sessionId);
+    ending.actions--;
+    if (result === "ended") ending.stopped = true;
+    if (result === "failed") ending.failed = true;
+    if (ending.actions > 0 || this.launches.get(sessionId) !== entry) return;
+    if (ending.stopped) {
+      ending.closing = true;
+      if (!this.connOf(sessionId)) return this.finishEnding(sessionId, entry);
+      entry.timer = this.setTimer(() => this.finishEnding(sessionId, entry), WINDOW_CLOSE_WAIT_MS);
+      return;
     }
-    this.log.info(`/cleanup of session ${sessionId}: compacted${before === undefined ? "" : ` from ${before} tokens`}; ending the window`);
-    c.phase = "exiting";
-    this.terminate(sessionId);
+    if (ending.failed) return this.abandonLaunch(sessionId, entry);
+    this.finishEnding(sessionId, entry);
   }
 
-  // The window is gone: once Claude Code has exited, the skills go from the
-  // transcript.
-  private async finishCleanup(sessionId: string, c: Cleanup, pid: number | undefined): Promise<void> {
-    const current = () => this.running && this.cleanups.get(sessionId) === c;
-    const gate = this.exitGates.get(sessionId) ?? this.gateExit(sessionId, pid);
-    const outcome = await gate.settled;
-    if (!current()) return;
-    // A window of the session connected again: the edit would race it, and
-    // what came meanwhile goes to it.
-    if (this.connOf(sessionId)) {
-      this.cleanups.delete(sessionId);
-      this.log.warn(`/cleanup of session ${sessionId}: a window of the session connected again; the transcript untouched, ${c.held.length} held message(s) go to it`);
-      this.cleanupOutcome(sessionId, c, this.m().cleanupReopened, "warning", "warning");
-      return this.releaseHeld(sessionId, c.held);
+  // The hold of a stop or a cleanup ends: its items are handled as new topic messages would be now.
+  private finishEnding(sessionId: string, entry: Launch): void {
+    if (this.launches.get(sessionId) !== entry) return;
+    this.clearTimer(entry.timer);
+    this.launches.delete(sessionId);
+    this.releaseHeld(sessionId, entry.held);
+  }
+
+  // What is on its way to the session's window is taken into its hold: open polls end (their answers go back
+  // to the terminal and are not swallowed), batches queued or waiting and an open replay give their
+  // messages up, so none reaches a window that is about to end.
+  private capturePending(sessionId: string): void {
+    for (const p of this.polls.values()) if (p.sessionId === sessionId) {
+      this.spawn(this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal));
+      this.spawn(this.takeAnswer(p.key));
     }
-    if (outcome === "deadline") {
-      this.cleanups.delete(sessionId);
-      this.log.warn(`/cleanup of session ${sessionId}: Claude Code ${pid} did not exit; the transcript untouched, ${c.held.length} held message(s) go the way of new topic messages`);
-      this.cleanupOutcome(sessionId, c, this.m().cleanupNoExit, "error", "warning");
-      return this.releaseHeld(sessionId, c.held);
+    for (const entry of this.batchItems.get(sessionId) ?? []) {
+      entry.captured = true;
+      for (const message of entry.messages) this.hold(sessionId, { message });
     }
-    const path = this.transcriptOf(sessionId);
-    let text: string;
-    let kind: MessageKind = "info";
-    let outcomeKind: "success" | "warning" = "success";
-    if (!path) {
-      this.log.warn(`/cleanup of session ${sessionId}: no transcript found`);
-      kind = "warning";
-      outcomeKind = "warning";
-      text = this.m().cleanupNoTranscript;
-    } else {
-      try {
-        const result = await (this.opts.cleanTranscript ?? cleanTranscript)(path, Date.now());
-        this.log.info(`/cleanup of session ${sessionId}: ${path}: ${result.kind}${result.kind === "cleaned" ? `, ${result.records} record(s), backup ${result.backup}` : ""}`);
-        if (result.kind === "format") kind = "warning";
-        text = cleanupSummary(result, this.m());
-        outcomeKind = result.kind === "format" ? "warning" : "success";
-      } catch (e) {
-        const why = e instanceof Error ? e.message : String(e);
-        this.log.warn(`/cleanup of session ${sessionId}: emptying the skills in ${path} failed: ${why}`);
-        kind = "error";
-        outcomeKind = "warning";
-        text = this.m().cleanupFailed({ why: e instanceof CleanupError ? e.render(this.m()) : why });
-      }
+    const batch = this.batches.get(sessionId);
+    if (batch) {
+      this.batches.delete(sessionId);
+      this.clearTimer(batch.quietTimer);
+      this.clearTimer(batch.maxTimer);
+      for (const message of batch.messages) this.hold(sessionId, { message });
     }
-    if (!current()) return;
-    this.cleanups.delete(sessionId);
-    // A window came back during the edit: it is not started a second time.
-    if (this.connOf(sessionId)) {
-      this.log.warn(`/cleanup of session ${sessionId}: a window of the session connected during the edit; not starting it, ${c.held.length} held message(s) go to it`);
-      this.cleanupOutcome(sessionId, c, text, kind, outcomeKind);
-      return this.releaseHeld(sessionId, c.held);
+    const replay = this.replays.get(sessionId);
+    if (replay) {
+      this.replays.delete(sessionId);
+      for (const h of replay.inFlight) this.hold(sessionId, h);
+      for (const h of replay.held.splice(0)) this.hold(sessionId, h);
     }
-    // Messages that came meanwhile still reach the agent, as a message to a
-    // stopped session starts it.
-    const relaunch = c.held.length > 0;
-    this.cleanupOutcome(sessionId, c, text, kind, outcomeKind);
-    if (relaunch) this.releaseHeld(sessionId, c.held);
-    else {
-      this.notice(sessionId, this.m().sessionEnded, "info");
-      this.log.info(`/cleanup of session ${sessionId}: done; the session stays ended`);
-    }
+  }
+
+  // rig has started the window; it has this long to say hello before the start counts as failed.
+  private awaitWindow(sessionId: string, entry: Launch): void {
+    if (this.launches.get(sessionId) !== entry) return;
+    entry.timer = this.setTimer(() => {
+      this.log.warn(`session ${sessionId} did not connect in ${CONNECT_WAIT_MS / MS_PER_SECOND} s; ${entry.held.length} held item(s) retained`);
+      this.abandonLaunch(sessionId, entry);
+      this.notice(sessionId, this.m().sessionDidNotStart({ seconds: CONNECT_WAIT_MS / MS_PER_SECOND }), "error");
+    }, CONNECT_WAIT_MS);
   }
 
   // The transcript the hook named, else the one found by the session id.
@@ -2560,30 +2299,18 @@ ${msg.text}`);
     return this.opts.projectsDir ? sessionTranscript(sessionId, this.opts.projectsDir) : undefined;
   }
 
-  // Runs the configured command for a session without a window: the account
-  // given, else the one it ran on last; with neither it does not start. The
-  // messages wait until the session connects; one start at a time. announce:
-  // false leaves out the start notice; a failure is told all the same.
-  private launch(sessionId: string, account: string | undefined, held: Held[], announce = true, mode?: PermissionMode): void {
+  // Starts a session without a window with `rig session run`: the account given, else the one it ran on
+  // last. The messages wait until the session connects; one start at a time.
+  private launch(sessionId: string, account: string | undefined, held: Held[]): void {
     const saved = this.retained.get(sessionId) ?? [];
     this.retained.delete(sessionId);
     for (const h of held) this.keepInOrder(saved, h);
     held = saved;
-    const existing = this.launches.get(sessionId) ?? this.gatedLaunches.get(sessionId);
+    const existing = this.launches.get(sessionId);
     if (existing) {
       for (const h of held) this.keepInOrder(existing.held, h);
       return;
     }
-    const gate = this.exitGates.get(sessionId);
-    if (gate) {
-      if (gate.expired && mode) {
-        mode = undefined;
-        if (!held.length) return this.notice(sessionId, this.m().modeChangeCancelled, "info");
-      }
-      this.gatedLaunches.set(sessionId, { account, held, announce, mode });
-      return;
-    }
-    const cfg = this.opts.config();
     const rec = this.store.get(sessionId);
     if (!rec) return this.retainHeld(sessionId, held);
     // A window of the session is open: a second Claude Code on the same
@@ -2593,62 +2320,22 @@ ${msg.text}`);
       if (held.length) this.replay(sessionId, held);
       return;
     }
-    if (!cfg.launch) {
-      this.retainHeld(sessionId, held);
-      return this.notice(sessionId, this.m().autolaunchNotConfigured({ launchError: cfg.launchError }), "warning");
-    }
-    const location = this.launchLocation(sessionId, account);
-    if ("error" in location) {
-      this.retainHeld(sessionId, held);
-      return this.notice(sessionId, location.error === "account" ? this.m().accountUnknown : this.m().directoryUnknown, "warning");
-    }
-    const { account: acc, cwd } = location;
-    let command: string[];
-    let modeOffset: number | undefined;
-    let spawned: void | Promise<void>;
-    try {
-      command = launchCommand(cfg.launch, { cwd, account: acc, session: sessionId, ...(mode ? { mode } : {}) }, this.opts.platform ?? PLATFORM);
-      const transcript = mode ? this.transcriptOf(sessionId) : undefined;
-      if (transcript) modeOffset = statSync(transcript).size;
-      this.log.info(`starting session ${sessionId} on account ${acc}: ${JSON.stringify(command)}`);
-      spawned = this.opts.spawn ? this.opts.spawn(command) : spawnDetached(command, {
-        graceMs: LAUNCH_EXIT_GRACE_MS,
-        setTimer: (fn, ms) => this.setTimer(fn, ms),
-        clearTimer: timer => this.clearTimer(timer),
-      });
-    } catch (e) {
-      const failure = e instanceof LaunchError ? e.message : catalogOf("en").launchCommandFailed({ error: e instanceof Error ? e.message : String(e) });
-      this.log.warn(`starting session ${sessionId} failed: ${failure}`);
-      this.retainHeld(sessionId, held);
-      const why = e instanceof LaunchError ? e.render(this.m()) : this.m().launchCommandFailed({ error: e instanceof Error ? e.message : String(e) });
-      return this.notice(sessionId, this.m().cannotLaunch({ why }), "error");
-    }
-    const sec = cfg.launch.timeoutSec;
-    const timer = this.setTimer(() => {
-      const l = this.launches.get(sessionId);
-      this.launches.delete(sessionId);
-      this.log.warn(`session ${sessionId} did not connect in ${sec} s; ${l?.held.length ?? 0} held item(s) retained`);
-      this.retainHeld(sessionId, l?.held ?? []);
-      this.launchEnded(sessionId, "failed");
-      const tmuxHint = isTmuxCommand(command) ? tmuxAttachHint(command, this.m()) : undefined;
-      this.notice(sessionId, this.m().sessionDidNotStart({ seconds: sec, tmuxHint }), "error");
-    }, sec * MS_PER_SECOND);
-    this.launches.set(sessionId, { account: acc, held, timer, mode });
+    const chosen = this.hasAccounts() ? account ?? rec.account : undefined;
+    const entry: Launch = { held, ...(chosen ? { account: chosen } : {}) };
+    this.launches.set(sessionId, entry);
+    this.capturePending(sessionId);
     this.launchEnds.delete(sessionId);
-    const started = () => {
-      this.store.setLaunchedMode(sessionId, mode, modeOffset);
-      if (announce) this.launchNotice(sessionId, this.m().launching({ account: acc || undefined }));
-    };
-    if (spawned) void spawned.then(started, e => {
-      const l = this.launches.get(sessionId);
-      if (!l || l.timer !== timer) return;
-      this.clearTimer(timer);
-      this.launches.delete(sessionId);
-      this.retainHeld(sessionId, l.held);
-      this.launchEnded(sessionId, "failed");
-      this.notice(sessionId, launchFailure(e, this.m()), "error");
-    });
-    else started();
+    this.launchNotice(sessionId, this.m().launching({ account: chosen || undefined }));
+    this.log.info(`starting session ${sessionId} with rig${chosen ? `, account ${chosen}` : ""}`);
+    this.spawn(this.rig.run(sessionId, chosen ? { account: chosen } : {}, () => this.launchNotice(sessionId, this.m().sessionWaiting)).then(result => {
+      if (!result.ok) {
+        if (result.error.kind === "rig") this.log.warn(`session ${sessionId}: rig refused to start it (${result.error.code}): ${result.error.message}`);
+        this.abandonLaunch(sessionId, entry);
+        return this.notice(sessionId, failureOutcome(result.error, this.m()).text, "error");
+      }
+      this.store.setLaunchedMode(sessionId, undefined, undefined);
+      this.awaitWindow(sessionId, entry);
+    }));
   }
 
   // A window of the session connected: a start it waited for is done, and
@@ -2668,18 +2355,19 @@ ${msg.text}`);
       if (this.execs) this.whenReady(() => this.execs?.connected(sessionId));
       return;
     }
-    this.clearTimer(l.timer);
-    this.launches.delete(sessionId);
-    if (l.cancelled) {
-      this.dyingHeld.set(sessionId, l.held);
-      this.terminate(sessionId);
+    // A window that says hello while a stop or a cleanup runs is the one being ended, or one that came after
+    // it ended: the hold goes on until rig is done and the old window is gone.
+    if (l.ending) {
+      if (l.ending.closing) this.finishEnding(sessionId, l);
       return;
     }
+    this.clearTimer(l.timer);
+    this.launches.delete(sessionId);
     ws.data.launchedMode = l.mode;
     if (l.mode && this.store.get(sessionId)?.launchedModeOffset === undefined && ws.data.attachedOffset !== undefined) {
       this.store.setLaunchedMode(sessionId, l.mode, ws.data.attachedOffset);
     }
-    if (!ws.data.account) {
+    if (!ws.data.account && l.account) {
       ws.data.account = l.account;
       this.store.setWhere(sessionId, undefined, l.account);
     }
@@ -2727,16 +2415,9 @@ ${msg.text}`);
           await flush();
           if (!wanted()) return;
           if (this.hold(sessionId, h)) continue;
+          // The command is taken: a stop or a cleanup it starts must not hold it again.
+          this.deliveredItems.add(m);
           if (this.connOf(sessionId)) this.onHubCommand(sessionId, hubCmd, m);
-          else this.log.warn(`session ${sessionId} has no window, message ${m.message_id} not delivered`);
-          continue;
-        }
-        const cmd = m.text !== undefined ? commandOf(m.text, this.botUsername) : undefined;
-        if (cmd) {
-          await flush();
-          if (!wanted()) return;
-          if (this.hold(sessionId, h)) continue;
-          if (this.connOf(sessionId)) this.queueCommand(sessionId, cmd);
           else this.log.warn(`session ${sessionId} has no window, message ${m.message_id} not delivered`);
           continue;
         }
@@ -2782,9 +2463,8 @@ ${msg.text}`);
     });
   }
 
-  // What a /cleanup held leaves it as a new topic message would at this
-  // moment: into the open window, else into a start under way, else it starts
-  // the session, else the user is told the session is not active.
+  // What a start or mode change gave up on is handled as a new topic message would be at this
+  // moment: into the open window, else into a start under way, else it starts the session.
   private releaseHeld(sessionId: string, held: Held[]): void {
     if (!held.length) {
       if (this.connOf(sessionId) && this.execs) this.whenReady(() => this.execs?.connected(sessionId));
@@ -2793,8 +2473,7 @@ ${msg.text}`);
     const rest = held.filter(h => !this.hold(sessionId, h));
     if (!rest.length) return;
     if (this.connOf(sessionId)) return this.replay(sessionId, rest, () => this.execs?.connected(sessionId));
-    if (this.opts.config().launch) return this.launch(sessionId, undefined, rest);
-    this.retainHeld(sessionId, rest);
+    this.launch(sessionId, undefined, rest);
   }
 
   // Runs once Claude Code is ready for channel messages.
@@ -2869,8 +2548,8 @@ ${msg.text}`);
   }
 
   // Test hook: the work the hub still has under way that ends by itself and may still produce output;
-  // empty when nothing is left. Waits on a user (an open poll, a busy window), on a deadline of a
-  // stopping or exiting session, and standing activity (spool scan, the typing timer) are not work in
+  // empty when nothing is left. Waits on a user (an open poll, a busy window), on the connect deadline
+  // of a starting session, and standing activity (spool scan, the typing timer) are not work in
   // this sense; a typing request already queued or sent is.
   busy(): string[] {
     const parts: [string, boolean][] = [
@@ -2896,11 +2575,9 @@ ${msg.text}`);
       && ![...this.permissions.values()].some(permission => !permission.settled && this.connOf(permission.sessionId))
       && ![...this.polls.values()].some(poll => this.connOf(poll.sessionId))
       && !this.catchUps.size && !this.questionSends.size
-      && ![...this.commands.values()].some(queued => queued.length)
       && !(this.execs?.running() ?? 0) && !this.machineQueries && !this.machineTasks.size && !this.updatesInFlight
-      && !this.launches.size && !this.modeRestarts.size && !this.exitGates.size && !this.gatedLaunches.size
-      && !this.cleanups.size && !this.stops.size && !this.stopping.size && !this.readyTimers.size
-      && ![...this.retained.values(), ...this.dyingHeld.values(), ...this.heldResults.values()].some(items => items.length)
+      && !this.launches.size && !this.readyTimers.size
+      && ![...this.retained.values(), ...this.heldResults.values()].some(items => items.length)
       && !this.replays.size && !this.batches.size && !this.batchSends.size && !this.answerGroups.size
       && this.deliverable() === 0 && !this.pumping.size && ![...this.cards.values()].some(card => card.editing)
       && !this.machineOutbox.size && !this.machineOutbox.busy && !this.rigEvents?.busy
@@ -3088,18 +2765,12 @@ ${msg.text}`);
     this.deliveryOrder(inbound);
     const replay = this.replays.get(sessionId);
     if (this.hold(sessionId, { inbound })) {
-      // The ending or starting window must not receive this result yet.
+      // The starting window must not receive this result yet.
     } else if (replay) {
       this.keepInOrder(replay.held, { inbound });
     } else if (this.connOf(sessionId)) {
-      // A /cleanup under way holds it like a topic message: a turn it starts
-      // would be cut by the kill.
-      if (!this.keepForCleanup(sessionId, { inbound })) this.deliverInbound(sessionId, inbound);
-    } else if (this.opts.config().launch) this.launch(sessionId, undefined, [{ inbound }]);
-    else {
-      this.notice(sessionId, this.m().resultNotDelivered, "warning");
-      this.retainHeld(sessionId, [{ inbound }]);
-    }
+      this.deliverInbound(sessionId, inbound);
+    } else this.launch(sessionId, undefined, [{ inbound }]);
     // The last command ended: the hub may go idle again.
     if (!this.execs?.running()) this.armIdle();
   }
@@ -3119,7 +2790,7 @@ ${msg.text}`);
   }
 
   private isStarting(sessionId: string): boolean {
-    return this.launches.has(sessionId) || this.modeRestarts.has(sessionId) || this.gatedLaunches.has(sessionId);
+    return this.launches.has(sessionId);
   }
 
   private setTimer(fn: () => void, ms: number): ReturnType<typeof setTimeout> {
@@ -3138,72 +2809,10 @@ ${msg.text}`);
     this.notice(sessionId, this.m().pendingDelivery({ count: saved.length }), "warning");
   }
 
-  private capturePending(sessionId: string): void {
-    for (const p of this.polls.values()) if (p.sessionId === sessionId) {
-      this.spawn(this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal));
-      this.spawn(this.takeAnswer(p.key));
-    }
-    for (const entry of this.batchItems.get(sessionId) ?? []) {
-      entry.captured = true;
-      for (const message of entry.messages) this.hold(sessionId, { message });
-    }
-    const batch = this.batches.get(sessionId);
-    if (batch) {
-      this.batches.delete(sessionId);
-      this.clearTimer(batch.quietTimer);
-      this.clearTimer(batch.maxTimer);
-      for (const message of batch.messages) this.hold(sessionId, { message });
-    }
-    const replay = this.replays.get(sessionId);
-    if (replay) {
-      this.replays.delete(sessionId);
-      for (const h of replay.inFlight) this.hold(sessionId, h);
-      for (const h of replay.held.splice(0)) this.hold(sessionId, h);
-    }
-  }
-
   private rerouteBatch(sessionId: string, ws: WS, messages: Message[]): boolean {
     if (this.connOf(sessionId) === ws && !messages.some(message => this.hold(sessionId, { message }))) return false;
     this.releaseHeld(sessionId, messages.map(message => ({ message })));
     return true;
-  }
-
-  private gateExit(sessionId: string, pid: number | undefined): ExitGate {
-    const existing = this.exitGates.get(sessionId);
-    if (existing) return existing;
-    if (pid === undefined) this.log.info(`session ${sessionId}: the Claude Code process is unknown; waiting for it to go`);
-    const gate = exitGate(pid, {
-      now: () => this.timers.now(),
-      sleep: ms => this.sleep(ms),
-      isAlive: this.opts.isAlive ?? isAlive,
-      pollMs: this.opts.exitPollMs ?? EXIT_POLL_MS,
-      deadlineMs: this.opts.cleanupExitMs ?? CLEANUP_EXIT_MS,
-      settleMs: this.opts.cleanupSettleMs ?? CLEANUP_SETTLE_MS,
-    });
-    this.exitGates.set(sessionId, gate);
-    void gate.settled.then(outcome => {
-      const pending = this.gatedLaunches.get(sessionId);
-      if (outcome === "deadline" && pending?.mode) {
-        pending.mode = undefined;
-        if (!pending.held.length) this.gatedLaunches.delete(sessionId);
-        this.notice(sessionId, this.m().modeNotChangedExit, "warning");
-      } else if (outcome === "deadline" && !this.cleanups.has(sessionId)) {
-        this.notice(sessionId, this.m().launchWaitsForExit, "warning");
-      }
-    });
-    void gate.done.then(outcome => {
-      if (this.exitGates.get(sessionId) !== gate) return;
-      this.exitGates.delete(sessionId);
-      if (!this.running || outcome === "cancelled") return;
-      const pending = this.gatedLaunches.get(sessionId);
-      this.gatedLaunches.delete(sessionId);
-      if (!pending) return;
-      if (outcome === "reconnected") {
-        if (pending.mode) this.notice(sessionId, this.m().modeNotChangedReopened, "warning");
-        this.releaseHeld(sessionId, pending.held);
-      } else this.launch(sessionId, pending.account, pending.held, pending.announce, pending.mode);
-    });
-    return gate;
   }
 
   // The hub's own copy goes, as for files from a window.
@@ -3355,26 +2964,6 @@ ${msg.text}`);
   }
 }
 
-const TMUX_DUPLICATE_SESSION = /duplicate session: (\S+)/;
-
-// What the topic is told when the launch command failed. A tmux session of the
-// same name means an earlier launch is alive, usually at a dialog: it is not
-// launched again.
-function launchFailure(e: unknown, m: Messages): string {
-  if (e instanceof LaunchExitError) {
-    const name = TMUX_DUPLICATE_SESSION.exec(e.stderr)?.[1];
-    if (name) return m.tmuxSessionAlive({ name });
-  }
-  return m.cannotLaunch({ why: e instanceof LaunchError ? e.render(m) : e instanceof Error ? e.message : String(e) });
-}
-
-// The /cleanup summary in the topic: what came of the skills.
-export function cleanupSummary(r: CleanupResult, m: Messages): string {
-  if (r.kind === "format") return m.cleanupFormatChanged({ version: r.version });
-  if (r.kind === "nothing" || !r.skills.length) return m.cleanupDone;
-  return m.cleanupDoneSkills({ skills: r.skills.map(s => s.name).join(", ") });
-}
-
 // Queue item ids are `<plugin message id>#<n>`, replacements add `.<m>`.
 function messageOf(itemId: string): string {
   return itemId.slice(0, itemId.lastIndexOf("#"));
@@ -3437,7 +3026,7 @@ function isInterrupt(m: Message): boolean {
 // What a topic message does to an open poll: a command works as usual and
 // leaves it open, a "!" message cancels it, anything else is the answer.
 function pollRole(m: Message, botUsername: string | undefined): "pass" | "cancel" | "answer" {
-  if (m.text !== undefined && (commandOf(m.text, botUsername) || hubCommandOf(m.text, botUsername))) return "pass";
+  if (m.text !== undefined && hubCommandOf(m.text, botUsername)) return "pass";
   return isInterrupt(m) ? "cancel" : "answer";
 }
 

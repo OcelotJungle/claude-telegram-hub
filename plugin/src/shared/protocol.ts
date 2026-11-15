@@ -5,27 +5,13 @@ import type { Entity } from "./markdown.ts";
 export const PROTOCOL_VERSION = 1;
 
 // The hub's localhost port unless TELEGRAM_HUB_PORT says otherwise. This file has no
-// imports, so the plugin's function hooks module can use it too.
+// imports, so hooks can use it too.
 export const DEFAULT_PORT = 47613;
 
-// A command from the topic, which the plugin's function hooks module takes
-// from the hub (GET /commands?session=<id>) and answers (POST /reply). stop
-// goes only to a module that asks with &stop=1; once it is ready for the
-// window to end, it says so with POST /terminate. cleanup goes only to a
-// module that asks with &cleanup=1; it compacts with the args and reports
-// with POST /cleanup: the context sizes before and after, or the error. rename
-// goes to any module with the new name as args; it runs the session's /rename.
-// The language of the texts a person reads in Telegram; rig stores it, the hub passes it on.
-// language on a command is the hub's current one: the module renders its texts with it
-// and uses English when it is absent.
 // The one list of languages; every other place derives from it.
 export const LANGUAGES = ["en", "ru"] as const;
 export type Language = (typeof LANGUAGES)[number];
-export type TopicCommand = { id: string; name: "info" | "compact" | "stop" | "cleanup" | "rename"; args: string; language?: Language };
 export type ResolutionKind = "success" | "warning" | "progress";
-export type CommandReply = { sessionId: string; id: string; text: string; notify: boolean; replaces?: { id: string; kind: ResolutionKind }; awaitsResult?: true };
-export type TerminateRequest = { sessionId: string; id: string };
-export type CleanupReport = { sessionId: string; id: string; before?: number; after?: number; error?: string };
 
 export type ChannelMeta = Record<string, string>;
 
@@ -63,9 +49,6 @@ export type PluginToHub =
   | { type: "seen"; messageIds: number[] }
   // The agent started working, or stopped: its turn ended or it waits for the user.
   | { type: "busy"; busy: boolean }
-  // The plugin is about to end this Claude Code process (after terminate), so
-  // the hub can wait until it is gone.
-  | { type: "exiting"; pid: number }
   // The answer to catchUp: the text written before the tool call is sent.
   | { type: "caughtUp"; id: string };
 
@@ -81,8 +64,6 @@ export type HubToPlugin =
   | { type: "switchSession"; sessionId: string; transcriptPath: string; cwd: string }
   // The answer to a permission prompt, given in the topic.
   | { type: "permissionReply"; requestId: string; behavior: PermissionBehavior }
-  // /stop in the topic: end the Claude Code process of this window.
-  | { type: "terminate" }
   // The Stop hook's decision on how the turn ended; kind only when final.
   | { type: "turnEnd"; final: boolean; kind?: TurnEndKind }
   // The hub is about to show a question: relay the text the agent wrote

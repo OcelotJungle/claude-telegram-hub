@@ -8,11 +8,11 @@ import { DEFAULT_PORT } from "./protocol.ts";
 
 export const API_BASE = "https://api.telegram.org";
 const DEFAULT_IDLE_MS = 5 * 60 * 1000;
-const DEFAULT_LAUNCH_TIMEOUT_SEC = 90;
 // Byte order marks.
 const UTF16LE_BOM = [0xff, 0xfe];
 const UTF16BE_BOM = [0xfe, 0xff];
 const UTF8_BOM = [0xef, 0xbb, 0xbf];
+let legacyLaunchLogged = false;
 
 // Shared by every cswap profile, so it never depends on CLAUDE_CONFIG_DIR.
 export function paths() {
@@ -85,21 +85,14 @@ export function loadToken(): string | undefined {
   return undefined;
 }
 
-// How the hub starts a session that has no window: command is the program
-// and its arguments, with {cwd}, {account} and {session} put in.
-export type Launch = { command: string[]; timeoutSec: number };
-
 // Topic commands: bash overrides the platform's default /bash executable.
 export type ExecConfig = { bash?: string };
 
-// launchError: config.json has a launch section that is not valid.
 // turnEndChime: the terminal sound command ("" for none), always set;
 // turnEndChimeError: config.json has a turnEndChime that is not a string.
 export type Config = {
   groupId?: string;
   allowFrom: string[];
-  launch?: Launch;
-  launchError?: string;
   exec?: ExecConfig;
   turnEndChime: string;
   turnEndChimeError?: string;
@@ -107,12 +100,7 @@ export type Config = {
 
 const execSchema: z.ZodType<ExecConfig> = z.object({ bash: z.string().min(1).optional() });
 
-const launchSchema: z.ZodType<Launch> = z.object({
-  command: z.array(z.string()).min(1),
-  timeoutSec: z.number().positive().default(DEFAULT_LAUNCH_TIMEOUT_SEC),
-});
-
-export function loadConfig(): Config {
+export function loadConfig(info?: (text: string) => void): Config {
   let raw: unknown;
   try {
     raw = JSON.parse(readText(paths().configFile));
@@ -125,11 +113,10 @@ export function loadConfig(): Config {
   if (typeof chime === "string") cfg.turnEndChime = chime;
   else if (chime !== undefined) cfg.turnEndChimeError = "turnEndChime in config.json must be a string";
   if (groupId != null && groupId !== "") cfg.groupId = String(groupId);
-  const launch = field(raw, "launch");
-  if (launch !== undefined) {
-    const parsed = launchSchema.safeParse(launch);
-    if (parsed.success) cfg.launch = parsed.data;
-    else cfg.launchError = z.prettifyError(parsed.error);
+  // Old configurations keep loading; rig owns all session launches now.
+  if (field(raw, "launch") !== undefined && info && !legacyLaunchLogged) {
+    legacyLaunchLogged = true;
+    info("Ignoring launch in config.json; rig session manages session launches");
   }
   // A broken exec section is left out: /bash then looks in the default place.
   const exec = execSchema.safeParse(field(raw, "exec"));

@@ -1,7 +1,7 @@
 // Runtime checks of the protocol messages, typed against protocol.ts: a
 // message type changed on one side and not here fails the type check.
-// protocol.ts itself has no value imports, so the function hooks module can use it.
-import type { AskQuestion, CleanupReport, CommandReply, EnableResult, HookBody, HubToPlugin, PluginToHub, QuestionBody, QuestionDecision, QueuedFile, TerminateRequest, TurnEndBody } from "./protocol.ts";
+// protocol.ts itself has no value imports, so hooks can use it.
+import type { AskQuestion, EnableResult, HookBody, HubToPlugin, PluginToHub, QuestionBody, QuestionDecision, QueuedFile, TurnEndBody } from "./protocol.ts";
 
 import { z } from "zod";
 import { entitySchema } from "./markdown.ts";
@@ -34,7 +34,6 @@ export const pluginToHub: z.ZodType<PluginToHub> = z.union([
   z.object({ type: z.literal("card"), id: z.string(), sessionId: z.string(), text: z.string(), entities: z.array(entitySchema).optional(), final: z.boolean(), reopen: z.boolean().optional(), replyTo: z.string().optional() }),
   z.object({ type: z.literal("seen"), messageIds: z.array(z.number()) }),
   z.object({ type: z.literal("busy"), busy: z.boolean() }),
-  z.object({ type: z.literal("exiting"), pid: z.number() }),
   z.object({ type: z.literal("caughtUp"), id: z.string() }),
 ]);
 
@@ -46,7 +45,6 @@ export const hubToPlugin: z.ZodType<HubToPlugin> = z.union([
   z.object({ type: z.literal("filesSent"), id: z.string(), error: z.string().optional() }),
   z.object({ type: z.literal("switchSession"), sessionId: z.string(), transcriptPath: z.string(), cwd: z.string() }),
   z.object({ type: z.literal("permissionReply"), requestId: z.string(), behavior: z.enum(["allow", "deny"]) }),
-  z.object({ type: z.literal("terminate") }),
   z.object({ type: z.literal("turnEnd"), final: z.boolean(), kind: z.enum(["ask", "done"]).optional() }),
   z.object({ type: z.literal("catchUp"), id: z.string() }),
   z.object({ type: z.literal("language"), language: z.enum(LANGUAGES) }),
@@ -88,15 +86,3 @@ export const questionDecision: z.ZodType<QuestionDecision> = z.union([
   z.object({ decision: z.literal("none") }),
 ]);
 
-// A reply without notify is sent silently.
-export const commandReply: z.ZodType<CommandReply> = z.object({ sessionId: z.string(), id: z.string(), text: z.string(), notify: z.boolean().catch(false), replaces: z.object({ id: z.string(), kind: z.enum(["success", "warning", "progress"]) }).optional(), awaitsResult: z.literal(true).optional() });
-
-export const terminateRequest: z.ZodType<TerminateRequest> = z.object({ sessionId: z.string(), id: z.string() });
-
-export const cleanupReport: z.ZodType<CleanupReport> = z.object({
-  sessionId: z.string(),
-  id: z.string(),
-  before: z.number().optional(),
-  after: z.number().optional(),
-  error: z.string().optional(),
-});

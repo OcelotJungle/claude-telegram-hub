@@ -1,6 +1,5 @@
-import type { RigInvocation, RigOutput } from "../src/hub/rig.ts";
+import type { RigInvocation, RigOutput, RigProgress } from "../src/hub/rig.ts";
 import type { VideoTools } from "../src/hub/video.ts";
-import type { Compaction, Usage } from "../src/mod/commands.ts";
 import type { Config } from "../src/shared/config.ts";
 import type { MessageKind } from "../src/shared/notification.ts";
 import type { Timers } from "../src/shared/timers.ts";
@@ -9,15 +8,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { z } from "zod";
-import { cleanupSummary, Hub, MAX_CARDS, projectName } from "../src/hub/hub.ts";
+import { Hub, MAX_CARDS, projectName } from "../src/hub/hub.ts";
 import { CANCEL_REASON } from "../src/hub/questions.ts";
+import { RIG_SESSION_LIMIT_MS } from "../src/hub/rig-session.ts";
 import { en } from "../src/shared/i18n/en.ts";
 import { ru } from "../src/shared/i18n/ru.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
-import { cleanTranscript } from "../src/hub/skill-cleanup.ts";
 import { saveExecs } from "../src/hub/exec-store.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
-import { Runner } from "../src/mod/commands.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { toTelegram } from "../src/shared/markdown.ts";
@@ -25,19 +23,17 @@ import { notifies } from "../src/shared/notification.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { hasFfmpeg, makeVideo, memLogger, must, NO_PACE, settled, tempDir, waitFor, wsClient } from "./helpers.ts";
 import { manualClock } from "./manual-clock.ts";
-import { fullInfo, neverSleep } from "./info-fixtures.ts";
+import { commandFailure, fullInfo } from "./info-fixtures.ts";
 import { PLATFORM, platformFor } from "../src/shared/platform.ts";
 
 const GROUP = "-1001";
 const ME = "123456789";
 // A session folder that exists: the repository itself.
 const CWD = join(import.meta.dir, "..", "..");
-// More polls than a compaction is tried with no turn running.
-const COMPACT_POLLS = 5;
 const DEFAULT_DIR = "C:\\Users\\me\\.claude";
 // Topic commands: a real command's run, a wait for what it shows, the idle
 // time a test hub exits after, a pause for what must not come, the age of a
-// command from while the hub was off, a test file limit, a launch timeout.
+// command from while the hub was off, a test file limit.
 const RUN_MS = 15_000;
 const WAIT_MS = 5000;
 const IDLE_MS = 300;
@@ -45,7 +41,6 @@ const SETTLE_MS = 300;
 const OLD_COMMAND_S = 5 * 60;
 const MS_PER_S = 1000;
 const FILE_LIMIT = 200;
-const LAUNCH_TIMEOUT_S = 30;
 // How long a test hub waits for windows before it delivers results of runs
 // that ended while it was off.
 const EXEC_GRACE_MS = 300;
@@ -79,6 +74,20 @@ const CARD_THROTTLE_MS = 400;
 // How often the hub renews "typing" for a busy window.
 const TYPING_EVERY_MS = 4000;
 const LONG_CATCH_UP_MS = 2000;
+// What the fake rig answers: the sizes of a compaction and the pid of a started session.
+const TOKENS_BEFORE = 120_000;
+const TOKENS_AFTER = 30_000;
+const RIG_PID = 4242;
+// The line rig prints on stderr while a session command waits for the turn to end.
+const WAITING_LINE = JSON.stringify({ progress: { code: "session-waiting" } });
+// How long the hub waits for the window of a session rig has started.
+const CONNECT_WAIT_MS = 90_000;
+// How long the hub holds a session's items for the window of a stop or a cleanup that rig has finished to close.
+const WINDOW_CLOSE_WAIT_MS = 30_000;
+// How many event-loop turns a test lets released work run for.
+const EVENT_LOOP_TURNS = 20;
+// The id the hub gives the first message of a topic.
+const TOPIC_ID = 100;
 
 let fake: FakeTelegram;
 let hub: Hub;
@@ -90,34 +99,27 @@ let exited: boolean;
 const clients: { close(): void }[] = [];
 
 type HubExtras = {
-  spawn?(command: string[]): void;
   projectsDir?: string;
-  stopTimeoutMs?: number;
   defaultAccount?(): Promise<string | undefined>;
   spawnRunner?(specFile: string): number;
   execFileLimit?: number;
   execGraceMs?: number;
   isAlive?(pid: number): boolean;
-  cleanupCompactMs?: number;
-  cleanupExitMs?: number;
-  cleanupSettleMs?: number;
-  exitPollMs?: number;
   timers?: Timers;
-  cleanTranscript?: typeof cleanTranscript;
   catchUpMs?: number;
   rigDir?: string;
   findRig?(): string | undefined;
-  runRig?(invocation: RigInvocation): Promise<RigOutput>;
+  runRig?(invocation: RigInvocation, signal?: AbortSignal, progress?: RigProgress): Promise<RigOutput>;
   pollOffsetFile?: string;
 };
 
-type StartOptions = { port?: number; idleMs?: number; token?: boolean | string; commandPickupMs?: number; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number; batchQuietMs?: number; batchMaxMs?: number } & HubExtras;
+type StartOptions = { port?: number; idleMs?: number; token?: boolean | string; videoTools?: VideoTools; cardEditMs?: number; cardGapMs?: number; reactionDelayMs?: number; typingEveryMs?: number; batchQuietMs?: number; batchMaxMs?: number; accountsAvailable?: () => boolean } & HubExtras;
 
 // The hub binds the port itself (0: the OS picks a free one) and the test reads it back, so no other socket can take it in between.
 async function startHub(o: StartOptions = {}): Promise<void> {
   hub = new Hub({
     platform: platformFor("win32"),
-    accountsAvailable: () => true,
+    accountsAvailable: o.accountsAvailable ?? (() => true),
     port: o.port ?? 0,
     sessionsFile: join(dir, "sessions.json"),
     outboxFile: join(dir, "outbox.json"),
@@ -131,7 +133,6 @@ async function startHub(o: StartOptions = {}): Promise<void> {
     api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === "string" ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, sendAttemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500, groupPace: NO_PACE }),
     config: () => config,
     idleMs: o.idleMs ?? 60_000,
-    commandPickupMs: o.commandPickupMs ?? 3000,
     pollTimeoutSec: 1,
     pollRetryBaseMs: 10,
     sendRetryBaseMs: 10,
@@ -144,16 +145,9 @@ async function startHub(o: StartOptions = {}): Promise<void> {
     batchQuietMs: o.batchQuietMs ?? BATCH_QUIET_MS,
     catchUpMs: o.catchUpMs ?? CATCH_UP_MS,
     ...(o.batchMaxMs ? { batchMaxMs: o.batchMaxMs } : {}),
-    ...(o.spawn ? { spawn: o.spawn } : {}),
     ...(o.projectsDir ? { projectsDir: o.projectsDir } : {}),
-    ...(o.stopTimeoutMs ? { stopTimeoutMs: o.stopTimeoutMs } : {}),
     ...(o.isAlive ? { isAlive: o.isAlive } : {}),
-    ...(o.cleanupCompactMs ? { cleanupCompactMs: o.cleanupCompactMs } : {}),
-    ...(o.cleanupExitMs ? { cleanupExitMs: o.cleanupExitMs } : {}),
-    ...(o.cleanupSettleMs ? { cleanupSettleMs: o.cleanupSettleMs } : {}),
-    ...(o.exitPollMs ? { exitPollMs: o.exitPollMs } : {}),
     ...(o.timers ? { timers: o.timers } : {}),
-    ...(o.cleanTranscript ? { cleanTranscript: o.cleanTranscript } : {}),
     ...(o.rigDir ? { rigDir: o.rigDir, hubCommit: () => "invented-commit", repository: dir } : {}),
     ...(o.findRig ? { findRig: o.findRig } : {}),
     ...(o.runRig ? { runRig: o.runRig } : {}),
@@ -700,14 +694,15 @@ describe("inbound", () => {
     expect(log.lines.some(l => l.startsWith("WARN photo download failed"))).toBe(true);
   });
 
-  test('a topic of a session without a window gets "the session is not active right now"', async () => {
+  test("a topic of a session without a window, on a machine without rig, says rig is missing and that the message waits", async () => {
     await startHub();
     const a = await enabled("a");
     a.close();
     await waitFor(() => !hub.isConnected("a"), 3000, "disconnect");
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "hello?" }));
-    const sent = await waitFor(() => fake.texts().find(p => p.text === "the session is not active right now"));
+    const sent = await waitFor(() => fake.texts().find(p => p.text === en.rigMissing), WAIT_MS, "rig missing notice");
     expect(sent).toMatchObject({ chat_id: GROUP, message_thread_id: 100, disable_notification: false });
+    expect(fake.texts().map(p => p.text)).toContain(en.pendingDelivery({ count: 1 }));
   });
 
   test("General, other chats and other users are ignored and the chat id is logged", async () => {
@@ -890,7 +885,7 @@ describe("batching", () => {
 describe("send", () => {
   test("technical message kinds set Telegram notification through the send path", async () => {
     await startHub();
-    await enabled("a");
+    const a = await enabled("a");
     const cases: { text: string; kind: MessageKind; loud: boolean }[] = [
       { text: "/info reply", kind: "info", loud: false },
       { text: "✅ /autocompact 80 done.", kind: "info", loud: false },
@@ -909,13 +904,7 @@ describe("send", () => {
       { text: "Pick an answer option", kind: "action", loud: true },
       { text: "⚠️ Compaction failed", kind: "error", loud: true },
     ];
-    for (const [index, item] of cases.entries()) {
-      const response = await fetch(`http://127.0.0.1:${port}/reply`, {
-        method: "POST",
-        body: JSON.stringify({ sessionId: "a", id: `kind-${index}`, text: item.text, notify: notifies(item.kind) }),
-      });
-      expect(response.status).toBe(200);
-    }
+    for (const [index, item] of cases.entries()) a.send({ type: "send", id: `kind-${index}`, text: item.text, notify: notifies(item.kind) });
     await waitFor(() => fake.texts().length === cases.length, WAIT_MS, "technical messages");
     expect(fake.texts().map(message => [message.text, message.disable_notification])).toEqual(
       cases.map(item => [item.text, !item.loud]),
@@ -1987,561 +1976,1118 @@ describe("subagent cards", () => {
   });
 });
 
-describe("starting and stopping sessions", () => {
-  const SID = "11111111-2222-3333-4444-555555555555";
-  const COMMAND = ["wt.exe", "-d", "{cwd}", "cswap.exe", "run", "{account}", "--", "--resume", "{session}"];
-  const MODE_COMMAND = ["wt.exe", "-d", "{cwd}", "cswap.exe", "run", "{account}", "--", "--resume", "{session}", "{mode}"];
-  const MODE_PID = 4242;
-  const MODE_SETTLE_MS = 1;
-  const msg = (text: string) => topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text });
-  const texts = () => fake.texts().map(t => t.text);
+type RigCall = { sub: string; sid: string; args: string[] };
+type RigGate = { signal?: AbortSignal; progress?: RigProgress };
+type RigAnswer = RigOutput | ((gate: RigGate) => Promise<RigOutput>);
 
-  // A session with a topic and no window; started commands are recorded.
-  async function closedSession(o: { timeoutSec?: number } & HubExtras = {}) {
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: COMMAND, timeoutSec: o.timeoutSec ?? 30 } };
-    await startHub({ spawn: c => void spawned.push(c), ...o });
-    const a = await enabled(SID);
-    a.close();
-    await waitFor(() => !hub.isConnected(SID));
-    return spawned;
+const rigOk = (value: object): RigOutput => ({ code: 0, stdout: JSON.stringify(value), stderr: "" });
+const rigRefused = (code: string, message: string): RigOutput => ({ code: 1, stdout: commandFailure(code, message), stderr: "" });
+const RIG_FEATURES = ["cmd", "pwsh", "bash"].map(name => ({ name, description: `the ${name} command`, enabled: true, platformAllowed: true }));
+
+// The words of the command line the hub gave cmd.exe: the outer quotes off, the caret escapes undone (they are applied twice), then split like cmd would.
+function rigTokens(invocation: RigInvocation): string[] {
+  const line = must(invocation.argv.at(-1), "the command line");
+  const plain = line.slice(1, -1).replace(/\^(.)/g, "$1").replace(/\^(.)/g, "$1");
+  return Array.from(plain.matchAll(/"([^"]*)"|(\S+)/g), m => m[1] ?? m[2] ?? "");
+}
+
+// A rig that answers like the real one: the session commands with the recorded shapes, and what the hub asks at start.
+function sessionRig() {
+  const calls: RigCall[] = [];
+  const infos: string[] = [];
+  const answers = new Map<string, RigAnswer>();
+  const compacted = { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER };
+  const fixture = (sub: string, session: string, args: string[]): RigOutput => {
+    switch (sub) {
+      case "compact": return rigOk({ session, ...compacted });
+      case "rename": return rigOk({ session, name: args[0] });
+      case "stop": return rigOk({ session, stopped: true, compacted });
+      case "cleanup": return rigOk({ session, compacted, backup: "backup.jsonl", skillsRemoved: 0 });
+      case "run": return rigOk({ session, pid: RIG_PID, mode: null, account: null });
+      case "mode": return rigOk({ session, mode: args[0], pid: RIG_PID });
+      default: return rigRefused("session-unknown", `no such session command: ${sub}`);
+    }
+  };
+  const run = async (invocation: RigInvocation, signal?: AbortSignal, progress?: RigProgress): Promise<RigOutput> => {
+    const [, command, sub = "", sid = "", ...args] = rigTokens(invocation);
+    if (command === "feature") return rigOk({ features: RIG_FEATURES });
+    if (command === "language") return rigOk({ language: "en" });
+    if (command === "info") {
+      infos.push(sid);
+      return rigOk(fullInfo());
+    }
+    calls.push({ sub, sid, args });
+    const answer = answers.get(sub) ?? fixture(sub, sid, args);
+    return typeof answer === "function" ? answer({ ...(signal ? { signal } : {}), ...(progress ? { progress } : {}) }) : answer;
+  };
+  return { run, calls, infos, answer: (sub: string, answer: RigAnswer) => void answers.set(sub, answer) };
+}
+
+// An answer that prints its progress lines, then waits to be released.
+function gatedAnswer(lines: string[], output: RigOutput) {
+  let release = () => {};
+  const opened = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  const answer: RigAnswer = async gate => {
+    for (const line of lines) gate.progress?.(line);
+    await opened;
+    return output;
+  };
+  return { answer, release: () => release() };
+}
+
+describe("session commands", () => {
+  const SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const ACCOUNT = "2";
+  const msg = (text: string) => topicMsg({ chatId: GROUP, threadId: TOPIC_ID, fromId: ME, text });
+  let rig: ReturnType<typeof sessionRig>;
+  beforeEach(() => {
+    rig = sessionRig();
+  });
+  // The hub on the fake rig; rig's own start-up questions are answered before a command goes in.
+  const start = async (extra: StartOptions = {}) => {
+    await startHub({ findRig: () => "rig-file", runRig: rig.run, ...extra });
+    await settle();
+  };
+  const texts = () => fake.texts().map(t => t.text);
+  const edits = () => fake.callsOf("editMessageText").map(c => String(c.text));
+  const shown = () => [...texts(), ...edits()];
+  const callsOf = (sub: string) => rig.calls.filter(c => c.sub === sub);
+  const closedSession = () => new SessionStore(join(dir, "sessions.json")).set(SID, { topicId: TOPIC_ID, title: "T", project: "p", enabled: true, cwd: CWD, account: ACCOUNT });
+  const buttonsOf = (call: object) =>
+    arr(field(field(call, "reply_markup"), "inline_keyboard"))
+      .flatMap(row => arr(row))
+      .map(b => String(field(b, "callback_data")));
+  const sent = (text: string) => fake.texts().find(t => t.text === text);
+  const startedAs = (text: string) => waitFor(() => sent(text), WAIT_MS, `"${text}" sent`);
+
+  const SUCCESS = [
+    { command: "/compact", sub: "compact", args: [], running: en.compactRunning, done: "✅ Compaction done: 120k → 30k tokens." },
+    { command: "/compact keep the tests", sub: "compact", args: ["--instructions", "keep the tests"], running: en.compactRunning, done: "✅ Compaction done: 120k → 30k tokens." },
+    { command: "/rename New name", sub: "rename", args: ["New name"], running: en.renameRunning, done: "✅ Renamed: New name" },
+    { command: "/stop", sub: "stop", args: [], running: en.stopRunning, done: "⏹ Session ended\n✅ Compaction done: 120k → 30k tokens." },
+    { command: "/cleanup", sub: "cleanup", args: [], running: en.cleanupRunning, done: "🧹 Cleanup done: 120k → 30k tokens." },
+  ];
+  for (const c of SUCCESS) {
+    test(`${c.command} is one rig session ${c.sub} call and its result replaces the running message`, async () => {
+      await start();
+      await enabled(SID);
+      fake.pushUpdate(msg(c.command));
+      await waitFor(() => edits().includes(c.done), WAIT_MS, "result");
+      expect(callsOf(c.sub)).toEqual([{ sub: c.sub, sid: SID, args: c.args }]);
+      const started = must(sent(c.running), "running message");
+      expect(started.disable_notification).toBe(true);
+      expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: fake.lastMessageId, text: c.done }]);
+      expect(fake.callsOf("deleteMessage")).toEqual([]);
+    });
   }
 
-  test("a message to a closed session starts it and reaches it once it connects", async () => {
-    const spawned = await closedSession();
-    fake.pushUpdate(msg("first"));
-    await waitFor(() => texts().includes("🚀 Starting the session (account 2)…"));
-    fake.pushUpdate(msg("second"));
-    await settle();
-    expect(spawned).toEqual([["wt.exe", "-d", CWD, "cswap.exe", "run", "2", "--", "--resume", SID]]);
-    const w = await plugin(SID);
-    // Held messages go together as one notification.
-    expect((await w.next("inbound")).content).toBe("first\n\nsecond");
-    await waitFor(() => fake.callsOf("editMessageText").some(c => c.text === "✅ Session started"));
-    expect(spawned.length).toBe(1);
+  const SESSION_ENDED = "The session has ended";
+  const FAILURES = [
+    { command: "/compact", sub: "compact", code: "session-no-module", message: "The session has no hooks module", shows: `The session has no hooks module\n${en.sessionRestartHint}`, running: en.compactRunning },
+    { command: "/rename New name", sub: "rename", code: "session-ended", message: SESSION_ENDED, shows: SESSION_ENDED, running: en.renameRunning },
+    { command: "/stop", sub: "stop", code: "session-unknown", message: "No such session", shows: "No such session", running: en.stopRunning },
+    { command: "/cleanup", sub: "cleanup", code: "session-cleanup-not-compacted", message: "Compact the session first", shows: "Compact the session first", running: en.cleanupRunning },
+    { command: "/compact", sub: "compact", code: "session-timeout", message: "The turn did not end in time", shows: "The turn did not end in time", running: en.compactRunning },
+  ];
+  for (const c of FAILURES) {
+    test(`${c.command} with rig's ${c.code} shows rig's words in a loud message and takes the running one away`, async () => {
+      const gated = gatedAnswer([], rigRefused(c.code, c.message));
+      rig.answer(c.sub, gated.answer);
+      await start();
+      await enabled(SID);
+      fake.pushUpdate(msg(c.command));
+      await startedAs(c.running);
+      const runningId = fake.lastMessageId;
+      gated.release();
+      const failure = await startedAs(c.shows);
+      expect(failure.disable_notification).toBe(false);
+      await waitFor(() => fake.callsOf("deleteMessage").length === 1, WAIT_MS, "running message deleted");
+      expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: runningId }]);
+      expect(fake.callsOf("editMessageText")).toEqual([]);
+    });
+  }
+
+  test("a compaction rig skipped is a warning with its reason", async () => {
+    rig.answer("compact", rigOk({ session: SID, skip: "a hook vetoed it" }));
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/compact"));
+    const warning = await startedAs("⚠️ Compaction skipped: a hook vetoed it");
+    expect(warning.disable_notification).toBe(false);
   });
 
-  test("a module command to a closed session starts it and waits for the window", async () => {
-    const spawned = await closedSession();
-    fake.pushUpdate(msg("/info"));
-    await waitFor(() => spawned.length === 1);
-    const beforeConnect = await (await fetch(`http://127.0.0.1:${port}/commands?session=${SID}`)).text();
-    expect(beforeConnect).toBe("[]");
-    const w = await plugin(SID);
-    await waitFor(async () => (await (await fetch(`http://127.0.0.1:${port}/commands?session=${SID}`)).text()).includes("info"));
-    expect(w.messages.filter(m => m.type === "inbound")).toEqual([]);
-    expect(spawned.length).toBe(1);
-    expect(texts()).toContain("🚀 Starting the session (account 2)…");
+  test("a stop that ended the session but not its compaction says how the compaction ended", async () => {
+    rig.answer("stop", rigOk({ session: SID, stopped: true, compacted: { skip: "nothing to compact" } }));
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/stop"));
+    await startedAs("⏹ Session ended\n⚠️ Compaction skipped: nothing to compact");
+    rig.answer("stop", rigOk({ session: SID, stopped: true, compacted: { error: "the model refused" } }));
+    fake.pushUpdate(msg("/stop"));
+    await startedAs("⏹ Session ended\n⚠️ Compaction failed: the model refused");
+    rig.answer("stop", rigOk({ session: SID, stopped: true, compacted: null }));
+    fake.pushUpdate(msg("/stop"));
+    await waitFor(() => edits().includes(en.sessionEnded), WAIT_MS, "a stop without compaction");
   });
 
-  test("a module command without launch keeps the inactive-session answer", async () => {
-    await startHub();
-    const a = await enabled(SID);
-    a.close();
-    await waitFor(() => !hub.isConnected(SID));
-    fake.pushUpdate(msg("/info"));
-    await waitFor(() => texts().includes("the session is not active right now"));
+  test("a stop that found nothing running says so", async () => {
+    rig.answer("stop", rigOk({ session: SID, stopped: false, reason: "not-running" }));
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/stop"));
+    await waitFor(() => edits().includes(en.sessionNotRunning), WAIT_MS, "the notice");
   });
 
-  test("/cleanup to a closed session launches it and queues cleanup after connect", async () => {
-    const spawned = await closedSession();
+  test("a cleanup that removed skills says how many", async () => {
+    rig.answer("cleanup", rigOk({ session: SID, compacted: { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER }, backup: "backup.jsonl", skillsRemoved: 3 }));
+    await start();
+    await enabled(SID);
     fake.pushUpdate(msg("/cleanup"));
-    await waitFor(() => spawned.length === 1);
-    const w = await plugin(SID);
-    await waitFor(async () => (await (await fetch(`http://127.0.0.1:${port}/commands?session=${SID}&cleanup=1`)).text()).includes("cleanup"));
-    expect(w.messages.filter(m => m.type === "inbound")).toEqual([]);
-    expect(texts()).toContain("🚀 Starting the session (account 2)…");
+    await waitFor(() => edits().includes(en.cleanupDoneSkills({ before: "120k", after: "30k", skills: 3 })), WAIT_MS, "the result");
   });
 
-  test("the start notice is one message: edited once the session starts, gone once the agent works", async () => {
-    await closedSession();
-    fake.pushUpdate(msg("first"));
-    await waitFor(() => texts().includes("🚀 Starting the session (account 2)…"));
-    const notice = fake.lastMessageId;
-    const w = await plugin(SID);
-    await waitFor(() => fake.callsOf("editMessageText").length === 1);
-    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: notice, text: "✅ Session started" }]);
-    await w.next("inbound");
-    await settle();
-    expect(texts().filter(t => /[Ss]ession/.test(t))).toEqual(["🚀 Starting the session (account 2)…"]);
-    expect(fake.callsOf("deleteMessage")).toEqual([]);
-    w.send({ type: "busy", busy: true });
-    await waitFor(() => fake.callsOf("deleteMessage").length === 1);
-    expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: notice }]);
-    // Only once.
-    w.send({ type: "busy", busy: false });
-    w.send({ type: "busy", busy: true });
-    await settle();
-    expect(fake.callsOf("deleteMessage").length).toBe(1);
-  });
-
-  test("a start notice still on its way is edited as soon as it is in the topic", async () => {
-    await closedSession();
-    fake.delayNext("sendMessage", 300);
-    fake.pushUpdate(msg("first"));
-    await waitFor(() => fake.callsOf("sendMessage").length === 1);
-    await plugin(SID);
-    await waitFor(() => fake.callsOf("editMessageText").length === 1);
-    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: fake.lastMessageId, text: "✅ Session started" }]);
-  });
-
-  test("a start notice still queued goes already saying the session started", async () => {
-    await closedSession();
-    for (let i = 0; i < 8; i++) fake.failNext("sendMessage", { code: 403, description: "Forbidden: bot is not a member" });
-    fake.pushUpdate(msg("first"));
-    await waitFor(() => fake.callsOf("sendMessage").length === 1);
-    await plugin(SID);
-    // Failed attempts are among the calls too: the first said "starting".
-    await waitFor(() => fake.callsOf("sendMessage").length === 9, 3000);
-    await settle();
-    const notices = texts().filter(t => /[Ss]ession/.test(t));
-    expect(notices[0]).toBe("🚀 Starting the session (account 2)…");
-    expect(notices.at(-1)).toBe("✅ Session started");
-    expect(fake.callsOf("editMessageText")).toEqual([]);
-  });
-
-  test("a session that does not connect in time is reported, and the start notice goes", async () => {
-    await closedSession({ timeoutSec: 0.2 });
-    fake.pushUpdate(msg("hello?"));
-    await waitFor(() => texts().includes("🚀 Starting the session (account 2)…"));
-    const notice = fake.lastMessageId;
-    await waitFor(() => texts().includes("⚠️ The session did not start within 0.2 s"), 3000);
-    expect(fake.texts().at(-1)).toMatchObject({ disable_notification: false });
-    await waitFor(() => fake.callsOf("deleteMessage").length === 1);
-    expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: notice }]);
-  });
-
-  test("/run starts on the account given, and not twice", async () => {
-    const spawned = await closedSession();
-    fake.pushUpdate(msg("/run 1"));
-    await waitFor(() => spawned.length === 1);
-    expect(spawned[0]?.[5]).toBe("1");
-    fake.pushUpdate(msg("/run"));
-    await waitFor(() => texts().includes("Session is already starting"));
-    await plugin(SID);
-    fake.pushUpdate(msg("/run"));
-    await waitFor(() => texts().includes("Session is already running"));
-    expect(spawned.length).toBe(1);
-  });
-
-  test("a bad account is refused before anything runs", async () => {
-    const spawned = await closedSession();
-    fake.pushUpdate(msg("/run 1&calc"));
-    await waitFor(() => texts().some(t => t.startsWith("⚠️ Cannot start the session: odd account")));
-    expect(spawned).toEqual([]);
-  });
-
-  test("without a recorded cwd the session's transcript tells it", async () => {
-    const projects = tempDir();
-    mkdirSync(join(projects, "C--x"), { recursive: true });
-    writeFileSync(join(projects, "C--x", `${SID}.jsonl`), JSON.stringify({ type: "user", cwd: dir }) + "\n");
-    const spawned = await closedSession({ projectsDir: projects });
-    const store = new SessionStore(join(dir, "sessions.json"));
-    const rec = must(store.get(SID));
-    await hub.stop();
-    store.set(SID, { topicId: rec.topicId, title: rec.title, project: rec.project, enabled: rec.enabled, account: "1" });
-    await startHub({ spawn: c => void spawned.push(c), projectsDir: projects });
-    fake.pushUpdate(msg("/run"));
-    await waitFor(() => spawned.length === 1);
-    expect(spawned[0]?.[2]).toBe(dir);
-  });
-
-  test("a session whose account is not known is not started until /run N", async () => {
-    const spawned = await closedSession();
-    const store = new SessionStore(join(dir, "sessions.json"));
-    const rec = must(store.get(SID));
-    await hub.stop();
-    store.set(SID, { topicId: rec.topicId, title: rec.title, project: rec.project, enabled: rec.enabled, cwd: CWD });
-    await startHub({ spawn: c => void spawned.push(c) });
-    fake.pushUpdate(msg("hi"));
-    await waitFor(() => texts().includes("⚠️ The session's account is unknown, use /run N."));
-    expect(spawned).toEqual([]);
-    fake.pushUpdate(msg("/run 2"));
-    await waitFor(() => spawned.length === 1);
-    expect(spawned[0]?.[5]).toBe("2");
-    const w = await wsClient(port, { type: "hello", v: PROTOCOL_VERSION, windowKey: "w-started", sessionId: SID, cwd: CWD });
-    clients.push(w);
-    await waitFor(() => [...texts(), ...fake.callsOf("editMessageText").map(c => c.text)].includes("✅ Session started"));
-    expect(new SessionStore(join(dir, "sessions.json")).get(SID)?.account).toBe("2");
-  });
-
-  // The window closes while its messages wait in a batch: none is lost.
-  test("a batch whose window closed starts the session", async () => {
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: COMMAND, timeoutSec: LAUNCH_TIMEOUT_S } };
-    await startHub({ spawn: c => void spawned.push(c), batchQuietMs: 400 });
-    const a = await enabled(SID);
-    fake.pushUpdate(msg("one"));
-    fake.pushUpdate(msg("two"));
-    await updatesTaken();
-    a.close();
-    await waitFor(() => spawned.length === 1, WAIT_MS, "session start");
-    const w = await plugin(SID);
-    expect((await w.next("inbound")).content).toBe("one\n\ntwo");
-  });
-
-  test("a batch whose window closed starts no session while the hub stops", async () => {
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: COMMAND, timeoutSec: LAUNCH_TIMEOUT_S } };
-    await startHub({ spawn: c => void spawned.push(c), batchQuietMs: 5000 });
-    const a = await enabled(SID);
-    fake.pushUpdate(msg("one"));
-    await updatesTaken();
-    a.close();
-    await waitFor(() => !hub.isConnected(SID));
-    await hub.stop();
-    expect(spawned).toEqual([]);
-  });
-
-  test("a batch whose window closed, without launch, says the session is inactive", async () => {
-    await startHub({ batchQuietMs: 400 });
-    const a = await enabled(SID);
-    fake.pushUpdate(msg("one"));
-    await updatesTaken();
-    a.close();
-    await waitFor(() => texts().includes("the session is not active right now"), WAIT_MS);
-  });
-
-  test("without launch in the config a closed session is just inactive", async () => {
+  test("a rig that is not installed says so and no call is made", async () => {
     await startHub();
+    await enabled(SID);
+    fake.pushUpdate(msg("/compact"));
+    await startedAs(en.rigMissing);
+    expect(rig.calls).toEqual([]);
+  });
+
+  test("a rig call that outlasts its limit is aborted and reported", async () => {
+    const clock = newClock();
+    let seen: AbortSignal | undefined;
+    rig.answer("compact", gate => {
+      seen = gate.signal;
+      return new Promise<RigOutput>(() => {});
+    });
+    await start({ timers: clock });
+    await enabled(SID);
+    fake.pushUpdate(msg("/compact"));
+    await waitFor(() => callsOf("compact").length === 1, WAIT_MS, "the call");
+    expect(seen?.aborted).toBe(false);
+    await clock.advance(RIG_SESSION_LIMIT_MS - 1);
+    expect(seen?.aborted).toBe(false);
+    await clock.advance(1);
+    await startedAs(en.rigTimeout({ seconds: RIG_SESSION_LIMIT_MS / MS_PER_S }));
+    expect(seen?.aborted).toBe(true);
+  });
+
+  test("while rig waits for the turn to end the running message says so, once", async () => {
+    const gated = gatedAnswer([WAITING_LINE, "not json at all", WAITING_LINE], rigOk({ session: SID, ...{ tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER } }));
+    rig.answer("compact", gated.answer);
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/compact"));
+    await waitFor(() => edits().includes(en.sessionWaiting), WAIT_MS, "the waiting text");
+    const startId = fake.lastMessageId;
+    gated.release();
+    await waitFor(() => edits().includes("✅ Compaction done: 120k → 30k tokens."), WAIT_MS, "result");
+    expect(fake.callsOf("editMessageText")).toEqual([
+      { chat_id: GROUP, message_id: startId, text: en.sessionWaiting },
+      { chat_id: GROUP, message_id: startId, text: "✅ Compaction done: 120k → 30k tokens." },
+    ]);
+  });
+
+  test("an unrelated line on rig's stderr shows nothing", async () => {
+    const gated = gatedAnswer(["warming up", JSON.stringify({ progress: { code: "something-else" } })], rigOk({ session: SID, name: "N" }));
+    rig.answer("rename", gated.answer);
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/rename N"));
+    await startedAs(en.renameRunning);
+    await waitFor(() => callsOf("rename").length === 1, WAIT_MS, "the call");
+    gated.release();
+    await waitFor(() => edits().includes("✅ Renamed: N"), WAIT_MS, "result");
+    expect(edits()).toEqual(["✅ Renamed: N"]);
+  });
+
+  test("/rename without a name asks for one and calls nothing", async () => {
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/rename"));
+    await startedAs(en.renameHint);
+    expect(rig.calls).toEqual([]);
+  });
+
+  // What an outbox item keeps while its result is awaited.
+  const storedIds = async () => {
+    const read = () => JSON.parse(readFileSync(join(dir, "outbox.json"), "utf8"));
+    await waitFor(() => arr(field(read(), "items")).length === 0);
+    return Object.entries(z.record(z.string(), z.number()).parse(field(read(), "messageIds"))).map(([, id]) => id);
+  };
+
+  test("an ordinary message leaves no message id in the outbox", async () => {
+    await start();
     const a = await enabled(SID);
-    a.close();
-    await waitFor(() => !hub.isConnected(SID));
-    fake.pushUpdate(msg("hi"));
-    await waitFor(() => texts().includes("the session is not active right now"));
+    a.send({ type: "send", id: "x1", text: "plain text", notify: false });
+    await waitFor(() => sent("plain text"));
+    expect(await storedIds()).toEqual([]);
+  });
+
+  test("a failed progress edit leaves its id for the result and does not stop delivery", async () => {
+    const gated = gatedAnswer([WAITING_LINE], rigOk({ session: SID, name: "N" }));
+    rig.answer("rename", gated.answer);
+    await start();
+    await enabled(SID);
+    fake.failNext("editMessageText", { code: 400, description: "Bad Request: message to edit not found" });
+    fake.pushUpdate(msg("/rename N"));
+    await waitFor(() => callsOf("rename").length === 1);
+    await waitFor(() => fake.callsOf("editMessageText").length === 1, WAIT_MS, "the progress edit");
+    const startId = fake.lastMessageId;
+    gated.release();
+    await waitFor(() => edits().includes("✅ Renamed: N"), WAIT_MS, "result");
+    expect(fake.callsOf("editMessageText").map(c => c.message_id)).toEqual([startId, startId]);
+  });
+
+  test("a queued message keeps its id until the result arrives, then the id is gone", async () => {
+    const gated = gatedAnswer([], rigOk({ session: SID, name: "N" }));
+    rig.answer("rename", gated.answer);
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/rename N"));
+    await startedAs(en.renameRunning);
+    const startId = fake.lastMessageId;
+    await waitFor(async () => (await storedIds()).includes(startId));
+    gated.release();
+    await waitFor(() => edits().includes("✅ Renamed: N"), WAIT_MS, "result");
+    expect(await storedIds()).toEqual([]);
+  });
+
+  test("a result that comes while its running message is being sent edits that message", async () => {
+    await start();
+    await enabled(SID);
+    fake.delayNext("sendMessage", SLOW_SEND_MS / 2);
+    fake.pushUpdate(msg("/rename N"));
+    await waitFor(() => edits().includes("✅ Renamed: N"), WAIT_MS, "result");
+    expect(fake.texts().filter(t => t.message_thread_id === TOPIC_ID && t.text === en.renameRunning)).toHaveLength(1);
+    expect(fake.callsOf("editMessageText")).toHaveLength(1);
+  });
+
+  test("/info draws rig's answer for the session", async () => {
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/info"));
+    const info = await waitFor(() => fake.texts().find(t => t.text.includes("Context")), WAIT_MS, "the info text");
+    expect(info.text).toContain("120/300k");
+    expect(rig.infos).toEqual([SID]);
+  });
+
+  test("/run starts a closed session through rig on the account given", async () => {
+    closedSession();
+    await start();
+    fake.pushUpdate(msg("/run 3"));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the run call");
+    expect(callsOf("run")).toEqual([{ sub: "run", sid: SID, args: ["--account", "3"] }]);
+    await startedAs(en.launching({ account: "3" }));
+  });
+
+  test("/run without a number takes the account the session ran on", async () => {
+    closedSession();
+    await start();
     fake.pushUpdate(msg("/run"));
-    await waitFor(() => texts().some(t => t.startsWith("⚠️ Autolaunch is not set up")));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the run call");
+    expect(callsOf("run")[0]?.args).toEqual(["--account", ACCOUNT]);
   });
 
-  // These windows have no module: /stop ends them once nobody takes it.
-  test("/stop ends the session's window", async () => {
-    await startHub({ commandPickupMs: 50 });
-    const a = await enabled(SID);
-    fake.pushUpdate(msg("/stop"));
-    await a.next("terminate");
-    a.close();
-    await waitFor(() => texts().includes("⏹ Session ended"));
+  test("a started session's window turns the start notice into a success", async () => {
+    closedSession();
+    await start();
+    fake.pushUpdate(msg("/run"));
+    await startedAs(en.launching({ account: ACCOUNT }));
+    await waitFor(() => callsOf("run").length === 1);
+    await settle();
+    await plugin(SID);
+    await waitFor(() => shown().includes(en.sessionLaunched), WAIT_MS, "the started text");
   });
 
-  test("/stop that does not end the window is reported", async () => {
-    await startHub({ stopTimeoutMs: 200, commandPickupMs: 50 });
-    const a = await enabled(SID);
-    fake.pushUpdate(msg("/stop"));
-    await a.next("terminate");
-    await waitFor(() => texts().includes("⚠️ Could not end the session within 0.2 s"), 3000);
-    fake.pushUpdate(msg("/stop"));
-    await a.nextNew("terminate");
+  test("a second /run while one starts, or a window is open, starts nothing", async () => {
+    const gated = gatedAnswer([], rigOk({ session: SID, pid: RIG_PID, mode: null, account: null }));
+    rig.answer("run", gated.answer);
+    closedSession();
+    await start();
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the run call");
+    fake.pushUpdate(msg("/run"));
+    await startedAs(en.sessionAlreadyStarting);
+    gated.release();
+    await settle();
+    await plugin(SID);
+    fake.pushUpdate(msg("/run"));
+    await startedAs(en.sessionAlreadyRunning);
+    expect(callsOf("run")).toHaveLength(1);
   });
 
-  test("/stop of a closed session says so", async () => {
-    const spawned = await closedSession();
-    fake.pushUpdate(msg("/stop"));
-    await waitFor(() => texts().includes("Session is not running"));
-    expect(spawned).toEqual([]);
+  test("/run with a number on a machine without accounts is refused", async () => {
+    closedSession();
+    await start({ accountsAvailable: () => false });
+    fake.pushUpdate(msg("/run 3"));
+    await startedAs(en.noAccounts);
+    expect(callsOf("run")).toEqual([]);
   });
 
-  test("/mode without an argument shows the current mode and buttons without starting", async () => {
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c) });
-    const a = await enabled(SID);
+  test("a launch rig refuses shows rig's words and takes the start notice away", async () => {
+    const gated = gatedAnswer([], rigRefused("launch-unavailable", "No terminal to start the session in"));
+    rig.answer("run", gated.answer);
+    closedSession();
+    await start();
+    fake.pushUpdate(msg("/run"));
+    await startedAs(en.launching({ account: ACCOUNT }));
+    const noticeId = fake.lastMessageId;
+    gated.release();
+    const failure = await startedAs("No terminal to start the session in");
+    expect(failure.disable_notification).toBe(false);
+    await waitFor(() => fake.callsOf("deleteMessage").length === 1, WAIT_MS, "start notice deleted");
+    expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: noticeId }]);
+  });
+
+  test("a start that waits for the turn of a running session says so", async () => {
+    const gated = gatedAnswer([WAITING_LINE], rigOk({ session: SID, pid: RIG_PID, mode: null, account: null }));
+    rig.answer("run", gated.answer);
+    closedSession();
+    await start();
+    fake.pushUpdate(msg("/run"));
+    await startedAs(en.sessionWaiting);
+    gated.release();
+  });
+
+  test("a start whose window never comes is reported once the wait ends", async () => {
+    const clock = newClock();
+    closedSession();
+    // The service runs the hub with --always-on (idleMs 0); the default idle exit would stop it inside the 90 s wait.
+    await start({ timers: clock, idleMs: 0 });
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the run call");
+    await settle();
+    await clock.advance(CONNECT_WAIT_MS - 1);
+    expect(texts()).not.toContain(en.sessionDidNotStart({ seconds: CONNECT_WAIT_MS / MS_PER_S }));
+    await clock.advance(1);
+    await startedAs(en.sessionDidNotStart({ seconds: CONNECT_WAIT_MS / MS_PER_S }));
+  });
+
+  test("a message for a session without a window starts it through rig and reaches it once", async () => {
+    closedSession();
+    await start();
+    fake.pushUpdate(msg("hello there"));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the run call");
+    expect(callsOf("run")).toEqual([{ sub: "run", sid: SID, args: ["--account", ACCOUNT] }]);
+    const w = await plugin(SID);
+    const inbound = await w.next("inbound", m => m.content === "hello there", WAIT_MS);
+    expect(inbound.content).toBe("hello there");
+    await settle();
+    expect(w.messages.filter(m => m.type === "inbound")).toHaveLength(1);
+    await waitFor(() => shown().includes(en.sessionLaunched), WAIT_MS, "the started text");
+  });
+
+  test("/cleanup on a session without a window starts it first", async () => {
+    closedSession();
+    await start();
+    fake.pushUpdate(msg("/cleanup"));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the run call");
+    expect(callsOf("run")).toEqual([{ sub: "run", sid: SID, args: ["--account", ACCOUNT] }]);
+    await plugin(SID);
+    await waitFor(() => callsOf("cleanup").length === 1, WAIT_MS, "the cleanup call");
+    expect(callsOf("cleanup")).toEqual([{ sub: "cleanup", sid: SID, args: [] }]);
+    await waitFor(() => edits().includes("🧹 Cleanup done: 120k → 30k tokens."), WAIT_MS, "the result");
+  });
+
+  test("a command result for a session without a window starts it through rig and reaches the agent once", async () => {
+    closedSession();
+    await start();
+    fake.pushUpdate(msg(PLATFORM.windows ? "/cmd echo hi" : "/bash echo hi"));
+    await waitFor(() => callsOf("run").length === 1, RUN_MS, "the run call");
+    expect(callsOf("run")).toEqual([{ sub: "run", sid: SID, args: ["--account", ACCOUNT] }]);
+    const w = await plugin(SID);
+    const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
+    expect(inbound.meta.exit_code).toBe("0");
+    await settle();
+    expect(w.messages.filter(m => m.type === "inbound")).toHaveLength(1);
+  }, RUN_MS + 2 * WAIT_MS);
+
+  test("/mode lists the modes as buttons without calling rig", async () => {
+    await start();
+    await enabled(SID);
     fake.pushUpdate(msg("/mode"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("mode unknown")));
-    const sent = fake.callsOf("sendMessage").find(c => String(c.text).includes("mode unknown"));
-    expect(sent?.reply_markup).toBeDefined();
-    expect(spawned).toEqual([]);
-    a.close();
+    const card = await waitFor(() => fake.callsOf("sendMessage").find(c => buttonsOf(c).length > 0), WAIT_MS, "the mode buttons");
+    expect(buttonsOf(card)).toEqual(["manual", "auto", "acceptEdits", "plan", "dontAsk"].map(mode => `m:${SID}:${mode}`));
+    expect(rig.calls).toEqual([]);
   });
 
-  test("/mode without an argument also works after the window closes and does not spawn", async () => {
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c) });
-    const a = await enabled(SID);
-    a.close();
-    await waitFor(() => !hub.isConnected(SID));
+  test("/mode with an unknown name lists the modes", async () => {
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/mode nonsense"));
+    await startedAs(en.modeList({ modes: "manual, auto, acceptEdits, plan, dontAsk" }));
+    expect(rig.calls).toEqual([]);
+  });
+
+  test("a mode button is one rig session mode call; the new window is the session's, and the same mode again changes nothing", async () => {
+    await start();
+    const old = await enabled(SID);
     fake.pushUpdate(msg("/mode"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("mode unknown")));
-    expect(spawned).toEqual([]);
-  });
-
-  test("a connected /mode terminates then launches with the allowlisted flag and replays messages", async () => {
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c), cleanupSettleMs: MODE_SETTLE_MS });
-    const a = await enabled(SID);
-    fake.pushUpdate(msg("/mode acceptedits"));
-    await a.next("terminate");
-    fake.pushUpdate(msg("held during restart"));
-    expect((await fetch(`http://127.0.0.1:${port}/commands?session=${SID}`)).status).toBe(200);
-    a.close();
-    await waitFor(() => spawned.length === 1);
-    expect(spawned[0]).toEqual(["wt.exe", "-d", CWD, "cswap.exe", "run", "2", "--", "--resume", SID, "--permission-mode", "acceptEdits"]);
-    const next = await plugin(SID);
-    expect((await next.next("inbound")).content).toBe("held during restart");
-  });
-
-  test("a mode restart starts the new window only after Claude Code has exited", async () => {
-    const spawned: string[][] = [];
-    let alive = true;
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c), isAlive: () => alive });
-    const a = await enabled(SID);
-    fake.pushUpdate(msg("/mode plan"));
-    await a.next("terminate");
-    a.send({ type: "exiting", pid: MODE_PID });
-    await waitFor(() => fake.texts().some(t => t.text.includes("🔁")));
-    a.close();
+    const card = await waitFor(() => fake.callsOf("sendMessage").find(c => buttonsOf(c).length > 0), WAIT_MS, "the mode buttons");
+    const data = `m:${SID}:plan`;
+    expect(buttonsOf(card)).toContain(data);
+    fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
+    await waitFor(() => callsOf("mode").length === 1, WAIT_MS, "the mode call");
+    expect(callsOf("mode")).toEqual([{ sub: "mode", sid: SID, args: ["plan"] }]);
+    await waitFor(() => fake.callsOf("editMessageReplyMarkup").length === 1, WAIT_MS, "the keyboard removed");
+    await waitFor(() => fake.callsOf("answerCallbackQuery").length === 1, WAIT_MS, "the button answered");
+    await startedAs(en.restartingInMode({ mode: "plan" }));
+    old.close();
     await waitFor(() => !hub.isConnected(SID));
-    // While the old process lives nothing may start a second one on the transcript.
-    fake.pushUpdate(msg("/run"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Session is already starting")));
-    fake.pushUpdate(msg("/mode auto"));
-    await waitFor(() => fake.texts().filter(t => t.text.includes("Session is already starting")).length === 2);
-    fake.pushUpdate(msg("held until the exit"));
-    expect(spawned).toEqual([]);
-    alive = false;
-    await waitFor(() => spawned.length === 1);
-    expect(spawned[0]).toContain("plan");
-    const next = await plugin(SID);
-    expect((await next.next("inbound")).content).toBe("held until the exit");
+    await plugin(SID, "win2");
+    await waitFor(() => shown().includes(en.sessionLaunched), WAIT_MS, "the started text");
+    fake.pushUpdate(msg("/mode plan"));
+    await startedAs(en.modeAlready({ mode: "plan" }));
+    expect(callsOf("mode")).toHaveLength(1);
   });
 
-  test("a mode restart gives up when Claude Code does not exit", async () => {
-    const spawned: string[][] = [];
-    const clock = manualClock();
-    let alive = true;
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c), isAlive: () => alive, cleanupExitMs: MODE_SETTLE_MS, exitPollMs: MODE_SETTLE_MS, timers: clock });
-    const a = await enabled(SID);
+  test("a mode rig reports as unchanged says so and starts no wait", async () => {
+    rig.answer("mode", rigOk({ session: SID, mode: "plan", changed: false }));
+    await start();
+    await enabled(SID);
     fake.pushUpdate(msg("/mode plan"));
-    await a.next("terminate");
-    fake.pushUpdate(msg("held past the deadline"));
-    a.send({ type: "exiting", pid: MODE_PID });
-    await waitFor(() => fake.texts().some(t => t.text.includes("🔁")));
-    a.close();
-    await waitFor(() => !hub.isConnected(SID));
-    await clock.advance(MODE_SETTLE_MS);
-    await waitFor(() => fake.texts().some(t => t.text.includes("Mode not changed: Claude Code did not exit")));
-    expect(spawned).toEqual([]);
-    alive = false;
-    await clock.advance(MODE_SETTLE_MS);
-    await waitFor(() => spawned.length === 1);
-    expect(spawned[0]).not.toContain("--permission-mode");
-    const next = await plugin(SID);
-    await waitFor(() => hub.busy().includes("replays"), WAIT_MS, "the held-message hand-over armed");
-    await clock.advance(READY_DELAY_MS);
-    expect((await next.next("inbound")).content).toBe("held past the deadline");
-    clock.dispose();
+    await startedAs(en.modeAlready({ mode: "plan" }));
+    await waitFor(() => fake.callsOf("deleteMessage").length === 1, WAIT_MS, "the restart notice deleted");
   });
 
-  test("/stop while a mode restart waits for the exit cancels it and keeps the held message", async () => {
-    const spawned: string[][] = [];
-    let alive = true;
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c), isAlive: () => alive });
-    const a = await enabled(SID);
+  test("a mode rig refuses shows rig's words and takes the restart notice away", async () => {
+    rig.answer("mode", rigRefused("session-timeout", "The turn did not end in time"));
+    await start();
+    await enabled(SID);
     fake.pushUpdate(msg("/mode plan"));
-    await a.next("terminate");
-    a.send({ type: "exiting", pid: MODE_PID });
-    await waitFor(() => fake.texts().some(t => t.text.includes("🔁")));
-    a.close();
-    await waitFor(() => !hub.isConnected(SID));
-    fake.pushUpdate(msg("not lost"));
+    const failure = await startedAs("The turn did not end in time");
+    expect(failure.disable_notification).toBe(false);
+    await waitFor(() => fake.callsOf("deleteMessage").length === 1, WAIT_MS, "the restart notice deleted");
+  });
+
+  test("a mode button nobody knows only answers the press", async () => {
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: 1, data: "m:99999999-bbbb-cccc-dddd-eeeeeeeeeeee:plan" }));
+    await waitFor(() => fake.callsOf("answerCallbackQuery").length === 1, WAIT_MS, "the answer");
+    expect(rig.calls).toEqual([]);
+  });
+});
+
+// While a session is stopped, cleaned, switched to another mode or started, whatever arrives for it is held and goes, in arrival order, to the next window once it connects.
+describe("holding across session actions", () => {
+  const SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const ACCOUNT = "2";
+  const TRANSCRIPT_ID = "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const STRANGER = "999";
+  type Win = Awaited<ReturnType<typeof plugin>>;
+  const msg = (text: string) => topicMsg({ chatId: GROUP, threadId: TOPIC_ID, fromId: ME, text });
+  let rig: ReturnType<typeof sessionRig>;
+  beforeEach(() => {
+    rig = sessionRig();
+  });
+  const start = async (extra: StartOptions = {}) => {
+    await startHub({ findRig: () => "rig-file", runRig: rig.run, ...extra });
+    await settle();
+  };
+  const texts = () => fake.texts().map(t => t.text);
+  const edits = () => fake.callsOf("editMessageText").map(c => String(c.text));
+  const shown = () => [...texts(), ...edits()];
+  const callsOf = (sub: string) => rig.calls.filter(c => c.sub === sub);
+  const closedSession = () => new SessionStore(join(dir, "sessions.json")).set(SID, { topicId: TOPIC_ID, title: "T", project: "p", enabled: true, cwd: CWD, account: ACCOUNT });
+  const contentsOf = (w: Win) => w.messages.flatMap(m => (m.type === "inbound" ? [m.content] : []));
+  const pressMode = (mode: string, fromId = ME) => fake.pushUpdate(buttonPress({ chatId: GROUP, fromId, messageId: TOPIC_ID, data: `m:${SID}:${mode}` }));
+  const inbound = (content: string, onSent = () => {}) => ({ content, meta: { exec_id: content }, onSent });
+  // The mode call is out, so the hub has begun the switch and holds what comes.
+  const modeStarted = () => waitFor(() => callsOf("mode").length === 1, WAIT_MS, "the mode call");
+  const stopStarted = () => waitFor(() => callsOf("stop").length === 1, WAIT_MS, "the stop call");
+  const windowGone = () => waitFor(() => !hub.isConnected(SID), WAIT_MS, "the window gone");
+  // Lets the continuations of work the test just released run (event-loop turns, not wall-clock time).
+  const turns = async () => {
+    for (let i = 0; i < EVENT_LOOP_TURNS; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  };
+  const reopen = async (old: Win) => {
+    old.close();
+    await windowGone();
+    return plugin(SID, "win2");
+  };
+  // What a window got once Claude Code is ready for it and the hub has handled everything.
+  const arrived = async (clock: Clock, w: Win, count: number) => {
+    await passReadyDelay(clock);
+    await waitFor(() => contentsOf(w).length >= count, WAIT_MS, "the items");
+    await settle();
+    return contentsOf(w);
+  };
+
+  test("/stop holds what arrives until the window is gone; the next window gets it in order", async () => {
+    const clock = newClock();
+    const gated = gatedAnswer([], rigOk({ session: SID, stopped: true, compacted: null }));
+    rig.answer("stop", gated.answer);
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
     fake.pushUpdate(msg("/stop"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Launch cancelled")));
-    expect(spawned).toEqual([]);
-    alive = false;
-    await waitFor(() => spawned.length === 1);
-    expect(spawned[0]).not.toContain("--permission-mode");
-    const next = await plugin(SID);
-    expect((await next.next("inbound")).content).toBe("not lost");
+    await stopStarted();
+    fake.pushUpdate(msg("held one"));
+    fake.pushUpdate(msg("held two"));
+    await updatesHandled();
+    gated.release();
+    await settle();
+    await waitFor(() => edits().includes(en.sessionEnded), WAIT_MS, "the stop result");
+    await clock.advance(BATCH_QUIET_MS + READY_DELAY_MS);
+    await settle();
+    expect(callsOf("run")).toEqual([]);
+    expect(contentsOf(old)).toEqual([]);
+    old.close();
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the start");
+    const next = await plugin(SID, "win2");
+    expect(await arrived(clock, next, 1)).toEqual(["held one\n\nheld two"]);
+    expect(contentsOf(old)).toEqual([]);
   });
 
-  test("a start without a mode forgets the launched one", async () => {
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c) });
-    const a = await enabled(SID);
-    a.close();
-    await waitFor(() => !hub.isConnected(SID));
-    fake.pushUpdate(msg("/mode plan"));
-    await waitFor(() => spawned.length === 1);
-    const started = await plugin(SID);
-    started.close();
-    await waitFor(() => !hub.isConnected(SID));
-    fake.pushUpdate(msg("/run"));
-    await waitFor(() => spawned.length === 2);
-    const again = await plugin(SID);
-    again.close();
-    await waitFor(() => !hub.isConnected(SID));
-    // Still "plan" here would answer “Mode is already plan” and refuse the switch.
-    fake.pushUpdate(msg("/mode plan"));
-    await waitFor(() => spawned.length === 3);
-    expect(spawned[2]).toContain("plan");
-  });
-
-  test("messages during a mode restart wait for the new window, never reaching the window that is ending", async () => {
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c), cleanupSettleMs: MODE_SETTLE_MS, batchQuietMs: LONG_CATCH_UP_MS });
-    const a = await enabled(SID);
-    fake.pushUpdate(msg("held during restart"));
-    fake.pushUpdate(buttonPress({ chatId: Number(GROUP), fromId: Number(ME), messageId: 1, data: `m:${SID}:plan` }));
-    await a.next("terminate");
-    // The message preceded the button and was still in the batch when restart began.
-    fake.pushUpdate(msg("/run"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Session is already starting")));
-    expect(a.messages.some(m => m.type === "inbound")).toBe(false);
-    a.close();
-    await waitFor(() => spawned.length === 1);
-    const next = await plugin(SID);
-    expect((await next.next("inbound")).content).toBe("held during restart");
-  });
-
-  test("a mode switch whose command cannot be built is refused before the window closes", async () => {
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c) });
-    // A folder name with "&" is refused by launchCommand, so the restart cannot be built.
-    const c = await wsClient(port, { ...hello(SID), cwd: join(dir, "bad&dir") });
-    clients.push(c);
-    await c.next("state");
-    expect((await req(c, { op: "enable", title: "Title" })).ok).toBe(true);
-    fake.pushUpdate(msg("/mode plan"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Cannot prepare the restart")));
-    expect(c.messages.some(m => m.type === "terminate")).toBe(false);
-    expect(spawned).toEqual([]);
-  });
-
-  test("unknown and bypass modes are refused, and missing placeholder leaves the window open", async () => {
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c) });
-    const a = await enabled(SID);
-    for (const mode of ["other", "bypassPermissions"]) {
-      const previous = fake.texts().filter(t => t.text.includes("Modes:")).length;
-      fake.pushUpdate(msg(`/mode ${mode}`));
-      await waitFor(() => fake.texts().filter(t => t.text.includes("Modes:")).length > previous);
-    }
-    fake.pushUpdate(msg("/mode plan"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Add {mode}")));
-    expect(a.messages.some(m => m.type === "terminate")).toBe(false);
-    expect(spawned).toEqual([]);
-    a.close();
-  });
-
-  test("a missing launch section warns without closing the connected window", async () => {
-    const spawned: string[][] = [];
-    await startHub({ spawn: c => void spawned.push(c) });
-    const a = await enabled(SID);
-    fake.pushUpdate(msg("/mode auto"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Autolaunch is not set up")));
-    expect(a.messages.some(m => m.type === "terminate")).toBe(false);
-    expect(spawned).toEqual([]);
-    a.close();
-  });
-
-  test("a mode restart that times out drops its restart and leaves the window open", async () => {
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ stopTimeoutMs: 100 });
-    const a = await enabled(SID);
-    fake.pushUpdate(msg("/mode plan"));
-    await a.next("terminate");
-    fake.pushUpdate(msg("held for the window that stays"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Could not end the session")));
-    expect(fake.callsOf("sendMessage").some(c => String(c.text).includes("🚀 Starting the session"))).toBe(false);
-    expect((await a.next("inbound")).content).toBe("held for the window that stays");
-    a.close();
-  });
-
-  test("a plain /run after a mode launch omits the mode flag", async () => {
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c) });
-    const a = await enabled(SID);
-    a.close();
-    await waitFor(() => !hub.isConnected(SID));
-    fake.pushUpdate(msg("/mode plan"));
-    await waitFor(() => spawned.length === 1);
-    expect(spawned[0]).toContain("plan");
-    const started = await plugin(SID);
-    started.close();
-    await waitFor(() => !hub.isConnected(SID));
-    fake.pushUpdate(msg("/run"));
-    await waitFor(() => spawned.length === 2);
-    expect(spawned[1]).not.toContain("--permission-mode");
-  });
-
-  test("/stop cancels a pending mode restart and releases held messages normally", async () => {
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c), cleanupSettleMs: MODE_SETTLE_MS });
-    const a = await enabled(SID);
-    fake.pushUpdate(msg("/mode plan"));
-    await a.next("terminate");
-    fake.pushUpdate(msg("held for stopped session"));
+  test("a window that closes before rig answers the stop hands the items over at the answer", async () => {
+    const clock = newClock();
+    const gated = gatedAnswer([], rigOk({ session: SID, stopped: true, compacted: null }));
+    rig.answer("stop", gated.answer);
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
     fake.pushUpdate(msg("/stop"));
+    await stopStarted();
+    fake.pushUpdate(msg("held while closing"));
+    await updatesHandled();
+    old.close();
+    await windowGone();
+    await updatesHandled();
+    expect(callsOf("run")).toEqual([]);
+    gated.release();
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the start");
+    const next = await plugin(SID, "win2");
+    expect(await arrived(clock, next, 1)).toEqual(["held while closing"]);
+  });
+
+  test("a window that stays open after a successful stop gets the items once the wait for it ends", async () => {
+    const clock = newClock();
+    rig.answer("stop", rigOk({ session: SID, stopped: true, compacted: null }));
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    fake.pushUpdate(msg("/stop"));
+    await waitFor(() => edits().includes(en.sessionEnded), WAIT_MS, "the stop result");
+    fake.pushUpdate(msg("held for a lingering window"));
+    await updatesHandled();
+    await clock.advance(WINDOW_CLOSE_WAIT_MS - 1);
+    await settle();
+    expect(contentsOf(old)).toEqual([]);
+    await clock.advance(1);
+    expect(await arrived(clock, old, 1)).toEqual(["held for a lingering window"]);
+  });
+
+  test("/stop takes the waiting batch with it, and what comes after, until the window is gone", async () => {
+    const clock = newClock();
+    const gated = gatedAnswer([], rigOk({ session: SID, stopped: true, compacted: null }));
+    rig.answer("stop", gated.answer);
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    fake.pushUpdate(msg("before stop"));
+    await waitFor(() => hub.busy().includes("message batches"), WAIT_MS, "the batch opened");
+    fake.pushUpdate(msg("/stop"));
+    await stopStarted();
+    fake.pushUpdate(msg("after stop"));
+    await updatesHandled();
+    await clock.advance(BATCH_QUIET_MS);
+    gated.release();
+    await waitFor(() => edits().includes(en.sessionEnded), WAIT_MS, "the stop result");
+    await settle();
+    expect(contentsOf(old)).toEqual([]);
+    old.close();
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the start");
+    const next = await plugin(SID, "win2");
+    expect(await arrived(clock, next, 1)).toEqual(["before stop\n\nafter stop"]);
+  });
+
+  test("/cleanup sends the waiting batch to the window first, then holds what arrives until the window is gone", async () => {
+    const clock = newClock();
+    const gated = gatedAnswer([], rigOk({ session: SID, compacted: { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER }, backup: "backup.jsonl", skillsRemoved: 0 }));
+    rig.answer("cleanup", gated.answer);
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    fake.pushUpdate(msg("before cleanup"));
+    await waitFor(() => hub.busy().includes("message batches"), WAIT_MS, "the batch opened");
+    fake.pushUpdate(msg("/cleanup"));
+    await waitFor(() => callsOf("cleanup").length === 1, WAIT_MS, "the cleanup call");
+    fake.pushUpdate(msg("during cleanup"));
+    await updatesHandled();
+    await clock.advance(BATCH_QUIET_MS);
+    await waitFor(() => contentsOf(old).length === 1, WAIT_MS, "the batch before the command");
+    gated.release();
+    await waitFor(() => edits().includes("🧹 Cleanup done: 120k → 30k tokens."), WAIT_MS, "the cleanup result");
+    await settle();
+    expect(callsOf("run")).toEqual([]);
+    expect(contentsOf(old)).toEqual(["before cleanup"]);
+    old.close();
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the start");
+    const next = await plugin(SID, "win2");
+    expect(await arrived(clock, next, 1)).toEqual(["during cleanup"]);
+  });
+
+  test("a /run, /mode or mode button while a stop is under way says the session is already starting", async () => {
+    const clock = newClock();
+    const gated = gatedAnswer([], rigOk({ session: SID, stopped: true, compacted: null }));
+    rig.answer("stop", gated.answer);
+    await start({ timers: clock, idleMs: 0 });
+    await enabled(SID);
+    fake.pushUpdate(msg("/stop"));
+    await stopStarted();
     fake.pushUpdate(msg("/run"));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Session is already starting")));
-    a.close();
-    await waitFor(() => spawned.length === 1);
-    expect(spawned[0]).not.toContain("--permission-mode");
-    const next = await plugin(SID);
-    expect((await next.next("inbound")).content).toBe("held for stopped session");
+    fake.pushUpdate(msg("/mode plan"));
+    pressMode("auto");
+    await waitFor(() => texts().filter(t => t === en.sessionAlreadyStarting).length === 3, WAIT_MS, "three refusals");
+    expect(callsOf("run")).toEqual([]);
+    expect(callsOf("mode")).toEqual([]);
+    gated.release();
+    await settle();
   });
 
-  test("a button press uses the same mode checks and removes its keyboard", async () => {
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c) });
-    const a = await enabled(SID);
-    fake.pushUpdate(msg("/mode"));
-    await waitFor(() => fake.callsOf("sendMessage").some(c => String(c.text).includes("Current mode")));
-    const prompt = fake.callsOf("sendMessage").find(c => String(c.text).includes("Current mode"));
-    const messageId = fake.lastMessageId;
-    expect(prompt?.reply_markup).toBeDefined();
-    fake.pushUpdate(buttonPress({ chatId: Number(GROUP), fromId: Number(ME), messageId, data: `m:${SID}:plan` }));
-    await a.next("terminate");
-    await waitFor(() => fake.callsOf("editMessageReplyMarkup").some(c => c.message_id === messageId));
-    expect(spawned).toEqual([]);
-    a.close();
+  test("a second mode press while the switch is under way starts nothing more", async () => {
+    const clock = newClock();
+    await start({ timers: clock, idleMs: 0 });
+    await enabled(SID);
+    pressMode("plan");
+    await modeStarted();
+    pressMode("auto");
+    await waitFor(() => texts().includes(en.sessionAlreadyStarting), WAIT_MS, "the refusal");
+    expect(callsOf("mode")).toEqual([{ sub: "mode", sid: SID, args: ["plan"] }]);
   });
 
-  test("a stale button uses the current-mode check and does not restart an already-current mode", async () => {
-    const projects = join(dir, "projects");
-    const transcriptDir = join(projects, "project");
-    mkdirSync(transcriptDir, { recursive: true });
-    writeFileSync(join(transcriptDir, `${SID}.jsonl`), "");
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ projectsDir: projects });
-    const a = await enabled(SID);
-    appendFileSync(join(transcriptDir, `${SID}.jsonl`), `${JSON.stringify({ type: "permission-mode", permissionMode: "plan" })}\n`);
-    fake.pushUpdate(msg("/mode"));
-    await waitFor(() => fake.callsOf("sendMessage").some(c => String(c.text).includes("Current mode")));
-    fake.pushUpdate(buttonPress({ chatId: Number(GROUP), fromId: Number(ME), messageId: fake.lastMessageId, data: `m:${SID}:plan` }));
-    await waitFor(() => fake.texts().some(t => t.text.includes("Mode is already plan")));
-    expect(a.messages.some(m => m.type === "terminate")).toBe(false);
-    a.close();
+  test("a mode press takes a waiting batch and an open replay before the window can get them", async () => {
+    const clock = newClock();
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    fake.pushUpdate(msg("waiting batch"));
+    await waitFor(() => hub.busy().includes("message batches"), WAIT_MS, "the batch opened");
+    hub["replay"](SID, [{ message: must(msg("open replay").message) }]);
+    pressMode("plan");
+    await modeStarted();
+    await clock.advance(BATCH_QUIET_MS + READY_DELAY_MS);
+    await settle();
+    expect(contentsOf(old)).toEqual([]);
+    const next = await reopen(old);
+    expect(await arrived(clock, next, 1)).toEqual(["waiting batch\n\nopen replay"]);
+    expect(contentsOf(old)).toEqual([]);
   });
 
-  test("a malformed and stale mode button does not start or terminate a window", async () => {
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: MODE_COMMAND, timeoutSec: 30 } };
-    await startHub({ spawn: c => void spawned.push(c) });
-    const a = await enabled(SID);
-    const presses = [
-      { data: "m:not-a-session:plan", fromId: Number(ME) },
-      { data: "m:22222222-2222-3333-4444-555555555555:plan", fromId: Number(ME) },
-      { data: `m:${SID}:plan`, fromId: Number(ME) + 1 },
-    ];
-    for (const [index, press] of presses.entries()) {
-      fake.pushUpdate(buttonPress({ chatId: Number(GROUP), messageId: 1, ...press }));
-      await waitFor(() => fake.callsOf("answerCallbackQuery").length > index);
-      expect(a.messages.some(m => m.type === "terminate")).toBe(false);
-      expect(spawned).toEqual([]);
-    }
-    expect(fake.callsOf("editMessageReplyMarkup")).toHaveLength(0);
+  test("attachment preparation that finishes after the switch began cannot send to the ending window", async () => {
+    const clock = newClock();
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    let release = () => {};
+    const prepared = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    let reached = false;
+    const original = hub["inboundOf"].bind(hub);
+    hub["inboundOf"] = async (api, message) => {
+      reached = true;
+      await prepared;
+      return original(api, message);
+    };
+    const sending = hub["queueBatch"](SID, hub["requireApi"](), [must(msg("slow attachment").message)]);
+    await waitFor(() => reached, WAIT_MS, "the preparation started");
+    pressMode("plan");
+    await modeStarted();
+    fake.pushUpdate(msg("after the attachment"));
+    await updatesHandled();
+    expect(contentsOf(old)).toEqual([]);
+    // The preparation ends while the old window is still open: it must not send there.
+    release();
+    await sending;
+    await turns();
+    expect(contentsOf(old)).toEqual([]);
+    const next = await reopen(old);
+    expect(await arrived(clock, next, 1)).toEqual(["slow attachment\n\nafter the attachment"]);
+    expect(contentsOf(old)).toEqual([]);
+  });
+
+  test("attachment preparation that finishes after a failed switch with no window does not start a second launch", async () => {
+    const clock = newClock();
+    const gated = gatedAnswer([], rigRefused("session-timeout", "The turn did not end in time"));
+    rig.answer("mode", gated.answer);
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    let release = () => {};
+    const prepared = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    let reached = false;
+    const original = hub["inboundOf"].bind(hub);
+    hub["inboundOf"] = async (api, message) => {
+      reached = true;
+      await prepared;
+      return original(api, message);
+    };
+    const sending = hub["queueBatch"](SID, hub["requireApi"](), [must(msg("slow attachment").message)]);
+    await waitFor(() => reached, WAIT_MS, "the preparation started");
+    pressMode("plan");
+    await modeStarted();
+    old.close();
+    await windowGone();
+    // Rig fails with no window: the held message is kept for the next start.
+    gated.release();
+    await waitFor(() => texts().some(t => t.includes(en.pendingDelivery({ count: 1 }))), WAIT_MS, "the kept notice");
+    // The preparation ends only now: the kept message must not start a launch of its own.
+    release();
+    await sending;
+    await turns();
+    await settle();
+    expect(callsOf("run")).toEqual([]);
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the start");
+    const next = await plugin(SID, "win2");
+    expect(await arrived(clock, next, 1)).toEqual(["slow attachment"]);
+    expect(callsOf("run").length).toBe(1);
+  });
+
+  test("an open poll ends when the session is stopped, and the next typed answer is not swallowed", async () => {
+    const clock = newClock();
+    const gated = gatedAnswer([], rigOk({ session: SID, stopped: true, compacted: null }));
+    rig.answer("stop", gated.answer);
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    let decided: unknown;
+    hub["polls"].set("poll", {
+      key: "poll",
+      sessionId: SID,
+      questions: [],
+      answers: {},
+      index: 0,
+      checked: new Set(),
+      messageIds: [],
+      outcomes: [],
+      taken: [],
+      done: false,
+      resolve: decision => {
+        decided = decision;
+      },
+    });
+    fake.pushUpdate(msg("/stop"));
+    await stopStarted();
+    await waitFor(() => decided !== undefined, WAIT_MS, "the poll ended");
+    expect(decided).toEqual({ decision: "none" });
+    fake.pushUpdate(msg("typed answer"));
+    await updatesHandled();
+    gated.release();
+    await waitFor(() => edits().includes(en.sessionEnded), WAIT_MS, "the stop result");
+    const next = await reopen(old);
+    expect(await arrived(clock, next, 1)).toEqual(["typed answer"]);
+    expect(contentsOf(old)).toEqual([]);
+  });
+
+  test("an in-flight replay is taken with its result and cannot overtake what comes after", async () => {
+    const clock = newClock();
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    let release = () => {};
+    const preparation = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    let reached = false;
+    const original = hub["inboundOf"].bind(hub);
+    hub["inboundOf"] = async (api, message) => {
+      reached = true;
+      await preparation;
+      return original(api, message);
+    };
+    let acknowledged = 0;
+    hub["replay"](SID, [
+      { message: must(msg("replay attachment").message) },
+      { inbound: inbound("replay result", () => void acknowledged++) },
+    ]);
+    await passReadyDelay(clock);
+    await waitFor(() => reached, WAIT_MS, "the replay is preparing its first message");
+    pressMode("plan");
+    await modeStarted();
+    fake.pushUpdate(msg("after the replay"));
+    await updatesHandled();
+    // The preparation ends while the old window is still open: the replay must not send there.
+    release();
+    await turns();
+    expect(contentsOf(old)).toEqual([]);
+    expect(acknowledged).toBe(0);
+    const next = await reopen(old);
+    expect(await arrived(clock, next, 3)).toEqual(["replay attachment", "replay result", "after the replay"]);
+    expect(contentsOf(old)).toEqual([]);
+    expect(acknowledged).toBe(1);
+  });
+
+  test("exec results during the switch and during readiness join one ordered replay", async () => {
+    const clock = newClock();
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    let delivered = 0;
+    pressMode("plan");
+    await modeStarted();
+    fake.pushUpdate(msg("first"));
+    await updatesHandled();
+    hub["reportExec"](SID, inbound("during restart", () => void delivered++));
+    fake.pushUpdate(msg("last held message"));
+    await updatesHandled();
+    const next = await reopen(old);
+    hub["reportExec"](SID, inbound("during readiness", () => void delivered++));
+    expect(contentsOf(next)).toEqual([]);
+    expect(await arrived(clock, next, 4)).toEqual(["first", "during restart", "last held message", "during readiness"]);
+    expect(delivered).toBe(2);
+    expect(contentsOf(old)).toEqual([]);
+    expect(shown()).not.toContain(en.sessionEnded);
+  });
+
+  test("a malformed, a stale and an unauthorised mode button never reach rig", async () => {
+    await start();
+    await enabled(SID);
+    pressMode("not-a-mode");
+    fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: TOPIC_ID, data: "m:not-a-session:plan" }));
+    fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: TOPIC_ID, data: "m:99999999-bbbb-cccc-dddd-eeeeeeeeeeee:plan" }));
+    pressMode("plan", STRANGER);
+    await settle();
+    expect(rig.calls).toEqual([]);
+    expect(hub.isConnected(SID)).toBe(true);
+  });
+
+  test("a mode rig refuses keeps messages and exec results for the next start", async () => {
+    const clock = newClock();
+    const gated = gatedAnswer([], rigRefused("session-timeout", "The turn did not end in time"));
+    rig.answer("mode", gated.answer);
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    let delivered = false;
+    pressMode("plan");
+    await modeStarted();
+    fake.pushUpdate(msg("kept message"));
+    await updatesHandled();
+    hub["reportExec"](SID, inbound("kept result", () => {
+      delivered = true;
+    }));
+    old.close();
+    await windowGone();
+    gated.release();
+    await waitFor(() => texts().some(t => t.includes(en.pendingDelivery({ count: 2 }))), WAIT_MS, "the kept notice");
+    expect(delivered).toBe(false);
+    expect(callsOf("run")).toEqual([]);
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the start");
+    const next = await plugin(SID, "win2");
+    expect(await arrived(clock, next, 2)).toEqual(["kept message", "kept result"]);
+    expect(delivered).toBe(true);
+  });
+
+  test("a start whose window never connects keeps messages and exec results for the next start", async () => {
+    const clock = newClock();
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    let delivered = false;
+    pressMode("plan");
+    await modeStarted();
+    fake.pushUpdate(msg("kept message"));
+    await updatesHandled();
+    hub["reportExec"](SID, inbound("kept result", () => {
+      delivered = true;
+    }));
+    old.close();
+    await windowGone();
+    await settle();
+    await clock.advance(CONNECT_WAIT_MS);
+    await waitFor(() => texts().some(t => t.includes(en.pendingDelivery({ count: 2 }))), WAIT_MS, "the kept notice");
+    expect(delivered).toBe(false);
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the start");
+    const next = await plugin(SID, "win2");
+    expect(await arrived(clock, next, 2)).toEqual(["kept message", "kept result"]);
+    expect(delivered).toBe(true);
+  });
+
+  test("a mode rig says is unchanged lets the held items go to the window that stayed", async () => {
+    const clock = newClock();
+    const gated = gatedAnswer([], rigOk({ session: SID, mode: "plan", changed: false }));
+    rig.answer("mode", gated.answer);
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    pressMode("plan");
+    await modeStarted();
+    fake.pushUpdate(msg("while changing"));
+    await updatesHandled();
+    expect(contentsOf(old)).toEqual([]);
+    gated.release();
+    await waitFor(() => texts().includes(en.modeAlready({ mode: "plan" })), WAIT_MS, "the notice");
+    expect(await arrived(clock, old, 1)).toEqual(["while changing"]);
+    expect(callsOf("run")).toEqual([]);
+  });
+
+  test("a stop rig refuses while the window is open gives the held items back to that window", async () => {
+    const clock = newClock();
+    const gated = gatedAnswer([], rigRefused("session-unknown", "No such session"));
+    rig.answer("stop", gated.answer);
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    fake.pushUpdate(msg("/stop"));
+    await stopStarted();
+    fake.pushUpdate(msg("held while stopping"));
+    await updatesHandled();
+    expect(contentsOf(old)).toEqual([]);
+    gated.release();
+    await waitFor(() => shown().includes("No such session"), WAIT_MS, "the refusal");
+    expect(await arrived(clock, old, 1)).toEqual(["held while stopping"]);
+    expect(callsOf("run")).toEqual([]);
+  });
+
+  test("a stop that found nothing running lets the held items go the way a new message would", async () => {
+    const clock = newClock();
+    const gated = gatedAnswer([], rigOk({ session: SID, stopped: false, reason: "not-running" }));
+    rig.answer("stop", gated.answer);
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    fake.pushUpdate(msg("/stop"));
+    await stopStarted();
+    fake.pushUpdate(msg("held while stopping"));
+    await updatesHandled();
+    gated.release();
+    await waitFor(() => edits().includes(en.sessionNotRunning), WAIT_MS, "the notice");
+    expect(await arrived(clock, old, 1)).toEqual(["held while stopping"]);
+  });
+
+  for (const command of ["/run", "/mode plan"]) {
+    test(`a /stop of a ${command} that has not connected keeps what it held for the next start`, async () => {
+      const clock = newClock();
+      const gated = gatedAnswer([], rigOk({ session: SID, pid: RIG_PID, mode: null, account: null }));
+      rig.answer("run", gated.answer);
+      rig.answer("mode", gated.answer);
+      closedSession();
+      await start({ timers: clock, idleMs: 0 });
+      fake.pushUpdate(msg(command));
+      await waitFor(() => callsOf(command === "/run" ? "run" : "mode").length === 1, WAIT_MS, "the start call");
+      fake.pushUpdate(msg("held until the cancelled start ends"));
+      await updatesHandled();
+      fake.pushUpdate(msg("/stop"));
+      await stopStarted();
+      await waitFor(() => texts().some(t => t.includes(en.pendingDelivery({ count: 1 }))), WAIT_MS, "the kept notice");
+      gated.release();
+      await settle();
+      fake.pushUpdate(msg("/run"));
+      await waitFor(() => callsOf("run").length === (command === "/run" ? 2 : 1), WAIT_MS, "the next start");
+      const next = await plugin(SID);
+      expect(await arrived(clock, next, 1)).toEqual(["held until the cancelled start ends"]);
+    });
+  }
+
+  test("a message that starts a session is held with what arrives during the start, in arrival order", async () => {
+    const clock = newClock();
+    const gated = gatedAnswer([], rigOk({ session: SID, pid: RIG_PID, mode: null, account: null }));
+    rig.answer("run", gated.answer);
+    closedSession();
+    await start({ timers: clock, idleMs: 0 });
+    fake.pushUpdate(msg("first"));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the start call");
+    fake.pushUpdate(msg("second"));
+    await updatesHandled();
+    gated.release();
+    await settle();
+    const w = await plugin(SID);
+    expect(await arrived(clock, w, 1)).toEqual(["first\n\nsecond"]);
+  });
+
+  test("a /cleanup that starts a session holds what arrives during the start and, after it, during the cleanup", async () => {
+    const clock = newClock();
+    const gated = gatedAnswer([], rigOk({ session: SID, compacted: { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER }, backup: "backup.jsonl", skillsRemoved: 0 }));
+    rig.answer("cleanup", gated.answer);
+    closedSession();
+    await start({ timers: clock, idleMs: 0 });
+    fake.pushUpdate(msg("/cleanup"));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the start call");
+    fake.pushUpdate(msg("while starting"));
+    await updatesHandled();
+    const w = await plugin(SID);
+    await passReadyDelay(clock);
+    await waitFor(() => callsOf("cleanup").length === 1, WAIT_MS, "the cleanup call");
+    await updatesHandled();
+    expect(contentsOf(w)).toEqual([]);
+    gated.release();
+    await waitFor(() => edits().includes("🧹 Cleanup done: 120k → 30k tokens."), WAIT_MS, "the cleanup result");
+    const next = await reopen(w);
+    expect(await arrived(clock, next, 1)).toEqual(["while starting"]);
+    expect(callsOf("run")).toHaveLength(2);
+    expect(contentsOf(w)).toEqual([]);
+  });
+
+  test("a command result that starts a session is held with what arrives during the start, in arrival order", async () => {
+    const clock = newClock();
+    const gated = gatedAnswer([], rigOk({ session: SID, pid: RIG_PID, mode: null, account: null }));
+    rig.answer("run", gated.answer);
+    closedSession();
+    await start({ timers: clock, idleMs: 0 });
+    let delivered = 0;
+    hub["reportExec"](SID, inbound("the result", () => void delivered++));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the start call");
+    fake.pushUpdate(msg("after the result"));
+    await updatesHandled();
+    gated.release();
+    await settle();
+    const w = await plugin(SID);
+    expect(await arrived(clock, w, 2)).toEqual(["the result", "after the result"]);
+    expect(delivered).toBe(1);
+  });
+
+  describe("mode belongs to the current run", () => {
+    const record = (mode: string) => `${JSON.stringify({ type: "permission-mode", permissionMode: mode })}\n`;
+    const transcriptPath = () => join(dir, `${TRANSCRIPT_ID}.jsonl`);
+    // The session's record names its transcript before the hub starts.
+    const withTranscript = (content: string) => {
+      const path = transcriptPath();
+      writeFileSync(path, content);
+      closedSession();
+      new SessionStore(join(dir, "sessions.json")).setTranscript(SID, path);
+      return path;
+    };
+
+    test("an older record is last known, and the same-mode request still restarts", async () => {
+      withTranscript(record("plan"));
+      await start();
+      await plugin(SID);
+      expect(hub["knownMode"](SID)).toBeUndefined();
+      expect(hub["currentMode"](SID)).toBe("plan");
+      fake.pushUpdate(msg("/mode"));
+      await waitFor(() => texts().some(t => t.includes(en.modeLastKnown({ mode: "plan" }))), WAIT_MS, "the mode card");
+      fake.pushUpdate(msg("/mode plan"));
+      await modeStarted();
+    });
+
+    test("a record after attachment makes the same mode a no-op", async () => {
+      const path = withTranscript("");
+      await start();
+      await plugin(SID);
+      appendFileSync(path, record("plan"));
+      fake.pushUpdate(msg("/mode plan"));
+      await waitFor(() => texts().includes(en.modeAlready({ mode: "plan" })), WAIT_MS, "the notice");
+      expect(callsOf("mode")).toEqual([]);
+    });
+
+    test("a closed session always starts, and later records override the launched mode", async () => {
+      const path = withTranscript(record("plan"));
+      await start();
+      fake.pushUpdate(msg("/mode plan"));
+      await modeStarted();
+      await plugin(SID);
+      expect(hub["knownMode"](SID)).toBe("plan");
+      appendFileSync(path, record("auto"));
+      expect(hub["knownMode"](SID)).toBe("auto");
+    });
+
+    test("no transcript at the switch does not let old records override the launched mode", async () => {
+      closedSession();
+      await start();
+      fake.pushUpdate(msg("/mode plan"));
+      await modeStarted();
+      const path = transcriptPath();
+      writeFileSync(path, record("auto"));
+      hub["store"].setTranscript(SID, path);
+      await plugin(SID);
+      expect(hub["currentMode"](SID)).toBe("plan");
+      expect(hub["knownMode"](SID)).toBe("plan");
+    });
   });
 });
 
@@ -2567,7 +3113,7 @@ describe("idle exit", () => {
     await waitFor(() => exited, WAIT_MS, "idle exit");
   });
 
-  test("with idleMs 0 or a launch command the hub stays up", async () => {
+  test("with idleMs 0 the hub stays up", async () => {
     const clock = newClock();
     await startHub({ idleMs: 0, timers: clock });
     const a = await plugin("a");
@@ -2576,1277 +3122,14 @@ describe("idle exit", () => {
     await settle();
     await clock.advance(IDLE_MS);
     expect(exited).toBe(false);
-    await hub.stop();
-    config = { ...config, launch: { command: ["x"], timeoutSec: 90 } };
-    await startHub({ idleMs: IDLE_MS, timers: clock });
-    await settle();
-    await clock.advance(IDLE_MS);
-    expect(exited).toBe(false);
-  });
-});
-
-describe("commands", () => {
-  const USAGE: Usage = {
-    context: { tokens: 128_400, window: 1_000_000, breakdown: { totalTokens: 130_000, rawMaxTokens: 333_000, autoCompactThreshold: 300_000, isAutoCompactEnabled: true } },
-  };
-
-  const COMPACTED: Compaction = { tokensBefore: 180_000, tokensAfter: 24_000 };
-
-  // A rig that answers `info` with the given output and every other query with an empty feature list.
-  const rigAnswering = (info: RigOutput = { code: 0, stdout: JSON.stringify(fullInfo()), stderr: "" }) => {
-    const asked: string[] = [];
-    return {
-      asked,
-      findRig: () => "/fake/rig",
-      runRig: async (invocation: RigInvocation): Promise<RigOutput> => {
-        const line = invocation.argv.join(" ");
-        if (!/ info --session /.test(line)) return { code: 0, stdout: JSON.stringify({ features: [] }), stderr: "" };
-        asked.push(line);
-        return info;
-      },
-    };
-  };
-
-  // The mod of one window, with the engine faked: the commands it ran and
-  // the compactions it asked for, and what `run` and `compact` answer.
-  function mod(
-    sessionId: string,
-    answer: (command: string, args: string) => Promise<{ text?: string }> = async () => ({}),
-    usage = () => USAGE,
-    compaction: () => Promise<Compaction> = async () => COMPACTED,
-  ) {
-    const ran: [string, string][] = [];
-    const compacted: (string | undefined)[] = [];
-    const runner = new Runner(`http://127.0.0.1:${port}`, {
-      sessionId: async () => sessionId,
-      usage: async () => usage(),
-      run: (command, args) => {
-        ran.push([command, args]);
-        return answer(command, args);
-      },
-      compact: instructions => {
-        compacted.push(instructions);
-        return compaction();
-      },
-      http: async (url, init) => {
-        const r = await fetch(url, init);
-        return { status: r.status, text: await r.text() };
-      },
-      now: () => Date.now(),
-      sleep: neverSleep,
-    });
-    return { runner, ran, compacted };
-  }
-
-  const command = (text: string, threadId = 100) => fake.pushUpdate(topicMsg({ chatId: GROUP, threadId, fromId: ME, text }));
-  const sentText = (pred: (t: string) => boolean) => fake.texts().find(p => pred(p.text));
-  // The text a queued notice was edited into (success outcomes edit it in place).
-  const editedText = (pred: (t: string) => boolean) => fake.callsOf("editMessageText").find(c => typeof c.text === "string" && pred(c.text));
-  // Polls like the mod's timer until the topic gets the text.
-  const reply = (runner: Runner, pred: (t: string) => boolean) =>
-    waitFor(
-      async () => {
-        await runner.poll();
-        return sentText(pred);
-      },
-      3000,
-      "command reply",
-    );
-
-  test("/info is answered by the mod silently, never reaches the agent and leaves the mode as it was", async () => {
-    const rig = rigAnswering();
-    await startHub({ findRig: rig.findRig, runRig: rig.runRig });
-    const a = await enabled("a");
-    await req(a, { op: "disable" });
-    const { runner } = mod("a");
-    command("/info");
-    const sent = await reply(runner, t => t.startsWith("Claude limits"));
-    expect(sent).toMatchObject({ message_thread_id: 100, disable_notification: true });
-    expect(sent.text).toContain("120/300k");
-    expect(sent.text).toContain("Codex limits");
-    expect(sent.text).not.toContain("{");
-    expect(rig.asked).toHaveLength(1);
-    expect(rig.asked[0]).toContain(" info --session a");
-    expect(arr(sent.entities)[0]).toEqual({ type: "bold", offset: 0, length: "Claude limits".length });
-    expect(a.messages.some(m => m.type === "inbound")).toBe(false);
-    expect(new SessionStore(join(dir, "sessions.json")).get("a")?.enabled).toBe(false);
-  });
-
-  test("a command goes to the mod of its own session only", async () => {
-    await startHub();
-    await enabled("a");
-    await enabled("b");
-    const a = mod("a");
-    const b = mod("b");
-    command("/compact 200k", 101);
-    await waitFor(async () => {
-      await a.runner.poll();
-      await b.runner.poll();
-      return b.ran.length;
-    });
-    expect(b.ran).toEqual([["autocompact", "200000"]]);
-    expect(a.ran).toEqual([]);
-  });
-
-  test("a command sends the messages waiting before it without waiting for the quiet window", async () => {
-    await startHub({ batchQuietMs: 5000 });
-    const a = await enabled("a");
-    const { runner, ran } = mod("a");
-    const start = Date.now();
-    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "hello" }));
-    command("/compact 200k");
-    expect((await a.nextNew("inbound")).content).toBe("hello");
-    expect(Date.now() - start).toBeLessThan(3000);
-    await waitFor(async () => {
-      await runner.poll();
-      return ran.length;
-    });
-    expect(ran).toEqual([["autocompact", "200000"]]);
-  });
-
-  test("a command for another bot and unknown commands reach the agent as text", async () => {
-    await startHub();
-    const a = await enabled("a");
-    command("/info@other_bot");
-    command("/start");
-    // Sent together, they come as one notification.
-    expect((await a.nextNew("inbound")).content).toBe("/info@other_bot\n\n/start");
-  });
-
-  test("a command nobody picks up is reported in the topic", async () => {
-    await startHub({ commandPickupMs: 150 });
-    await enabled("a");
-    command("/info");
-    const sent = await waitFor(() => sentText(t => t.startsWith("⚠️")));
-    expect(sent.text).toBe("⚠️ /info failed: the window did not pick it up within 0.15 s.");
-    expect(sent.disable_notification).toBe(false);
-    // Picked up too late, it is not run.
-    const { runner, ran } = mod("a");
-    await runner.poll();
-    expect(ran).toEqual([]);
-  });
-
-  test("/compact edits its queued notice into the successful result", async () => {
-    await startHub();
-    await enabled("a");
-    const { runner, ran, compacted } = mod("a");
-    runner.turn(true);
-    command("/compact keep the plan");
-    const started = await reply(runner, t => t.startsWith("🗜"));
-    expect(started.text).toBe("🗜 Compaction is queued.");
-    expect(started.disable_notification).toBe(true);
-    const startedId = fake.lastMessageId;
-    await runner.poll();
-    await settle();
-    expect(compacted).toStrictEqual([]);
-    runner.turn(false);
-    expect(fake.callsOf("editMessageText")).toEqual([]);
-    await waitFor(async () => {
-      await runner.poll();
-      return fake.callsOf("editMessageText").length === 2;
-    });
-    expect(fake.callsOf("editMessageText")).toEqual([
-      { chat_id: GROUP, message_id: startedId, text: "🗜 Compaction is running…" },
-      { chat_id: GROUP, message_id: startedId, text: "✅ Compaction done." },
-    ]);
-    expect(fake.texts().filter(t => t.message_thread_id === 100)).toHaveLength(1);
-    expect(compacted).toStrictEqual(["keep the plan"]);
-    expect(ran).toEqual([]);
-  });
-
-  // The message ids the outbox file keeps once its queue is empty.
-  const storedIds = async () => {
-    const read = () => JSON.parse(readFileSync(join(dir, "outbox.json"), "utf8"));
-    await waitFor(() => arr(field(read(), "items")).length === 0);
-    return Object.entries(z.record(z.string(), z.number()).parse(field(read(), "messageIds"))).map(([, id]) => id);
-  };
-
-  test("an ordinary message leaves no message id in the outbox", async () => {
-    await startHub();
-    const a = await enabled("a");
-    a.send({ type: "send", id: "x1", text: "plain text", notify: false });
-    await waitFor(() => sentText(t => t === "plain text"));
-    expect(await storedIds()).toEqual([]);
-  });
-
-  test("a progress resolution without an id sends nothing and leaves later items deliverable", async () => {
-    await startHub();
-    await enabled("a");
-    const post = (body: unknown) => fetch(`http://127.0.0.1:${port}/reply`, { method: "POST", body: JSON.stringify(body) });
-    expect((await post({ sessionId: "a", id: "progress.1", text: "🗜 Compaction is running…", notify: false, replaces: { id: "missing.0", kind: "progress" } })).status).toBe(200);
-    expect((await post({ sessionId: "a", id: "later.0", text: "after progress", notify: false })).status).toBe(200);
-    await waitFor(() => sentText(t => t === "after progress"));
-    expect(sentText(t => t === "🗜 Compaction is running…")).toBeUndefined();
-  });
-
-  test("a failed progress edit leaves its id for the result and does not stop delivery", async () => {
-    await startHub();
-    await enabled("a");
-    const post = (body: unknown) => fetch(`http://127.0.0.1:${port}/reply`, { method: "POST", body: JSON.stringify(body) });
-    await post({ sessionId: "a", id: "compact.0", text: "🗜 Compaction is queued.", notify: false, awaitsResult: true });
-    await waitFor(() => sentText(t => t === "🗜 Compaction is queued."));
-    const messageId = fake.lastMessageId;
-    fake.failNext("editMessageText", { code: 400, description: "Bad Request: message to edit not found" });
-    await post({ sessionId: "a", id: "compact.1", text: "🗜 Compaction is running…", notify: false, replaces: { id: "compact.0", kind: "progress" } });
-    await post({ sessionId: "a", id: "compact.2", text: "✅ Compaction done.", notify: false, replaces: { id: "compact.0", kind: "success" } });
-    await waitFor(() => fake.callsOf("editMessageText").some(c => c.text === "✅ Compaction done."));
-    expect(fake.callsOf("editMessageText").map(c => c.message_id)).toEqual([messageId, messageId]);
-    expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual(["🗜 Compaction is running…", "✅ Compaction done."]);
-  });
-
-  test("a queued notice keeps its id until the result arrives, then the id is gone", async () => {
-    await startHub();
-    await enabled("a");
-    const { runner } = mod("a");
-    runner.turn(true);
-    command("/compact");
-    await reply(runner, t => t.startsWith("🗜"));
-    expect(await storedIds()).toEqual([fake.lastMessageId]);
-    runner.turn(false);
-    await waitFor(async () => {
-      await runner.poll();
-      return fake.callsOf("editMessageText").length === 2;
-    });
-    expect(await storedIds()).toEqual([]);
-  });
-
-  test("a compact result arriving while its queued notice is being sent edits that notice", async () => {
-    await startHub();
-    await enabled("a");
-    const { runner } = mod("a");
-    fake.delayNext("sendMessage", SLOW_SEND_MS / 2);
-    command("/compact");
-    await waitFor(async () => {
-      await runner.poll();
-      return fake.callsOf("sendMessage").length > 0;
-    });
-    await waitFor(async () => {
-      await runner.poll();
-      return fake.callsOf("editMessageText").length === 2;
-    });
-    expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual(["🗜 Compaction is running…", "✅ Compaction done."]);
-    expect(fake.texts().filter(t => t.message_thread_id === 100)).toHaveLength(1);
-  });
-
-  test("a compact result after hub restart resolves the persisted Telegram message id", async () => {
-    await startHub();
-    await enabled("a");
-    const h = held();
-    const { runner } = mod("a", undefined, undefined, h.answer);
-    command("/compact");
-    await reply(runner, t => t.startsWith("🗜"));
-    const startedId = fake.lastMessageId;
-    // The running edit asks the hub for the language first, so it lands a moment after the queued notice:
-    // wait for it, or the hub could stop while that edit is on its way.
-    await waitFor(async () => {
-      await runner.poll();
-      return fake.callsOf("editMessageText").length === 1;
-    });
-    const oldPort = port;
-    await hub.stop();
-    await startHub({ port: oldPort });
-    h.release();
-    await waitFor(async () => {
-      await runner.poll();
-      return fake.callsOf("editMessageText").length === 2;
-    });
-    expect(fake.callsOf("editMessageText")).toEqual([
-      { chat_id: GROUP, message_id: startedId, text: "🗜 Compaction is running…" },
-      { chat_id: GROUP, message_id: startedId, text: "✅ Compaction done." },
-    ]);
-  });
-
-  test("a skipped compaction gives the reason", async () => {
-    await startHub();
-    await enabled("a");
-    const { runner } = mod("a", undefined, undefined, async () => ({ skip: "a hook vetoed it" }));
-    command("/compact");
-    // The next bot message is the queued notice: read before the compaction can send another one.
-    const startedId = fake.nextMessageId;
-    const started = await reply(runner, t => t.startsWith("🗜"));
-    const warning = await reply(runner, t => t.startsWith("⚠️"));
-    expect(warning.text).toBe("⚠️ Compaction skipped: a hook vetoed it");
-    expect(warning.disable_notification).toBe(false);
-    await waitFor(() => fake.callsOf("editMessageText").length === 1);
-    expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🗜 Compaction is running…" }]);
-    await waitFor(() => fake.callsOf("deleteMessage").length === 1);
-    expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
-    expect(started.disable_notification).toBe(true);
-  });
-
-  test("a compaction that keeps failing with no turn running gives the reason", async () => {
-    await startHub();
-    await enabled("a");
-    const { runner, compacted } = mod("a", undefined, undefined, async () => {
-      throw new Error("Not enough messages to compact.");
-    });
-    command("/compact");
-    const started = await reply(runner, t => t.startsWith("🗜"));
-    const startedId = fake.lastMessageId;
-    expect((await reply(runner, t => t.startsWith("⚠️"))).text).toBe("⚠️ Compaction failed: Not enough messages to compact.");
-    await waitFor(() => fake.callsOf("deleteMessage").length === 1);
-    expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
-    expect(started.disable_notification).toBe(true);
-    expect(compacted).toStrictEqual([undefined, undefined, undefined]);
-  });
-
-  test("a compaction refused as turns start runs once they end, however many times", async () => {
-    await startHub();
-    await enabled("a");
-    const { runner, compacted } = mod("a", undefined, undefined, async () => {
-      if (compacted.length > COMPACT_POLLS) return COMPACTED;
-      runner.turn(true);
-      throw new Error("a turn is running");
-    });
-    command("/compact");
-    await reply(runner, t => t.startsWith("🗜"));
-    for (let i = 1; i <= COMPACT_POLLS; i++) {
-      await waitFor(async () => {
-        await runner.poll();
-        return compacted.length === i;
-      });
-      // No retry while the turn runs.
-      await runner.poll();
-      expect(compacted.length).toBe(i);
-      runner.turn(false);
-    }
-    await waitFor(async () => {
-      await runner.poll();
-      return fake.callsOf("editMessageText").length === COMPACT_POLLS * 2 + 2;
-    });
-    const expectedStatuses = Array.from({ length: COMPACT_POLLS }, () => ["🗜 Compaction is running…", "🗜 Compaction is queued."]).flat();
-    expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual([...expectedStatuses, "🗜 Compaction is running…", "✅ Compaction done."]);
-    expect(sentText(t => t.startsWith("⚠️"))).toBeUndefined();
-  });
-
-  test("/compact N sets the autocompact window and answers with the text of the command", async () => {
-    await startHub();
-    await enabled("a");
-    const { runner, ran } = mod("a", async () => ({ text: "Auto-compact window set to 333k tokens" }));
-    command("/compact 333k");
-    const sent = await reply(runner, t => t.startsWith("Auto-compact"));
-    expect(ran).toEqual([["autocompact", "333000"]]);
-    expect(sent.disable_notification).toBe(true);
-  });
-
-  test("/rename goes to the mod, which runs the session's rename and edits its queued notice into the result", async () => {
-    await startHub();
-    await enabled("a");
-    const { runner, ran } = mod("a");
-    command("/rename \u0421\u043f\u0440\u0438\u043d\u0442 3");
-    const started = await reply(runner, t => t.startsWith("🏷"));
-    expect(started.text).toBe("🏷 Rename is queued.");
-    const edited = await waitFor(async () => {
-      await runner.poll();
-      return editedText(t => t.startsWith("✅ /rename"));
-    });
-    expect(edited.text).toBe("✅ /rename \u0421\u043f\u0440\u0438\u043d\u0442 3 done.");
-    expect(ran).toEqual([["rename", "\u0421\u043f\u0440\u0438\u043d\u0442 3"]]);
-  });
-
-  test("a reply the mod could not deliver goes with the next poll, once", async () => {
-    const rig = rigAnswering();
-    await startHub({ findRig: rig.findRig, runRig: rig.runRig });
-    await enabled("a");
-    let down = true;
-    const ran: string[] = [];
-    const runner = new Runner(`http://127.0.0.1:${port}`, {
-      sessionId: async () => "a",
-      usage: async () => USAGE,
-      run: async () => ({}),
-      compact: async () => COMPACTED,
-      http: async (url, init) => {
-        ran.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
-        if (init?.method === "POST" && down) throw new Error("connection refused");
-        const r = await fetch(url, init);
-        return { status: r.status, text: await r.text() };
-      },
-      now: () => Date.now(),
-      sleep: neverSleep,
-    });
-    command("/info");
-    await waitFor(async () => {
-      await runner.poll();
-      return ran.includes("POST /reply");
-    });
-    down = false;
-    await reply(runner, t => t.startsWith("Claude limits"));
-    await runner.poll();
-    await runner.poll();
-    expect(fake.texts().filter(p => p.text.startsWith("Claude limits")).length).toBe(1);
-  });
-
-  describe("GET /info", () => {
-    const get = (session: string) => fetch(`http://127.0.0.1:${port}/info?session=${session}`);
-
-    test("answers rig's data of the session as it is, from `rig info --session <id>`", async () => {
-      const rig = rigAnswering();
-      await startHub({ findRig: rig.findRig, runRig: rig.runRig });
-      const res = await get("abc-1");
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual(fullInfo());
-      expect(rig.asked).toHaveLength(1);
-      expect(rig.asked[0]).toContain(" info --session abc-1");
-      expect(rig.asked[0]).not.toContain("--json");
-    });
-
-    test("a block without its data and a block with rig's error pass through unchanged", async () => {
-      const claude = { error: { code: "claude-failed", message: "no session data" } };
-      const { codex, volunteers, ...rest } = fullInfo({ claude });
-      const rig = rigAnswering({ code: 0, stdout: JSON.stringify(rest), stderr: "" });
-      await startHub({ findRig: rig.findRig, runRig: rig.runRig });
-      const data = await (await get("s")).json();
-      expect(data).toEqual(rest);
-      expect(data).not.toHaveProperty("codex");
-      expect(data).not.toHaveProperty("volunteers");
-    });
-
-    test("a command failure is rig's own message, with a failure status", async () => {
-      const failure = { error: { code: "session-unknown", message: "No such session: s" } };
-      const rig = rigAnswering({ code: 1, stdout: JSON.stringify(failure), stderr: "" });
-      await startHub({ findRig: rig.findRig, runRig: rig.runRig });
-      const res = await get("s");
-      expect(res.status).toBe(502);
-      expect(await res.json()).toEqual({ failure: "No such session: s" });
-    });
-
-    test("an answer that is not rig's data is a failure, not data", async () => {
-      const rig = rigAnswering({ code: 0, stdout: JSON.stringify({ session: "s" }), stderr: "" });
-      await startHub({ findRig: rig.findRig, runRig: rig.runRig });
-      const res = await get("s");
-      expect(res.status).toBe(502);
-      expect(await res.json()).toHaveProperty("failure");
-    });
-
-    test("a session id that is not a plain id never reaches rig", async () => {
-      const rig = rigAnswering();
-      await startHub({ findRig: rig.findRig, runRig: rig.runRig });
-      for (const bad of ["", "a%20b", "a%3Bb", "..%2F..", "a%26b"]) {
-        const res = await get(bad);
-        expect(res.status).toBe(502);
-        expect(await res.json()).toEqual({ failure: en.rigBadSession });
-      }
-      expect(rig.asked).toEqual([]);
-    });
-
-    test("without rig the answer is the missing-rig text", async () => {
-      await startHub();
-      const res = await get("s");
-      expect(res.status).toBe(502);
-      expect(await res.json()).toEqual({ failure: en.rigMissing });
-    });
-
-    test("the removed limits endpoints are gone", async () => {
-      await startHub();
-      for (const path of ["limits?session=a", "codex-limits?session=a", "volunteer-limits?session=a"]) {
-        expect((await fetch(`http://127.0.0.1:${port}/${path}`)).status).toBe(404);
-      }
-    });
-  });
-
-  test("the same reply posted twice is sent once", async () => {
-    await startHub();
-    await enabled("a");
-    const post = () => fetch(`http://127.0.0.1:${port}/reply`, { method: "POST", body: JSON.stringify({ sessionId: "a", id: "c1.0", text: "once", notify: true }) });
-    expect((await post()).status).toBe(200);
-    expect((await post()).status).toBe(200);
-    await waitFor(() => sentText(t => t === "once"));
-    await settle();
-    expect(fake.texts().filter(p => p.text === "once").length).toBe(1);
-  });
-
-  const SMALL: Usage = { context: { tokens: 50_000, window: 1_000_000 } };
-  const terminated = (c: { messages: { type: string }[] }) => c.messages.some(m => m.type === "terminate");
-
-  // A compaction that ends when the test lets it.
-  function held(result: Compaction = COMPACTED) {
-    let release = () => {};
-    const done = new Promise<void>(r => (release = r));
-    return {
-      release: () => release(),
-      answer: async () => {
-        await done;
-        return result;
-      },
-    };
-  }
-
-  test("/stop of a session with little context ends it with no compaction", async () => {
-    await startHub();
-    const a = await enabled("a");
-    const { runner, compacted } = mod("a", undefined, () => SMALL);
-    command("/stop");
-    await waitFor(async () => {
-      await runner.poll();
-      return terminated(a);
-    });
-    expect(compacted).toStrictEqual([]);
-  });
-
-  test("/stop of a session with more than 120k compacts it first, reports it, then ends it", async () => {
-    await startHub();
-    const a = await enabled("a");
-    const h = held({ tokensBefore: 128_000, tokensAfter: 20_000 });
-    const { runner, compacted } = mod("a", undefined, undefined, h.answer);
-    command("/stop");
-    const started = await reply(runner, t => t.startsWith("🗜"));
-    const startedId = fake.lastMessageId;
-    expect(started.text).toBe("🗜 I will compact the context and end the session. A second /stop ends it right away.");
-    expect(started.disable_notification).toBe(true);
-    await waitFor(async () => {
-      await runner.poll();
-      return compacted.length;
-    });
-    expect(compacted).toStrictEqual([undefined]);
-    await settle();
-    expect(terminated(a)).toBe(false);
-    h.release();
-    await a.next("terminate");
-    await waitFor(async () => {
-      await runner.poll();
-      return fake.callsOf("editMessageText").length === 2;
-    });
-    expect(fake.callsOf("editMessageText")).toEqual([
-      { chat_id: GROUP, message_id: startedId, text: "🗜 Compacting the context and ending the session. A second /stop ends it right away." },
-      { chat_id: GROUP, message_id: startedId, text: "✅ Compaction done." },
-    ]);
-    a.close();
-    await waitFor(() => sentText(t => t === "⏹ Session ended"));
-  });
-
-  test("/stop deletes its compaction notice and sends a skipped result loudly", async () => {
-    await startHub();
-    const a = await enabled("a");
-    const { runner } = mod("a", undefined, undefined, async () => ({ skip: "nothing to compact" }));
-    command("/stop");
-    // The next bot message is the notice: read before the compaction can send another one.
-    const startedId = fake.nextMessageId;
-    const started = await reply(runner, t => t.startsWith("🗜 I will compact the context"));
-    expect(started.disable_notification).toBe(true);
-    const warning = await reply(runner, t => t.startsWith("⚠️ Compaction skipped"));
-    expect(warning.disable_notification).toBe(false);
-    expect(warning.text).toBe("⚠️ Compaction skipped: nothing to compact");
-    await waitFor(() => fake.callsOf("deleteMessage").length === 1);
-    expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
-    await a.next("terminate");
-    a.close();
-    await waitFor(() => sentText(t => t === "⏹ Session ended"));
-  });
-
-  test("/stop waits for a /compact from the topic", async () => {
-    await startHub();
-    const a = await enabled("a");
-    const h = held();
-    let usage = USAGE;
-    const { runner, compacted } = mod("a", undefined, () => usage, h.answer);
-    command("/compact");
-    await reply(runner, t => t.startsWith("🗜"));
-    command("/stop");
-    const waiting = await reply(runner, t => t.startsWith("⏳"));
-    expect(waiting.text).toBe("⏳ I will end the session after the compaction. A second /stop ends it right away.");
-    await settle();
-    expect(terminated(a)).toBe(false);
-    usage = SMALL;
-    h.release();
-    await a.next("terminate");
-    expect(compacted).toStrictEqual([undefined]);
-  });
-
-  test("the notice of a /stop waiting for a compact turns into the ended notice", async () => {
-    await startHub();
-    const a = await enabled("a");
-    const h = held();
-    let usage = USAGE;
-    const { runner } = mod("a", undefined, () => usage, h.answer);
-    command("/compact");
-    await reply(runner, t => t.startsWith("🗜"));
-    command("/stop");
-    await reply(runner, t => t.startsWith("⏳"));
-    const waitingId = fake.lastMessageId;
-    usage = SMALL;
-    h.release();
-    await a.next("terminate");
-    a.close();
-    await waitFor(() => fake.callsOf("editMessageText").some(c => c.text === "⏹ Session ended"));
-    expect(fake.callsOf("editMessageText").filter(c => c.message_id === waitingId)).toEqual([{ chat_id: GROUP, message_id: waitingId, text: "⏹ Session ended" }]);
-    expect(fake.callsOf("sendMessage").filter(c => c.text === "⏹ Session ended")).toEqual([]);
-  });
-
-  test("/stop with no compaction running sends the ended notice as a new message", async () => {
-    await startHub();
-    const a = await enabled("a");
-    const { runner } = mod("a", undefined, () => SMALL);
-    command("/stop");
-    await waitFor(async () => {
-      await runner.poll();
-      return terminated(a);
-    });
-    a.close();
-    await waitFor(() => sentText(t => t === "⏹ Session ended"));
-    expect(fake.callsOf("editMessageText")).toEqual([]);
-  });
-
-  test("a second /stop ends the window without waiting", async () => {
-    await startHub();
-    const a = await enabled("a");
-    const { runner } = mod("a", undefined, undefined, held().answer);
-    command("/stop");
-    await reply(runner, t => t.startsWith("🗜"));
-    command("/stop");
-    await a.next("terminate");
-  });
-
-  test("an older module never gets /stop, and the window ends once nobody takes it", async () => {
-    await startHub({ commandPickupMs: 150 });
-    const a = await enabled("a");
-    command("/stop");
-    const answers = new Set<string>();
-    await waitFor(async () => {
-      answers.add(await (await fetch(`http://127.0.0.1:${port}/commands?session=a`)).text());
-      return terminated(a);
-    }, 3000);
-    expect([...answers]).toEqual(["[]"]);
-  });
-
-  test("the hub puts the commands into the bot menu", async () => {
-    await startHub();
-    const call = await waitFor(() => fake.callsOf("setMyCommands")[0]);
-    expect(arr(call.commands).map(c => field(c, "command"))).toEqual(["info", "cleanup", "compact", "stop", "bash", "pwsh", "cmd", "run", "mode", "rename", "rig"]);
-    expect(field(arr(call.commands).find(c => field(c, "command") === "compact"), "description")).toBe("Compact the context; /compact <instructions> adds instructions; /compact N sets the autocompact window");
-    expect(field(arr(call.commands).find(c => field(c, "command") === "rename"), "description")).toBe("Rename the session and its topic; /rename <name> is the new name");
-    expect(field(arr(call.commands).find(c => field(c, "command") === "pwsh"), "description")).toBe("Run a command in PowerShell in the session folder");
-  });
-
-  describe("/cleanup", () => {
-    const SID = "11111111-2222-3333-4444-555555555555";
-    const COMMAND = ["wt.exe", "-d", "{cwd}", "cswap.exe", "run", "{account}", "--", "--resume", "{session}"];
-    const STARTED = ["wt.exe", "-d", CWD, "cswap.exe", "run", "2", "--", "--resume", SID];
-    const PID = 4242;
-    const VERSION = "1.0.0";
-    // Skill sizes in characters: 1k and 18k tokens.
-    const SMALL_SKILL = 4000;
-    const BIG_SKILL = 72_000;
-    // How long a Claude Code that does not exit is waited for.
-    const EXIT_MS = 300;
-    // How long a compact that does not end is waited for: 0.02 min.
-    const COMPACT_MS = 1200;
-    // How long a window that does not end is waited for: 0.4 s.
-    const STOP_MS = 400;
-    // How often a test hub looks whether Claude Code is gone: a real tick, kept short.
-    const EXIT_POLL_MS = 5;
-    // A slow send, still under the test API's 300 ms attempt timeout so it
-    // is not sent twice.
-    const SLOW_SEND_MS = 200;
-
-    const skill = (name: string, chars: number) => ({ name, content: "x".repeat(chars) });
-    const record = (uuid: string, skills: { name: string; content: string }[]) =>
-      JSON.stringify({ parentUuid: "p", type: "attachment", attachment: { type: "invoked_skills", skills }, uuid, version: VERSION });
-    const SKILLS = [record("u1", [skill("a", SMALL_SKILL)]), record("u2", [skill("a", SMALL_SKILL), skill("b", BIG_SKILL)])];
-
-    // A session with a window, a topic and a transcript in its own projects
-    // folder; Claude Code exits at once unless told otherwise, started
-    // commands are recorded.
-    async function liveSession(lines: string[], o: Parameters<typeof startHub>[0] = {}) {
-      const projects = tempDir();
-      const folder = join(projects, "C--x");
-      mkdirSync(folder, { recursive: true });
-      const transcript = join(folder, `${SID}.jsonl`);
-      writeFileSync(transcript, [JSON.stringify({ type: "user", cwd: CWD }), ...lines].map(l => `${l}\n`).join(""));
-      const spawned: string[][] = [];
-      config = { ...config, launch: { command: COMMAND, timeoutSec: LAUNCH_TIMEOUT_S } };
-      await startHub({ spawn: c => void spawned.push(c), projectsDir: projects, isAlive: () => false, ...o });
-      const a = await enabled(SID);
-      return { a, spawned, transcript, folder, original: readFileSync(transcript, "utf8") };
-    }
-
-    // The window ends the way the plugin ends it on terminate.
-    async function windowEnds(a: Awaited<ReturnType<typeof plugin>>) {
-      await a.next("terminate");
-      a.send({ type: "exiting", pid: PID });
-      a.close();
-    }
-
-    const pollUntil = (runner: Runner, done: () => boolean) =>
-      waitFor(async () => {
-        await runner.poll();
-        return done();
-      });
-
-    const backups = (folder: string) => readdirSync(folder).filter(f => f.startsWith(`${SID}.cleanup-`));
-
-    test("/cleanup compacts, ends the window, empties the skills and leaves the session ended", async () => {
-      const { a, spawned, transcript, folder } = await liveSession(SKILLS);
-      const { runner, compacted } = mod(SID);
-      command("/cleanup keep the plan");
-      const started = await reply(runner, t => t.startsWith("🧹 Cleanup"));
-      expect(started.text).toBe("🧹 Cleanup is queued.");
-      expect(started.disable_notification).toBe(true);
-      const startedId = fake.lastMessageId;
-      await pollUntil(runner, () => terminated(a));
-      expect(compacted).toStrictEqual(["keep the plan"]);
-      await windowEnds(a);
-      // The summary edits the "will compact" message in place.
-      await waitFor(() => fake.callsOf("editMessageText").length === 2);
-      expect(fake.callsOf("editMessageText")).toEqual([
-        { chat_id: GROUP, message_id: startedId, text: "🧹 Cleanup is running…" },
-        { chat_id: GROUP, message_id: startedId, text: "🧹 Cleanup done, skills removed: a, b." },
-      ]);
-      expect(sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued"))).toBeUndefined();
-      await waitFor(() => sentText(t => t === "⏹ Session ended"));
-      await settle();
-      expect(spawned).toEqual([]);
-      expect(fake.callsOf("deleteMessage")).toEqual([]);
-      expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
-      expect(backups(folder).length).toBe(1);
-    });
-
-    test("a message during /cleanup waits and reaches the session started again", async () => {
-      let alive = true;
-      const { a, spawned } = await liveSession(SKILLS, { isAlive: () => alive, exitPollMs: EXIT_POLL_MS });
-      const { runner } = mod(SID);
-      command("/cleanup");
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      await waitFor(() => !hub.isConnected(SID));
-      command("meanwhile");
-      await updatesHandled();
-      alive = false;
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued") && !t.endsWith("…")));
-      expect(summary.text).toBe("🧹 Cleanup done, skills removed: a, b.");
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
-      const w = await plugin(SID);
-      expect((await w.next("inbound")).content).toBe("meanwhile");
-      await waitFor(() => sentText(t => t.startsWith("🚀")));
-      expect(sentText(t => t.startsWith("🚀"))).toBeDefined();
-    });
-
-    test("a failed compact leaves the window and the transcript alone", async () => {
-      const { a, spawned, transcript, original } = await liveSession(SKILLS);
-      const { runner } = mod(SID, undefined, undefined, async () => {
-        throw new Error("boom");
-      });
-      // The "will compact" message is still being sent when the failure comes.
-      fake.delayNext("sendMessage", SLOW_SEND_MS);
-      command("/cleanup");
-      const startedId = fake.nextMessageId;
-      const failed = await reply(runner, t => t.startsWith("⚠️"));
-      expect(failed.text).toBe("⚠️ Cleanup failed: the compaction failed: boom");
-      expect(failed.disable_notification).toBe(false);
-      // Tries that fail with no turn in the way stay running: one edit, no flicker.
-      await waitFor(() => fake.callsOf("editMessageText").length === 1);
-      expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🧹 Cleanup is running…" }]);
-      await waitFor(() => fake.callsOf("deleteMessage").length);
-      expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
-      await settle();
-      expect(terminated(a)).toBe(false);
-      expect(readFileSync(transcript, "utf8")).toBe(original);
-      expect(spawned).toEqual([]);
-    });
-
-    test("an older module that does not take /cleanup gets the lost notice and keeps running", async () => {
-      const { a } = await liveSession(SKILLS, { commandPickupMs: 150 });
-      command("/cleanup");
-      const answers = new Set<string>();
-      const lost = await waitFor(async () => {
-        answers.add(await (await fetch(`http://127.0.0.1:${port}/commands?session=${SID}&stop=1`)).text());
-        return sentText(t => t.startsWith("⚠️"));
-      }, 3000);
-      expect(lost.text).toBe("⚠️ /cleanup failed: the window did not pick it up within 0.15 s.");
-      expect([...answers]).toEqual(["[]"]);
-      expect(terminated(a)).toBe(false);
-      // The cleanup is over: /run answers for a working session.
-      command("/run");
-      await waitFor(() => sentText(t => t === "Session is already running"));
-    });
-
-    test("a Claude Code that does not exit keeps the transcript and does not relaunch", async () => {
-      const clock = newClock();
-      const { a, spawned, transcript, original } = await liveSession(SKILLS, { isAlive: () => true, cleanupExitMs: EXIT_MS, exitPollMs: EXIT_MS, timers: clock });
-      const { runner } = mod(SID);
-      command("/cleanup");
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      await waitFor(() => !hub.isConnected(SID));
-      await clock.advance(EXIT_MS);
-      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
-      expect(warning.text).toBe("⚠️ Cleanup failed: Claude Code did not exit");
-      expect(warning.disable_notification).toBe(false);
-      expect(readFileSync(transcript, "utf8")).toBe(original);
-      expect(spawned).toEqual([]);
-    });
-
-    test("/stop during the compact ends the window at once, the transcript untouched", async () => {
-      const { a, spawned, transcript, original, folder } = await liveSession(SKILLS);
-      const h = held();
-      const { runner } = mod(SID, undefined, undefined, h.answer);
-      command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Cleanup"));
-      const startedId = fake.lastMessageId;
-      command("/stop");
-      const cancelled = await waitFor(() => sentText(t => t === "⏹ Cleanup cancelled"));
-      expect(cancelled.disable_notification).toBe(true);
-      await waitFor(() => fake.callsOf("deleteMessage").length);
-      expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
-      await windowEnds(a);
-      await waitFor(() => sentText(t => t === "⏹ Session ended"));
-      await settle();
-      expect(readFileSync(transcript, "utf8")).toBe(original);
-      expect(backups(folder)).toEqual([]);
-      expect(spawned).toEqual([]);
-      h.release();
-    });
-
-    test("/stop during the compact does not hand held messages to the dying window", async () => {
-      const { a, spawned } = await liveSession(SKILLS);
-      const h = held();
-      const { runner } = mod(SID, undefined, undefined, h.answer);
-      command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Cleanup"));
-      command("meanwhile");
-      await heldForCleanup();
-      command("/stop");
-      await windowEnds(a);
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
-      expect(inbound(a)).toBe(false);
-      const w = await plugin(SID);
-      expect((await w.next("inbound")).content).toBe("meanwhile");
-      h.release();
-    });
-
-    test("a Claude Code that does not exit keeps held messages gated until it dies", async () => {
-      const clock = manualClock();
-      let alive = true;
-      const { a, spawned } = await liveSession(SKILLS, { isAlive: () => alive, cleanupExitMs: EXIT_MS, exitPollMs: EXIT_MS, timers: clock });
-      const { runner } = mod(SID);
-      command("/cleanup");
-      await pollUntil(runner, () => terminated(a));
-      command("meanwhile");
-      await heldForCleanup();
-      await windowEnds(a);
-      await waitFor(() => !hub.isConnected(SID));
-      await clock.advance(EXIT_MS);
-      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
-      expect(warning.text).toBe("⚠️ Cleanup failed: Claude Code did not exit");
-      expect(spawned).toEqual([]);
-      alive = false;
-      await clock.advance(EXIT_MS);
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
-      const w = await plugin(SID);
-      await waitFor(() => hub.busy().includes("replays"), WAIT_MS, "the held-message hand-over armed");
-      await clock.advance(READY_DELAY_MS);
-      expect((await w.next("inbound")).content).toBe("meanwhile");
-      clock.dispose();
-    });
-
-    test("an exec result during /cleanup waits for the relaunched session", async () => {
-      const { a, spawned } = await liveSession(SKILLS);
-      const h = held();
-      const { runner } = mod(SID, undefined, undefined, h.answer);
-      command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Cleanup"));
-      command("/cmd echo hi");
-      await waitFor(() => log.lines.some(l => l.includes("a command result for session") && l.includes("held until /cleanup ends")), RUN_MS);
-      expect(a.messages.some(m => m.type === "inbound")).toBe(false);
-      h.release();
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
-      const w = await plugin(SID);
-      expect((await w.next("inbound", m => m.meta.source === "exec", WAIT_MS)).content).toContain("hi");
-      expect(a.messages.some(m => m.type === "inbound")).toBe(false);
-    }, RUN_MS + WAIT_MS);
-
-    test("an unknown transcript format leaves the session ended with the warning", async () => {
-      const odd = JSON.stringify({ parentUuid: "p", type: "attachment", attachment: { type: "invoked_skills", names: ["x"] }, uuid: "u1", version: VERSION });
-      const { a, spawned, transcript, original } = await liveSession([odd]);
-      const { runner } = mod(SID);
-      command("/cleanup");
-      const startedId = (await reply(runner, t => t.startsWith("🧹 Cleanup is queued")), fake.lastMessageId);
-      command("format held");
-      await heldForCleanup();
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      const summary = await waitFor(() => sentText(t => t.startsWith("⚠️ Cleanup failed")));
-      // A failure deletes the queued notice and arrives as a new loud message.
-      expect(summary.disable_notification).toBe(false);
-      expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
-      expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🧹 Cleanup is running…" }]);
-      expect(summary.text).toBe(`⚠️ Cleanup failed: the transcript format changed (Claude Code ${VERSION})`);
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
-      const w = await plugin(SID);
-      expect((await w.next("inbound")).content).toBe("format held");
-      expect(readFileSync(transcript, "utf8")).toBe(original);
-    });
-
-    test("a missing transcript still routes held messages through the normal flow", async () => {
-      const { a, spawned, transcript } = await liveSession(SKILLS);
-      const { runner } = mod(SID);
-      unlinkSync(transcript);
-      command("/cleanup");
-      command("missing transcript held");
-      await heldForCleanup();
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️ Cleanup failed")));
-      expect(warning.text).toBe("⚠️ Cleanup failed: transcript not found");
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
-      const w = await plugin(SID);
-      expect((await w.next("inbound")).content).toBe("missing transcript held");
-      expect(existsSync(transcript)).toBe(false);
-    });
-
-    test("nothing to remove reports completion and leaves the session ended", async () => {
-      const { a, spawned } = await liveSession([]);
-      const { runner } = mod(SID);
-      command("/cleanup");
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued") && !t.endsWith("…")));
-      expect(summary.text).toBe("🧹 Cleanup done.");
-      await waitFor(() => sentText(t => t === "⏹ Session ended"));
-      await settle();
-      expect(spawned).toEqual([]);
-    });
-
-    test("a second /cleanup and /run wait for the first", async () => {
-      const { a } = await liveSession(SKILLS);
-      const h = held();
-      const { runner } = mod(SID, undefined, undefined, h.answer);
-      command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Cleanup"));
-      command("/cleanup");
-      command("/run");
-      await waitFor(() => fake.texts().filter(p => p.text === "⏳ Cleanup is already running").length === 2);
-      expect(terminated(a)).toBe(false);
-      h.release();
-    });
-
-    test("a window back while Claude Code is waited for gets the held messages and the transcript stays", async () => {
-      const { a, spawned, transcript, original, folder } = await liveSession(SKILLS, { isAlive: () => true });
-      const { runner } = mod(SID);
-      command("/cleanup");
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      await waitFor(() => !hub.isConnected(SID));
-      command("meanwhile");
-      await updatesHandled();
-      const w = await plugin(SID);
-      expect((await w.next("inbound")).content).toBe("meanwhile");
-      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
-      expect(warning.text).toBe("⚠️ Cleanup failed: the session was reopened");
-      expect(readFileSync(transcript, "utf8")).toBe(original);
-      expect(backups(folder)).toEqual([]);
-      expect(spawned).toEqual([]);
-    });
-
-    test("a window back during the edit is not started a second time and gets the held messages", async () => {
-      let alive = true;
-      let w: Awaited<ReturnType<typeof plugin>> | undefined;
-      const { a, spawned, transcript } = await liveSession(SKILLS, {
-        isAlive: () => alive,
-        exitPollMs: EXIT_POLL_MS,
-        cleanTranscript: async (path, now) => {
-          w = await plugin(SID);
-          return cleanTranscript(path, now);
-        },
-      });
-      const { runner } = mod(SID);
-      command("/cleanup");
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      await waitFor(() => !hub.isConnected(SID));
-      command("meanwhile");
-      await updatesHandled();
-      alive = false;
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued") && !t.endsWith("…")));
-      expect(summary.text).toBe("🧹 Cleanup done, skills removed: a, b.");
-      const window = must(w, "window");
-      expect((await window.next("inbound")).content).toBe("meanwhile");
-      expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
-      await settle();
-      expect(spawned).toEqual([]);
-    });
-
-    const heldForCleanup = () => waitFor(() => log.lines.some(l => l.includes("held until /cleanup ends")));
-    const inbound = (c: { messages: { type: string }[] }) => c.messages.some(m => m.type === "inbound");
-
-    test("a message during the compact does not reach the window and goes to the session started again", async () => {
-      const { a, spawned } = await liveSession(SKILLS);
-      const h = held();
-      const { runner } = mod(SID, undefined, undefined, h.answer);
-      command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Cleanup"));
-      command("meanwhile");
-      await heldForCleanup();
-      await settle();
-      expect(inbound(a)).toBe(false);
-      h.release();
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
-      const w = await plugin(SID);
-      expect((await w.next("inbound")).content).toBe("meanwhile");
-      expect(inbound(a)).toBe(false);
-    });
-
-    test("a message starting with ! during the compact reaches the window at once", async () => {
-      const { a } = await liveSession(SKILLS);
-      const h = held();
-      const { runner } = mod(SID, undefined, undefined, h.answer);
-      command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Cleanup"));
-      command(" !stop now");
-      const stop = await a.nextNew("inbound");
-      expect(stop.content).toBe("stop now");
-      expect(stop.interrupt).toBe(true);
-      h.release();
-    });
-
-    test("a failed compact hands the held messages to the window", async () => {
-      const { a, spawned } = await liveSession(SKILLS);
-      let release = () => {};
-      const gate = new Promise<void>(r => (release = r));
-      const { runner } = mod(SID, undefined, undefined, async () => {
-        await gate;
-        throw new Error("boom");
-      });
-      command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Cleanup"));
-      command("meanwhile");
-      await heldForCleanup();
-      expect(inbound(a)).toBe(false);
-      release();
-      await reply(runner, t => t.startsWith("⚠️ Cleanup failed"));
-      expect((await a.next("inbound")).content).toBe("meanwhile");
-      expect(terminated(a)).toBe(false);
-      expect(spawned).toEqual([]);
-    });
-
-    test('held messages and a waiting "!" batch reach the window in the order they came', async () => {
-      const { a } = await liveSession(SKILLS, { batchQuietMs: 2000, batchMaxMs: 5000 });
-      let release = () => {};
-      const gate = new Promise<void>(r => (release = r));
-      const { runner } = mod(SID, undefined, undefined, async () => {
-        await gate;
-        throw new Error("boom");
-      });
-      const inbounds = (c: { messages: { type: string; content?: unknown }[] }) => c.messages.filter(m => m.type === "inbound").map(m => m.content);
-      const contents = () => inbounds(a);
-      const heldCount = () => log.lines.filter(l => l.includes("held until /cleanup ends")).length;
-      command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Cleanup"));
-      command("before");
-      await waitFor(() => heldCount() === 1);
-      // Goes live, and waits in its batch for the quiet window.
-      command("!stop");
-      await waitFor(() => hub.busy().includes("message batches"), WAIT_MS, "the \"!\" batch opened");
-      command("after");
-      await waitFor(() => heldCount() === 2);
-      expect(inbound(a)).toBe(false);
-      release();
-      await reply(runner, t => t.startsWith("⚠️ Cleanup failed"));
-      await waitFor(() => contents().length === 2, 1000, "both batches before the quiet window ends");
-      expect(contents()).toEqual(["before", "stop\n\nafter"]);
-    });
-
-    test("a compact that does not end in time drops /cleanup loudly, hands the held messages to the window and ignores the late report", async () => {
-      const { a, spawned, transcript, original } = await liveSession(SKILLS, { cleanupCompactMs: COMPACT_MS });
-      const h = held();
-      const { runner } = mod(SID, undefined, undefined, h.answer);
-      command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Cleanup"));
-      command("meanwhile");
-      await heldForCleanup();
-      const late = await waitFor(() => sentText(t => t.startsWith("⚠️")), COMPACT_MS * 3);
-      expect(late.text).toBe("⚠️ Cleanup failed: the compaction did not finish within 0.02 min");
-      expect(late.disable_notification).toBe(false);
-      expect((await a.next("inbound")).content).toBe("meanwhile");
-      h.release();
-      await pollUntil(runner, () => log.lines.some(l => l.includes("ignored: that /cleanup was dropped or is unknown")));
-      await settle();
-      expect(terminated(a)).toBe(false);
-      expect(readFileSync(transcript, "utf8")).toBe(original);
-      expect(spawned).toEqual([]);
-    });
-
-    test("a window closed during the compact drops /cleanup loudly and its held messages start the session", async () => {
-      const { a, spawned, transcript, original } = await liveSession(SKILLS);
-      const h = held();
-      const { runner } = mod(SID, undefined, undefined, h.answer);
-      command("/cleanup");
-      await reply(runner, t => t.startsWith("🧹 Cleanup"));
-      command("meanwhile");
-      await heldForCleanup();
-      a.close();
-      const closed = await waitFor(() => sentText(t => t.startsWith("⚠️ Cleanup failed")));
-      expect(closed.text).toBe("⚠️ Cleanup failed: the window closed before the compaction ended");
-      expect(closed.disable_notification).toBe(false);
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
-      const w = await plugin(SID);
-      expect((await w.next("inbound")).content).toBe("meanwhile");
-      expect(readFileSync(transcript, "utf8")).toBe(original);
-      h.release();
-    });
-
-    test("/stop while the window ends after the compact changes nothing", async () => {
-      const { a, spawned, transcript } = await liveSession(SKILLS);
-      const { runner } = mod(SID);
-      command("/cleanup");
-      await pollUntil(runner, () => terminated(a));
-      command("/stop");
-      await settle();
-      expect(a.messages.filter(m => m.type === "terminate").length).toBe(1);
-      await windowEnds(a);
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued") && !t.endsWith("…")));
-      expect(summary.text).toBe("🧹 Cleanup done, skills removed: a, b.");
-      await waitFor(() => sentText(t => t === "⏹ Session ended"));
-      expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
-      await settle();
-      expect(spawned).toEqual([]);
-    });
-
-    test("a window that does not end after the compact drops /cleanup loudly and gets the held messages", async () => {
-      const { a, spawned, transcript, original } = await liveSession(SKILLS, { stopTimeoutMs: STOP_MS });
-      const { runner } = mod(SID);
-      command("/cleanup");
-      await pollUntil(runner, () => terminated(a));
-      command("meanwhile");
-      await heldForCleanup();
-      const failed = await waitFor(() => sentText(t => t.startsWith("⚠️")), STOP_MS * 3);
-      expect(failed.text).toBe("⚠️ Could not end the session within 0.4 s");
-      expect(failed.disable_notification).toBe(false);
-      expect((await a.next("inbound")).content).toBe("meanwhile");
-      // The cleanup is over: /run answers for a working session.
-      command("/run");
-      await waitFor(() => sentText(t => t === "Session is already running"));
-      expect(readFileSync(transcript, "utf8")).toBe(original);
-      expect(spawned).toEqual([]);
-    });
-
-    test("a window that ends without naming its process is waited out, then cleaned and left ended", async () => {
-      // A pid would be waited for and found alive; without one the hub only waits a moment.
-      const { a, spawned, transcript } = await liveSession(SKILLS, { isAlive: () => true, cleanupSettleMs: SETTLE_MS });
-      const { runner } = mod(SID);
-      command("/cleanup");
-      await pollUntil(runner, () => terminated(a));
-      await a.next("terminate");
-      a.close();
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued") && !t.endsWith("…")));
-      expect(summary.text).toBe("🧹 Cleanup done, skills removed: a, b.");
-      await waitFor(() => sentText(t => t === "⏹ Session ended"));
-      expect(log.lines.some(l => l.includes("the Claude Code process is unknown"))).toBe(true);
-      expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
-      await settle();
-      expect(spawned).toEqual([]);
-    });
-
-    test("a failed transcript edit says so loudly and leaves the session ended", async () => {
-      const { a, spawned, transcript, original } = await liveSession(SKILLS, {
-        cleanTranscript: async () => {
-          throw new Error("disk");
-        },
-      });
-      const { runner } = mod(SID);
-      command("/cleanup");
-      command("edit failed held");
-      await heldForCleanup();
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      const warning = await waitFor(() => sentText(t => t.startsWith("⚠️ Cleanup failed")));
-      expect(warning.text).toBe("⚠️ Cleanup failed: disk");
-      expect(warning.disable_notification).toBe(false);
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
-      const w = await plugin(SID);
-      expect((await w.next("inbound")).content).toBe("edit failed held");
-      expect(readFileSync(transcript, "utf8")).toBe(original);
-    });
-
-    test("a successful cleanup starts the session and hands it the held messages the standard way", async () => {
-      const { a, spawned, transcript } = await liveSession(SKILLS);
-      const { runner } = mod(SID);
-      command("/cleanup");
-      command("success held");
-      await heldForCleanup();
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      const summary = await waitFor(() => editedText(t => t.startsWith("🧹 Cleanup done")));
-      expect(summary.text).toBe("🧹 Cleanup done, skills removed: a, b.");
-      await waitFor(() => spawned.length);
-      expect(spawned).toEqual([STARTED]);
-      const w = await plugin(SID);
-      expect((await w.next("inbound")).content).toBe("success held");
-      expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
-    });
-
-    test("a message sent before the window is ready arrives after the held ones", async () => {
-      const { a, spawned } = await liveSession(SKILLS);
-      const { runner } = mod(SID);
-      command("/cleanup");
-      command("older");
-      command("older too");
-      await heldForCleanup();
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      await waitFor(() => spawned.length);
-      // The hand-over starts after readyDelayMs; the batch of "newer" is
-      // flushed after BATCH_QUIET_MS, well before that.
-      const w = await plugin(SID);
-      command("newer");
-      await w.nextNew("inbound", m => m.content.includes("newer"));
-      const text = w.messages.filter(m => m.type === "inbound").map(m => m.content).join(" | ");
-      expect(text.indexOf("older too")).toBeGreaterThan(text.indexOf("older"));
-      expect(text.indexOf("newer")).toBeGreaterThan(text.indexOf("older too"));
-    });
-
-    test("messages written during /cleanup are all delivered in order, however many", async () => {
-      const { a, spawned } = await liveSession(SKILLS);
-      const { runner } = mod(SID);
-      const COUNT = 60;
-      command("/cleanup");
-      for (let i = 1; i <= COUNT; i++) command(`m${i}`);
-      await waitFor(() => log.lines.filter(l => l.includes("held until /cleanup ends")).length >= COUNT);
-      await pollUntil(runner, () => terminated(a));
-      await windowEnds(a);
-      await waitFor(() => spawned.length);
-      const w = await plugin(SID);
-      // w is a new connection, so its inbound messages are all the batch; wait on the whole list, not one message at a time.
-      const got = () => w.messages.filter(m => m.type === "inbound").map(m => m.content).join("\n\n");
-      await waitFor(() => got().includes(`m${COUNT}`), 3000, `the last message m${COUNT}`);
-      expect(got()).toBe(Array.from({ length: COUNT }, (_, i) => `m${i + 1}`).join("\n\n"));
-    });
-  });
-});
-
-describe("cleanupSummary", () => {
-  const BACKUP = "x.cleanup-1.jsonl";
-
-  test("removed skills are listed without sizes", () => {
-    const r = { kind: "cleaned" as const, skills: [{ name: "a", chars: 4000 }, { name: "b", chars: 72_000 }], records: 2, backup: BACKUP };
-    expect(cleanupSummary(r, en)).toBe("🧹 Cleanup done, skills removed: a, b.");
-  });
-
-  test("nothing to remove and empty skills both report completion", () => {
-    expect(cleanupSummary({ kind: "nothing" }, en)).toBe("🧹 Cleanup done.");
-    expect(cleanupSummary({ kind: "cleaned", skills: [], records: 1, backup: BACKUP }, en)).toBe("🧹 Cleanup done.");
-  });
-
-  test("an unknown format names the Claude Code version when it is known", () => {
-    expect(cleanupSummary({ kind: "format", version: "1.0.1" }, en)).toBe("⚠️ Cleanup failed: the transcript format changed (Claude Code 1.0.1)");
-    expect(cleanupSummary({ kind: "format" }, en)).toBe("⚠️ Cleanup failed: the transcript format changed");
   });
 });
 
 describe("topic commands", () => {
   const SID = "11111111-2222-3333-4444-555555555555";
+  let rig: ReturnType<typeof sessionRig>;
+  const runCalls = () => rig.calls.filter(c => c.sub === "run");
+  const withRig = { findRig: () => "rig-file" };
   const msg = (text: string, extra?: Record<string, unknown>) => topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text, ...(extra ? { extra } : {}) });
   const texts = () => fake.texts().map(t => t.text);
   // What the topic has shown: messages sent and their edits.
@@ -3860,8 +3143,14 @@ describe("topic commands", () => {
   const hostCommand = (cmdText: string, bashText: string) => (PLATFORM.windows ? `/cmd ${cmdText}` : `/bash ${bashText}`);
   const HOST_CARD = PLATFORM.windows ? "cmd" : platformFor("win32").bashName;
   beforeEach(() => {
+    rig = sessionRig();
     if (!PLATFORM.windows) config = { ...config, exec: { bash: PLATFORM.bash } };
   });
+  // The hub on the fake rig, its start-up questions answered.
+  const startWithRig = async (extra: StartOptions = {}) => {
+    await startHub({ ...withRig, runRig: rig.run, ...extra });
+    await settle();
+  };
 
   // A session with a topic and no window, as the hub finds it on disk.
   const closedSession = () => new SessionStore(join(dir, "sessions.json")).set(SID, { topicId: 100, title: "T", project: "p", enabled: true, cwd: CWD, account: "2" });
@@ -3963,10 +3252,8 @@ describe("topic commands", () => {
   test("a result that came while the hub was off goes once to the window that reconnects", async () => {
     closedSession();
     endedWhileOff();
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: ["wt.exe", "{session}"], timeoutSec: LAUNCH_TIMEOUT_S } };
     const clock = newClock();
-    await startHub({ spawn: c => void spawned.push(c), timers: clock });
+    await startWithRig({ timers: clock });
     const w = await plugin(SID);
     await passReadyDelay(clock);
     const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
@@ -3976,8 +3263,7 @@ describe("topic commands", () => {
     await clock.advance(EXEC_GRACE_MS * 2);
     await settle();
     expect(w.messages.filter(m => m.type === "inbound").length).toBe(1);
-    expect(spawned).toEqual([]);
-    expect(texts()).not.toContain("⚠️ The session is not running: the command result was not delivered to the agent");
+    expect(runCalls()).toEqual([]);
   });
 
   test("a run that ends during the start's grace waits for the reconnecting window", async () => {
@@ -3989,10 +3275,8 @@ describe("topic commands", () => {
     // A live runner: our own pid, a fresh heartbeat.
     writeFileSync(join(execDir, `${id}.alive`), "");
     saveExecs(join(dir, "execs.json"), [{ id, sessionId: SID, messageId: 1, shell: "cmd", text: "echo hi", cwd: CWD, state: "running", startedAt: Date.now(), pid: process.pid, reported: false }]);
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: ["wt.exe", "{session}"], timeoutSec: LAUNCH_TIMEOUT_S } };
     const clock = newClock();
-    await startHub({ spawn: c => void spawned.push(c), execGraceMs: LONG_GRACE_MS, timers: clock });
+    await startWithRig({ execGraceMs: LONG_GRACE_MS, timers: clock });
     await clock.advance(EXEC_CARD_MS);
     await waitFor(() => shown().some(t => t.startsWith("▶ cmd")), WAIT_MS, "running card");
     writeFileSync(join(execDir, `${id}.exit.json`), JSON.stringify({ code: 0, endedAt: Date.now() }));
@@ -4009,25 +3293,23 @@ describe("topic commands", () => {
     await clock.advance(LONG_GRACE_MS);
     await settle();
     expect(w.messages.filter(m => m.type === "inbound").length).toBe(1);
-    expect(spawned).toEqual([]);
+    expect(runCalls()).toEqual([]);
   }, 3 * WAIT_MS);
 
-  test("a result that came while the hub was off starts the session once no window came", async () => {
+  test("a result that came while the hub was off starts the session through rig once no window came", async () => {
     closedSession();
     endedWhileOff();
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: ["wt.exe", "{session}"], timeoutSec: LAUNCH_TIMEOUT_S } };
     const clock = newClock();
-    await startHub({ spawn: c => void spawned.push(c), timers: clock });
-    await settle();
+    await startWithRig({ timers: clock });
     await clock.advance(EXEC_GRACE_MS - 1);
     await settle();
-    expect(spawned).toEqual([]);
+    expect(runCalls()).toEqual([]);
     await clock.advance(1);
-    await waitFor(() => spawned.length === 1, WAIT_MS, "session start");
+    await waitFor(() => runCalls().length === 1, WAIT_MS, "session start");
+    expect(runCalls()).toEqual([{ sub: "run", sid: SID, args: ["--account", "2"] }]);
   });
 
-  test("a result that came while the hub was off says it was not delivered once no window came", async () => {
+  test("a result that came while the hub was off and no rig to start the session says so once no window came", async () => {
     closedSession();
     endedWhileOff();
     const clock = newClock();
@@ -4035,34 +3317,21 @@ describe("topic commands", () => {
     await settle();
     await clock.advance(EXEC_GRACE_MS - 1);
     await settle();
-    expect(texts()).not.toContain("⚠️ The session is not running: the command result was not delivered to the agent");
+    expect(texts()).not.toContain(en.rigMissing);
     await clock.advance(1);
-    await waitFor(() => texts().includes("⚠️ The session is not running: the command result was not delivered to the agent"), WAIT_MS, "notice");
+    await waitFor(() => texts().includes(en.rigMissing), WAIT_MS, "notice");
+    expect(texts()).toContain(en.pendingDelivery({ count: 1 }));
   });
 
-  test("a result for a session without a window and without launch says it was not delivered", async () => {
+  test("a result for a session without a window and without rig says it waits for the next start", async () => {
     closedSession();
     await startHub();
     fake.pushUpdate(msg(hostCommand("echo hi", "echo hi")));
-    await waitFor(() => texts().includes("⚠️ The session is not running: the command result was not delivered to the agent"), RUN_MS, "notice");
+    await waitFor(() => texts().includes(en.rigMissing), RUN_MS, "notice");
+    expect(texts()).toContain(en.pendingDelivery({ count: 1 }));
     // The final card is an edit, cardEditMs after the end.
     await waitFor(() => shown().some(t => t.startsWith("✅ code 0")), WAIT_MS, "final card");
   }, RUN_MS + WAIT_MS);
-
-  test("a result for a closed session with launch starts it and reaches the agent once", async () => {
-    closedSession();
-    const spawned: string[][] = [];
-    config = { ...config, launch: { command: ["wt.exe", "{session}"], timeoutSec: LAUNCH_TIMEOUT_S } };
-    await startHub({ spawn: c => void spawned.push(c) });
-    fake.pushUpdate(msg(hostCommand("echo hi", "echo hi")));
-    await waitFor(() => spawned.length === 1, RUN_MS, "session start");
-    const w = await plugin(SID);
-    const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
-    expect(inbound.meta.exit_code).toBe("0");
-    await settle();
-    expect(w.messages.filter(m => m.type === "inbound").length).toBe(1);
-    expect(texts()).not.toContain("⚠️ The session is not running: the command result was not delivered to the agent");
-  }, RUN_MS + 2 * WAIT_MS);
 
   test("the hub does not exit idle while a command runs", async () => {
     closedSession();
@@ -4340,13 +3609,14 @@ describe("questions", () => {
   });
 
   test("a topic command works as usual and leaves the poll open", async () => {
-    await startHub();
+    const rig = sessionRig();
+    await startHub({ findRig: () => "rig-file", runRig: rig.run });
     await enabled("a");
     const answer = ask([Q1]);
     const msg = await polled();
     const id = fake.lastMessageId;
     say("/info");
-    await waitFor(async () => (await (await fetch(`http://127.0.0.1:${port}/commands?session=a`)).text()).includes("info"));
+    await waitFor(() => rig.infos.includes("a"), WAIT_MS, "rig asked for the session's info");
     press(dataOf(msg, 0), id);
     expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "Red" } });
   });

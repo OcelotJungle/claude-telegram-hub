@@ -56,7 +56,6 @@ test("without cswap /run uses plain launch and /run 2 explains missing accounts"
   const message: Message = { message_id: MESSAGE, date: 0, chat: { id: CHAT, type: "supergroup", title: "Test" }, from: { id: USER, is_bot: false, first_name: "Tester" } };
   hub["onHubCommand"]("session", { name: "run", args: "2" }, message);
   expect(notices).toEqual([en.noAccounts]);
-  expect(hub["launchLocation"]("session", undefined)).toEqual({ account: "", cwd: dir });
 });
 
 test("Linux shell commands stay unavailable even with no exec manager", () => {

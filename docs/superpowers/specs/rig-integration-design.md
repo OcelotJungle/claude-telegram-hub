@@ -9,7 +9,7 @@ Windows and on Ubuntu 24.04: both on one machine, on a working Windows machine o
 The contract between them is the section "Link with the hub" in `agent-rig/docs/superpowers/specs/agent-rig-design.md`. It is shared: it can be changed
 only in agreement for both sides. If it differs from this file, the `rig` spec is right.
 
-The hub works without `rig` too: while `rig` is not found, everything behaves as before, except that `/rig` answers that it is missing.
+The hub forwards messages and runs shell commands without `rig`. Session actions and `/info` require `rig`; when it is missing, they answer with the hub's missing-rig text. There is no fallback session implementation in the hub.
 
 ## Platform
 
@@ -18,22 +18,12 @@ The hub chooses behavior by platform in one place; the rest of the code gets rea
 - **`/bash`.** On Windows, Git Bash, as now. On Linux, `bash` from `PATH`, started as a login shell, the label in the card is `bash`. The
   `bash` value in the config works on both systems.
 - **`/pwsh`, `/cmd`.** Only on Windows. On Linux they are not shown in the menu, and a call answers that they are not available on this platform.
-- **Starting sessions.** `launch.command` is a list of arguments. Value checks follow who runs the command: on Windows `CMD_SPECIAL`
-  is always applied, as before, because `cmd` can be inside the template. On Linux the template goes without a shell, so there are no dangerous characters.
-  The checks of the session id, the account, the mode and the existence of the folder stay everywhere.
-- **tmux.** The README has a `launch` example for Linux: one tmux session per Claude Code window, named `claude-{session}`, started with
-  `tmux new-session -d`. The arguments go separately, with no string for a shell. The session lives after an SSH drop and after a hub restart.
-- **Result of the launch command.** The hub waits for it to finish for no longer than `LAUNCH_EXIT_GRACE_MS` (2 s). A non-zero code in that time is a failed launch: the topic
-  gets "⚠️ Cannot start the session: <reason>" with the command's stderr, held messages are kept, and there is no "🚀 Starting the session…" and no wait for `timeoutSec`. A command
-  that lives longer (a terminal window on Windows) counts as started, without waiting for its end. For tmux, `duplicate session: <name>`
-  means the session is already alive and most likely waits for an answer in a dialog (for example, the channel confirmation): the topic names
-  `tmux attach -t <name>` and starts nothing again. If the window did not connect within `timeoutSec` and the command starts with `tmux`, the timeout message
-  adds that the session may be waiting for a confirmation in tmux, and names the attach command.
+- **Starting sessions.** The hub calls `rig session run <id>` with the account it would use for that session. Rig owns terminal selection, launch validation, the Claude command and process liveness. There is no hub launch template. An old `launch` config key is ignored with one info log line.
+- **Terminals.** Rig selects Windows Terminal, Terminal.app or a Linux terminal, falling back to tmux on Linux. The hub shows rig's launch failure message verbatim.
 - **Channel confirmation dialog on Linux.** Whether it repeats on every launch or only on the first one is unknown without a logged-in Claude Code
   and goes to the end-to-end check. It can be removed with managed settings (`channelsEnabled`, `allowedChannelPlugins`); on Linux the file
   is at `/etc/claude-code/managed-settings.json` (official Claude Code documentation).
-- **`cswap`.** Optional. Without it there is no default account, `/run` without a number works, and `/run <number>` answers that there are no accounts
-  on this machine. Account detection does not run `cswap.exe` where it does not exist.
+- **`cswap`.** Optional. Rig decides how to launch with or without it. The hub retains default-login account detection because connected windows and session metadata use it beyond `/run`. Account detection does not run `cswap.exe` where it does not exist.
 - **Sound.** On Linux there is no end-of-turn sound: no launch, no error, no log entry.
 - **Dependencies.** Starting the plugin and the service installs packages with `--frozen-lockfile`. Otherwise `bun install` can change `bun.lock` in
   the clone, and any local edit stops the whole `rig` update.
@@ -59,6 +49,27 @@ delete it. While the file exists, Claude Code windows do not start the hub thems
 service restart a window takes the port before the service, and after `/rig feature telegram disable` it brings up the disabled hub. Without the file, windows
 start the hub as before. The file is created before the service or task starts: a window opened during installation does not manage to bring up
 its own hub. If the start fails, the script removes the file again (otherwise windows would wait for a hub that nobody starts).
+
+## Session actions
+
+The hub is a thin client over rig for every action on a Claude Code session:
+
+| Topic command | Rig command |
+| --- | --- |
+| `/compact [instructions]` | `rig session compact <id> [--instructions <text>]` |
+| `/rename <name>` | `rig session rename <id> <name>` |
+| `/stop` | `rig session stop <id>` |
+| `/cleanup` | `rig session cleanup <id>` |
+| `/run [account]` | `rig session run <id> [--account <n>]` |
+| `/mode <mode>` | `rig session mode <id> <mode>` |
+
+These calls are asynchronous and tracked by the hub's busy state. Their injected deadline exceeds rig's ten-minute compact/rename limit. JSON success data is validated, then rendered with the existing success texts, including token counts, skip reasons, stop compaction outcomes and cleanup results. `session-waiting` progress on stderr shows the existing waiting-for-the-turn text. Rig errors keep their message verbatim; their codes distinguish missing modules (with restart guidance), ended/unknown sessions, timeouts, cleanup that did not compact, and unavailable launch.
+
+Messages, cleanup requests and exec results for a session without a window retain autolaunch through `rig session run`, using the account the hub would have selected. Mode changes make one rig call: the hub has no process-exit gate or mode restart implementation. The hub remains always on so it can launch stopped sessions.
+
+`/info` calls `rig info --session <id>` and renders its validated data directly into the topic, preserving the former window renderer's layout. The hub has no function-hooks module, module polling routes, Claude process-kill code, launch implementation or transcript editing code. Working-directory lookup remains for `/pwsh`, `/cmd` and `/bash`, which still execute in the hub.
+
+The session mechanism, queue, process checks and transcript cleanup are specified by `agent-rig/docs/superpowers/specs/rig-sessions-design.md`, section `rig session`.
 
 ## Machine commands
 
@@ -150,8 +161,7 @@ and writes about the failure once to the shared topic.
 1. On `hub-restart-pending` the hub compares its commit with the current `HEAD`. If they match, the code is already new: it writes
    `hub-ready.json` again and does not exit. Otherwise `rig` would wait forever: it does not count a readiness older than the moment of the update.
 2. The hub waits for idle with no time limit and interrupts nothing. Idle means all of these at once: no turn is running in any session, there are no
-   unanswered questions or permission requests, no running `/bash`, `/pwsh`, `/cmd` and `rig` commands, no window
-   restart in progress and no held messages, no commands not yet picked up by a window, and the send queue is empty. A `/bash` command waiting for a
+   unanswered questions or permission requests, no running `/bash`, `/pwsh`, `/cmd` and `rig` commands, no pending session action or autolaunch and no held messages, and the send queue is empty. A `/bash` command waiting for a
    press of the launch button does not prevent idle. A question or permission request from a closed window does not count: there is nobody left to answer it.
    The queue is counted by what can be delivered: parts waiting for settings do not prevent idle.
 3. At the moment of idle the hub writes `~/.agent-rig/hub-restarting.json` (`{"time":"ISO 8601"}`) and exits with code 75. The idle check and
@@ -173,6 +183,7 @@ the contract treats a hub that did not come up as a failure.
 - All hub tests pass on Windows and in an Ubuntu 24.04 container (`docker/ubuntu-24.04`, `scripts/test-linux.sh`). The `/pwsh` and `/cmd` tests
   are not run on Linux: those commands do not exist there.
 - Commands, events and restart are checked on a fake Telegram and a fake `rig`, with no real waits.
+- Session actions use recorded success and failure JSON for all six commands, including skips, a stopped process, missing modules, cleanup without compaction, unavailable launch and streamed waiting progress. Message and exec-result autolaunch are checked through `rig session run`.
 - The service is checked by a container with systemd: after the service stops, tmux and `rig` are alive; after the hub crashes, the service comes up by itself; after
   an exit with code 75 with a connected window, the service keeps the port; after the service stops, a connected window does not bring up the hub.
 - Internal mechanisms of Claude Code (the socket, the channels flag, transcript paths, the confirmation dialog on launch in tmux) are checked in a container
