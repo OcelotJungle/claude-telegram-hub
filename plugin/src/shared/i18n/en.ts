@@ -32,6 +32,7 @@ export const en = {
   sessionEnded: "⏹ Session ended",
   sessionNotRunning: "Session is not running",
   sessionAlreadyStarting: "Session is already starting",
+  sessionEnding: "Session is being stopped or cleaned up",
   sessionAlreadyRunning: "Session is already running",
   launching: ({ account }: { account: string | undefined }) => account ? `🚀 Starting the session (account ${account})…` : "🚀 Starting the session…",
   noAccounts: "This machine has no cswap accounts. Use /run without a number.",

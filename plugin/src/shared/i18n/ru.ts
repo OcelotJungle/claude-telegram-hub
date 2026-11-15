@@ -29,6 +29,7 @@ export const ru: Messages = {
   sessionEnded: "⏹ Сессия завершена",
   sessionNotRunning: "Сессия не запущена",
   sessionAlreadyStarting: "Сессия уже запускается",
+  sessionEnding: "Сессия сейчас останавливается или очищается",
   sessionAlreadyRunning: "Сессия уже работает",
   launching: ({ account }) => account ? `🚀 Запускаю сессию (аккаунт ${account})…` : "🚀 Запускаю сессию…",
   noAccounts: "На этой машине нет аккаунтов cswap. Используй /run без номера.",

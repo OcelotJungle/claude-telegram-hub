@@ -390,9 +390,15 @@ the sound of the results and the `/cleanup` texts are in `cleanup-design.md`. `/
   and a replay in progress (what it had in flight or still held goes back to the hold). A `/cleanup` first sends the
   waiting batch, so what was written before it is cleaned with the session; only later items are held.
 - The hold is released into the next window once it connects, in one ordered replay with the messages and exec results
-  that came while the window was starting. `/stop` and `/cleanup` (`ended`) wait until the old window is gone: the hold
-  is released when it disconnects, or after `WINDOW_CLOSE_WAIT_MS` (30 s) if it stays connected (a safety timer; the
-  number is an estimate, not a measurement). With no window at all, a message that arrives later is a normal start.
+  that came while the window was starting. `/stop` and `/cleanup` (`ended`) wait until the old window is gone, decided by
+  identity and never by a timer: when the action begins the hub records every connection that could be the window being
+  ended (those attached to the session and those that have not said hello yet). Once rig has answered, the hold is
+  released when none of them is open any more, or when a window that was not among them connects. A hello from a
+  recorded connection (a late hello of the dying window) never gets held items, however long that connection stays
+  open: the process has ended, so the OS closes its socket, and a bound would have to either deliver to the closing
+  window or give up the items. With no window at all, a message that arrives later is a normal start.
+- Known limit: the held items live in memory only. A hub restart while items are held loses them, although the Telegram
+  update offset is already saved. Persisting the hold is not built.
 - Nothing held is dropped. If rig fails (`rig` missing, an error answer, a launch that never connects within
   `CONNECT_WAIT_MS`), the held items are kept for the next start of the session and the topic is told they are kept
   (the delivery notice). They are never sent to the ending window. Exception: when rig refuses the stop or cleanup while the old
@@ -401,7 +407,8 @@ the sound of the results and the `/cleanup` texts are in `cleanup-design.md`. `/
   with the window open should keep the items for the next start instead.
 - A button press that is stale (its message no longer current), malformed or from a user who is not authorised never
   reaches `rig session stop|run|mode`: it is answered and ignored. A second `/run`, `/mode`, a mode button or `/stop` while
-  one of these actions is in progress answers "Session is already starting" and makes no second call. `/compact` and
+  one of these actions is in progress answers "Session is already starting" (a start or a mode change) or "Session is
+  being stopped or cleaned up" (a stop or a cleanup) and makes no second call; none of them waits behind the action. `/compact` and
   `/rename` do not hold.
 - `/info` draws what `rig info --session <id>` returns (`InfoData`: `session`, `account`, `claude`, optional `codex`,
   optional `volunteers`, `context`; the type is in `plugin/src/shared/info-data.ts`) through `infoText`
@@ -438,7 +445,7 @@ the sound of the results and the `/cleanup` texts are in `cleanup-design.md`. `/
   process-exit gate, no launch template and no mode restart of its own. What comes in the meantime is held for the new
   window and delivered in order once it connects; a rig failure keeps the held items for the next start and shows rig's
   message (see "Holding while a session is being stopped, cleaned, switched or started"). `/run` and
-  `/mode` during a start or a stop answer "Session is already starting". The mode is saved after a successful call; a normal
+  `/mode` during a start or a mode change answer "Session is already starting", during a stop or a cleanup "Session is being stopped or cleaned up". The mode is saved after a successful call; a normal
   launch clears the mode and the offset. An offset beyond the size of a shortened transcript is not read; the mode
   search reads the transcript backwards in blocks until a record or the offset.
 - At start the hub registers the topic commands in the bot menu (`setMyCommands`); a failure is a WARN in the log.
@@ -530,7 +537,8 @@ Automated tests (`bun test`):
   the manual clock): `/stop`, `/cleanup`, `/mode` and the mode buttons, `/run` and the three autolaunches hold in arrival
   order and release to the next window; a waiting batch, an open poll, an attachment being prepared and a replay in
   flight are captured; a rig refusal and a start that never connects keep the items; stale, malformed and
-  unauthorised presses never reach rig; the old window never receives a held item;
+  unauthorised presses never reach rig; the old window never receives a held item, not after its late hello and not
+  however long it stays open, while a different window does; `/run` and `/mode` during a stop answer the stop text;
 - `rich_message` → Markdown: each kind of block and text, nested lists, a table, media with `file_id`
   and the path of a downloaded photo, unknown kinds; photos to download are the largest size of each,
   wherever it lies; the hub downloads them to `inbox`, and one that failed to download stays with its `file_id`;

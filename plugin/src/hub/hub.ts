@@ -81,12 +81,8 @@ const INTERRUPT_MARK = /^\s*!\s*/;
 const POLL_ITEM = /^poll:([0-9a-f]+):(\d+)#/;
 const MS_PER_SECOND = 1000;
 // After rig reports a start, the window has this long to say hello. It is the
-// longest the old launch command was given (config `timeoutSec` default, 90 s).
+// longest the old launch command was given (90 s, the launch timeout the hub had before rig took over).
 const CONNECT_WAIT_MS = 90_000;
-// After `rig session stop|cleanup` reports the process ended, its window's connection should drop at
-// once; this is the safety net that lets the held items go on if it never does (30 s is a guess at "much
-// longer than a socket close", not a measured value).
-const WINDOW_CLOSE_WAIT_MS = 30_000;
 const HOOK_TTL_MS = 60_000;
 const SPOOL_SCAN_MS = 5000;
 const POLL_TIMEOUT_SEC = 25;
@@ -175,12 +171,14 @@ type QueuedBatch = { messages: Message[]; captured: boolean };
 type Replay = { held: Held[]; inFlight: Held[]; after: (() => void)[] };
 // A rig action that ends the session's window is running (a stop or a cleanup): `actions` of them are in
 // flight; `stopped` is set once one ended the process, `failed` once one failed, `closing` once all are done
-// and what is left is the window's connection dropping.
-type Ending = { actions: number; stopped: boolean; failed: boolean; closing: boolean };
+// and what is left is the window's connection dropping. `old` is every connection that could be the window being
+// ended, taken when the action began: the ones attached to the session and the ones that had not said hello yet.
+// The hold ends by this identity (the old connections closing, or a different window connecting), never by a timer.
+type Ending = { actions: number; stopped: boolean; failed: boolean; closing: boolean; old: Set<WS> };
 // A rig session action is holding the session's incoming items: a start (a run or a mode change: what it
 // will get once its window says hello, the mode it was started in, the account it runs on, and the timer
 // that gives up on a window that never comes) or an `ending` (a stop or a cleanup: the items wait until the
-// old window is gone, then go the way a new topic message would).
+// old window is gone or a different window has connected, then go the way a new topic message would).
 type Launch = { held: Held[]; mode?: PermissionMode; account?: string; timer?: ReturnType<typeof setTimeout>; ending?: Ending };
 // How a stop or a cleanup came out for the hold it set.
 type EndingResult = "ended" | "failed" | "not-running";
@@ -666,10 +664,10 @@ export class Hub {
     // Without its window the session cannot take an answer any more.
     if (sid && !this.connOf(sid)) {
       for (const p of this.polls.values()) if (p.sessionId === sid) this.spawn(this.finishPoll(p, { decision: "none" }, this.m().pollMovedToTerminal));
-      // The window a stop or a cleanup ended is gone: what was held meanwhile goes the way a new topic message would.
-      const l = this.launches.get(sid);
-      if (l?.ending?.closing) this.finishEnding(sid, l);
     }
+    // The window a stop or a cleanup ended is gone: what was held meanwhile goes the way a new topic message would.
+    const closing = [...this.launches].filter(([launchSid, l]) => l.ending?.closing && this.endingSettled(launchSid, l.ending));
+    for (const [launchSid, l] of closing) this.finishEnding(launchSid, l);
     this.armIdle();
   }
 
@@ -2056,7 +2054,7 @@ ${msg.text}`);
         return this.onExecCommand(sessionId, cmd.name, cmd.args, m);
       case "run":
         if (cmd.args && !this.hasAccounts()) return this.notice(sessionId, msg.noAccounts, "warning");
-        if (this.isStarting(sessionId)) return this.notice(sessionId, msg.sessionAlreadyStarting, "info");
+        if (this.refuseWhileHolding(sessionId)) return;
         if (this.connOf(sessionId)) return this.notice(sessionId, msg.sessionAlreadyRunning, "info");
         return this.launch(sessionId, cmd.args || undefined, []);
       case "mode":
@@ -2115,7 +2113,7 @@ ${msg.text}`);
 
   private onModeCommand(sessionId: string, args: string): void {
     const msg = this.m();
-    if (this.isStarting(sessionId)) return this.notice(sessionId, msg.sessionAlreadyStarting, "info");
+    if (this.refuseWhileHolding(sessionId)) return;
     const requested = PERMISSION_MODES.find(mode => mode.toLowerCase() === args.toLowerCase());
     if (args && !requested) return this.notice(sessionId, msg.modeList({ modes: PERMISSION_MODES.join(", ") }), "info");
     if (!requested) return this.spawn(this.showModes(sessionId));
@@ -2207,7 +2205,9 @@ ${msg.text}`);
   private beginEnding(sessionId: string): Launch {
     let entry = this.launches.get(sessionId);
     if (!entry) {
-      entry = { held: [], ending: { actions: 0, stopped: false, failed: false, closing: false } };
+      const old = new Set<WS>();
+      for (const ws of this.conns) if (ws.data.sessionId === sessionId || ws.data.sessionId === undefined) old.add(ws);
+      entry = { held: [], ending: { actions: 0, stopped: false, failed: false, closing: false, old } };
       this.launches.set(sessionId, entry);
     }
     if (entry.ending) entry.ending.actions++;
@@ -2230,19 +2230,30 @@ ${msg.text}`);
     if (result === "failed") ending.failed = true;
     if (ending.actions > 0 || this.launches.get(sessionId) !== entry) return;
     if (ending.stopped) {
+      // The process has ended, so the OS closes its socket: the hold waits for that close (or for a different
+      // window), however long it takes. A bound would have to deliver to the closing window or give up on the
+      // items, and the process being gone means neither is needed.
       ending.closing = true;
-      if (!this.connOf(sessionId)) return this.finishEnding(sessionId, entry);
-      entry.timer = this.setTimer(() => this.finishEnding(sessionId, entry), WINDOW_CLOSE_WAIT_MS);
+      if (this.endingSettled(sessionId, ending)) this.finishEnding(sessionId, entry);
       return;
     }
     if (ending.failed) return this.abandonLaunch(sessionId, entry);
     this.finishEnding(sessionId, entry);
   }
 
+  // The window being ended is settled: every connection that was open for the session when the action began is
+  // closed (or went to another session), or a window that was not among them is attached to the session.
+  private endingSettled(sessionId: string, ending: Ending): boolean {
+    for (const ws of this.conns) if (ws.data.sessionId === sessionId && !ending.old.has(ws)) return true;
+    for (const ws of ending.old) {
+      if (this.conns.has(ws) && (ws.data.sessionId === undefined || ws.data.sessionId === sessionId)) return false;
+    }
+    return true;
+  }
+
   // The hold of a stop or a cleanup ends: its items are handled as new topic messages would be now.
   private finishEnding(sessionId: string, entry: Launch): void {
     if (this.launches.get(sessionId) !== entry) return;
-    this.clearTimer(entry.timer);
     this.launches.delete(sessionId);
     this.releaseHeld(sessionId, entry.held);
   }
@@ -2347,10 +2358,11 @@ ${msg.text}`);
       if (this.execs) this.whenReady(() => this.execs?.connected(sessionId));
       return;
     }
-    // A window that says hello while a stop or a cleanup runs is the one being ended, or one that came after
-    // it ended: the hold goes on until rig is done and the old window is gone.
+    // A window that says hello while a stop or a cleanup runs is the one being ended (its hello came late) or
+    // a different one: the hold goes on until rig is done, then ends when the old connections are gone or a
+    // window that was not among them is attached. Held items never go to a window of the old set.
     if (l.ending) {
-      if (l.ending.closing) this.finishEnding(sessionId, l);
+      if (l.ending.closing && this.endingSettled(sessionId, l.ending)) this.finishEnding(sessionId, l);
       return;
     }
     this.clearTimer(l.timer);
@@ -2777,8 +2789,18 @@ ${msg.text}`);
     this.log.info(`command result ${inbound.meta.exec_id ?? "?"} → session ${sessionId}`);
   }
 
+  // A rig session action holds the session: a start or a mode change, or a stop or a cleanup.
   private isStarting(sessionId: string): boolean {
     return this.launches.has(sessionId);
+  }
+
+  // /run and /mode wait for nothing: while a start or a mode change is under way they say it is starting, while
+  // a stop or a cleanup is under way they say that. True when refused.
+  private refuseWhileHolding(sessionId: string): boolean {
+    const held = this.launches.get(sessionId);
+    if (!held) return false;
+    this.notice(sessionId, held.ending ? this.m().sessionEnding : this.m().sessionAlreadyStarting, "info");
+    return true;
   }
 
   private setTimer(fn: () => void, ms: number): ReturnType<typeof setTimeout> {

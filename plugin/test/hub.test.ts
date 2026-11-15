@@ -85,8 +85,8 @@ const RIG_PID = 4242;
 const WAITING_LINE = JSON.stringify({ progress: { code: "session-waiting" } });
 // How long the hub waits for the window of a session rig has started.
 const CONNECT_WAIT_MS = 90_000;
-// How long the hub holds a session's items for the window of a stop or a cleanup that rig has finished to close.
-const WINDOW_CLOSE_WAIT_MS = 30_000;
+// Several times the longest wait the hub has (the 90 s start wait): a window that stays open this long after a stop still gets no held item.
+const LINGERING_WINDOW_MS = 5 * CONNECT_WAIT_MS;
 // How many event-loop turns a test lets released work run for.
 const EVENT_LOOP_TURNS = 20;
 // The id the hub gives the first message of a topic.
@@ -2579,7 +2579,7 @@ describe("holding across session actions", () => {
     expect(await arrived(clock, next, 1)).toEqual(["held while closing"]);
   });
 
-  test("a window that stays open after a successful stop gets the items once the wait for it ends", async () => {
+  test("a window that stays open after a successful stop never gets the items, however long it stays", async () => {
     const clock = newClock();
     rig.answer("stop", rigOk({ session: SID, stopped: true, compacted: null }));
     await start({ timers: clock, idleMs: 0 });
@@ -2588,11 +2588,42 @@ describe("holding across session actions", () => {
     await waitFor(() => edits().includes(en.sessionEnded), WAIT_MS, "the stop result");
     fake.pushUpdate(msg("held for a lingering window"));
     await updatesHandled();
-    await clock.advance(WINDOW_CLOSE_WAIT_MS - 1);
+    await clock.advance(LINGERING_WINDOW_MS);
     await settle();
     expect(contentsOf(old)).toEqual([]);
-    await clock.advance(1);
-    expect(await arrived(clock, old, 1)).toEqual(["held for a lingering window"]);
+    expect(callsOf("run")).toEqual([]);
+    // A different window connecting ends the hold and gets the items, while the old one is still open.
+    const next = await plugin(SID, "win2");
+    expect(await arrived(clock, next, 1)).toEqual(["held for a lingering window"]);
+    expect(contentsOf(old)).toEqual([]);
+  });
+
+  test("a late hello from the window being ended gets nothing; the items go on when its connection closes", async () => {
+    const clock = newClock();
+    rig.answer("stop", rigOk({ session: SID, stopped: true, compacted: null }));
+    await start({ timers: clock, idleMs: 0 });
+    const old = await enabled(SID);
+    // A connection that has not said hello when the stop begins could be the window being ended.
+    const late = await wsClient(port);
+    clients.push(late);
+    fake.pushUpdate(msg("/stop"));
+    await waitFor(() => edits().includes(en.sessionEnded), WAIT_MS, "the stop result");
+    fake.pushUpdate(msg("held for the next window"));
+    await updatesHandled();
+    old.close();
+    await windowGone();
+    late.send(hello(SID, "late"));
+    await late.next("state");
+    await settle();
+    await passReadyDelay(clock);
+    await settle();
+    expect(contentsOf(late)).toEqual([]);
+    expect(callsOf("run")).toEqual([]);
+    late.close();
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the start");
+    const next = await plugin(SID, "win2");
+    expect(await arrived(clock, next, 1)).toEqual(["held for the next window"]);
+    expect(contentsOf(late)).toEqual([]);
   });
 
   test("/stop takes the waiting batch with it, and what comes after, until the window is gone", async () => {
@@ -2643,7 +2674,7 @@ describe("holding across session actions", () => {
     expect(await arrived(clock, next, 1)).toEqual(["during cleanup"]);
   });
 
-  test("a /run, /mode or mode button while a stop is under way says the session is already starting", async () => {
+  test("a /run, /mode or mode button while a stop is under way says the session is being stopped", async () => {
     const clock = newClock();
     const gated = gatedAnswer([], rigOk({ session: SID, stopped: true, compacted: null }));
     rig.answer("stop", gated.answer);
@@ -2654,7 +2685,8 @@ describe("holding across session actions", () => {
     fake.pushUpdate(msg("/run"));
     fake.pushUpdate(msg("/mode plan"));
     pressMode("auto");
-    await waitFor(() => texts().filter(t => t === en.sessionAlreadyStarting).length === 3, WAIT_MS, "three refusals");
+    await waitFor(() => texts().filter(t => t === en.sessionEnding).length === 3, WAIT_MS, "three refusals");
+    expect(texts()).not.toContain(en.sessionAlreadyStarting);
     expect(callsOf("run")).toEqual([]);
     expect(callsOf("mode")).toEqual([]);
     gated.release();
