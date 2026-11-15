@@ -4,6 +4,7 @@ import type { Message, Update } from "./telegram.ts";
 import type { MachineCommand } from "./rig.ts";
 
 import { z } from "zod";
+import { MILLION, THOUSAND } from "../shared/tokens.ts";
 
 // Fields every message may carry, whatever its kind.
 const ENVELOPE = new Set([
@@ -70,6 +71,16 @@ export function routeCallback(u: Update, cfg: Config): CallbackRoute | undefined
 // one `rig session` call each; `/info` renders `rig info`. `/pwsh`, `/cmd` and
 // `/bash` run their text in a shell in the session's folder.
 export type HubCommand = { name: "run" | "stop" | "cleanup" | "mode" | "info" | "compact" | "rename" | "pwsh" | "cmd" | "bash"; args: string };
+
+// `/compact <N>` with a token count (333000, 333k, 1.5m) or `auto` asks for the autocompact window: the value
+// (integer digits as a string, or "auto"), or undefined when the arguments are instructions for the summary.
+export function autocompactArg(args: string): string | undefined {
+  const a = args.trim().toLowerCase();
+  if (a === "auto") return a;
+  const m = a.match(/^(\d+(?:\.\d+)?)([km]?)$/);
+  if (!m) return undefined;
+  return String(Math.round(Number(m[1]) * (m[2] === "k" ? THOUSAND : m[2] === "m" ? MILLION : 1)));
+}
 
 const HUB_COMMANDS: readonly HubCommand["name"][] = ["run", "stop", "cleanup", "mode", "info", "compact", "rename", "pwsh", "cmd", "bash"];
 

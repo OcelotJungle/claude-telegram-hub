@@ -127,6 +127,7 @@ export const en = {
   sessionWaiting: "⏳ Waiting for the turn to end…",
   sessionRestartHint: "Restart the session so that it loads the hooks module, then try again.",
   compactRunning: "🗜 Compaction is running…",
+  autocompactUnavailable: "Setting the autocompact window from the topic is not available yet.",
   compactDoneTokens: ({ before, after }: { before: string; after: string }) => `✅ Compaction done: ${before} → ${after} tokens.`,
   compactFailed: ({ error }: { error: string }) => `⚠️ Compaction failed: ${error}`,
   compactSkipped: ({ reason }: { reason: string }) => `⚠️ Compaction skipped: ${reason}`,

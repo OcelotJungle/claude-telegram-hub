@@ -43,7 +43,7 @@ import { PERMISSION_MODES, RIG_SESSION_LIMIT_MS } from "./rig-session.ts";
 import { sessionCwd, sessionTranscript, transcriptMode } from "./transcript.ts";
 import { infoText } from "./info-text.ts";
 import { cleanupOutcome, compactOutcome, failureOutcome, renameOutcome, stopOutcome } from "./session-outcome.ts";
-import { hubCommandOf, machineCommandOf, routeCallback, routeUpdate } from "./router.ts";
+import { autocompactArg, hubCommandOf, machineCommandOf, routeCallback, routeUpdate } from "./router.ts";
 import { accountOf, SessionStore, topicName } from "./sessions.ts";
 import { isThreadNotFound, TelegramError } from "./telegram.ts";
 import { media, richPhotos, richToMarkdown } from "./rich.ts";
@@ -2080,6 +2080,8 @@ ${msg.text}`);
           result => this.endingDone(sessionId, hold, result.ok ? "ended" : "failed"));
       }
       case "compact":
+        // The autocompact window has no rig command yet: say so, call nothing.
+        if (autocompactArg(cmd.args) !== undefined) return this.notice(sessionId, msg.autocompactUnavailable, "warning");
         return this.sessionAction(sessionId, msg.compactRunning, onWaiting => this.rig.compact(sessionId, cmd.args || undefined, onWaiting), compactOutcome);
       case "rename": {
         const name = cmd.args.replace(/\s+/g, " ").trim();

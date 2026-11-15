@@ -116,6 +116,7 @@ export const ru: Messages = {
   sessionWaiting: "⏳ Жду конца хода…",
   sessionRestartHint: "Перезапусти сессию, чтобы она загрузила модуль хуков, и повтори.",
   compactRunning: "🗜 Компакт выполняется…",
+  autocompactUnavailable: "Настроить окно автокомпакта из топика пока нельзя.",
   compactDoneTokens: ({ before, after }) => `✅ Компакт выполнен: ${before} → ${after} токенов.`,
   compactFailed: ({ error }) => `⚠️ Компакт не выполнен: ${error}`,
   compactSkipped: ({ reason }) => `⚠️ Компакт пропущен: ${reason}`,

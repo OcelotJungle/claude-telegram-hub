@@ -2,7 +2,7 @@ import type { Update } from "../src/hub/telegram.ts";
 
 import { describe, expect, test } from "bun:test";
 import { join } from "path";
-import { hubCommandOf, machineCommandOf, routeUpdate } from "../src/hub/router.ts";
+import { autocompactArg, hubCommandOf, machineCommandOf, routeUpdate } from "../src/hub/router.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
 import { topicMsg } from "./fake-telegram.ts";
 import { tempDir } from "./helpers.ts";
@@ -127,6 +127,23 @@ describe("window commands as hub commands", () => {
 
   test("another bot, another command or text around it is a plain message", () => {
     for (const text of ["/info@other_bot", "/rename@other_bot new name", "/start", "/compactor", "/renamed x", "see /info", " /info", "/", ""]) expect(hubCommandOf(text, "test_bot")).toBeUndefined();
+  });
+});
+
+describe("autocompactArg", () => {
+  test("token counts and auto are windows, in any case", () => {
+    expect(autocompactArg("120000")).toBe("120000");
+    expect(autocompactArg("333k")).toBe("333000");
+    expect(autocompactArg(" 1M ")).toBe("1000000");
+    expect(autocompactArg("1.5m")).toBe("1500000");
+    expect(autocompactArg("AUTO")).toBe("auto");
+  });
+
+  test("anything else is instructions", () => {
+    expect(autocompactArg("")).toBeUndefined();
+    expect(autocompactArg("keep the plan")).toBeUndefined();
+    expect(autocompactArg("333k tokens")).toBeUndefined();
+    expect(autocompactArg("-5")).toBeUndefined();
   });
 });
 

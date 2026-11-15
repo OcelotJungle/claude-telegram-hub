@@ -2109,6 +2109,18 @@ describe("session commands", () => {
     });
   }
 
+  for (const arg of ["333k", "1m", "120000", "auto"]) {
+    test(`/compact ${arg} says the autocompact window is not available and calls no rig`, async () => {
+      await start();
+      await enabled(SID);
+      fake.pushUpdate(msg(`/compact ${arg}`));
+      await startedAs(en.autocompactUnavailable);
+      await settle();
+      expect(rig.calls.filter(c => c.sub === "compact")).toEqual([]);
+      expect(rig.calls.filter(c => c.sub === "autocompact")).toEqual([]);
+    });
+  }
+
   test("a compaction rig skipped is a warning with its reason", async () => {
     rig.answer("compact", rigOk({ session: SID, skip: "a hook vetoed it" }));
     await start();
