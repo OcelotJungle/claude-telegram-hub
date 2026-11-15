@@ -19,8 +19,9 @@ import { isPermissionMode, isSessionWaiting, RIG_SESSION_LIMIT_MS, rigCleanupSch
 const MS_PER_SECOND = 1000;
 const FEATURE_NAME = /^[a-z][a-z0-9-]*$/;
 // A session id reaches cmd.exe verbatim, so only the characters of an id are let through.
-const SESSION_ID = /^[A-Za-z0-9-]{1,100}$/;
-const ACCOUNT = /^[\w.@-]+$/;
+// Both start with a letter, digit or underscore: a value with a leading "-" is never put on the command line.
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/;
+const ACCOUNT = /^[\w@][\w.@-]*$/;
 const WINDOWS_META = /([()\][%!^"`<>&|;, *?])/g;
 const SIMPLE_ARGUMENT = /^[A-Za-z0-9_.@/-]+$/;
 // rig feature, rig status, rig language and rig info take no lock, so they answer fast; a longer one is a failure.
@@ -54,7 +55,13 @@ export type RigError =
   | { kind: "failure"; message: string }
   // rig's own failure: its message is shown as it is, the code is kept for logs.
   | { kind: "rig"; code: string; message: string }
-  | { kind: "badSession" };
+  | { kind: "badSession" }
+  // The hub's own refusals before a command line is built.
+  | { kind: "controlChar" }
+  | { kind: "badAccount" }
+  | { kind: "badMode" }
+  // The hub could not save the run before asking rig to start it, so it did not ask.
+  | { kind: "notRecorded" };
 export type RigOutput = { code: number; stdout: string; stderr: string };
 export type RigProgress = (line: string) => void;
 // stdin: text the command reads; limit: its own time limit; progress: each stderr line as it arrives.
@@ -73,6 +80,10 @@ export function rigErrorText(error: RigError, m: Messages): string {
     case "failure": return m.rigFailure({ message: error.message });
     case "rig": return error.message;
     case "badSession": return m.rigBadSession;
+    case "controlChar": return m.rigControlChar;
+    case "badAccount": return m.rigBadAccount;
+    case "badMode": return m.rigBadMode;
+    case "notRecorded": return m.execNotRecorded;
   }
 }
 
@@ -229,7 +240,7 @@ export class Rig {
     // cmd.exe cannot represent an embedded line break as an argv value. Refuse it
     // before constructing a command; POSIX passes multiline instructions directly.
     if (args.some(arg => arg.includes("\0") || (this.deps.platform.windows && /[\r\n]/.test(arg)))) {
-      return { ok: false, error: { kind: "failure", message: "Unsupported control character in rig session argument" } };
+      return { ok: false, error: { kind: "controlChar" } };
     }
     let waiting = false;
     const progress = (line: string) => {
@@ -238,6 +249,9 @@ export class Rig {
     return this.query(["session", ...args.slice(0, 1), sessionId, ...args.slice(1)], schema, { limit: RIG_SESSION_LIMIT_MS, progress });
   }
 
+  // Free text goes after the fixed words rig's parser expects (src/commands/session-compact.ts and session-rename.ts in
+  // agent-rig take the words after "--instructions" / after the id positionally and join them), so a text with a
+  // leading "-" is a value there; a "--" or "--instructions=" form would be read by rig as part of the text.
   compact(sessionId: string, instructions?: string, onWaiting?: () => void): Promise<RigResult<RigCompact>> {
     return this.sessionQuery(sessionId, ["compact", ...(instructions ? ["--instructions", instructions] : [])], rigCompactSchema, onWaiting);
   }
@@ -255,13 +269,13 @@ export class Rig {
   }
 
   run(sessionId: string, options: RigRunOptions = {}, onWaiting?: () => void): Promise<RigResult<RigRun>> {
-    if (options.account !== undefined && !ACCOUNT.test(options.account)) return Promise.resolve({ ok: false, error: { kind: "failure", message: "Invalid rig session account" } });
-    if (options.mode !== undefined && !isPermissionMode(options.mode)) return Promise.resolve({ ok: false, error: { kind: "failure", message: "Invalid rig session mode" } });
+    if (options.account !== undefined && !ACCOUNT.test(options.account)) return Promise.resolve({ ok: false, error: { kind: "badAccount" } });
+    if (options.mode !== undefined && !isPermissionMode(options.mode)) return Promise.resolve({ ok: false, error: { kind: "badMode" } });
     return this.sessionQuery(sessionId, ["run", ...(options.mode ? ["--mode", options.mode] : []), ...(options.account ? ["--account", options.account] : [])], rigRunSchema, onWaiting);
   }
 
   mode(sessionId: string, mode: PermissionMode, onWaiting?: () => void): Promise<RigResult<RigMode>> {
-    if (!isPermissionMode(mode)) return Promise.resolve({ ok: false, error: { kind: "failure", message: "Invalid rig session mode" } });
+    if (!isPermissionMode(mode)) return Promise.resolve({ ok: false, error: { kind: "badMode" } });
     return this.sessionQuery(sessionId, ["mode", mode], rigModeSchema, onWaiting);
   }
 

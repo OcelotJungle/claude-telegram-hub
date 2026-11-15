@@ -264,6 +264,25 @@ describe("rig contract", () => {
     expect(f.calls).toEqual([]);
   });
 
+  test("compact and rename keep a text that starts with a dash as one value after rig's fixed words", async () => {
+    const f = fixture("linux");
+    f.output({ code: 0, stdout: "{}", stderr: "" });
+    await f.rig.compact(SESSION, "--help keep this");
+    await f.rig.rename(SESSION, "-x name");
+    expect(f.calls.map(argv => argv.slice(1))).toEqual([
+      ["session", "compact", SESSION, "--instructions", "--help keep this"],
+      ["session", "rename", SESSION, "-x name"],
+    ]);
+  });
+
+  test("an id or an account that starts with a dash never reaches the command line", async () => {
+    const f = fixture("linux");
+    expect(await f.rig.info("--help")).toEqual({ ok: false, error: { kind: "badSession" } });
+    expect(await f.rig.stop("-x")).toEqual({ ok: false, error: { kind: "badSession" } });
+    expect(await f.rig.run(SESSION, { account: "--mode" })).toEqual({ ok: false, error: { kind: "badAccount" } });
+    expect(f.calls).toEqual([]);
+  });
+
   test("bad /rig arguments answer the usage that lists every form", () => {
     for (const args of ["", "bogus", "status now", "language xx"]) {
       expect(rigAction({ name: "rig", args }, en)).toEqual({ ok: false, error: en.rigUsage });

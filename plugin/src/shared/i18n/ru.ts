@@ -152,6 +152,10 @@ export const ru: Messages = {
   rigLanguageChanged: ({ language }) => `Язык: ${language} (изменён)`,
   rigLanguageUnchanged: ({ language }) => `Язык: ${language} (уже установлен)`,
   rigBadSession: "rig: неверный id сессии",
+  rigControlChar: "rig: в тексте есть символ, который командная строка Windows не передаст (перевод строки или нуль)",
+  rigBadAccount: "rig: неверное имя аккаунта",
+  rigBadMode: "rig: неверный режим разрешений",
+  execNotRecorded: "хаб не смог сохранить запуск, поэтому не стал его начинать",
 
   subagentContinued: "⬇️ продолжение ниже",
   subagentName: "Субагент",

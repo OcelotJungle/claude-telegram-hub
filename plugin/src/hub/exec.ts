@@ -58,7 +58,6 @@ const BYTES_PER_MB = 1024 * 1024;
 const SIZE_DECIMALS = 1;
 const LOST_PROCESS_GONE = "process-gone";
 const LOST_START_FAILED = "start-failed";
-const SAVE_FAILED = "hub-save-failed";
 // rig's end.reason of a rig run that exited with no usable answer.
 const NO_RESULT_REASONS = new Set(["empty-result", "invalid-result"]);
 
@@ -297,7 +296,7 @@ export class Execs {
     if (!this.save()) {
       this.launching.delete(rec.id);
       delete rec.starting;
-      return this.startFailed(rec, { kind: "rig", code: SAVE_FAILED, message: "the run could not be recorded" });
+      return this.startFailed(rec, { kind: "notRecorded" });
     }
     const started = rec.shell === "rig"
       ? await this.deps.rig.startRig(rec.args ?? [])

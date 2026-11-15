@@ -167,6 +167,10 @@ export const en = {
   rigLanguageChanged: ({ language }: { language: string }) => `Language: ${language} (changed)`,
   rigLanguageUnchanged: ({ language }: { language: string }) => `Language: ${language} (already set)`,
   rigBadSession: "rig: the session id is not valid",
+  rigControlChar: "rig: the text has a character a Windows command line cannot carry (a line break or a null)",
+  rigBadAccount: "rig: the account name is not valid",
+  rigBadMode: "rig: the permission mode is not valid",
+  execNotRecorded: "the hub could not save the run, so it did not start it",
 
   // Subagent cards and API failures.
   subagentContinued: "⬇️ continued below",

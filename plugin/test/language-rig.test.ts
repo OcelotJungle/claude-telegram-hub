@@ -13,6 +13,9 @@ import { hubToPlugin } from "../src/shared/protocol-schema.ts";
 import { platformFor } from "../src/shared/platform.ts";
 import { manualClock } from "./manual-clock.ts";
 
+// Lowercase Cyrillic letters, written as escapes: test files hold no Cyrillic (language-guard.test.ts).
+const CYRILLIC = /[\u0430-\u044f]/;
+
 function fixture(found = true) {
   let output: RigOutput = { code: 0, stdout: JSON.stringify({ language: "en" }), stderr: "" };
   const warnings: string[] = [];
@@ -110,6 +113,21 @@ describe("rig errors are data, rendered in the language shown", () => {
     expect(rigErrorText({ kind: "badSession" }, en)).toBe(en.rigBadSession);
     expect(rigErrorText({ kind: "badSession" }, ru)).toBe(ru.rigBadSession);
     expect(ru.rigBadSession).not.toBe(en.rigBadSession);
+  });
+
+  test("the hub's own refusals are catalog text, in Russian for ru", async () => {
+    const { rig } = fixture();
+    const control = await rig.rename("abc", "two\nlines");
+    const account = await rig.run("abc", { account: "bad name" });
+    for (const [result, key] of [[control, "rigControlChar"], [account, "rigBadAccount"]] as const) {
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      expect(rigErrorText(result.error, ru)).toBe(ru[key]);
+      expect(rigErrorText(result.error, en)).toBe(en[key]);
+      expect(ru[key]).toMatch(CYRILLIC);
+    }
+    expect(rigErrorText({ kind: "badMode" }, ru)).toBe(ru.rigBadMode);
+    expect(ru.rigBadMode).toMatch(CYRILLIC);
   });
 
   test("the query results carry the kind, not text", async () => {
