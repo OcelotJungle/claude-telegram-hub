@@ -3922,6 +3922,7 @@ describe("topic commands", () => {
     const data = must(buttonsOf(card).find(d => d.endsWith(":run")), "run button");
     fake.pushUpdate(buttonPress({ chatId: GROUP, fromId: ME, messageId: fake.lastMessageId, data }));
     await waitFor(() => fake.callsOf("answerCallbackQuery").find(c => c.text === "Starting"), WAIT_MS, "answer");
+    await settle();
     expect(specs).toHaveLength(1);
     const running = await waitFor(() => fake.callsOf("editMessageText").find(c => String(c.text).startsWith("▶ PowerShell")), WAIT_MS, "running card");
     expect(buttonsOf(running).some(d => d.endsWith(":stop"))).toBe(true);

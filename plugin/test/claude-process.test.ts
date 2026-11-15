@@ -12,19 +12,19 @@ const TREE: Record<number, { name: string; parent: number }> = {
 const info = (pid: number) => TREE[pid];
 
 describe("findClaudePid", () => {
-  test("walks up to claude.exe", () => {
-    expect(findClaudePid(30, info)).toBe(10);
+  test("walks up to claude.exe", async () => {
+    expect(await findClaudePid(30, info)).toBe(10);
   });
 
-  test("CLAUDE_PID wins when it is a claude.exe", () => {
-    expect(findClaudePid(30, info, "7")).toBe(7);
-    expect(findClaudePid(30, info, "8")).toBe(10);
-    expect(findClaudePid(30, info, "junk")).toBe(10);
+  test("CLAUDE_PID wins when it is a claude.exe", async () => {
+    expect(await findClaudePid(30, info, "7")).toBe(7);
+    expect(await findClaudePid(30, info, "8")).toBe(10);
+    expect(await findClaudePid(30, info, "junk")).toBe(10);
   });
 
-  test("no claude.exe up the chain gives nothing", () => {
-    expect(findClaudePid(5, info)).toBeUndefined();
-    expect(findClaudePid(99, info)).toBeUndefined();
+  test("no claude.exe up the chain gives nothing", async () => {
+    expect(await findClaudePid(5, info)).toBeUndefined();
+    expect(await findClaudePid(99, info)).toBeUndefined();
   });
 });
 
@@ -34,8 +34,8 @@ test("Linux and other platforms read /proc, only win32 asks PowerShell", () => {
   expect(processInfoFor("darwin")).toBe(linuxProcessInfo);
 });
 
-test("platform process lookup tells the name and parent of this process", () => {
-  const me = (process.platform === "win32" ? windowsProcessInfo : linuxProcessInfo)(process.pid);
+test("platform process lookup tells the name and parent of this process", async () => {
+  const me = await (process.platform === "win32" ? windowsProcessInfo : linuxProcessInfo)(process.pid);
   expect(me?.name).toMatch(/^bun/i);
   expect(me?.parent).toBe(process.ppid);
 }, 15_000);
@@ -52,15 +52,15 @@ describe("Linux parent-chain fixtures", () => {
   };
   const info = (pid: number) => linuxProcessInfo(pid, path => files[path]);
 
-  test("finds node Claude and native Claude", () => {
-    expect(findClaudePid(30, info)).toBe(20);
-    expect(findClaudePid(10, info)).toBe(10);
-    expect(findClaudePid(30, info, "10")).toBe(10);
+  test("finds node Claude and native Claude", async () => {
+    expect(await findClaudePid(30, info)).toBe(20);
+    expect(await findClaudePid(10, info)).toBe(10);
+    expect(await findClaudePid(30, info, "10")).toBe(10);
     expect(info(5)).toEqual({ name: "a (name)", parent: 1, argv: [] });
   });
 
-  test("rejects unrelated node processes, missing records and parent cycles", () => {
-    expect(findClaudePid(20, pid => pid === 20 ? { name: "node", parent: 20, argv: ["node", "/app/server.js"] } : undefined)).toBeUndefined();
+  test("rejects unrelated node processes, missing records and parent cycles", async () => {
+    expect(await findClaudePid(20, pid => pid === 20 ? { name: "node", parent: 20, argv: ["node", "/app/server.js"] } : undefined)).toBeUndefined();
     expect(linuxProcessInfo(99, path => files[path])).toBeUndefined();
     expect(linuxProcessInfo(5, () => "malformed")).toBeUndefined();
   });

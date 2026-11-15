@@ -85,11 +85,11 @@ describe("parseRegQuery", () => {
 });
 
 describe("freshEnv", () => {
-  test.skipIf(process.platform !== "win32")("freshEnv on this machine has a Path and nothing else of the hub's", () => {
+  test.skipIf(process.platform !== "win32")("freshEnv on this machine has a Path and nothing else of the hub's", async () => {
     process.env.TG_EXEC_TEST_LEAK = "1";
     let env: Record<string, string>;
     try {
-      env = freshEnv();
+      env = await freshEnv();
     } finally {
       delete process.env.TG_EXEC_TEST_LEAK;
     }

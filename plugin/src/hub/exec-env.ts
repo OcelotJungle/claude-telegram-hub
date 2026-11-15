@@ -2,8 +2,9 @@
 // have, built from the registry, not the hub's. The hub's may date from logon
 // or carry the variables of the Claude Code window it was started from.
 import type { Logger } from "../shared/log.ts";
+import type { Timers } from "../shared/timers.ts";
 
-import { spawnSync } from "child_process";
+import { runTimed } from "../shared/timed-run.ts";
 import { PLATFORM } from "../shared/platform.ts";
 
 const REG_TIMEOUT_MS = 10_000;
@@ -113,26 +114,23 @@ function hubEnv(): Record<string, string> {
 
 // One registry key's string values, or undefined when reg fails. reg runs
 // after chcp 65001 in the same console, so non-ASCII values come as UTF-8.
-function regQuery(key: string): Record<string, RegValue> | undefined {
-  const r = spawnSync("cmd.exe", ["/d", "/s", "/c", `"chcp 65001>nul & reg query "${key}""`], {
+async function regQuery(key: string, timers?: Timers): Promise<Record<string, RegValue> | undefined> {
+  const r = await runTimed("cmd.exe", ["/d", "/s", "/c", `"chcp 65001>nul & reg query "${key}""`], {
     windowsVerbatimArguments: true,
-    windowsHide: true,
-    encoding: "utf8",
-    timeout: REG_TIMEOUT_MS,
+    timeoutMs: REG_TIMEOUT_MS,
+    ...(timers ? { timers } : {}),
   });
   if (r.status !== 0) return undefined;
   return parseRegQuery(r.stdout);
 }
 
-export function freshEnv(log?: Logger): Record<string, string> {
+export async function freshEnv(log?: Logger, timers?: Timers): Promise<Record<string, string>> {
   if (!PLATFORM.windows) return hubEnv();
-  const machine = regQuery(MACHINE_KEY);
-  const user = regQuery(USER_KEY);
+  const [machine, user, volatileKey] = await Promise.all([regQuery(MACHINE_KEY, timers), regQuery(USER_KEY, timers), regQuery(VOLATILE_KEY, timers)]);
   if (machine === undefined || user === undefined) {
     log?.warn("exec: reg query failed; the command gets the hub's environment");
     return hubEnv();
   }
   // A logon without it only lacks a few variables the hub's list has anyway.
-  const volatile = regQuery(VOLATILE_KEY) ?? {};
-  return mergeEnv(process.env, machine, user, volatile);
+  return mergeEnv(process.env, machine, user, volatileKey ?? {});
 }

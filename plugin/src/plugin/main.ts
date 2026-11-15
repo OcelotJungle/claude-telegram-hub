@@ -95,17 +95,21 @@ const core = sessionId
       answerPermission: (requestId, behavior) => {
         mcp.notification({ method: "notifications/claude/channel/permission", params: { request_id: requestId, behavior } }).catch(e => log.error(`permission answer failed: ${e}`));
       },
+      // The process lookup asks the OS and so is asynchronous; nobody waits for the end of Claude Code.
       terminate: exiting => {
         const info = processInfoFor(PLATFORM.windows ? "win32" : "linux");
-        const pid = findClaudePid(process.ppid, info, process.env.CLAUDE_PID);
-        if (!pid) return log.error("terminate: no Claude Code process among the parents of this plugin");
-        log.info(`terminate: ending Claude Code ${pid}`);
-        exiting(pid);
-        try {
-          process.kill(pid);
-        } catch (e) {
-          log.error(`terminate: could not end ${pid}: ${e}`);
-        }
+        findClaudePid(process.ppid, info, process.env.CLAUDE_PID)
+          .then(pid => {
+            if (!pid) return log.error("terminate: no Claude Code process among the parents of this plugin");
+            log.info(`terminate: ending Claude Code ${pid}`);
+            exiting(pid);
+            try {
+              process.kill(pid);
+            } catch (e) {
+              log.error(`terminate: could not end ${pid}: ${e}`);
+            }
+          })
+          .catch(e => log.error(`terminate: process lookup failed: ${e}`));
       },
       log,
     })

@@ -60,7 +60,7 @@ afterEach(() => {
 // writing the log and the exit file itself.
 // alive: runner pids alive from the start, for a manager that finds runs on disk.
 // windows: sessions with a window; graceMs: the start's grace, none by default.
-function setup(o: { messages?: () => Messages; dir?: string; sendOnSent?: boolean; fileLimit?: number; alive?: number[]; windows?: string[]; graceMs?: number } = {}) {
+function setup(o: { env?: ExecDeps["env"]; messages?: () => Messages; dir?: string; sendOnSent?: boolean; fileLimit?: number; alive?: number[]; windows?: string[]; graceMs?: number } = {}) {
   const dir = o.dir ?? tempDir("telegramhub-exec-");
   if (o.dir === undefined) dirs.push(dir);
   const specs: RunnerSpec[] = [];
@@ -97,7 +97,7 @@ function setup(o: { messages?: () => Messages; dir?: string; sendOnSent?: boolea
     dir,
     file: join(dir, "execs.json"),
     shells: () => ({ powershell: "powershell.exe", bash: "bash.exe" }),
-    env: () => ({ A: "1" }),
+    env: o.env ?? (() => ({ A: "1" })),
     spawnRunner: specFile => {
       specs.push(runnerSpecSchema.parse(JSON.parse(readFileSync(specFile, "utf8"))));
       const pid = FIRST_PID + specs.length;
@@ -143,6 +143,34 @@ const msg = (messageId: number, ageMs = 0, chatId = CHAT) => ({ chatId, messageI
 const idOf = (cardId: string) => cardId.replace(/^exec-/, "");
 
 describe("Execs", () => {
+  test("a command whose environment comes later starts once it is there, and only once", async () => {
+    let release: (env: Record<string, string>) => void = () => {};
+    const t = setup({ env: () => new Promise<Record<string, string>>(resolve => { release = resolve; }) });
+    t.execs.command(SID, "cmd", "npm run x", "C:\\proj", msg(1));
+    expect(t.specs).toHaveLength(0);
+    // Waiting for the environment counts as running, so the hub does not go idle under it.
+    expect(t.execs.running()).toBe(1);
+    expect(t.execs.starting()).toBe(1);
+    release({ A: "late" });
+    await t.clock.advance(1);
+    expect(t.specs).toHaveLength(1);
+    expect(t.spec().env.A).toBe("late");
+    expect(t.execs.running()).toBe(1);
+    expect(t.execs.starting()).toBe(0);
+  });
+
+  test("a command whose environment fails no longer counts as running", async () => {
+    let fail: (e: Error) => void = () => {};
+    const t = setup({ env: () => new Promise<Record<string, string>>((_, reject) => { fail = reject; }) });
+    t.execs.command(SID, "cmd", "npm run x", "C:\\proj", msg(1));
+    expect(t.execs.running()).toBe(1);
+    fail(new Error("registry gone"));
+    await t.clock.advance(1);
+    expect(t.specs).toHaveLength(0);
+    expect(t.execs.running()).toBe(0);
+    expect(t.execs.starting()).toBe(0);
+  });
+
   test("a command runs, edits its card and reports once", async () => {
     const t = setup();
     t.execs.command(SID, "cmd", "npm run x", "C:\\proj", msg(1));

@@ -1,5 +1,7 @@
-import { spawnSync } from "child_process";
+import type { Timers } from "../shared/timers.ts";
+
 import { readFileSync } from "fs";
+import { runTimed } from "../shared/timed-run.ts";
 
 const CLAUDE_NAME = /^claude(\.exe)?$/i;
 const NODE_NAME = /^node(?:\.exe)?$/i;
@@ -9,8 +11,11 @@ const LOOKUP_TIMEOUT_MS = 10_000;
 
 export type ProcessInfo = { name: string; parent: number; argv?: string[] };
 
+// A process reader answers at once (/proc) or later (an external command).
+export type ProcessReader = (pid: number) => ProcessInfo | undefined | Promise<ProcessInfo | undefined>;
+
 // The process reader for a platform: Windows asks PowerShell, every other platform reads /proc.
-export function processInfoFor(platform: NodeJS.Platform): (pid: number) => ProcessInfo | undefined {
+export function processInfoFor(platform: NodeJS.Platform): ProcessReader {
   return platform === "win32" ? windowsProcessInfo : linuxProcessInfo;
 }
 
@@ -22,14 +27,14 @@ function isClaude(info: ProcessInfo | undefined): boolean {
 
 // The Claude Code process this plugin serves: CLAUDE_PID if it names one,
 // else the first claude.exe up the chain of parents from `from`.
-export function findClaudePid(from: number, info: (pid: number) => ProcessInfo | undefined, claudePid?: string): number | undefined {
+export async function findClaudePid(from: number, info: ProcessReader, claudePid?: string): Promise<number | undefined> {
   const given = Number(claudePid);
-  if (Number.isInteger(given) && given > 0 && isClaude(info(given))) return given;
+  if (Number.isInteger(given) && given > 0 && isClaude(await info(given))) return given;
   let pid = from;
   const visited = new Set<number>();
   while (pid > 0 && !visited.has(pid)) {
     visited.add(pid);
-    const p = info(pid);
+    const p = await info(pid);
     if (!p) return undefined;
     if (isClaude(p)) return pid;
     pid = p.parent;
@@ -56,9 +61,9 @@ function readProc(path: string): string | undefined {
 }
 
 // Name and parent of a Windows process.
-export function windowsProcessInfo(pid: number): ProcessInfo | undefined {
+export async function windowsProcessInfo(pid: number, timers?: Timers): Promise<ProcessInfo | undefined> {
   const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${Math.trunc(pid)}"; if ($p) { "$($p.Name)|$($p.ParentProcessId)" }`;
-  const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: LOOKUP_TIMEOUT_MS, windowsHide: true });
-  const m = (r.stdout ?? "").trim().match(/^(.+)\|(\d+)$/);
+  const r = await runTimed("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { timeoutMs: LOOKUP_TIMEOUT_MS, ...(timers ? { timers } : {}) });
+  const m = r.stdout.trim().match(/^(.+)\|(\d+)$/);
   return m?.[1] && m[2] ? { name: m[1], parent: Number(m[2]) } : undefined;
 }

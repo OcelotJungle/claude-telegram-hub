@@ -62,7 +62,8 @@ export type ExecDeps = {
   file: string;
   shells(): ShellPaths;
   shellNames?: Record<ExecShell, string>;
-  env(): Record<string, string>;
+  // The environment of a command: at once, or later when it is read from the system.
+  env(): Record<string, string> | Promise<Record<string, string>>;
   spawnRunner(specFile: string): number;
   alive(pid: number): boolean;
   kill(pid: number): void;
@@ -102,6 +103,8 @@ export class Execs {
   // What the card of a running rig run last showed: its output and when.
   private rigShown = new Map<string, { tail: string; at: number }>();
   private deferUntil = 0;
+  // Runs waiting for their environment.
+  private launching = new Set<string>();
   private sweepTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private deps: ExecDeps) {}
@@ -145,8 +148,14 @@ export class Execs {
     if (this.sweepTimer !== undefined) this.deps.timers.clearTimer(this.sweepTimer);
   }
 
+  // A run still waiting for its environment counts: it is about to run, so the hub must not go idle under it.
   running(): number {
-    return this.recs.filter(r => r.state === "running").length;
+    return this.recs.filter(r => r.state === "running" || this.launching.has(r.id)).length;
+  }
+
+  // Runs whose start is in flight inside the hub (the environment read), as opposed to runners that already run.
+  starting(): number {
+    return this.launching.size;
   }
 
   command(sessionId: string, shell: ExecShell, text: string, cwd: string, msg: { chatId: string; messageId: number; date: number }): void {
@@ -254,7 +263,33 @@ export class Execs {
     }
   }
 
+  // The environment may come later (a registry read): the run waits for it as "pending", and a second
+  // press of its button meanwhile does not start it twice.
   private launch(rec: ExecRecord): void {
+    if (this.launching.has(rec.id)) return;
+    let env: Record<string, string> | Promise<Record<string, string>>;
+    try {
+      env = this.deps.env();
+    } catch (e) {
+      return this.startFailed(rec, e);
+    }
+    if (!(env instanceof Promise)) return this.begin(rec, env);
+    this.launching.add(rec.id);
+    // The run leaves `launching` before it begins or fails: what those report (an end, the hub going idle) already
+    // sees the run as started or gone, not as still waiting.
+    void env.then(
+      resolved => {
+        this.launching.delete(rec.id);
+        if (rec.state === "pending") this.begin(rec, resolved);
+      },
+      e => {
+        this.launching.delete(rec.id);
+        this.startFailed(rec, e);
+      },
+    );
+  }
+
+  private begin(rec: ExecRecord, hubEnv: Record<string, string>): void {
     try {
       const run = rec.shell === "rig"
         ? rec.invocation && { ...rec.invocation, files: [], env: {} }
@@ -265,7 +300,7 @@ export class Execs {
         argv: run.argv,
         verbatim: run.verbatim,
         cwd: rec.cwd,
-        env: { ...this.deps.env(), ...run.env },
+        env: { ...hubEnv, ...run.env },
         log: this.path(rec.id, "log"),
         exit: this.path(rec.id, "exit.json"),
         alive: this.path(rec.id, "alive"),
@@ -292,10 +327,14 @@ export class Execs {
       this.save();
       this.showCard(rec);
     } catch (e) {
-      this.deps.log.error(`exec ${rec.id}: start failed: ${e}`);
-      rec.startedAt = this.deps.timers.now();
-      this.end(rec, { kind: "lost", at: this.deps.timers.now(), reason: LOST_START_FAILED, detail: e instanceof Error ? e.message : String(e) });
+      this.startFailed(rec, e);
     }
+  }
+
+  private startFailed(rec: ExecRecord, e: unknown): void {
+    this.deps.log.error(`exec ${rec.id}: start failed: ${e}`);
+    rec.startedAt = this.deps.timers.now();
+    this.end(rec, { kind: "lost", at: this.deps.timers.now(), reason: LOST_START_FAILED, detail: e instanceof Error ? e.message : String(e) });
   }
 
   // Drops the oldest ended runs, with their files, past MAX_EXECS.

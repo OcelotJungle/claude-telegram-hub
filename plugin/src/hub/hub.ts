@@ -2885,6 +2885,7 @@ ${msg.text}`);
       ["pumps", this.pumping.size > 0],
       ["replays", this.replays.size > 0],
       ["card edits", [...this.cards.values()].some(card => card.editing)],
+      ["exec starts", (this.execs?.starting() ?? 0) > 0],
     ];
     return parts.filter(([, on]) => on).map(([name]) => name);
   }
