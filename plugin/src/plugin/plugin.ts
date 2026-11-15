@@ -204,6 +204,11 @@ export class PluginCore {
     this.client.start();
   }
 
+  // Test hook: what this window has exchanged with the hub on its current connection.
+  traffic(): { sent: number; received: number; open: boolean } {
+    return this.client.traffic();
+  }
+
   stop(): void {
     this.tailer?.stop();
     this.subagents?.stop();

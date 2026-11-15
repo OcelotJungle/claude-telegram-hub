@@ -4,6 +4,7 @@ import { autocompactArg, infoText, Runner } from "../src/mod/commands.ts";
 import { field } from "../src/shared/guards.ts";
 import { catalogOf } from "../src/shared/i18n/index.ts";
 import { waitFor } from "./helpers.ts";
+import { turn } from "./manual-clock.ts";
 import { tokens } from "../src/shared/tokens.ts";
 import { bareInfo, blockError, fullInfo, INFO_NOW, iso, neverSleep } from "./info-fixtures.ts";
 import { RIG_QUERY_LIMIT_MS } from "../src/shared/info-data.ts";
@@ -188,6 +189,12 @@ describe("replies", () => {
   test("a poll while a reply is being posted does not post it again: each reply once, in order", async () => {
     const posted: string[] = [];
     let commands = [{ id: "c1", name: "compact", args: "" }];
+    // Every post waits here, so the next poll comes while the first reply is still being posted.
+    let postStarted = 0;
+    let openGate = () => {};
+    const gate = new Promise<void>(resolve => {
+      openGate = resolve;
+    });
     const runner = new Runner("http://hub", {
       sessionId: async () => "s",
       usage: async () => usage(),
@@ -199,7 +206,8 @@ describe("replies", () => {
           commands = [];
           return { status: 200, text: JSON.stringify(list) };
         }
-        await Bun.sleep(30);
+        postStarted++;
+        await gate;
         posted.push(String(field(JSON.parse(init.body ?? "{}"), "id")));
         return { status: 200, text: "ok" };
       },
@@ -207,11 +215,16 @@ describe("replies", () => {
       sleep: neverSleep,
     });
     await runner.poll();
-    // The next tick of the module's timer, while the first reply is posted.
+    await waitFor(() => postStarted === 1, 1000, "the first reply being posted");
+    // The next tick of the module's timer, while the first reply is posted: it waits for that post, so it ends only once the gate opens.
+    const second = runner.poll();
+    await turn();
+    expect(posted).toEqual([]);
+    openGate();
+    await second;
+    await turn();
     await runner.poll();
-    await Bun.sleep(150);
-    await runner.poll();
-    await Bun.sleep(150);
+    await turn();
     await runner.poll();
     // Started, running (the compaction's own status), then its result.
     expect(posted).toEqual(["c1.0", "c1.1", "c1.2"]);
@@ -358,7 +371,7 @@ describe("/rename", () => {
     const polls = async (n: number) => {
       for (let i = 0; i < n; i++) {
         await r.poll();
-        await Bun.sleep(10);
+        await turn();
       }
     };
     return { posted, ran, polls };
@@ -440,7 +453,7 @@ describe("/cleanup", () => {
     const polls = async (n: number) => {
       for (let i = 0; i < n; i++) {
         await r.poll();
-        await Bun.sleep(10);
+        await turn();
       }
     };
     return { r, posted, urls, compacted, polls };

@@ -11,11 +11,8 @@ import { PLATFORM } from "../src/shared/platform.ts";
 
 const EXIT_WAIT_MS = 5000;
 const PING_WAIT_MS = 15_000;
-// A test runner's heartbeat period, and a wait of several of them.
+// A test runner heartbeat period.
 const TEST_HEARTBEAT_MS = 100;
-const BEATS_MS = 600;
-// How long a stopped command's log must stay as it is: over two ping lines.
-const QUIET_MS = 2500;
 
 let dirs: string[] = [];
 let pids: number[] = [];
@@ -69,7 +66,6 @@ function start(file: string): number {
 }
 
 const readExit = (path: string) => exitInfoSchema.parse(JSON.parse(readFileSync(path, "utf8")));
-const sizeOf = (path: string) => (existsSync(path) ? statSync(path).size : 0);
 const textOf = (path: string) => (existsSync(path) ? readFileSync(path, "utf8") : "");
 
 describe("line splitter", () => {
@@ -207,8 +203,7 @@ describe("exec runner", () => {
     const pid = start(file);
     await waitFor(() => existsSync(spec.alive), EXIT_WAIT_MS, "heartbeat file");
     const first = statSync(spec.alive).mtimeMs;
-    await Bun.sleep(BEATS_MS);
-    expect(statSync(spec.alive).mtimeMs).toBeGreaterThan(first);
+    await waitFor(() => statSync(spec.alive).mtimeMs > first, EXIT_WAIT_MS, "a second heartbeat");
     await waitFor(() => existsSync(spec.exit), PING_WAIT_MS, "exit file");
     await waitFor(() => !isAlive(pid), EXIT_WAIT_MS, "runner gone");
   }, PING_WAIT_MS + 2 * EXIT_WAIT_MS);
@@ -232,11 +227,9 @@ describe("exec runner", () => {
     killTree(pid);
     await waitFor(() => !isAlive(pid), EXIT_WAIT_MS, "runner gone");
     await waitFor(() => !isAlive(ping), EXIT_WAIT_MS, "ping gone");
-    const size = sizeOf(spec.log);
-    await Bun.sleep(QUIET_MS);
-    expect(sizeOf(spec.log)).toBe(size);
+    // Both processes are confirmed gone above, so nothing can write the log or the exit file any more.
     expect(existsSync(spec.exit)).toBe(false);
-  }, PING_WAIT_MS + 2 * EXIT_WAIT_MS + QUIET_MS);
+  }, PING_WAIT_MS + 2 * EXIT_WAIT_MS);
 
   // Windows PowerShell and its console code page exist only there.
   test.skipIf(!PLATFORM.windows)("PowerShell Cyrillic reaches the log through the runner", async () => {

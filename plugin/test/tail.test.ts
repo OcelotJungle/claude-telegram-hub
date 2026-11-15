@@ -4,6 +4,9 @@ import { join } from "path";
 import { readSessionTitle, TranscriptTailer } from "../src/transcript/tail.ts";
 import { sanitizeCwd, transcriptPathFor } from "../src/transcript/locate.ts";
 import { tempDir } from "./helpers.ts";
+import { manualClock } from "./manual-clock.ts";
+
+const TAIL_INTERVAL_MS = 20;
 
 const line = (o: object) => JSON.stringify(o) + "\n";
 
@@ -118,11 +121,13 @@ describe("TranscriptTailer", () => {
     const path = join(tempDir(), "s.jsonl");
     writeFileSync(path, "");
     const recs: unknown[] = [];
-    const t = new TranscriptTailer({ path, onRecord: r => recs.push(r), intervalMs: 20 });
+    const clock = manualClock();
+    const t = new TranscriptTailer({ path, onRecord: r => recs.push(r), intervalMs: TAIL_INTERVAL_MS, timers: clock });
     tailers.push(t);
     t.start();
     appendFileSync(path, line({ n: 1 }));
-    await Bun.sleep(150);
+    expect(recs).toEqual([]);
+    await clock.advance(TAIL_INTERVAL_MS);
     expect(recs).toEqual([{ n: 1 }]);
   });
 });

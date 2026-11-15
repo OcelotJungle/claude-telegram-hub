@@ -52,6 +52,8 @@ export class HubClient {
   private fileWaiters = new Map<string, (r: { error?: string }) => void>();
   private waiters: (() => void)[] = [];
   private timers: Timers;
+  private sentCount = 0;
+  private receivedCount = 0;
 
   constructor(
     private opts: {
@@ -72,6 +74,11 @@ export class HubClient {
 
   get connected(): boolean {
     return this.ws !== undefined;
+  }
+
+  // Test hook: the messages of the current connection, so a test can tell the hub has taken all this side wrote and this side has read all the hub wrote.
+  traffic(): { sent: number; received: number; open: boolean } {
+    return { sent: this.sentCount, received: this.receivedCount, open: this.ws !== undefined };
   }
 
   // Messages the hub has not acked yet, oldest first.
@@ -102,6 +109,7 @@ export class HubClient {
     if (!this.ws) return;
     try {
       this.ws.send(JSON.stringify(msg));
+      this.sentCount++;
     } catch {}
   }
 
@@ -175,12 +183,17 @@ export class HubClient {
       opened = true;
       this.attempt = 0;
       this.ws = ws;
+      this.sentCount = 0;
+      this.receivedCount = 0;
       this.opts.log.info("connected to hub");
       this.send(this.opts.hello());
       for (const item of this.outbox) this.send(item);
       for (const w of this.waiters.splice(0)) w();
     };
-    ws.onmessage = e => this.onMessage(String(e.data));
+    ws.onmessage = e => {
+      if (this.ws === ws) this.receivedCount++;
+      this.onMessage(String(e.data));
+    };
     ws.onerror = () => {};
     ws.onclose = () => {
       if (this.ws === ws) {

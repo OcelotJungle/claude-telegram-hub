@@ -9,27 +9,25 @@ import type { MessageKind } from "../src/shared/notification.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
-import { Execs, EXEC_CARD_LINES, execCardText, HEARTBEAT_STALE_MS, logTail, MAX_EXECS } from "../src/hub/exec.ts";
+import { Execs, EXEC_CARD_LINES, EXEC_CHECK_MS, execCardText, HEARTBEAT_STALE_MS, logTail, MAX_EXECS } from "../src/hub/exec.ts";
 import { loadExecs, saveExecs } from "../src/hub/exec-store.ts";
 import { HEARTBEAT_MS, runnerSpecSchema } from "../src/hub/exec-runner.ts";
 import { en } from "../src/shared/i18n/en.ts";
 import { ru } from "../src/shared/i18n/ru.ts";
 import { notifies } from "../src/shared/notification.ts";
 import { platformFor } from "../src/shared/platform.ts";
-import { realTimers } from "../src/shared/timers.ts";
-import { memLogger, must, tempDir, waitFor } from "./helpers.ts";
+import { manualClock } from "./manual-clock.ts";
+import { memLogger, must, tempDir } from "./helpers.ts";
 
 const SID = "s1";
 const FIRST_PID = 1000;
 const MIN_MS = 60_000;
 const NOW = 1_800_000_000_000;
-// A wait for what a check brings, a pause for what must not come, the fake
-// manager's timer periods, a run of 1 min 05 s, a log longer than the agent's
+// A card pace shorter than the heartbeat staleness (so a run stays alive while the clock walks a pace), a cap on the
+// checks a wait may run, a run of 1 min 05 s, a log longer than the agent's
 // tail, a test file limit and a line well over it.
-const WAIT_MS = 2000;
-const SETTLE_MS = 100;
-const CHECK_MS = 10;
-const CARD_MS = 50;
+const CARD_MS = 5000;
+const MAX_TICKS = 100;
 const RUN_1_05_MS = 65_000;
 const LOG_LINES = 40;
 const FILE_LIMIT = 200;
@@ -37,7 +35,6 @@ const BIG_LINE_CHARS = 500;
 // One two-byte UTF-8 character (Cyrillic ya).
 const YA = "\u044f";
 const MS_PER_S = 1000;
-const CHECKS_PER_STEP = 3;
 // A start's grace no test outlasts, and one a test waits out.
 const LONG_GRACE_MS = 60_000;
 const SHORT_GRACE_MS = 100;
@@ -76,7 +73,24 @@ function setup(o: { messages?: () => Messages; dir?: string; sendOnSent?: boolea
   const reports: ReportCall[] = [];
   const machineCards: { text: string; final: boolean }[] = [];
   const machineFiles: { path: string; kind: MessageKind }[] = [];
-  const clock = { now: NOW };
+  const manual = manualClock();
+  // Time is NOW plus a skew (the machine sleeping: a jump no timer fires for) plus what the manual clock advanced.
+  let skew = 0;
+  const clock = {
+    get now() { return NOW + skew + manual.now(); },
+    jump: (ms: number) => { skew += ms; },
+    advance: (ms: number) => manual.advance(ms),
+  };
+  // Waits for a condition by letting the manager's checks run, one check period at a time.
+  const until = async <T>(pred: () => T | undefined | false | null, label: string): Promise<T> => {
+    for (let i = 0; i < MAX_TICKS; i++) {
+      const v = pred();
+      if (v) return v;
+      await manual.advance(EXEC_CHECK_MS);
+    }
+    throw new Error(`no ${label} after ${MAX_TICKS} checks`);
+  };
+  const tick = () => manual.advance(EXEC_CHECK_MS);
   const log = memLogger();
   const deps: ExecDeps = {
     messages: o.messages ?? (() => en),
@@ -101,8 +115,8 @@ function setup(o: { messages?: () => Messages; dir?: string; sendOnSent?: boolea
     },
     machineCard: (_record, text, final) => void machineCards.push({ text, final }),
     machineFile: (_record, path, kind) => void machineFiles.push({ path, kind }),
-    timers: { ...realTimers, now: () => clock.now },
-    checkMs: CHECK_MS,
+    timers: { ...manual, now: () => clock.now },
+    checkMs: EXEC_CHECK_MS,
     cardMs: CARD_MS,
     maxAgeMs: 2 * MIN_MS,
     fileLimit: o.fileLimit,
@@ -121,16 +135,7 @@ function setup(o: { messages?: () => Messages; dir?: string; sendOnSent?: boolea
   };
   // The runner's last heartbeat, as its file's time.
   const beat = (n: number, at: number) => utimesSync(spec(n).alive, at / MS_PER_S, at / MS_PER_S);
-  return { dir, deps, execs, specs, alive, windows, killed, cards, machineCards, machineFiles, notices, files, reports, clock, log, spec, lastCard, finish, beat };
-}
-
-// Moves the fake clock in steps short enough not to look like a sleep, a few
-// checks apart.
-async function walk(clock: { now: number }, ms: number): Promise<void> {
-  for (let left = ms; left > 0; left -= HEARTBEAT_MS / 2) {
-    clock.now += Math.min(left, HEARTBEAT_MS / 2);
-    await Bun.sleep(CHECK_MS * CHECKS_PER_STEP);
-  }
+  return { dir, deps, execs, specs, alive, windows, killed, cards, machineCards, machineFiles, notices, files, reports, clock, log, spec, lastCard, finish, beat, until, tick };
 }
 
 const CHAT = "-1001";
@@ -151,14 +156,15 @@ describe("Execs", () => {
     expect(first.buttons).toEqual([[{ text: en.execStopButton, data: `x:${idOf(first.cardId)}:stop` }]]);
     expect(t.execs.running()).toBe(1);
     appendFileSync(t.spec().log, "a\nb\n");
-    await waitFor(() => t.cards.find(c => c.markdown.includes("b") && !c.final), WAIT_MS, "card with b");
-    t.clock.now += RUN_1_05_MS;
+    await t.until(() => t.cards.find(c => c.markdown.includes("b") && !c.final), "card with b");
+    // The run started at NOW: jump to exactly 1 min 05 s after it, whatever the checks have advanced.
+    t.clock.jump(NOW + RUN_1_05_MS - t.clock.now);
     t.finish(0, 0);
-    const last = await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
+    const last = await t.until(() => t.cards.find(c => c.final), "final card");
     expect(last.markdown).toStartWith(`${en.execOutcomeOk} · 1 min 05 s`);
     expect(last.kind).toBe("info");
     expect(last.buttons).toBeUndefined();
-    await Bun.sleep(SETTLE_MS);
+    await t.tick();
     expect(t.reports).toHaveLength(1);
     expect(t.reports[0]?.meta.source).toBe("exec");
     expect(t.reports[0]?.meta.exit_code).toBe("0");
@@ -172,7 +178,7 @@ describe("Execs", () => {
     t.execs.command(SID, "powershell", "npm run x", "C:\\proj", msg(1));
     appendFileSync(t.spec().log, Array.from({ length: LOG_LINES }, (_, i) => `line ${i + 1}`).join("\n") + "\n");
     t.finish(0, 2);
-    const report = await waitFor(() => t.reports[0], WAIT_MS, "report");
+    const report = await t.until(() => t.reports[0], "report");
     expect(t.lastCard().markdown).toStartWith(en.execOutcomeCode({ code: 2 }));
     expect(t.lastCard().kind).toBe("error");
     expect(t.files).toEqual([{ path: t.spec().log, name: `${report.meta.exec_id}.log`, loud: true }]);
@@ -194,7 +200,7 @@ describe("Execs", () => {
       t.execs.command(SID, "cmd", "x", "C:\\proj", msg(n + 1));
       appendFileSync(t.spec(n).log, `${YA.repeat(BIG_LINE_CHARS)}\n${last}`);
       t.finish(n, 1);
-      const sent = await waitFor(() => t.files[n], WAIT_MS, "sent file");
+      const sent = await t.until(() => t.files[n], "sent file");
       expect(sent.path).not.toBe(t.spec(n).log);
       expect(sent.name).toEndWith(".log");
       const bytes = readFileSync(sent.path);
@@ -227,7 +233,7 @@ describe("Execs", () => {
     const id = idOf(t.lastCard().cardId);
     expect(t.execs.press(id, "stop")).toBe(en.execStopping);
     t.finish(0, 0);
-    await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
+    await t.until(() => t.cards.find(c => c.final), "final card");
     expect(t.lastCard().markdown).toStartWith(en.execOutcomeOk);
   });
 
@@ -264,7 +270,7 @@ describe("Execs", () => {
     expect(t.execs.press(id, "stop")).toBe(en.execStopping);
     expect(t.killed).toEqual([FIRST_PID + 1]);
     t.alive.clear();
-    await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
+    await t.until(() => t.cards.find(c => c.final), "final card");
     expect(t.lastCard().markdown).toStartWith(en.execOutcomeStopped);
     expect(t.execs.press(id, "stop")).toBe(en.execAlreadyEnded);
     expect(t.execs.press(id, "run")).toBe(en.execAlreadyEnded);
@@ -274,9 +280,9 @@ describe("Execs", () => {
     const t = setup();
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     t.alive.clear();
-    await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
+    await t.until(() => t.cards.find(c => c.final), "final card");
     expect(t.lastCard().markdown).toStartWith(en.execOutcomeLost({ reason: en.execLostProcessGone }));
-    const report = await waitFor(() => t.reports[0], WAIT_MS, "report");
+    const report = await t.until(() => t.reports[0], "report");
     expect(report.content).toContain(en.execOutcomeLost({ reason: en.execLostProcessGone }));
     expect(report.meta.exit_code).toBeUndefined();
   });
@@ -285,7 +291,7 @@ describe("Execs", () => {
     const t = setup();
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     t.finish(0, null, "spawn ENOENT");
-    await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
+    await t.until(() => t.cards.find(c => c.final), "final card");
     expect(t.lastCard().markdown).toStartWith(en.execOutcomeLost({ reason: en.execLostNotStarted({ error: "spawn ENOENT" }) }));
   });
 
@@ -295,7 +301,7 @@ describe("Execs", () => {
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     current = ru;
     t.finish(0, null, "spawn ENOENT");
-    await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
+    await t.until(() => t.cards.find(c => c.final), "final card");
     expect(t.lastCard().markdown).toStartWith(ru.execOutcomeLost({ reason: ru.execLostNotStarted({ error: "spawn ENOENT" }) }));
     expect(t.lastCard().markdown).not.toContain("did not start");
   });
@@ -306,8 +312,8 @@ describe("Execs", () => {
     t.execs.stop();
     const t2 = setup({ dir: t.dir, alive: [FIRST_PID + 1] });
     t.finish(0, 0);
-    await waitFor(() => t2.reports[0], WAIT_MS, "report");
-    await Bun.sleep(SETTLE_MS);
+    await t2.until(() => t2.reports[0], "report");
+    await t2.tick();
     expect(t2.reports).toHaveLength(1);
     expect(t.reports).toHaveLength(0);
     expect(t2.lastCard().markdown).toStartWith(en.execOutcomeOk);
@@ -337,7 +343,7 @@ describe("Execs", () => {
     writeFileSync(join(dir, "abcd1234.alive"), "");
     utimesSync(join(dir, "abcd1234.alive"), (NOW - LONG_AGO_MS) / MS_PER_S, (NOW - LONG_AGO_MS) / MS_PER_S);
     const t = setup({ dir, alive: [4242] });
-    await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
+    await t.until(() => t.cards.find(c => c.final), "final card");
     expect(t.lastCard().markdown).toStartWith(en.execOutcomeLost({ reason: en.execLostProcessGone }));
     expect(t.execs.press("abcd1234", "stop")).toBe(en.execAlreadyEnded);
     expect(t.killed).toEqual([]);
@@ -357,15 +363,15 @@ describe("Execs", () => {
     const t = setup();
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     // The machine slept: the clock jumps, the heartbeat is old.
-    t.clock.now += LONG_AGO_MS;
-    await Bun.sleep(SETTLE_MS);
+    t.clock.jump(LONG_AGO_MS);
+    await t.tick();
     expect(t.execs.running()).toBe(1);
     t.beat(0, t.clock.now);
-    await walk(t.clock, HEARTBEAT_STALE_MS / 2);
+    await t.clock.advance(HEARTBEAT_STALE_MS / 2);
     expect(t.execs.running()).toBe(1);
     // No beat for the whole grace: the runner is gone.
-    await walk(t.clock, HEARTBEAT_STALE_MS);
-    await waitFor(() => t.cards.find(c => c.final), WAIT_MS, "final card");
+    await t.clock.advance(HEARTBEAT_STALE_MS);
+    await t.until(() => t.cards.find(c => c.final), "final card");
     expect(t.lastCard().markdown).toStartWith(en.execOutcomeLost({ reason: en.execLostProcessGone }));
   });
 
@@ -396,7 +402,7 @@ describe("Execs", () => {
     const t2 = setup({ dir: t.dir, alive: [FIRST_PID + 1, FIRST_PID + 2], windows: ["s2"], graceMs: LONG_GRACE_MS });
     t.finish(0, 0);
     t.finish(1, 0);
-    await waitFor(() => t2.cards.filter(c => c.final).length === 2, WAIT_MS, "final cards");
+    await t2.until(() => t2.cards.filter(c => c.final).length === 2, "final cards");
     expect(t2.reports.map(r => r.sessionId)).toEqual(["s2"]);
     t2.windows.add(SID);
     t2.execs.connected(SID);
@@ -410,14 +416,14 @@ describe("Execs", () => {
     t.finish(0, 0);
     const t2 = setup({ dir: t.dir, graceMs: SHORT_GRACE_MS });
     expect(t2.reports).toHaveLength(0);
-    await waitFor(() => t2.reports[0], WAIT_MS, "report after the grace");
+    await t2.until(() => t2.reports[0], "report after the grace");
   });
 
   test("an unreported result goes again when the session connects", async () => {
     const t = setup({ sendOnSent: false });
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     t.finish(0, 0);
-    await waitFor(() => t.reports[0], WAIT_MS, "report");
+    await t.until(() => t.reports[0], "report");
     t.execs.connected("other");
     expect(t.reports).toHaveLength(1);
     t.execs.connected(SID);
@@ -431,7 +437,7 @@ describe("Execs", () => {
     const t = setup();
     t.execs.command(SID, "cmd", "x", "C:\\proj", msg(1));
     appendFileSync(t.spec().log, "```js\nx\n10%\r50%\r100%\r\n");
-    const card = await waitFor(() => t.cards.find(c => c.markdown.includes("100%") && !c.final), WAIT_MS, "card");
+    const card = await t.until(() => t.cards.find(c => c.markdown.includes("100%") && !c.final), "card");
     expect(card.markdown).toContain("\n````\n```js\nx\n100%\n````");
     expect(card.markdown).not.toContain("50%");
   });
@@ -479,31 +485,28 @@ describe("rig run cards", () => {
     const t = startRig();
     expect(t.machineCards).toHaveLength(1);
     appendFileSync(t.spec().log, "waiting for the lock\n");
-    const card = await waitFor(() => t.machineCards.find(c => c.text.includes("waiting for the lock")), WAIT_MS, "card with the lock line");
+    const card = await t.until(() => t.machineCards.find(c => c.text.includes("waiting for the lock")), "card with the lock line");
     expect(card.final).toBe(false);
     expect(t.machineCards).toHaveLength(2);
   });
 
   test("unchanged output is not redrawn between card paces, only when the pace passes", async () => {
     const t = startRig();
-    // Many checks pass on the real timer while the fake clock stands still.
-    await Bun.sleep(SETTLE_MS);
     expect(t.machineCards).toHaveLength(1);
-    // The seconds counter alone changes with the clock, but less than a pace is no reason to redraw.
-    t.clock.now += CARD_MS - 1;
-    await Bun.sleep(SETTLE_MS);
+    // Checks run every second, and the seconds counter changes with the clock, but less than a pace is no reason to redraw.
+    await t.clock.advance(CARD_MS - 1);
     expect(t.machineCards).toHaveLength(1);
-    t.clock.now += 1;
-    await waitFor(() => t.machineCards.length === 2, WAIT_MS, "card at the pace");
-    await Bun.sleep(SETTLE_MS);
+    await t.clock.advance(1);
+    expect(t.machineCards).toHaveLength(2);
+    await t.tick();
     expect(t.machineCards).toHaveLength(2);
   });
 
   test("a finished run draws its final card once", async () => {
     const t = startRig();
     t.finish(0, 0);
-    await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
-    await Bun.sleep(SETTLE_MS);
+    await t.until(() => t.machineCards.find(c => c.final), "final card");
+    await t.tick();
     expect(t.machineCards.filter(c => c.final)).toHaveLength(1);
   });
 
@@ -514,12 +517,12 @@ describe("rig run cards", () => {
   test("progress and the result are shown in words, never as JSON", async () => {
     const t = startRig();
     appendFileSync(t.spec().log, `${progress("lock-waiting")}\n${progress("update-step-output", { line: "fetching" })}\n`);
-    const waiting = await waitFor(() => t.machineCards.find(c => c.text.includes("fetching")), WAIT_MS, "card with the step line");
+    const waiting = await t.until(() => t.machineCards.find(c => c.text.includes("fetching")), "card with the step line");
     expect(waiting.text).toContain(en.rigProgressLockWaiting);
     expect(waiting.text).not.toContain("{");
     appendFileSync(resultFile(t), `${JSON.stringify({ mode: "server", outcome: "complete" })}\n`);
     t.finish(0, 0);
-    const done = await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
+    const done = await t.until(() => t.machineCards.find(c => c.final), "final card");
     expect(done.text).toContain(en.rigUpdateComplete({ pending: false }));
     expect(done.text).not.toContain("{");
     expect(done.text).not.toContain("outcome");
@@ -545,12 +548,12 @@ describe("rig run cards", () => {
     const half = progress("update-step-output", { line: "second" });
     // The half line has no newline yet, in the same write as a whole line: the card with the whole line proves the read saw it.
     appendFileSync(t.spec().log, `${whole}\n${half.slice(0, half.length - 5)}`);
-    const first = await waitFor(() => t.machineCards.find(c => c.text.includes("first")), WAIT_MS, "card with the whole line");
+    const first = await t.until(() => t.machineCards.find(c => c.text.includes("first")), "card with the whole line");
     expect(first.text).not.toContain("{");
     expect(first.text).not.toContain("progress");
     expect(first.text).not.toContain("second");
     appendFileSync(t.spec().log, `${half.slice(half.length - 5)}\n`);
-    const second = await waitFor(() => t.machineCards.find(c => c.text.includes("second")), WAIT_MS, "card with the second line");
+    const second = await t.until(() => t.machineCards.find(c => c.text.includes("second")), "card with the second line");
     expect(tailOf(second.text)).toEqual(["first", "second"]);
   });
 
@@ -559,7 +562,7 @@ describe("rig run cards", () => {
     appendFileSync(resultFile(t), `${JSON.stringify({ feature: "pwsh", enabled: true })}\n`);
     appendFileSync(t.spec().log, `${progress("update-step-output", { line: "late step" })}\n`);
     t.finish(0, 0);
-    const done = await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
+    const done = await t.until(() => t.machineCards.find(c => c.final), "final card");
     expect(tailOf(done.text)).toEqual(["late step", en.rigFeatureEnabled({ name: "pwsh" })]);
   });
 
@@ -568,12 +571,12 @@ describe("rig run cards", () => {
     const message = Array.from({ length: LOG_LINES }, (_, i) => `detail ${i}`).join("\n") + "\nthe real cause";
     appendFileSync(resultFile(t), `${JSON.stringify({ error: { code: "update-failed", message } })}\n`);
     t.finish(0, 1);
-    const done = await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
+    const done = await t.until(() => t.machineCards.find(c => c.final), "final card");
     const shown = tailOf(done.text);
     expect(shown).toHaveLength(EXEC_CARD_LINES);
     expect(shown.at(-1)).toBe("the real cause");
     expect(done.text).not.toContain("detail 0\n");
-    await waitFor(() => t.machineFiles.length === 1, WAIT_MS, "the log file");
+    await t.until(() => t.machineFiles.length === 1, "the log file");
     const sent = readFileSync(must(t.machineFiles[0]).path, "utf8");
     expect(sent).toContain("detail 0\n");
     expect(sent.trimEnd().endsWith("the real cause")).toBe(true);
@@ -583,14 +586,14 @@ describe("rig run cards", () => {
   test("a progress line with an empty code is no empty line; an unknown code is a catalog line", async () => {
     const t = startRig();
     appendFileSync(t.spec().log, `${progress("")}\n${progress("brand-new-step")}\n${progress("update-step-output", { line: "tail" })}\n`);
-    const card = await waitFor(() => t.machineCards.find(c => c.text.includes("tail")), WAIT_MS, "card with the last line");
+    const card = await t.until(() => t.machineCards.find(c => c.text.includes("tail")), "card with the last line");
     expect(tailOf(card.text)).toEqual([en.rigProgressUnknown({ code: "brand-new-step" }), "tail"]);
   });
 
   test("a line that is not JSON (a traceback) is shown as text", async () => {
     const t = startRig();
     appendFileSync(t.spec().log, "Traceback (most recent call last):\n  File x\n");
-    const card = await waitFor(() => t.machineCards.find(c => c.text.includes("File x")), WAIT_MS, "card with the traceback");
+    const card = await t.until(() => t.machineCards.find(c => c.text.includes("File x")), "card with the traceback");
     expect(tailOf(card.text)).toEqual(["Traceback (most recent call last):", "  File x"]);
   });
 
@@ -598,7 +601,7 @@ describe("rig run cards", () => {
     const t = startRig();
     appendFileSync(resultFile(t), `${JSON.stringify({ error: { code: "update-busy", message: "Another update is running" } })}\n`);
     t.finish(0, 1);
-    const done = await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
+    const done = await t.until(() => t.machineCards.find(c => c.final), "final card");
     expect(done.text).toContain("Another update is running");
     expect(done.text).not.toContain("update-busy");
     expect(done.text).toContain(en.execOutcomeCode({ code: 1 }));
@@ -609,10 +612,10 @@ describe("rig run cards", () => {
     const t = setup({ messages: () => current });
     t.execs.machine(INVOCATION, "rig update", "C:\\proj", { chatId: CHAT }, 1);
     appendFileSync(t.spec().log, `${progress("service-stopping")}\n`);
-    await waitFor(() => t.machineCards.find(c => c.text.includes(en.rigProgressServiceStopping)), WAIT_MS, "English card");
+    await t.until(() => t.machineCards.find(c => c.text.includes(en.rigProgressServiceStopping)), "English card");
     current = ru;
     t.finish(0, 0);
-    const done = await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
+    const done = await t.until(() => t.machineCards.find(c => c.final), "final card");
     expect(done.text).toContain(ru.rigProgressServiceStopping);
     expect(done.text).not.toContain(en.rigProgressServiceStopping);
   });
@@ -622,7 +625,7 @@ describe("rig run cards", () => {
     const lines = Array.from({ length: LOG_LINES }, (_, i) => progress("update-step-output", { line: `step ${i}` }));
     appendFileSync(t.spec().log, `${lines.join("\n")}\n`);
     t.finish(0, 0);
-    await waitFor(() => t.machineFiles.length === 1, WAIT_MS, "the log file");
+    await t.until(() => t.machineFiles.length === 1, "the log file");
     const sent = readFileSync(must(t.machineFiles[0]).path, "utf8");
     expect(sent).toContain("step 0\n");
     expect(sent).toContain(`step ${LOG_LINES - 1}`);
@@ -634,7 +637,7 @@ describe("rig run cards", () => {
     const t = startRig();
     appendFileSync(t.spec().log, `${progress("update-step-output", { line: "ok", note: "x".repeat(BIG_LINE_CHARS) })}\n`);
     t.finish(0, 0);
-    await waitFor(() => t.machineCards.find(c => c.final), WAIT_MS, "final card");
+    await t.until(() => t.machineCards.find(c => c.final), "final card");
     // end() draws the final card and hands over the file in one step, so the file list is already final.
     expect(t.machineFiles).toEqual([]);
   });

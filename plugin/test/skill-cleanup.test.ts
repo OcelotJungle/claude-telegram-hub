@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { rename } from "fs/promises";
 import { join } from "path";
 import { cleanTranscript, KEEP_BACKUPS, restoreCleanup } from "../src/hub/skill-cleanup.ts";
@@ -10,7 +10,7 @@ import { tempDir } from "./helpers.ts";
 const SID = "11111111-2222-3333-4444-555555555555";
 const OTHER = "99999999-2222-3333-4444-555555555555";
 const NOW = 1_700_000_000_000;
-const MTIME_WAIT_MS = 20;
+const OLD_MTIME_SEC = 1_000_000_000;
 
 const dirs: string[] = [];
 
@@ -154,8 +154,9 @@ describe("cleanTranscript", () => {
     const none = join(d, `${OTHER}.jsonl`);
     const a = write(empty, [user("u1", "x"), "\n", invoked("s1", []), "\n"]);
     const b = write(none, [user("u1", "x"), "\n"]);
+    // Old mtimes set by hand: a rewrite would change them, whatever the file system's resolution.
+    for (const path of [empty, none]) utimesSync(path, OLD_MTIME_SEC, OLD_MTIME_SEC);
     const mtimes = [statSync(empty).mtimeMs, statSync(none).mtimeMs];
-    await Bun.sleep(MTIME_WAIT_MS);
     expect(await cleanTranscript(empty, NOW)).toEqual({ kind: "nothing", version: "1.0.0" });
     expect((await cleanTranscript(none, NOW)).kind).toBe("nothing");
     expect(readFileSync(empty).equals(a)).toBe(true);

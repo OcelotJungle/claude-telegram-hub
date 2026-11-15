@@ -14,8 +14,10 @@ import { ru } from "../src/shared/i18n/ru.ts";
 import { platformFor } from "../src/shared/platform.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { TURN_DECISION_MS } from "../src/transcript/relay.ts";
+import { SETTLE_MS as SUBAGENT_SETTLE_MS } from "../src/transcript/subagents.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
-import { memLogger, NO_PACE, tempDir, waitFor } from "./helpers.ts";
+import { manualClock } from "./manual-clock.ts";
+import { memLogger, NO_PACE, settled, tempDir, trackWindow, waitFor as waitForReal } from "./helpers.ts";
 import { realTimers } from "../src/shared/timers.ts";
 
 const en = catalogOf("en");
@@ -26,6 +28,16 @@ const CWD = "C:\\code\\demo-app";
 const SID = "sess-1";
 // The hub's quiet window for topic messages that come together, kept short.
 const BATCH_QUIET_MS = 5;
+// The production defaults the tests run on: the transcript tailer's poll period and the hub's typing period.
+const TAIL_POLL_MS = 300;
+const TYPING_EVERY_MS = 4000;
+// The plugin's wait for Telegram to take a file (fileWaitMs below).
+const FILE_WAIT_MS = 3000;
+const SUBAGENT_SCAN_MS = 1000;
+// The hub client's drain poll and the shutdown limits the tests use.
+const DRAIN_POLL_MS = 25;
+const SHUTDOWN_LONG_MS = 60_000;
+const SHUTDOWN_DOWN_MS = 300;
 
 let fake: FakeTelegram;
 let hub: Hub;
@@ -34,11 +46,17 @@ let configDir: string;
 let transcript: string;
 let config: Config;
 let core: PluginCore | undefined;
+let untrackCore: (() => void) | undefined;
 let channel: { content: string; meta: Record<string, string> }[];
 let answers: { requestId: string; behavior: string }[];
 // Each interrupt, with the number of channel messages emitted before and after it.
 let interrupts: { prompt: string; channelBefore: number; channelAfter: number }[];
-let interruptMs: number;
+// While set, the interrupt does not finish: a test opens it to let the interrupt end.
+let interruptGate: Promise<void> | undefined;
+// The plugin's time, moved by hand: the tailer, the relay, the card pace and the hub client run on it.
+let pluginClock: ReturnType<typeof manualClock>;
+// The hub's typing repeat, moved by hand; the hub's one-shot timers stay real and short.
+let hubClock: ReturnType<typeof manualClock>;
 let interruptFails: boolean;
 let terminated: number;
 // The pid the fake terminate reports as the Claude Code process it ends.
@@ -48,9 +66,41 @@ let spoolDir: string;
 let state: string;
 let spawned: number;
 let pluginLog: ReturnType<typeof memLogger>;
-// The chimes the plugin asked for, and how far the plugin's clock is moved ahead.
+// The chimes the plugin asked for.
 let chimes: ChimeKind[];
-let clockSkew: number;
+
+// A wait for a condition. The plugin's clock moves exactly one tailer poll, at the first look, so the tailer sees what the test wrote;
+// the time the test waits is real I/O, never virtual time (a blind step per look could trip the relay's decision limit).
+function waitFor<T>(pred: () => T | undefined | false | null | Promise<T | undefined | false | null>, timeoutMs?: number, label?: string): Promise<T> {
+  let polled = false;
+  return waitForReal(async () => {
+    if (!polled) {
+      polled = true;
+      await pluginClock.advance(TAIL_POLL_MS);
+    }
+    return pred();
+  }, timeoutMs, label);
+}
+
+// A wait for a condition that needs the plugin's own time to pass (a scan period, a card pace): each look moves the clock one poll.
+function waitForTime<T>(pred: () => T | undefined | false | null | Promise<T | undefined | false | null>, timeoutMs?: number, label?: string): Promise<T> {
+  return waitForReal(async () => {
+    await pluginClock.advance(TAIL_POLL_MS);
+    return pred();
+  }, timeoutMs, label);
+}
+
+// The plugin reads what was written and the hub has handled everything that followed from it.
+async function flushed() {
+  await pluginClock.advance(TAIL_POLL_MS);
+  await settled(hub, { fake });
+}
+
+// One typing period of the hub, and the typing call it makes has reached Telegram.
+async function typingTick() {
+  await hubClock.advance(TYPING_EVERY_MS);
+  await settled(hub, { fake });
+}
 
 // What the Stop hook does: tells the hub how the turn ended.
 async function stopHook(final: boolean, kind?: ChimeKind) {
@@ -115,7 +165,7 @@ function makeCore(sessionId = SID, entrypoint?: string) {
     interrupt: async prompt => {
       const call = { prompt, channelBefore: channel.length, channelAfter: -1 };
       interrupts.push(call);
-      await Bun.sleep(interruptMs);
+      await interruptGate;
       call.channelAfter = channel.length;
       if (interruptFails) throw new Error("inbox is gone");
     },
@@ -126,15 +176,16 @@ function makeCore(sessionId = SID, entrypoint?: string) {
     },
     log: pluginLog,
     chime: kind => chimes.push(kind),
-    timers: { ...realTimers, now: () => Date.now() + clockSkew },
-    tailIntervalMs: 30,
-    cardEveryMs: 30,
+    timers: pluginClock,
   });
   core.start();
+  untrackCore = trackWindow(port, core);
   return core;
 }
 
 beforeEach(async () => {
+  pluginClock = manualClock();
+  hubClock = manualClock();
   fake = new FakeTelegram();
   state = tempDir();
   config = { groupId: GROUP, allowFrom: [ME], turnEndChime: "" };
@@ -150,7 +201,8 @@ beforeEach(async () => {
     pollTimeoutSec: 1,
     cardEditMs: 50,
     cardGapMs: 0,
-    typingEveryMs: 50,
+    typingEveryMs: TYPING_EVERY_MS,
+    timers: { ...realTimers, setRepeat: hubClock.setRepeat, clearTimer: handle => { hubClock.clearTimer(handle); clearTimeout(handle); } },
     reactionDelayMs: 50,
     batchQuietMs: BATCH_QUIET_MS,
     // No module polls here: /stop ends the window once nobody takes it.
@@ -168,7 +220,7 @@ beforeEach(async () => {
   channel = [];
   answers = [];
   interrupts = [];
-  interruptMs = 0;
+  interruptGate = undefined;
   interruptFails = false;
   terminated = 0;
   claudePid = undefined;
@@ -176,14 +228,17 @@ beforeEach(async () => {
   spawned = 0;
   pluginLog = memLogger();
   chimes = [];
-  clockSkew = 0;
 });
 
 afterEach(async () => {
+  untrackCore?.();
+  untrackCore = undefined;
   core?.stop();
   core = undefined;
   await hub.stop();
   fake.stop();
+  pluginClock.dispose();
+  hubClock.dispose();
 });
 
 async function enabledCore() {
@@ -198,7 +253,7 @@ describe("PluginCore", () => {
     const c = makeCore(SID, "cli");
     await waitFor(() => hub.isConnected(SID), 3000, "plugin connected");
     await waitFor(() => c.enabled, 3000, "mode on");
-    await Bun.sleep(100);
+    await flushed();
     expect(fake.callsOf("createForumTopic")).toEqual([]);
     append(assistantText("\u0413\u043e\u0442\u043e\u0432\u043e", "end_turn", "a1"), closed);
     await stopHook(true, "done");
@@ -210,7 +265,7 @@ describe("PluginCore", () => {
   test("a session started by an SDK entrypoint stays off and gets no topic", async () => {
     const c = makeCore(SID, "sdk-cli");
     await waitFor(() => hub.isConnected(SID), 3000, "plugin connected");
-    await Bun.sleep(150);
+    await flushed();
     expect(c.enabled).toBe(false);
     expect(fake.callsOf("createForumTopic")).toEqual([]);
   });
@@ -220,7 +275,7 @@ describe("PluginCore", () => {
     const answer = await c.enable();
     expect(answer).toContain("demo-app · \u0421\u0442\u0430\u0440\u043e\u0435 \u0438\u043c\u044f");
     expect(fake.callsOf("createForumTopic")).toEqual([{ chat_id: GROUP, name: "demo-app · \u0421\u0442\u0430\u0440\u043e\u0435 \u0438\u043c\u044f" }]);
-    await Bun.sleep(150);
+    await flushed();
     expect(sent()).toEqual([]);
   });
 
@@ -254,16 +309,10 @@ describe("PluginCore", () => {
   test("without a decision a closed turn is closed as final after the limit", async () => {
     await enabledCore();
     append(assistantText("\u0418\u0442\u043e\u0433", "end_turn", "n1"), closed);
-    // Each check moves the clock past the limit: the tailer reads both records
-    // in one poll, and its next idle check closes the turn.
-    await waitFor(
-      () => {
-        clockSkew += TURN_DECISION_MS;
-        return sent().length === 1;
-      },
-      3000,
-      "text",
-    );
+    // The tailer reads both records in one poll; once the clock is past the limit its next idle check closes the turn.
+    await flushed();
+    await pluginClock.advance(TURN_DECISION_MS);
+    await waitFor(() => sent().length === 1, 3000, "text");
     expect(sent()).toEqual([{ text: "\u0418\u0442\u043e\u0433", silent: false, topic: 100 }]);
   });
 
@@ -277,13 +326,15 @@ describe("PluginCore", () => {
 
   describe("the terminal chime", () => {
     // The mode is off (it was never on here), the user types in the terminal,
-    // and the turn that follows ends and is closed.
-    async function terminalTurn() {
+    // `afterMs` of the plugin's time pass, and the turn that follows ends and is closed.
+    // The time passes before the turn ends: a turn that ended earlier would be closed as final by its own decision limit meanwhile, before the stop hook comes.
+    async function terminalTurn(afterMs = 0) {
       makeCore();
       await waitFor(() => hub.isConnected(SID), 3000, "plugin connected");
       append(humanTyped("\u0441\u0430\u043c \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0443"));
-      // The tailer reads the transcript every 30 ms: the typing is read before the turn closes.
-      await Bun.sleep(200);
+      // The typing is read before the turn closes.
+      await pluginClock.advance(TAIL_POLL_MS);
+      if (afterMs > 0) await pluginClock.advance(afterMs);
       append(assistantText("\u0421\u0434\u0435\u043b\u0430\u043b", "end_turn", "e1"), closed);
     }
 
@@ -297,13 +348,12 @@ describe("PluginCore", () => {
     test("done soon after the user typed is silent", async () => {
       await terminalTurn();
       await stopHook(true, "done");
-      await Bun.sleep(200);
+      await flushed();
       expect(chimes).toEqual([]);
     });
 
     test(`done ${CHIME_MIN_TURN_MS / 1000} s after the user typed chimes`, async () => {
-      await terminalTurn();
-      clockSkew = CHIME_MIN_TURN_MS;
+      await terminalTurn(CHIME_MIN_TURN_MS);
       await stopHook(true, "done");
       await waitFor(() => chimes.length === 1, 3000, "chime");
       expect(chimes).toEqual(["done"]);
@@ -323,13 +373,12 @@ describe("PluginCore", () => {
       await waitFor(() => hub.isConnected(SID), 3000, "plugin connected");
       append(assistantText("Step 2 of 5", "end_turn", "e1"), closed);
       await stopHook(false);
-      await Bun.sleep(200);
+      await flushed();
       expect(chimes).toEqual([]);
     });
 
     test("a turn the user typed chimes done despite background work", async () => {
-      await terminalTurn();
-      clockSkew = CHIME_MIN_TURN_MS;
+      await terminalTurn(CHIME_MIN_TURN_MS);
       await stopHook(false);
       await waitFor(() => chimes.length === 1, 3000, "chime");
       expect(chimes).toEqual(["done"]);
@@ -337,7 +386,7 @@ describe("PluginCore", () => {
 
     test("with the mode on the terminal stays silent", async () => {
       await enabledCore();
-      clockSkew = CHIME_MIN_TURN_MS;
+      await pluginClock.advance(CHIME_MIN_TURN_MS);
       append(assistantText("\u041a\u0430\u043a\u043e\u0439 \u0432\u0430\u0440\u0438\u0430\u043d\u0442?", "end_turn", "q1"), closed);
       await stopHook(true, "ask");
       await waitFor(() => sent().length === 1, 3000, "loud question");
@@ -441,12 +490,19 @@ describe("PluginCore", () => {
     await enabledCore();
     append(assistantText("\u0421\u043c\u043e\u0442\u0440\u044e", "tool_use", "i1"), assistantTool("Bash", "i1"));
     await waitFor(() => fake.callsOf("sendChatAction").length >= 1, 3000, "busy");
-    interruptMs = 100;
+    let openInterrupt: () => void = () => {};
+    interruptGate = new Promise<void>(resolve => {
+      openInterrupt = resolve;
+    });
     const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!\u0441\u0442\u043e\u043f, \u043d\u0435 \u0442\u0443\u0434\u0430" });
     fake.pushUpdate(u);
     // Sent together, the next message would join the "!" one.
     await waitFor(() => interrupts.length === 1, 3000, "interrupt");
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "\u0441\u043c\u043e\u0442\u0440\u0438 \u0432 src" }));
+    // The hub has delivered the next message, and the plugin holds it while the interrupt runs.
+    await settled(hub, { fake });
+    expect(channel).toEqual([]);
+    openInterrupt();
     await waitFor(() => channel.length === 1, 3000, "the next message");
     expect(interrupts.map(i => [i.channelBefore, i.channelAfter])).toEqual([[0, 0]]);
     expect(channel.map(m => m.content)).toEqual(["\u0441\u043c\u043e\u0442\u0440\u0438 \u0432 src"]);
@@ -513,18 +569,34 @@ describe("PluginCore", () => {
     await enabledCore();
     const typing = () => fake.callsOf("sendChatAction").length;
     append(assistantText("\u0421\u043c\u043e\u0442\u0440\u044e", "tool_use", "w1"), assistantTool("Bash", "w1"));
-    await waitFor(() => typing() >= 2, 3000, "typing");
+    await waitFor(
+      async () => {
+        await typingTick();
+        return typing() >= 2;
+      },
+      3000,
+      "typing",
+    );
     append(assistantTool("AskUserQuestion", "w2"));
-    await Bun.sleep(150);
+    await flushed();
     const asked = typing();
-    await Bun.sleep(200);
+    await typingTick();
+    await typingTick();
     expect(typing()).toBe(asked);
     append(assistantText("\u041f\u043e\u043d\u044f\u043b", "tool_use", "w3"));
-    await waitFor(() => typing() > asked, 3000, "typing again");
+    await waitFor(
+      async () => {
+        await typingTick();
+        return typing() > asked;
+      },
+      3000,
+      "typing again",
+    );
     append(assistantText("\u0413\u043e\u0442\u043e\u0432\u043e", "end_turn", "w4"));
-    await Bun.sleep(150);
+    await flushed();
     const ended = typing();
-    await Bun.sleep(200);
+    await typingTick();
+    await typingTick();
     expect(typing()).toBe(ended);
   });
 
@@ -534,9 +606,10 @@ describe("PluginCore", () => {
     append(assistantTool("Bash", "q1"));
     await waitFor(() => typing() >= 1, 3000, "initial busy state");
     append(assistantTool("AskUserQuestion", "q2"));
-    await Bun.sleep(150);
+    await flushed();
     const waiting = typing();
-    await Bun.sleep(200);
+    await typingTick();
+    await typingTick();
     expect(typing()).toBe(waiting);
 
     append({
@@ -544,7 +617,14 @@ describe("PluginCore", () => {
       isSidechain: false,
       message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "The answer" }] },
     });
-    await waitFor(() => typing() > waiting, 3000, "busy state after the answer");
+    await waitFor(
+      async () => {
+        await typingTick();
+        return typing() > waiting;
+      },
+      3000,
+      "busy state after the answer",
+    );
 
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!" }));
     await waitFor(() => interrupts.length === 1, 3000, "interrupt after the answer");
@@ -554,8 +634,10 @@ describe("PluginCore", () => {
     append(assistantText("Finished", "end_turn", "q3"), closed);
     await stopHook(true, "done");
     await waitFor(() => sent().some(message => message.text.includes("Finished")), 3000, "turn end after the answer");
+    await flushed();
     const ended = typing();
-    await Bun.sleep(200);
+    await typingTick();
+    await typingTick();
     expect(typing()).toBe(ended);
   });
 
@@ -565,13 +647,18 @@ describe("PluginCore", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "agent-a1.meta.json"), JSON.stringify({ agentType: "Explore", description: "Find it" }));
     const agent = join(dir, "agent-a1.jsonl");
-    const timestamp = new Date(2026, 0, 1, 12, 0).toISOString();
+    // The records carry the plugin's own time (the card measures its age against it); the label is that time in the local zone.
+    const stamp = new Date(pluginClock.now());
+    const timestamp = stamp.toISOString();
+    const label = `${String(stamp.getHours()).padStart(2, "0")}:${String(stamp.getMinutes()).padStart(2, "0")}`;
     appendFileSync(agent, line({ ...assistantText("Looking", "tool_use", "s1"), isSidechain: true, timestamp }));
-    await waitFor(() => sent().length === 1, 3000, "card");
-    expect(sent()[0]).toEqual({ text: "🤖 Explore\nFind it\n⏳ 0 s · 0 actions\n\n[12:00] Looking", silent: true, topic: 100 });
-    appendFileSync(agent, line({ ...assistantText("Found", "end_turn", "s2"), isSidechain: true, timestamp }));
-    await waitFor(() => fake.callsOf("editMessageText").some(c => /✅ \d+ s · \d+ actions?/.test(String(c.text))), 3000, "final edit");
-    expect(String(fake.callsOf("editMessageText").at(-1)?.text)).toEndWith("[12:00] Looking\n\n[12:00] Found");
+    await waitForTime(() => sent().length === 1, 3000, "card");
+    expect(sent()[0]).toEqual({ text: `🤖 Explore\nFind it\n⏳ 0 s · 0 actions\n\n[${label}] Looking`, silent: true, topic: 100 });
+    appendFileSync(agent, line({ ...assistantText("Found", "end_turn", "s2"), isSidechain: true, timestamp: new Date(pluginClock.now()).toISOString() }));
+    // A finished agent's card is closed once it has been quiet for the settle time.
+    await pluginClock.advance(SUBAGENT_SETTLE_MS);
+    await waitForTime(() => fake.callsOf("editMessageText").some(c => /✅ \d+ s · \d+ actions?/.test(String(c.text))), 3000, "final edit");
+    expect(String(fake.callsOf("editMessageText").at(-1)?.text)).toMatch(/\[\d\d:\d\d\] Looking\n\n\[\d\d:\d\d\] Found$/);
     expect(sent().length).toBe(1);
   });
 
@@ -581,7 +668,8 @@ describe("PluginCore", () => {
     const dir = join(transcript.replace(/\.jsonl$/, ""), "subagents");
     mkdirSync(dir, { recursive: true });
     appendFileSync(join(dir, "agent-a1.jsonl"), line({ ...assistantText("Looking", "end_turn", "s1"), isSidechain: true }));
-    await Bun.sleep(200);
+    await pluginClock.advance(SUBAGENT_SCAN_MS);
+    await flushed();
     expect(sent()).toEqual([]);
   });
 
@@ -668,7 +756,7 @@ describe("PluginCore", () => {
     append(assistantText("\u0432 \u0441\u0442\u0430\u0440\u043e\u0439 \u0441\u0435\u0441\u0441\u0438\u0438", "end_turn"));
     await stopHook(false);
     await waitFor(() => sent().length === 1, 3000, "message");
-    await Bun.sleep(150);
+    await flushed();
     expect(sent()).toEqual([{ text: "\u0432 \u043d\u043e\u0432\u043e\u0439 \u0441\u0435\u0441\u0441\u0438\u0438", silent: true, topic: 101 }]);
   });
 
@@ -685,7 +773,13 @@ describe("PluginCore", () => {
   test("shutdown sends text written just before the window closed", async () => {
     const c = await enabledCore();
     append(assistantText("\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u0435 \u0441\u043b\u043e\u0432\u043e", "end_turn", "z1"));
-    await c.shutdown(2000);
+    let finished = false;
+    const closing = c.shutdown(SHUTDOWN_LONG_MS).then(() => void (finished = true));
+    await waitForReal(async () => {
+      await pluginClock.advance(DRAIN_POLL_MS);
+      return finished;
+    }, 3000, "shutdown");
+    await closing;
     core = undefined;
     await waitFor(() => sent().length === 1, 3000, "last words");
     expect(sent()).toEqual([{ text: "\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u0435 \u0441\u043b\u043e\u0432\u043e", silent: true, topic: 100 }]);
@@ -697,7 +791,9 @@ describe("PluginCore", () => {
     await hub.stop();
     await waitFor(() => pluginLog.lines.some(l => l.includes("hub connection lost")), 3000, "connection lost");
     append(assistantText("\u0431\u0435\u0437 \u0445\u0430\u0431\u0430", "end_turn", "y1"));
-    await c.shutdown(300);
+    const closing = c.shutdown(SHUTDOWN_DOWN_MS);
+    await pluginClock.advance(SHUTDOWN_DOWN_MS);
+    await closing;
     core = undefined;
     const files = readdirSync(spoolDir).filter(f => f.endsWith(".json"));
     expect(files.length).toBe(1);
@@ -764,7 +860,7 @@ describe("a turn ended by a failed connection to the API", () => {
     const c = makeCore();
     await waitFor(() => hub.isConnected(SID), 3000, "plugin connected");
     append(...cut());
-    await Bun.sleep(300);
+    await flushed();
     expect(c.enabled).toBe(false);
     expect(channel).toEqual([]);
   });
@@ -903,14 +999,20 @@ describe("tg_send_file", () => {
   test("when Telegram does not answer in time the files stay queued and the agent is told so", async () => {
     const c = await enabledCore();
     fake.hangNext("sendDocument", 1000);
-    expect(await c.sendFiles([file("a.txt")])).toContain("queued");
+    const sending = c.sendFiles([file("a.txt")]);
+    await pluginClock.advance(FILE_WAIT_MS);
+    expect(await sending).toContain("queued");
   });
 
   test("a rejection after the call returned reaches the agent, not the topic", async () => {
     const c = await enabledCore();
-    fake.delayNext("sendDocument", 3500);
+    const release = fake.holdNext("sendDocument");
     fake.failNext("sendDocument", { code: 413, description: "Request Entity Too Large" });
-    expect(await c.sendFiles([file("a.txt")])).toContain("queued");
+    const sending = c.sendFiles([file("a.txt")]);
+    await waitFor(() => fake.callsOf("sendDocument").length === 1, 3000, "the held send");
+    await pluginClock.advance(FILE_WAIT_MS);
+    expect(await sending).toContain("queued");
+    release();
     await waitFor(() => channel.length === 1, 3000, "rejection prompt");
     expect(channel[0]).toEqual({ content: filesRejectedPrompt("a.txt: Request Entity Too Large"), meta: { user: "telegram-hub", reason: "files_rejected" } });
     expect(sent()).toEqual([]);

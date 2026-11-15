@@ -104,6 +104,14 @@ function windowsOf(port: number): Set<WindowSent> {
   return created;
 }
 
+// Counts a window that is not a `wsClient` (a real plugin core) so `settled` waits for its traffic too; returns the undo.
+export function trackWindow(port: number, entry: { traffic(): { sent: number; received: number; open: boolean } }): () => void {
+  const open = windowsOf(port);
+  const window: WindowSent = { sent: () => entry.traffic().sent, received: () => entry.traffic().received, isOpen: () => entry.traffic().open };
+  open.add(window);
+  return () => void open.delete(window);
+}
+
 // HTTP requests a test sent to each hub through `hubFetch` (per hub object: a hub restarted on a port counts from zero).
 const requestsByHub = new WeakMap<object, number>();
 

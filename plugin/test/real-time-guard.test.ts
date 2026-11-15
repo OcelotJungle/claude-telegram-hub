@@ -14,22 +14,15 @@ const TEST_ALLOWED: Record<string, Allowed> = {
   "helpers.ts": { count: 1, reason: "waitFor, the polling primitive of every wait for a condition" },
   "fake-telegram.ts": { count: 2, reason: "the fake server's own latency: a long-poll that waits for updates, and delayNext" },
   "manual-clock.ts": { count: 1, reason: "makes a unique timer handle and cancels it at once; nothing waits" },
+  "election.test.ts": { count: 1, reason: "a real hub process must outlive its own idle limit with plugins connected; its timer is in another process" },
+  "packaging.test.ts": { count: 2, reason: "a slow reader against a real OS pipe, and a child process that stays alive in the packaged-hook scenario" },
   "launch.test.ts": { count: 2, reason: "makes a timer handle for an injected timer that never fires; nothing waits" },
+  "hub.test.ts": { count: 1, reason: "a real ping process runs for seconds while the hub must not exit idle; the process end is the subject" },
 };
 
 // Files that still wait on real time and are to be converted, one at a time, with the number of uses left.
 // A converted file leaves this list; a count only goes down.
 const TO_CONVERT: Record<string, number> = {
-  "election.test.ts": 2,
-  "exec-runner.test.ts": 2,
-  "exec.test.ts": 8,
-  "hub.test.ts": 72,
-  "mod.test.ts": 5,
-  "packaging.test.ts": 2,
-  "plugin.test.ts": 17,
-  "skill-cleanup.test.ts": 1,
-  "tail.test.ts": 1,
-  "telegram.test.ts": 3,
 };
 
 // Raw clock uses in the source that are not a wait the Timers shape could carry, and why.

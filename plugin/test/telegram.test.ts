@@ -6,10 +6,28 @@ import { basename, join } from "path";
 import { isThreadNotFound, TelegramApi, TelegramError } from "../src/hub/telegram.ts";
 import { field } from "../src/shared/guards.ts";
 import { FakeTelegram, topicMsg } from "./fake-telegram.ts";
-import { tempDir } from "./helpers.ts";
+import { tempDir, waitFor } from "./helpers.ts";
+import { manualClock } from "./manual-clock.ts";
+
+const RETRY_AFTER_MS = 1000;
 
 let fake: FakeTelegram;
 let api: TelegramApi;
+
+// An api on a manual clock; `sleeps` lists the waits it has put on that clock so far.
+function clockedApi() {
+  const clock = manualClock();
+  const sleeps: number[] = [];
+  const timers = {
+    ...clock,
+    sleep: (ms: number) => {
+      sleeps.push(ms);
+      return clock.sleep(ms);
+    },
+  };
+  const clocked = new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 3, timers });
+  return { api: clocked, clock, sleeps };
+}
 
 beforeEach(() => {
   fake = new FakeTelegram();
@@ -36,35 +54,42 @@ describe("TelegramApi", () => {
 
   test("after a 429 the other calls to chats wait out retry_after too", async () => {
     fake.failNext("sendMessage", { code: 429, description: "Too Many Requests: retry after 1", retry_after: 1 });
-    const started = Date.now();
-    const send = api.sendMessage("-100", 7, "hi", true);
-    await Bun.sleep(100);
-    expect(api.floodEndsAt()).toBeGreaterThan(Date.now());
-    await api.editMessageText("-100", 1, "edited");
-    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
-    await send;
+    const { api: flooded, clock, sleeps } = clockedApi();
+    const send = flooded.sendMessage("-100", 7, "hi", true);
+    await waitFor(() => flooded.floodEndsAt() > clock.now());
+    const edit = flooded.editMessageText("-100", 1, "edited");
+    // Both the send (its retry) and the edit (the flood) are waiting on the clock.
+    await waitFor(() => sleeps.length >= 2);
+    expect(fake.callsOf("editMessageText")).toEqual([]);
+    await clock.advance(RETRY_AFTER_MS);
+    await Promise.all([send, edit]);
     expect(fake.callsOf("editMessageText").length).toBe(1);
   });
 
   test("a call without retries fails during a flood wait without asking Telegram", async () => {
     fake.failNext("sendMessage", { code: 429, description: "Too Many Requests: retry after 1", retry_after: 1 });
-    const send = api.sendMessage("-100", 7, "hi", true);
-    await Bun.sleep(100);
-    const err = await api.sendTyping("-100", 7).catch(e => e);
+    const { api: flooded, clock, sleeps } = clockedApi();
+    const send = flooded.sendMessage("-100", 7, "hi", true);
+    await waitFor(() => sleeps.length >= 1);
+    const err = await flooded.sendTyping("-100", 7).catch(e => e);
     expect(err instanceof TelegramError && err.code).toBe(429);
     expect(fake.callsOf("sendChatAction")).toEqual([]);
-    expect(await api.getUpdates(0, 0)).toEqual([]);
+    expect(await flooded.getUpdates(0, 0)).toEqual([]);
+    await clock.advance(RETRY_AFTER_MS);
     await send;
   });
 
   test("posts and edits keep to the group's pace; other calls do not wait", async () => {
-    const paced = new TelegramApi({ token: fake.token, base: fake.url, groupPace: { count: 2, perMs: 300 } });
-    const started = Date.now();
+    const clock = manualClock();
+    const paced = new TelegramApi({ token: fake.token, base: fake.url, groupPace: { count: 2, perMs: 300 }, timers: clock });
     const posts = [paced.sendMessage("-100", 7, "1", true), paced.editMessageText("-100", 1, "2"), paced.sendMessage("-100", 7, "3", true)];
     await paced.sendTyping("-100", 7);
-    expect(Date.now() - started).toBeLessThan(250);
+    // The typing call went through and the two posts within the pace; the third post waits for the clock.
+    await waitFor(() => fake.callsOf("sendMessage").length + fake.callsOf("editMessageText").length >= 2);
+    expect(fake.callsOf("sendMessage").length + fake.callsOf("editMessageText").length).toBe(2);
+    await clock.advance(300);
     await Promise.all(posts);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(280);
+    expect(fake.callsOf("sendMessage").length).toBe(2);
   });
 
   test("failed attempts of a call do not use up the pace", async () => {
@@ -77,8 +102,14 @@ describe("TelegramApi", () => {
   });
 
   test("a send waiting for the pace goes before a waiting edit", async () => {
-    const paced = new TelegramApi({ token: fake.token, base: fake.url, groupPace: { count: 1, perMs: 150 } });
-    await Promise.all([paced.sendMessage("-100", 7, "a", true), paced.editMessageText("-100", 1, "e"), paced.sendMessage("-100", 7, "b", true)]);
+    const clock = manualClock();
+    const paced = new TelegramApi({ token: fake.token, base: fake.url, groupPace: { count: 1, perMs: 150 }, timers: clock });
+    const posts = Promise.all([paced.sendMessage("-100", 7, "a", true), paced.editMessageText("-100", 1, "e"), paced.sendMessage("-100", 7, "b", true)]);
+    for (const reached of [1, 2]) {
+      await waitFor(() => fake.calls.length >= reached);
+      await clock.advance(150);
+    }
+    await posts;
     expect(fake.calls.map(c => c.method)).toEqual(["sendMessage", "sendMessage", "editMessageText"]);
   });
 
@@ -160,7 +191,7 @@ describe("TelegramApi", () => {
 
   test("getUpdates long-polls until an update arrives", async () => {
     const p = api.getUpdates(0, 2);
-    await Bun.sleep(50);
+    await waitFor(() => fake.callsOf("getUpdates").length > 0);
     fake.pushUpdate(topicMsg({ chatId: -100, threadId: 7, fromId: 1, text: "yo" }));
     const updates = await p;
     expect(updates.length).toBe(1);

@@ -103,7 +103,8 @@ describe("hub election", () => {
     a.c.enqueue("a", "first", false);
     a.c.enqueue("a", "second", true);
     await waitFor(() => fake.texts().length >= 2, 10_000, "messages delivered");
-    await Bun.sleep(300);
+    // Everything acked: the client has nothing left to send again.
+    await waitFor(() => a.c.unacked.length === 0, 5000, "all acked");
     expect(fake.texts().map(p => [p.text, p.disable_notification])).toEqual([
       ["first", true],
       ["second", false],

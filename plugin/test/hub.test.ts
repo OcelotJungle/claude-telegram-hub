@@ -49,15 +49,16 @@ const LAUNCH_TIMEOUT_S = 30;
 // How long a test hub waits for windows before it delivers results of runs
 // that ended while it was off.
 const EXEC_GRACE_MS = 300;
+// How often a test hub looks at the exit files of running commands, and how often it redraws their cards.
+const EXEC_CHECK_MS = 20;
+const EXEC_CARD_MS = 100;
 // A grace long enough to end a run and connect a window inside it.
 const LONG_GRACE_MS = 2000;
 // Topic messages that come together go as one; a short quiet window keeps
 // the other tests quick.
 const BATCH_QUIET_MS = 5;
 const READY_DELAY_MS = 50;
-// Time for the hub to take in a sent question's message id: only messages
-// after it answer the question. A slow send keeps a question unsent.
-const SHOWN_MS = 50;
+// A slow send keeps a question unsent.
 const SLOW_SEND_MS = 300;
 // Telegram takes at most this many characters in one message.
 const TELEGRAM_LIMIT = 4096;
@@ -65,6 +66,18 @@ const TELEGRAM_LIMIT = 4096;
 // it waits briefly by default; the catch-up tests pick their own wait.
 const CATCH_UP_MS = 20;
 const SHORT_CATCH_UP_MS = 150;
+// A steady stream of topic messages: its quiet window outlasts the stream, so only the age cap sends a part of it.
+const STREAM_QUIET_MS = 1000;
+const STREAM_MAX_MS = 300;
+const STREAM_STEP_MS = 100;
+// How long the hub waits before it shows ✍ on a message the agent has not reported seen.
+const REACTION_DELAY_MS = 300;
+// Subagent card edits: the delay after a card's last edit, and the gap between edits of different cards.
+const CARD_EDIT_MS = 50;
+const CARD_GAP_MS = 300;
+const CARD_THROTTLE_MS = 400;
+// How often the hub renews "typing" for a busy window.
+const TYPING_EVERY_MS = 4000;
 const LONG_CATCH_UP_MS = 2000;
 
 let fake: FakeTelegram;
@@ -148,8 +161,8 @@ async function startHub(o: StartOptions = {}): Promise<void> {
     defaultAccount: o.defaultAccount ?? (async () => undefined),
     execDir: join(dir, "exec"),
     execsFile: join(dir, "execs.json"),
-    execCheckMs: 20,
-    execCardMs: 100,
+    execCheckMs: EXEC_CHECK_MS,
+    execCardMs: EXEC_CARD_MS,
     ...(o.spawnRunner ? { spawnRunner: o.spawnRunner } : {}),
     ...(o.execFileLimit ? { execFileLimit: o.execFileLimit } : {}),
     execGraceMs: o.execGraceMs ?? EXEC_GRACE_MS,
@@ -164,6 +177,37 @@ async function startHub(o: StartOptions = {}): Promise<void> {
 
 // Resolves when the hub has handled everything sent so far: use it instead of a sleep before "nothing happened".
 const settle = () => settled(hub, { fake });
+
+type Clock = ReturnType<typeof manualClock>;
+
+// A test that drives a hub timer runs the hub on a manual clock; every clock is disposed after its test.
+const clocks: Clock[] = [];
+function newClock(): Clock {
+  const clock = manualClock();
+  clocks.push(clock);
+  return clock;
+}
+
+// On a manual clock a topic message waits in its batch until the quiet window passes: wait for the batch, then close it.
+async function closeBatch(clock: Clock, quietMs = BATCH_QUIET_MS): Promise<void> {
+  await waitFor(() => hub.busy().includes("message batches"), WAIT_MS, "the batch opened");
+  await clock.advance(quietMs);
+}
+
+// On a manual clock a window that connects gets the results it missed only after the ready delay. The hub arms it in the same step that answers the window's hello, so a window that has its "state" back has it armed.
+async function passReadyDelay(clock: Clock): Promise<void> {
+  await clock.advance(READY_DELAY_MS);
+}
+
+// For a hub that has work waiting on something outside it (a /cleanup waiting for Claude Code to exit), so `settle` cannot resolve: wait until the hub has handled every update pushed so far (the poller confirms an update only after handling it).
+async function updatesHandled(): Promise<void> {
+  await waitFor(() => fake.unconfirmedUpdates === 0, WAIT_MS, "the pushed updates handled");
+}
+
+// On a manual clock the batches stay open: wait until the hub has taken every update pushed so far and only open batches or their sends remain.
+async function updatesTaken(): Promise<void> {
+  await waitFor(() => fake.unconfirmedUpdates === 0 && hub.busy().every(part => part === "message batches"), WAIT_MS, "the pushed updates taken");
+}
 
 const PROFILE = "C:\\Users\\me\\.claude-swap-backup\\sessions\\2-me_gmail.com";
 const hello = (sessionId: string, windowKey = `win-${sessionId}`) => ({ type: "hello", v: PROTOCOL_VERSION, windowKey, sessionId, cwd: CWD, configDir: PROFILE, reportsSeen: true });
@@ -200,6 +244,7 @@ beforeEach(() => {
 afterEach(async () => {
   for (const c of clients.splice(0)) c.close();
   await hub?.stop();
+  for (const clock of clocks.splice(0)) clock.dispose();
   fake.stop();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -439,7 +484,7 @@ describe("interactive windows", () => {
   test("a busy interactive window with no topic yet shows no typing and does not break", async () => {
     await startHub();
     const c = await connect({ ...cliHello("s1"), busy: true });
-    await Bun.sleep(150);
+    await settle();
     expect(fake.callsOf("sendChatAction")).toEqual([]);
     c.send({ type: "send", id: "x1", text: "\u0433\u043e\u0442\u043e\u0432\u043e", notify: false });
     await waitFor(() => fake.texts().length === 1, 3000, "the message");
@@ -475,13 +520,17 @@ describe("inbound", () => {
   });
 
   test("a message the agent has at once never wears ✍", async () => {
-    await startHub({ reactionDelayMs: 300 });
+    const clock = newClock();
+    await startHub({ reactionDelayMs: REACTION_DELAY_MS, timers: clock });
     const a = await enabled("a");
     const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "\u043f\u0440\u0438\u0432\u0435\u0442" });
     fake.pushUpdate(u);
-    await a.nextNew("inbound");
+    await closeBatch(clock);
+    await a.next("inbound");
     a.send({ type: "seen", messageIds: [u.message?.message_id] });
-    await Bun.sleep(500);
+    await settle();
+    await clock.advance(REACTION_DELAY_MS * 2);
+    await settle();
     expect(fake.callsOf("setMessageReaction")).toEqual([]);
   });
 
@@ -513,16 +562,19 @@ describe("inbound", () => {
   });
 
   test("the topic of a busy agent shows typing until its turn ends", async () => {
-    await startHub();
+    const clock = newClock();
+    await startHub({ typingEveryMs: TYPING_EVERY_MS, timers: clock });
     const a = await enabled("a");
     a.send({ type: "busy", busy: true });
-    await waitFor(() => fake.callsOf("sendChatAction").length >= 2);
+    await waitFor(() => fake.callsOf("sendChatAction").length === 1);
+    await clock.advance(TYPING_EVERY_MS);
+    await waitFor(() => fake.callsOf("sendChatAction").length === 2);
     expect(fake.callsOf("sendChatAction")[0]).toEqual({ chat_id: GROUP, message_thread_id: 100, action: "typing" });
     a.send({ type: "busy", busy: false });
-    await Bun.sleep(100);
-    const shown = fake.callsOf("sendChatAction").length;
-    await Bun.sleep(200);
-    expect(fake.callsOf("sendChatAction").length).toBe(shown);
+    await settle();
+    await clock.advance(TYPING_EVERY_MS * 3);
+    await settle();
+    expect(fake.callsOf("sendChatAction").length).toBe(2);
   });
 
   // Some networks let few new connections through: parallel requests hang,
@@ -531,11 +583,14 @@ describe("inbound", () => {
     await startHub({ typingEveryMs: 60_000 });
     const a = await enabled("a");
     const b = await enabled("b");
-    fake.delayNext("sendChatAction", 300);
+    const release = fake.holdNext("sendChatAction");
     a.send({ type: "busy", busy: true });
+    await waitFor(() => fake.callsOf("sendChatAction").length === 1);
     b.send({ type: "busy", busy: true });
-    await Bun.sleep(150);
+    // The window's later request is answered after its busy message, so the hub has taken b's by now.
+    expect((await req(b, { op: "enable", title: "Title" })).ok).toBe(true);
     expect(fake.callsOf("sendChatAction").length).toBe(1);
+    release();
     await waitFor(() => fake.callsOf("sendChatAction").length === 2);
     expect(new Set(fake.callsOf("sendChatAction").map(c => c.message_thread_id)).size).toBe(2);
   });
@@ -557,7 +612,7 @@ describe("inbound", () => {
     const a = await enabled("a");
     await req(a, { op: "disable" });
     a.send({ type: "busy", busy: true });
-    await Bun.sleep(200);
+    await settle();
     expect(fake.callsOf("sendChatAction")).toEqual([]);
   });
 
@@ -570,22 +625,28 @@ describe("inbound", () => {
   });
 
   test("a window whose plugin cannot report seen messages gets no ✍ that would never come off", async () => {
-    await startHub();
+    const clock = newClock();
+    await startHub({ reactionDelayMs: REACTION_DELAY_MS, timers: clock });
     const old = await wsClient(port, { ...hello("a"), reportsSeen: undefined });
     clients.push(old);
     await old.next("state");
     expect((await req(old, { op: "enable", title: "T" })).ok).toBe(true);
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "\u043f\u0440\u0438\u0432\u0435\u0442" }));
-    await old.nextNew("inbound");
-    await Bun.sleep(100);
+    await closeBatch(clock);
+    await old.next("inbound");
+    await clock.advance(REACTION_DELAY_MS * 2);
+    await settle();
     expect(fake.callsOf("setMessageReaction")).toEqual([]);
   });
 
   test("a command for the plugin wears no ✍", async () => {
-    await startHub();
+    const clock = newClock();
+    await startHub({ reactionDelayMs: REACTION_DELAY_MS, timers: clock });
     await enabled("a");
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "/info" }));
-    await Bun.sleep(200);
+    await settle();
+    await clock.advance(REACTION_DELAY_MS * 2);
+    await settle();
     expect(fake.callsOf("setMessageReaction")).toEqual([]);
   });
 
@@ -706,7 +767,7 @@ describe("batching", () => {
     expect(parts[0].startsWith(`look (photo: ${join(dir, "inbox")}`)).toBe(true);
     for (const p of parts.slice(1)) expect(p.startsWith(`(photo: ${join(dir, "inbox")}`)).toBe(true);
     expect(inbound.meta.image_path).toBeUndefined();
-    await Bun.sleep(100);
+    await settle();
     expect(inbounds(a).length).toBe(1);
   });
 
@@ -714,7 +775,7 @@ describe("batching", () => {
     await startHub();
     const a = await enabled("a");
     a.send({ type: "busy", busy: true });
-    await Bun.sleep(50);
+    await settle();
     for (const id of ["B1", "B2"]) fake.files.set(id, { path: `photos/${id}.jpg`, body: new Uint8Array([1]) });
     const photo = (id: string) => [{ file_id: id, file_unique_id: id }];
     fake.pushUpdate(msg(undefined, { caption: "!x", photo: photo("B1") }));
@@ -735,11 +796,16 @@ describe("batching", () => {
   });
 
   test("a message after the quiet window is a notification of its own", async () => {
-    await startHub({ batchQuietMs: 30 });
+    const clock = newClock();
+    await startHub({ timers: clock });
     const a = await enabled("a");
     fake.pushUpdate(msg("one"));
-    await Bun.sleep(150);
+    await updatesTaken();
+    await clock.advance(BATCH_QUIET_MS);
+    await waitFor(() => inbounds(a).length === 1);
     fake.pushUpdate(msg("two"));
+    await updatesTaken();
+    await clock.advance(BATCH_QUIET_MS);
     await waitFor(() => inbounds(a).length === 2);
     expect(inbounds(a)).toEqual(["one", "two"]);
   });
@@ -747,17 +813,20 @@ describe("batching", () => {
   test("a steady stream is sent once the batch is old enough", async () => {
     // The quiet window outlasts the whole stream, so only the cap can send a
     // part of it before the stream ends.
-    await startHub({ batchQuietMs: 1000, batchMaxMs: 300 });
+    const clock = newClock();
+    await startHub({ batchQuietMs: STREAM_QUIET_MS, batchMaxMs: STREAM_MAX_MS, timers: clock });
     const a = await enabled("a");
     const texts = Array.from({ length: 8 }, (_, i) => `m${i}`);
-    let sentAfter: number | undefined;
     for (const [i, t] of texts.entries()) {
       fake.pushUpdate(msg(t));
-      await Bun.sleep(100);
-      if (sentAfter === undefined && inbounds(a).length > 0) sentAfter = i;
+      await updatesTaken();
+      // The batch of m0..m2 is as old as the cap at the end of the third step.
+      if (i === 1) expect(inbounds(a)).toEqual([]);
+      await clock.advance(STREAM_STEP_MS);
     }
-    expect(sentAfter).toBeDefined();
-    expect(String(inbounds(a)[0])).not.toContain("m7");
+    await waitFor(() => inbounds(a).length >= 1);
+    expect(inbounds(a)[0]).toBe("m0\n\nm1\n\nm2");
+    await clock.advance(STREAM_QUIET_MS);
     await waitFor(() => inbounds(a).join("\n\n") === texts.join("\n\n"), 3000, "the whole stream");
   });
 
@@ -797,7 +866,7 @@ describe("batching", () => {
     fake.pushUpdate(msg("a"));
     fake.pushUpdate(msg("!b", { forward_origin: { type: "hidden_user", date: 0, sender_user_name: "X" } }));
     await waitFor(() => inbounds(a).length === 1);
-    await Bun.sleep(50);
+    await settle();
     expect(inbounds(a)).toEqual(["a\n\n[forwarded from X]\n!b"]);
     expect(flags(a)).toEqual([undefined]);
   });
@@ -952,7 +1021,7 @@ describe("send", () => {
     await waitFor(() => fake.callsOf("editForumTopic").length === 1);
     expect(fake.callsOf("editForumTopic")[0]).toMatchObject({ name: `${projectName(CWD)} · New` });
     a.send({ type: "title", title: "New" });
-    await Bun.sleep(100);
+    await settle();
     expect(fake.callsOf("editForumTopic").length).toBe(1);
   });
 
@@ -964,7 +1033,7 @@ describe("send", () => {
     expect(fake.texts()[0]).toMatchObject({ text: "🔐 Confirmation needed: Bash", disable_notification: false });
     await req(a, { op: "disable" });
     a.send({ type: "permission", toolName: "Bash", description: "again" });
-    await Bun.sleep(100);
+    await settle();
     expect(fake.texts().length).toBe(1);
   });
 
@@ -1057,7 +1126,7 @@ describe("delivery", () => {
     fake.hangNext("sendMessage", 6);
     a.send({ type: "send", id: "x1", text: "patience", notify: false });
     await waitFor(() => fake.texts().length === 7, 8000, "delivered after the hangs");
-    await Bun.sleep(100);
+    await settle();
     expect(fake.texts().length).toBe(7);
   });
 
@@ -1083,7 +1152,7 @@ describe("delivery", () => {
     await a.next("ack", m => m.id === "x1");
     a.send({ type: "send", id: "x1", text: "once", notify: false });
     await waitFor(() => a.messages.filter(m => m.type === "ack" && m.id === "x1").length === 2);
-    await Bun.sleep(100);
+    await settle();
     expect(texts()).toEqual(["once"]);
   });
 
@@ -1113,14 +1182,18 @@ describe("delivery", () => {
   });
 
   test("the hub does not exit while its queue is not delivered", async () => {
-    await startHub({ idleMs: 100 });
+    const clock = newClock();
+    await startHub({ idleMs: IDLE_MS, timers: clock });
     const a = await enabled("a");
-    fake.hangNext("sendMessage", 4);
+    const release = fake.holdNext("sendMessage");
     a.send({ type: "send", id: "x1", text: "last words", notify: true });
     await a.next("ack", m => m.id === "x1");
     a.close();
-    await Bun.sleep(400);
+    await waitFor(() => !hub.isConnected("a"));
+    await clock.advance(IDLE_MS);
+    await waitFor(() => log.lines.some(l => l.includes("exiting once 1 queued")), WAIT_MS, "the idle time passed with the queue undelivered");
     expect(exited).toBe(false);
+    release();
     await waitFor(() => exited, 8000, "exit after delivery");
     expect(texts().at(-1)).toBe("last words");
     expect(log.lines.some(l => l.includes("queued"))).toBe(true);
@@ -1664,7 +1737,7 @@ describe("subagent cards", () => {
     await waitFor(() => fake.callsOf("editMessageText").length === 1);
     expect(fake.callsOf("editMessageText")[0]).toMatchObject({ chat_id: GROUP, message_id: id, text: "🤖 Explore\n✅ done" });
     a.send(card("x-0", "🤖 **Explore**\n✅ done", true));
-    await Bun.sleep(150);
+    await settle();
     expect(fake.texts().length).toBe(1);
     expect(fake.callsOf("editMessageText").length).toBe(1);
   });
@@ -1719,11 +1792,13 @@ describe("subagent cards", () => {
     a.send(card("x-0", "first", true));
     await waitFor(() => fake.texts().length === 1);
     const previousMessageId = fake.lastMessageId;
-    fake.hangNext("sendMessage");
+    // The blocker's send is received and never answered, so the card stays queued behind it.
+    fake.holdNext("sendMessage");
     a.send({ type: "send", id: "blocker", sessionId: "a", text: "wait", notify: false });
-    await Bun.sleep(50);
+    await waitFor(() => fake.callsOf("sendMessage").length === 2, WAIT_MS, "the blocker's send");
     a.send({ ...card("x-1", "continued"), replyTo: "x-0" });
-    await Bun.sleep(50);
+    // The plugin's messages are handled in order: the answer means the card is queued.
+    await req(a, { op: "enable", title: "Title" });
     await hub.stop();
     await startHub();
     await enabled("a");
@@ -1743,6 +1818,8 @@ describe("subagent cards", () => {
     const x = fake.lastMessageId;
     a.send(card("y-0", "done", true));
     await waitFor(() => fake.texts().length === 2);
+    // The hub records a sent card's message id and its end only once Telegram's answer is handled.
+    await settle();
     await hub.stop();
     await startHub();
     const b = await enabled("a");
@@ -1751,7 +1828,7 @@ describe("subagent cards", () => {
     expect(fake.callsOf("editMessageText")[0]).toMatchObject({ message_id: x, text: "v2" });
     // A finished card stays finished.
     b.send(card("y-0", "late", true));
-    await Bun.sleep(150);
+    await settle();
     expect(fake.texts().length).toBe(2);
     expect(fake.callsOf("editMessageText").map(c => c.message_id)).toEqual([x]);
   });
@@ -1766,7 +1843,7 @@ describe("subagent cards", () => {
     a.send(card("y-0", "Another card", true));
     await waitFor(() => fake.texts().length === 2);
     a.send({ ...card("x-0", "Ignored late version"), reopen: false });
-    await Bun.sleep(SHOWN_MS);
+    await settle();
     expect(fake.callsOf("editMessageText")).toEqual([]);
     a.send({ ...card("x-0", "Earlier question\nContinuation"), reopen: true });
     await waitFor(() => fake.callsOf("editMessageText").length === 1);
@@ -1780,7 +1857,7 @@ describe("subagent cards", () => {
     await waitFor(() => fake.callsOf("editMessageText").length === 2);
     expect(fake.callsOf("editMessageText")[1]).toMatchObject({ message_id: id, text: "Continuation final" });
     b.send(card("x-0", "Ignored after final"));
-    await Bun.sleep(SHOWN_MS);
+    await settle();
     expect(fake.callsOf("editMessageText").length).toBe(2);
   });
 
@@ -1794,29 +1871,48 @@ describe("subagent cards", () => {
   });
 
   test("edits are throttled, and only the latest version goes", async () => {
-    await startHub({ cardEditMs: 400 });
+    const clock = newClock();
+    await startHub({ cardEditMs: CARD_THROTTLE_MS, timers: clock });
     const a = await enabled("a");
     a.send(card("x-0", "v1"));
     await waitFor(() => fake.texts().length === 1);
     a.send(card("x-0", "v2"));
     a.send(card("x-0", "v3"));
     a.send(card("x-0", "v4"));
-    await Bun.sleep(150);
+    await settle();
+    await clock.advance(CARD_THROTTLE_MS - 1);
+    await settle();
     expect(fake.callsOf("editMessageText")).toEqual([]);
-    await waitFor(() => fake.callsOf("editMessageText").length === 1, 2000);
-    await Bun.sleep(100);
+    await clock.advance(1);
+    await waitFor(() => fake.callsOf("editMessageText").length === 1);
+    await settle();
+    await clock.advance(CARD_THROTTLE_MS);
+    await settle();
     expect(fake.callsOf("editMessageText").map(c => c.text)).toEqual(["v4"]);
   });
 
   test("edits of many cards share one pace", async () => {
-    await startHub({ cardGapMs: 300 });
+    const clock = newClock();
+    await startHub({ cardGapMs: CARD_GAP_MS, cardEditMs: CARD_EDIT_MS, timers: clock });
     const a = await enabled("a");
     for (const id of ["x-0", "y-0", "z-0"]) a.send(card(id, `${id} v1`));
     await waitFor(() => fake.texts().length === 3);
+    await settle();
     for (const id of ["x-0", "y-0", "z-0"]) a.send(card(id, `${id} v2`));
-    await Bun.sleep(400);
-    expect(fake.callsOf("editMessageText").length).toBeLessThanOrEqual(2);
-    await waitFor(() => fake.callsOf("editMessageText").length === 3, 3000);
+    await settle();
+    // The edits take slots one gap apart: at the edit delay, then a gap later, then another gap later.
+    await clock.advance(CARD_EDIT_MS);
+    await waitFor(() => fake.callsOf("editMessageText").length === 1);
+    await clock.advance(CARD_GAP_MS - 1);
+    await settle();
+    expect(fake.callsOf("editMessageText").length).toBe(1);
+    await clock.advance(1);
+    await waitFor(() => fake.callsOf("editMessageText").length === 2);
+    await clock.advance(CARD_GAP_MS - 1);
+    await settle();
+    expect(fake.callsOf("editMessageText").length).toBe(2);
+    await clock.advance(1);
+    await waitFor(() => fake.callsOf("editMessageText").length === 3);
   });
 
   test("card edits wait while the session's text is being delivered", async () => {
@@ -1826,7 +1922,7 @@ describe("subagent cards", () => {
     await waitFor(() => fake.texts().length === 1);
     fake.hangNext("sendMessage", 3);
     a.send({ type: "send", id: "t1", sessionId: "a", text: "urgent", notify: false });
-    await Bun.sleep(100);
+    await waitFor(() => fake.callsOf("sendMessage").length === 2, WAIT_MS, "the first attempt of the text");
     a.send(card("x-0", "v2"));
     // The card's own send and four attempts of the text.
     await waitFor(() => fake.callsOf("sendMessage").length === 5 && fake.callsOf("editMessageText").length === 1, 5000);
@@ -1844,7 +1940,7 @@ describe("subagent cards", () => {
     await waitFor(() => fake.texts().some(t => t.text === "v2"), 5000);
     // The hung send of "before" is retried, the card goes after it.
     expect([...new Set(fake.texts().map(t => t.text))]).toEqual(["before", "v2"]);
-    await Bun.sleep(150);
+    await settle();
     expect(fake.callsOf("editMessageText")).toEqual([]);
   });
 
@@ -1865,7 +1961,7 @@ describe("subagent cards", () => {
     await startHub();
     const a = await plugin("a");
     a.send(card("x-0", "v1"));
-    await Bun.sleep(150);
+    await settle();
     expect(fake.texts()).toEqual([]);
   });
 });
@@ -1895,7 +1991,7 @@ describe("starting and stopping sessions", () => {
     fake.pushUpdate(msg("first"));
     await waitFor(() => texts().includes("🚀 Starting the session (account 2)…"));
     fake.pushUpdate(msg("second"));
-    await Bun.sleep(150);
+    await settle();
     expect(spawned).toEqual([["wt.exe", "-d", CWD, "cswap.exe", "run", "2", "--", "--resume", SID]]);
     const w = await plugin(SID);
     // Held messages go together as one notification.
@@ -1945,7 +2041,7 @@ describe("starting and stopping sessions", () => {
     await waitFor(() => fake.callsOf("editMessageText").length === 1);
     expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: notice, text: "✅ Session started" }]);
     await w.next("inbound");
-    await Bun.sleep(100);
+    await settle();
     expect(texts().filter(t => /[Ss]ession/.test(t))).toEqual(["🚀 Starting the session (account 2)…"]);
     expect(fake.callsOf("deleteMessage")).toEqual([]);
     w.send({ type: "busy", busy: true });
@@ -1954,7 +2050,7 @@ describe("starting and stopping sessions", () => {
     // Only once.
     w.send({ type: "busy", busy: false });
     w.send({ type: "busy", busy: true });
-    await Bun.sleep(100);
+    await settle();
     expect(fake.callsOf("deleteMessage").length).toBe(1);
   });
 
@@ -1976,7 +2072,7 @@ describe("starting and stopping sessions", () => {
     await plugin(SID);
     // Failed attempts are among the calls too: the first said "starting".
     await waitFor(() => fake.callsOf("sendMessage").length === 9, 3000);
-    await Bun.sleep(100);
+    await settle();
     const notices = texts().filter(t => /[Ss]ession/.test(t));
     expect(notices[0]).toBe("🚀 Starting the session (account 2)…");
     expect(notices.at(-1)).toBe("✅ Session started");
@@ -2056,7 +2152,7 @@ describe("starting and stopping sessions", () => {
     const a = await enabled(SID);
     fake.pushUpdate(msg("one"));
     fake.pushUpdate(msg("two"));
-    await Bun.sleep(100);
+    await updatesTaken();
     a.close();
     await waitFor(() => spawned.length === 1, WAIT_MS, "session start");
     const w = await plugin(SID);
@@ -2069,7 +2165,7 @@ describe("starting and stopping sessions", () => {
     await startHub({ spawn: c => void spawned.push(c), batchQuietMs: 5000 });
     const a = await enabled(SID);
     fake.pushUpdate(msg("one"));
-    await Bun.sleep(100);
+    await updatesTaken();
     a.close();
     await waitFor(() => !hub.isConnected(SID));
     await hub.stop();
@@ -2080,7 +2176,7 @@ describe("starting and stopping sessions", () => {
     await startHub({ batchQuietMs: 400 });
     const a = await enabled(SID);
     fake.pushUpdate(msg("one"));
-    await Bun.sleep(100);
+    await updatesTaken();
     a.close();
     await waitFor(() => texts().includes("the session is not active right now"), WAIT_MS);
   });
@@ -2430,29 +2526,40 @@ describe("starting and stopping sessions", () => {
 
 describe("idle exit", () => {
   test("the hub exits after the last plugin disconnects", async () => {
-    await startHub({ idleMs: 200 });
+    const clock = newClock();
+    await startHub({ idleMs: IDLE_MS, timers: clock });
     const a = await plugin("a");
-    await Bun.sleep(350);
+    await clock.advance(IDLE_MS * 2);
     expect(exited).toBe(false);
     a.close();
-    await waitFor(() => exited, 2000, "idle exit");
+    await waitFor(() => !hub.isConnected("a"));
+    await settle();
+    await clock.advance(IDLE_MS);
+    await waitFor(() => exited, WAIT_MS, "idle exit");
   });
 
   test("a hub nobody connects to exits too", async () => {
-    await startHub({ idleMs: 150 });
-    await waitFor(() => exited, 2000, "idle exit");
+    const clock = newClock();
+    await startHub({ idleMs: IDLE_MS, timers: clock });
+    await settle();
+    await clock.advance(IDLE_MS);
+    await waitFor(() => exited, WAIT_MS, "idle exit");
   });
 
   test("with idleMs 0 or a launch command the hub stays up", async () => {
-    await startHub({ idleMs: 0 });
+    const clock = newClock();
+    await startHub({ idleMs: 0, timers: clock });
     const a = await plugin("a");
     a.close();
-    await Bun.sleep(200);
+    await waitFor(() => !hub.isConnected("a"));
+    await settle();
+    await clock.advance(IDLE_MS);
     expect(exited).toBe(false);
     await hub.stop();
     config = { ...config, launch: { command: ["x"], timeoutSec: 90 } };
-    await startHub({ idleMs: 50 });
-    await Bun.sleep(200);
+    await startHub({ idleMs: IDLE_MS, timers: clock });
+    await settle();
+    await clock.advance(IDLE_MS);
     expect(exited).toBe(false);
   });
 });
@@ -2609,7 +2716,7 @@ describe("commands", () => {
     expect(started.disable_notification).toBe(true);
     const startedId = fake.lastMessageId;
     await runner.poll();
-    await Bun.sleep(50);
+    await settle();
     expect(compacted).toStrictEqual([]);
     runner.turn(false);
     expect(fake.callsOf("editMessageText")).toEqual([]);
@@ -2923,7 +3030,7 @@ describe("commands", () => {
     expect((await post()).status).toBe(200);
     expect((await post()).status).toBe(200);
     await waitFor(() => sentText(t => t === "once"));
-    await Bun.sleep(100);
+    await settle();
     expect(fake.texts().filter(p => p.text === "once").length).toBe(1);
   });
 
@@ -2970,7 +3077,7 @@ describe("commands", () => {
       return compacted.length;
     });
     expect(compacted).toStrictEqual([undefined]);
-    await Bun.sleep(100);
+    await settle();
     expect(terminated(a)).toBe(false);
     h.release();
     await a.next("terminate");
@@ -3016,7 +3123,7 @@ describe("commands", () => {
     command("/stop");
     const waiting = await reply(runner, t => t.startsWith("⏳"));
     expect(waiting.text).toBe("⏳ I will end the session after the compaction. A second /stop ends it right away.");
-    await Bun.sleep(100);
+    await settle();
     expect(terminated(a)).toBe(false);
     usage = SMALL;
     h.release();
@@ -3104,6 +3211,8 @@ describe("commands", () => {
     const COMPACT_MS = 1200;
     // How long a window that does not end is waited for: 0.4 s.
     const STOP_MS = 400;
+    // How often a test hub looks whether Claude Code is gone: a real tick, kept short.
+    const EXIT_POLL_MS = 5;
     // A slow send, still under the test API's 300 ms attempt timeout so it
     // is not sent twice.
     const SLOW_SEND_MS = 200;
@@ -3163,7 +3272,7 @@ describe("commands", () => {
       ]);
       expect(sentText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued"))).toBeUndefined();
       await waitFor(() => sentText(t => t === "⏹ Session ended"));
-      await Bun.sleep(SETTLE_MS);
+      await settle();
       expect(spawned).toEqual([]);
       expect(fake.callsOf("deleteMessage")).toEqual([]);
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
@@ -3172,14 +3281,14 @@ describe("commands", () => {
 
     test("a message during /cleanup waits and reaches the session started again", async () => {
       let alive = true;
-      const { a, spawned } = await liveSession(SKILLS, { isAlive: () => alive });
+      const { a, spawned } = await liveSession(SKILLS, { isAlive: () => alive, exitPollMs: EXIT_POLL_MS });
       const { runner } = mod(SID);
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
       await waitFor(() => !hub.isConnected(SID));
       command("meanwhile");
-      await Bun.sleep(SETTLE_MS);
+      await updatesHandled();
       alive = false;
       const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued") && !t.endsWith("…")));
       expect(summary.text).toBe("🧹 Cleanup done, skills removed: a, b.");
@@ -3187,7 +3296,7 @@ describe("commands", () => {
       expect(spawned).toEqual([STARTED]);
       const w = await plugin(SID);
       expect((await w.next("inbound")).content).toBe("meanwhile");
-      await Bun.sleep(SETTLE_MS);
+      await waitFor(() => sentText(t => t.startsWith("🚀")));
       expect(sentText(t => t.startsWith("🚀"))).toBeDefined();
     });
 
@@ -3208,7 +3317,7 @@ describe("commands", () => {
       expect(fake.callsOf("editMessageText")).toEqual([{ chat_id: GROUP, message_id: startedId, text: "🧹 Cleanup is running…" }]);
       await waitFor(() => fake.callsOf("deleteMessage").length);
       expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
-      await Bun.sleep(SETTLE_MS);
+      await settle();
       expect(terminated(a)).toBe(false);
       expect(readFileSync(transcript, "utf8")).toBe(original);
       expect(spawned).toEqual([]);
@@ -3231,11 +3340,14 @@ describe("commands", () => {
     });
 
     test("a Claude Code that does not exit keeps the transcript and does not relaunch", async () => {
-      const { a, spawned, transcript, original } = await liveSession(SKILLS, { isAlive: () => true, cleanupExitMs: EXIT_MS });
+      const clock = newClock();
+      const { a, spawned, transcript, original } = await liveSession(SKILLS, { isAlive: () => true, cleanupExitMs: EXIT_MS, exitPollMs: EXIT_MS, timers: clock });
       const { runner } = mod(SID);
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
       await windowEnds(a);
+      await waitFor(() => !hub.isConnected(SID));
+      await clock.advance(EXIT_MS);
       const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
       expect(warning.text).toBe("⚠️ Cleanup failed: Claude Code did not exit");
       expect(warning.disable_notification).toBe(false);
@@ -3257,7 +3369,7 @@ describe("commands", () => {
       expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: startedId }]);
       await windowEnds(a);
       await waitFor(() => sentText(t => t === "⏹ Session ended"));
-      await Bun.sleep(SETTLE_MS);
+      await settle();
       expect(readFileSync(transcript, "utf8")).toBe(original);
       expect(backups(folder)).toEqual([]);
       expect(spawned).toEqual([]);
@@ -3377,7 +3489,7 @@ describe("commands", () => {
       const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued") && !t.endsWith("…")));
       expect(summary.text).toBe("🧹 Cleanup done.");
       await waitFor(() => sentText(t => t === "⏹ Session ended"));
-      await Bun.sleep(SETTLE_MS);
+      await settle();
       expect(spawned).toEqual([]);
     });
 
@@ -3402,7 +3514,7 @@ describe("commands", () => {
       await windowEnds(a);
       await waitFor(() => !hub.isConnected(SID));
       command("meanwhile");
-      await Bun.sleep(SETTLE_MS);
+      await updatesHandled();
       const w = await plugin(SID);
       expect((await w.next("inbound")).content).toBe("meanwhile");
       const warning = await waitFor(() => sentText(t => t.startsWith("⚠️")));
@@ -3417,6 +3529,7 @@ describe("commands", () => {
       let w: Awaited<ReturnType<typeof plugin>> | undefined;
       const { a, spawned, transcript } = await liveSession(SKILLS, {
         isAlive: () => alive,
+        exitPollMs: EXIT_POLL_MS,
         cleanTranscript: async (path, now) => {
           w = await plugin(SID);
           return cleanTranscript(path, now);
@@ -3428,14 +3541,14 @@ describe("commands", () => {
       await windowEnds(a);
       await waitFor(() => !hub.isConnected(SID));
       command("meanwhile");
-      await Bun.sleep(SETTLE_MS);
+      await updatesHandled();
       alive = false;
       const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued") && !t.endsWith("…")));
       expect(summary.text).toBe("🧹 Cleanup done, skills removed: a, b.");
       const window = must(w, "window");
       expect((await window.next("inbound")).content).toBe("meanwhile");
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
-      await Bun.sleep(SETTLE_MS);
+      await settle();
       expect(spawned).toEqual([]);
     });
 
@@ -3450,7 +3563,7 @@ describe("commands", () => {
       await reply(runner, t => t.startsWith("🧹 Cleanup"));
       command("meanwhile");
       await heldForCleanup();
-      await Bun.sleep(SETTLE_MS);
+      await settle();
       expect(inbound(a)).toBe(false);
       h.release();
       await pollUntil(runner, () => terminated(a));
@@ -3512,7 +3625,7 @@ describe("commands", () => {
       await waitFor(() => heldCount() === 1);
       // Goes live, and waits in its batch for the quiet window.
       command("!stop");
-      await Bun.sleep(SETTLE_MS);
+      await waitFor(() => hub.busy().includes("message batches"), WAIT_MS, "the \"!\" batch opened");
       command("after");
       await waitFor(() => heldCount() === 2);
       expect(inbound(a)).toBe(false);
@@ -3536,7 +3649,7 @@ describe("commands", () => {
       expect((await a.next("inbound")).content).toBe("meanwhile");
       h.release();
       await pollUntil(runner, () => log.lines.some(l => l.includes("ignored: that /cleanup was dropped or is unknown")));
-      await Bun.sleep(SETTLE_MS);
+      await settle();
       expect(terminated(a)).toBe(false);
       expect(readFileSync(transcript, "utf8")).toBe(original);
       expect(spawned).toEqual([]);
@@ -3568,14 +3681,14 @@ describe("commands", () => {
       command("/cleanup");
       await pollUntil(runner, () => terminated(a));
       command("/stop");
-      await Bun.sleep(SETTLE_MS);
+      await settle();
       expect(a.messages.filter(m => m.type === "terminate").length).toBe(1);
       await windowEnds(a);
       const summary = await waitFor(() => editedText(t => t.startsWith("🧹") && !t.startsWith("🧹 Cleanup is queued") && !t.endsWith("…")));
       expect(summary.text).toBe("🧹 Cleanup done, skills removed: a, b.");
       await waitFor(() => sentText(t => t === "⏹ Session ended"));
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
-      await Bun.sleep(SETTLE_MS);
+      await settle();
       expect(spawned).toEqual([]);
     });
 
@@ -3610,7 +3723,7 @@ describe("commands", () => {
       await waitFor(() => sentText(t => t === "⏹ Session ended"));
       expect(log.lines.some(l => l.includes("the Claude Code process is unknown"))).toBe(true);
       expect(readFileSync(transcript, "utf8").match(/"skills":\[\]/g)?.length).toBe(2);
-      await Bun.sleep(SETTLE_MS);
+      await settle();
       expect(spawned).toEqual([]);
     });
 
@@ -3830,11 +3943,16 @@ describe("topic commands", () => {
     endedWhileOff();
     const spawned: string[][] = [];
     config = { ...config, launch: { command: ["wt.exe", "{session}"], timeoutSec: LAUNCH_TIMEOUT_S } };
-    await startHub({ spawn: c => void spawned.push(c) });
+    const clock = newClock();
+    await startHub({ spawn: c => void spawned.push(c), timers: clock });
     const w = await plugin(SID);
+    await passReadyDelay(clock);
     const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
     expect(inbound.meta.exec_id).toBe("abcd1234");
-    await Bun.sleep(EXEC_GRACE_MS * 2);
+    await settle();
+    // The grace ends: the sweep finds the result reported and sends nothing more.
+    await clock.advance(EXEC_GRACE_MS * 2);
+    await settle();
     expect(w.messages.filter(m => m.type === "inbound").length).toBe(1);
     expect(spawned).toEqual([]);
     expect(texts()).not.toContain("⚠️ The session is not running: the command result was not delivered to the agent");
@@ -3851,36 +3969,52 @@ describe("topic commands", () => {
     saveExecs(join(dir, "execs.json"), [{ id, sessionId: SID, messageId: 1, shell: "cmd", text: "echo hi", cwd: CWD, state: "running", startedAt: Date.now(), pid: process.pid, reported: false }]);
     const spawned: string[][] = [];
     config = { ...config, launch: { command: ["wt.exe", "{session}"], timeoutSec: LAUNCH_TIMEOUT_S } };
-    await startHub({ spawn: c => void spawned.push(c), execGraceMs: LONG_GRACE_MS });
-    await Bun.sleep(SETTLE_MS);
-    expect(shown().some(t => t.startsWith("▶ cmd"))).toBe(true);
+    const clock = newClock();
+    await startHub({ spawn: c => void spawned.push(c), execGraceMs: LONG_GRACE_MS, timers: clock });
+    await clock.advance(EXEC_CARD_MS);
+    await waitFor(() => shown().some(t => t.startsWith("▶ cmd")), WAIT_MS, "running card");
     writeFileSync(join(execDir, `${id}.exit.json`), JSON.stringify({ code: 0, endedAt: Date.now() }));
+    await clock.advance(EXEC_CHECK_MS);
+    await settle();
+    await clock.advance(CARD_EDIT_MS);
     await waitFor(() => shown().some(t => t.startsWith("✅ code 0")), WAIT_MS, "final card");
     const w = await plugin(SID);
+    await passReadyDelay(clock);
     const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
     expect(inbound.meta.exec_id).toBe(id);
-    await Bun.sleep(LONG_GRACE_MS);
+    await settle();
+    // The grace ends: the sweep finds the result reported and sends nothing more.
+    await clock.advance(LONG_GRACE_MS);
+    await settle();
     expect(w.messages.filter(m => m.type === "inbound").length).toBe(1);
     expect(spawned).toEqual([]);
-  }, LONG_GRACE_MS + 3 * WAIT_MS);
+  }, 3 * WAIT_MS);
 
   test("a result that came while the hub was off starts the session once no window came", async () => {
     closedSession();
     endedWhileOff();
     const spawned: string[][] = [];
     config = { ...config, launch: { command: ["wt.exe", "{session}"], timeoutSec: LAUNCH_TIMEOUT_S } };
-    await startHub({ spawn: c => void spawned.push(c) });
-    await Bun.sleep(EXEC_GRACE_MS / 2);
+    const clock = newClock();
+    await startHub({ spawn: c => void spawned.push(c), timers: clock });
+    await settle();
+    await clock.advance(EXEC_GRACE_MS - 1);
+    await settle();
     expect(spawned).toEqual([]);
+    await clock.advance(1);
     await waitFor(() => spawned.length === 1, WAIT_MS, "session start");
   });
 
   test("a result that came while the hub was off says it was not delivered once no window came", async () => {
     closedSession();
     endedWhileOff();
-    await startHub();
-    await Bun.sleep(EXEC_GRACE_MS / 2);
+    const clock = newClock();
+    await startHub({ timers: clock });
+    await settle();
+    await clock.advance(EXEC_GRACE_MS - 1);
+    await settle();
     expect(texts()).not.toContain("⚠️ The session is not running: the command result was not delivered to the agent");
+    await clock.advance(1);
     await waitFor(() => texts().includes("⚠️ The session is not running: the command result was not delivered to the agent"), WAIT_MS, "notice");
   });
 
@@ -3903,7 +4037,7 @@ describe("topic commands", () => {
     const w = await plugin(SID);
     const inbound = await w.next("inbound", m => m.meta.source === "exec", WAIT_MS);
     expect(inbound.meta.exit_code).toBe("0");
-    await Bun.sleep(SETTLE_MS);
+    await settle();
     expect(w.messages.filter(m => m.type === "inbound").length).toBe(1);
     expect(texts()).not.toContain("⚠️ The session is not running: the command result was not delivered to the agent");
   }, RUN_MS + 2 * WAIT_MS);
@@ -3970,7 +4104,8 @@ describe("questions", () => {
   const polled = (n = 1) => waitFor(() => fake.callsOf("sendMessage")[n - 1]);
   const shown = async (n = 1) => {
     const msg = await polled(n);
-    await Bun.sleep(SHOWN_MS);
+    // The hub takes in the sent question's message id; only messages after it answer the question.
+    await settle();
     return msg;
   };
   const edits = () => fake.callsOf("editMessageText");
@@ -3993,30 +4128,32 @@ describe("questions", () => {
   });
 
   test("the window relays the text written before the call first, and the poll goes after it", async () => {
-    await startHub({ catchUpMs: LONG_CATCH_UP_MS });
+    const clock = newClock();
+    await startHub({ catchUpMs: LONG_CATCH_UP_MS, timers: clock });
     const a = await enabled("a");
-    const started = Date.now();
     const answer = ask([Q1]);
     const m = await a.next("catchUp");
-    await Bun.sleep(SHOWN_MS);
+    // The wait for the window has not run out, so only its answer lets the poll go.
+    await clock.advance(LONG_CATCH_UP_MS - 1);
     expect(fake.callsOf("sendMessage")).toEqual([]);
     a.send({ type: "send", id: "s1", sessionId: "a", text: "Asking about color", notify: false });
     a.send({ type: "caughtUp", id: m.id });
     const msg = await polled(2);
-    expect(Date.now() - started).toBeLessThan(LONG_CATCH_UP_MS);
     expect(fake.texts().map(t => t.text)).toEqual(["Asking about color", Q1_TEXT]);
     press(dataOf(msg, 0), fake.lastMessageId);
     expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "Red" } });
   });
 
   test("a window that does not answer the catch-up still gets the poll after a short wait", async () => {
-    await startHub({ catchUpMs: SHORT_CATCH_UP_MS });
+    const clock = newClock();
+    await startHub({ catchUpMs: SHORT_CATCH_UP_MS, timers: clock });
     const a = await enabled("a");
-    const started = Date.now();
     const answer = ask([Q1]);
     await a.next("catchUp");
+    await clock.advance(SHORT_CATCH_UP_MS - 1);
+    expect(fake.callsOf("sendMessage")).toEqual([]);
+    await clock.advance(1);
     expect((await polled()).text).toBe(Q1_TEXT);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(SHORT_CATCH_UP_MS);
     press(dataOf(await polled(), 1), fake.lastMessageId);
     expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "Blue" } });
   });
@@ -4030,7 +4167,7 @@ describe("questions", () => {
     abort.abort();
     await answer;
     a.send({ type: "caughtUp", id: m.id });
-    await Bun.sleep(SHOWN_MS);
+    await settle();
     expect(fake.callsOf("sendMessage")).toEqual([]);
   });
 
@@ -4090,7 +4227,7 @@ describe("questions", () => {
     say("Green");
     expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "Green" } });
     await waitFor(() => edits().some(e => e.text === `${Q1_TEXT}\n\n✅ Green`));
-    await Bun.sleep(SETTLE_MS);
+    await settle();
     expect(a.messages.filter(m => m.type === "inbound")).toEqual([]);
   });
 
@@ -4148,7 +4285,7 @@ describe("questions", () => {
     say("one");
     say("two");
     expect(await answer).toEqual({ decision: "allow", answers: { "Which color?": "one\n\ntwo" } });
-    await Bun.sleep(SETTLE_MS);
+    await settle();
     expect(a.messages.filter(m => m.type === "inbound")).toEqual([]);
   });
 
@@ -4304,8 +4441,7 @@ describe("questions", () => {
     const answer = ask([Q1]);
     await polled();
     const stopping = hub.stop();
-    // Let stop() run up to the question send it has to wait for.
-    await Bun.sleep(SHOWN_MS);
+    // stop() runs on microtasks up to the question send it has to wait for; the held response needs network I/O, so it comes later.
     release();
     await stopping;
     expect(edits().some(e => e.text === `${Q1_TEXT}\n\n${en.pollMovedToTerminal}`)).toBe(true);

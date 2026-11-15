@@ -116,7 +116,8 @@ class Agent {
   private tasks = new Set<string>();
   private dirty = false;
   private idle = false;
-  private lastSent = 0;
+  // When the card was last sent; unset until the first send, so the first card goes at once whatever the clock reads.
+  private lastSent: number | undefined;
   private sentText: Formatted = { text: "", entities: [] };
   private executor: ExecutorConfig | undefined;
   private executorJob: ExecutorJob | undefined;
@@ -264,7 +265,7 @@ class Agent {
     if (!this.dirty && !final && (stopped || !this.shown)) return;
     if (!this.shown && !this.env.canStart()) return;
     // The final message comes in several records: wait until all are read.
-    if (final ? !this.idle : this.env.now() - this.lastSent < this.env.sendEveryMs) return;
+    if (final ? !this.idle : this.lastSent !== undefined && this.env.now() - this.lastSent < this.env.sendEveryMs) return;
     const formatted = this.render(this.texts, this.statusLine());
     this.dirty = false;
     if (!final && formatted.text === this.sentText.text && JSON.stringify(formatted.entities) === JSON.stringify(this.sentText.entities)) return;

@@ -1022,6 +1022,8 @@ ${msg.text}`);
         },
       );
     });
+    // The queued request is work that ends by itself, so `busy` counts it.
+    this.spawn(this.typingQueue);
   }
 
   private async handleRequest(ws: WS, msg: Extract<PluginToHub, { type: "req" }>): Promise<void> {
@@ -2864,7 +2866,8 @@ ${msg.text}`);
 
   // Test hook: the work the hub still has under way that ends by itself and may still produce output;
   // empty when nothing is left. Waits on a user (an open poll, a busy window), on a deadline of a
-  // stopping or exiting session, and standing activity (spool scan, typing) are not work in this sense.
+  // stopping or exiting session, and standing activity (spool scan, the typing timer) are not work in
+  // this sense; a typing request already queued or sent is.
   busy(): string[] {
     const parts: [string, boolean][] = [
       ["spawned work", this.spawned.size > 0],
