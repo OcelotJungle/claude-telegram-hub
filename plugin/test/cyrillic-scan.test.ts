@@ -35,12 +35,14 @@ test("the Russian catalog is not scanned", () => {
   expect(scan.offenders).toEqual(["x.ts"]);
 });
 
-test("only tracked files are listed: an untracked file is not the repository's", () => {
+test("the repository's files are listed: tracked ones and new ones before their first commit, never ignored ones", () => {
   const root = tempDir("telegramhub-scan-");
   execFileSync("git", ["init", "-q"], { cwd: root });
   mkdirSync(join(root, "sub"));
   writeFileSync(join(root, "sub", "tracked.ts"), "x");
   writeFileSync(join(root, "untracked.ts"), ZHE);
+  writeFileSync(join(root, ".gitignore"), "ignored.ts\n");
+  writeFileSync(join(root, "ignored.ts"), ZHE);
   execFileSync("git", ["add", "sub/tracked.ts"], { cwd: root });
-  expect(listTracked(root)).toEqual(["sub/tracked.ts"]);
+  expect(listTracked(root).sort()).toEqual([".gitignore", "sub/tracked.ts", "untracked.ts"]);
 });
