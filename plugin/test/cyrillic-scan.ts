@@ -13,9 +13,11 @@ type ScanDeps = {
   exists: (file: string) => boolean;
 };
 
-// The files git tracks (the index), relative to the root. Untracked files are not the repository's.
+// The files of the repository, relative to the root: the ones git tracks and the new ones it would take in a commit
+// (untracked and not ignored), so a file is checked before its first commit, not after. Ignored files (.tmp, node_modules)
+// are not the repository's.
 export function listTracked(root: string): string[] {
-  const listing = execFileSync("git", ["ls-files", "-z"], { cwd: root, maxBuffer: GIT_OUTPUT_LIMIT_BYTES }).toString("utf8");
+  const listing = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: root, maxBuffer: GIT_OUTPUT_LIMIT_BYTES }).toString("utf8");
   return listing.split("\0").filter(file => file !== "");
 }
 

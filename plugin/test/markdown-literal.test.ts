@@ -47,7 +47,7 @@ const FOREIGN: readonly string[] = [
   "line one\nline two\n\n\nline five",
   "a  \nb",
   "a\r\nb",
-  "тест *звёздочки* и _подчёркивания_",
+  "\u0442\u0435\u0441\u0442 *\u0437\u0432\u0451\u0437\u0434\u043e\u0447\u043a\u0438* \u0438 _\u043f\u043e\u0434\u0447\u0451\u0440\u043a\u0438\u0432\u0430\u043d\u0438\u044f_",
   "",
   "plain text",
 ];
@@ -70,7 +70,7 @@ describe("literal", () => {
   });
 
   test("random strings of markup characters show as written", () => {
-    const alphabet = [..."\\`*_[]()<>#+-.!|~{}&;=:/@ \t\n\r123aб"];
+    const alphabet = [..."\\`*_[]()<>#+-.!|~{}&;=:/@ \t\n\r123a\u0431"];
     let state = SEED;
     const next = (n: number) => {
       state = (Math.imul(state, LCG_MULTIPLIER) + LCG_INCREMENT) % LCG_MODULUS;
