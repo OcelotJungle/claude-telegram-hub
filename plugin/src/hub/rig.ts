@@ -12,6 +12,7 @@ import { DEFAULT_LANGUAGE, isLanguage } from "../shared/i18n/index.ts";
 import { isBlockError, RIG_QUERY_LIMIT_MS } from "../shared/info-data.ts";
 import { infoDataSchema } from "./info-schema.ts";
 import { plainLines } from "./rig-output.ts";
+import { literal } from "../shared/markdown.ts";
 import { LANGUAGES } from "../shared/protocol.ts";
 import { PLATFORM } from "../shared/platform.ts";
 import { isPermissionMode, isSessionWaiting, RIG_SESSION_LIMIT_MS, rigAutocompactSchema, rigCleanupSchema, rigCompactSchema, rigModeSchema, rigRenameSchema, rigRunSchema, rigStopSchema } from "./rig-session.ts";
@@ -311,7 +312,7 @@ export class Rig {
 }
 
 export function featureText(features: RigFeature[], m: Messages): string {
-  return features.map(feature => `${feature.enabled ? "✅" : "⏹"} ${feature.name}: ${feature.description}${feature.platformAllowed ? "" : ` ${m.featureNotOnPlatform}`}`).join("\n") || m.featuresEmpty;
+  return features.map(feature => `${feature.enabled ? "✅" : "⏹"} ${literal(feature.name)}: ${literal(feature.description)}${feature.platformAllowed ? "" : ` ${m.featureNotOnPlatform}`}`).join("\n") || m.featuresEmpty;
 }
 
 // A release is read from a commit, so without a commit there is nothing to name.
@@ -321,8 +322,8 @@ function versionText(release: string | null, commit: string | null): string {
 }
 
 export function statusText(status: RigStatus, m: Messages): string {
-  return [m.statusMode({ mode: status.mode }), `rig: ${versionText(status.releases.rig, status.versions.rig)}`, `hub: ${versionText(status.releases.hub, status.versions.hub)}`,
-    featureText(status.features, m), m.statusLastUpdate({ text: status.lastUpdate?.text ?? "—" }),
-    m.statusPendingRestart({ text: status.pendingHubRestart ?? "—" }),
-    ...status.errors.map(error => `${error.time} ${error.type}: ${error.text}`)].join("\n");
+  return [m.statusMode({ mode: status.mode }), `rig: ${literal(versionText(status.releases.rig, status.versions.rig))}`, `hub: ${literal(versionText(status.releases.hub, status.versions.hub))}`,
+    featureText(status.features, m), m.statusLastUpdate({ text: literal(status.lastUpdate?.text ?? "—") }),
+    m.statusPendingRestart({ text: literal(status.pendingHubRestart ?? "—") }),
+    ...status.errors.map(error => literal(`${error.time} ${error.type}: ${error.text}`))].join("\n");
 }

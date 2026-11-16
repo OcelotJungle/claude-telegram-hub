@@ -100,6 +100,29 @@ export function toTelegram(md: string): Formatted {
   return b.result();
 }
 
+// Every ASCII punctuation character: CommonMark lets a backslash escape each
+// of them, so escaping all of them leaves no construct (emphasis, code, link,
+// autolink, list marker, heading, quote, thematic break, setext underline,
+// entity reference, HTML) for marked to find, wherever it stands in a line.
+const ASCII_PUNCTUATION = /[!-/:-@[-`{-~]/g;
+const LEADING_BLANKS = /^[ \t]+/;
+const BLANK_REFERENCES: Readonly<Record<string, string>> = { " ": "&#32;", "\t": "&#9;" };
+
+// Text from outside (a path, a command, a name, a reply) made safe inside a
+// Markdown message the hub composes: toTelegram(literal(x)) is x, without
+// entities. A character reference stands for each line break, so the text is
+// one Markdown line and no line-start construct (list, indented code, ...)
+// can form; the reference is decoded back to the break. The leading blanks
+// are references too, so the text is safe at the start of a line. toTelegram
+// trims its result, so blanks at the very start or end of x are lost there.
+export function literal(text: string): string {
+  return text
+    .replace(ASCII_PUNCTUATION, "\\$&")
+    .replace(/\r/g, "&#13;")
+    .replace(/\n/g, "&#10;")
+    .replace(LEADING_BLANKS, blanks => blanks.replace(/[ \t]/g, c => BLANK_REFERENCES[c] ?? c));
+}
+
 // Links Telegram can open from a text_link.
 function openable(url: string): boolean {
   return /^(https?|tg):\/\//i.test(url);

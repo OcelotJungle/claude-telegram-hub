@@ -1179,6 +1179,27 @@ describe("delivery", () => {
     expect(sent[1].disable_notification).toBe(false);
   });
 
+  test("the reason Telegram gave arrives in the loud notice verbatim, not read as Markdown", async () => {
+    await startHub();
+    const a = await enabled("a");
+    fake.failNext("sendMessage", { code: 400, description: "Bad Request: can't parse *entities* at byte_offset [3]" });
+    a.send({ type: "send", id: "x1", text: "odd words", notify: false });
+    await waitFor(() => fake.texts().some(p => p.text.includes("byte_offset")), 3000);
+    const notice = must(fake.texts().find(p => p.text.includes("byte_offset")));
+    expect(notice.text).toBe(en.telegramRejected({ reason: "Bad Request: can't parse *entities* at byte_offset [3]" }));
+  });
+
+  test("a rig event's text arrives as it is, never read as Markdown", async () => {
+    const rigDir = join(dir, "rig");
+    mkdirSync(rigDir, { recursive: true });
+    await startHub({ rigDir });
+    await waitFor(() => hub["botReady"], 3000, "the bot");
+    const text = "updated C:\\projects\\_tmp\\a*b*c [x] <y>";
+    writeFileSync(join(rigDir, "events.jsonl"), `${JSON.stringify({ id: "e1", time: "2026-01-01T00:00:00Z", type: "update-ok", text, level: "info" })}\n`);
+    await must(hub["rigEvents"]).poll();
+    await waitFor(() => fake.texts().some(t => t.text === text), 3000, "the event");
+  });
+
   test("a bot thrown out of the group keeps the text queued until it is back", async () => {
     await startHub();
     const a = await enabled("a");
@@ -2011,11 +2032,13 @@ function sessionRig() {
   };
   const run = async (invocation: RigInvocation, signal?: AbortSignal, progress?: RigProgress): Promise<RigOutput> => {
     const [, command, sub = "", sid = "", ...args] = rigTokens(invocation);
-    if (command === "feature") return rigOk({ features: RIG_FEATURES });
+    const featureAnswer = answers.get("feature");
+    if (command === "feature") return featureAnswer && typeof featureAnswer !== "function" ? featureAnswer : rigOk({ features: RIG_FEATURES });
     if (command === "language") return rigOk({ language: "en" });
     if (command === "info") {
       infos.push(sid);
-      return rigOk(fullInfo());
+      const failure = answers.get("info");
+      return failure && typeof failure !== "function" ? failure : rigOk(fullInfo());
     }
     calls.push({ sub, sid, args });
     const answer = answers.get(sub) ?? fixture(sub, sid, args);
@@ -2322,6 +2345,53 @@ describe("session commands", () => {
     const info = await waitFor(() => fake.texts().find(t => t.text.includes("Context")), WAIT_MS, "the info text");
     expect(info.text).toContain("120/300k");
     expect(rig.infos).toEqual([SID]);
+  });
+
+  test("/info's header arrives bold, without asterisks", async () => {
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/info"));
+    const info = await waitFor(() => fake.texts().find(t => t.text.includes(en.infoClaudeLimits({ age: undefined }).replaceAll("*", ""))), WAIT_MS, "the info text");
+    const header = en.infoClaudeLimits({ age: undefined }).replaceAll("*", "");
+    expect(info.text).not.toContain("*");
+    expect(info.entities).toContainEqual({ type: "bold", offset: info.text.indexOf(header), length: header.length });
+  });
+
+  describe("a value from outside the catalog arrives as it is, never read as Markdown", () => {
+    const FOREIGN = "C:\\projects\\_tmp\\a*b*c `x` rig session <subcommand> [x]";
+    const arrived = (text: string) => fake.texts().find(t => t.text === text);
+
+    test("/info shows rig's refusal verbatim", async () => {
+      rig.answer("info", rigRefused("session-unknown", FOREIGN));
+      await start();
+      await enabled(SID);
+      fake.pushUpdate(msg("/info"));
+      const sentText = await waitFor(() => arrived(FOREIGN), WAIT_MS, "the refusal");
+      expect(sentText.entities ?? []).toEqual([]);
+    });
+
+    test("a session command's refusal is sent as Markdown and shows rig's words verbatim", async () => {
+      rig.answer("rename", rigRefused("session-unknown", FOREIGN));
+      await start();
+      await enabled(SID);
+      fake.pushUpdate(msg("/rename N"));
+      await waitFor(() => shown().some(t => t.includes(FOREIGN)), WAIT_MS, "the refusal");
+      expect(shown().filter(t => t.includes("\\\\"))).toEqual([]);
+    });
+
+    test("a launch notice shows the account verbatim", async () => {
+      closedSession();
+      await start();
+      fake.pushUpdate(msg("/run a*b*c"));
+      await startedAs(en.launching({ account: "a*b*c" }));
+    });
+
+    test("a machine command's rig failure shows rig's words verbatim", async () => {
+      await start();
+      rig.answer("feature", rigRefused("feature-unknown", FOREIGN));
+      fake.pushUpdate(topicMsg({ chatId: GROUP, fromId: ME, text: "/rig feature" }));
+      await waitFor(() => arrived(FOREIGN), WAIT_MS, "the failure");
+    });
   });
 
   test("/run starts a closed session through rig on the account given", async () => {
@@ -3172,6 +3242,14 @@ describe("holding across session actions", () => {
       new SessionStore(join(dir, "sessions.json")).setTranscript(SID, path);
       return path;
     };
+
+    test("a mode read from the transcript is shown verbatim", async () => {
+      withTranscript(record("a*b*c"));
+      await start();
+      await plugin(SID);
+      fake.pushUpdate(msg("/mode"));
+      await waitFor(() => fake.texts().some(t => t.text === en.modeLastKnown({ mode: "a*b*c" })), WAIT_MS, "the mode card");
+    });
 
     test("an older record is last known, and the same-mode request still restarts", async () => {
       withTranscript(record("plan"));

@@ -296,7 +296,11 @@ Mapping on this path:
 - pieces of ≤ 4096 characters of plain text are split by paragraphs, lines, words; an entity on the boundary is
   divided between pieces; a surrogate pair is not split; spaces at the edges of a piece are trimmed.
 
-The hub's service texts (confirmations, notices) are not parsed and go as plain text.
+The hub's own texts (notices, command answers, the /info answer, command cards, launch notices, rig's answers in
+the machine topic) are Markdown written by the catalog: `**bold**` in a catalog line shows as bold. Every value from
+outside the catalog (rig's messages and data, paths, command text, names, Telegram's refusal reasons) goes in through
+`literal()` (`src/shared/markdown.ts`), which escapes it so it shows exactly as it is; text a function returns as a
+value (`rigErrorText`) stays raw and is escaped where it enters a message, so log lines keep the raw text.
 
 **Sending files.** The tool `tg_send_file(paths: string[], caption?: string, as_document?: boolean)`:
 - works if the session has a topic, even with the mode off (the agent sends a file on an explicit

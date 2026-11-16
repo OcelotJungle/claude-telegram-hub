@@ -10,6 +10,7 @@ import { readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { Execs, EXEC_CARD_LINES, EXEC_CHECK_MS, EXEC_STOP_AGAIN_MS, execCardText, execReportText, MAX_EXECS } from "../src/hub/exec.ts";
 import { loadRuns, saveRuns } from "../src/hub/exec-runs.ts";
+import { toTelegram } from "../src/shared/markdown.ts";
 import { en } from "../src/shared/i18n/en.ts";
 import { ru } from "../src/shared/i18n/ru.ts";
 import { notifies } from "../src/shared/notification.ts";
@@ -78,6 +79,9 @@ afterEach(() => {
 // Fake deps over a FakeExec: rig's side is played by the test (it writes the run's log and ends it), the hub's
 // side (cards, files, reports) is recorded. dir / fake: reuse those of an earlier setup, for a restarted hub.
 // windows: sessions with a window; graceMs: the start's grace, none by default.
+// A card as the user sees it: the Markdown rendered to Telegram text.
+const shown = (md: string): string => toTelegram(md).text;
+
 function setup(o: { messages?: () => Messages; dir?: string; fake?: FakeExec; sendOnSent?: boolean; windows?: string[]; graceMs?: number; fileLimit?: number; } = {}) {
   const dir = o.dir ?? tempDir("telegramhub-exec-");
   if (o.dir === undefined) dirs.push(dir);
@@ -310,7 +314,7 @@ describe("a shell command that does not start", () => {
     expect(card.final).toBe(true);
     expect(card.kind).toBe("warning");
     expect(card.buttons).toBeUndefined();
-    expect(card.markdown).toStartWith(en.execOutcomeFailed({ error: "The pwsh feature is off; run: rig feature pwsh enable" }));
+    expect(shown(card.markdown)).toStartWith(en.execOutcomeFailed({ error: "The pwsh feature is off; run: rig feature pwsh enable" }));
     expect(t.execs.running()).toBe(0);
     expect(t.reports).toHaveLength(1);
     expect(t.reports[0]?.content).toContain("The pwsh feature is off");
@@ -336,7 +340,7 @@ describe("a shell command that does not start", () => {
     t.fake.start = async () => ({ ok: false, error: { kind: "cwdUnsafe" } });
     t.execs.command(SID, "cmd", "x", "C:\\100%", msg(1));
     await t.settle();
-    expect(t.lastCard().markdown).toStartWith(en.execOutcomeFailed({ error: en.execCwdUnsafe }));
+    expect(shown(t.lastCard().markdown)).toStartWith(en.execOutcomeFailed({ error: en.execCwdUnsafe }));
   });
 
   test("a rig that is not there is told in words", async () => {
@@ -439,7 +443,7 @@ describe("the Stop and Run buttons", () => {
     expect(await t.execs.press(id, "run")).toBe(en.execStarting);
     await t.settle();
     expect(t.fake.starts).toHaveLength(1);
-    expect(t.lastCard().markdown).toStartWith(en.execOutcomeFailed({ error: "The pwsh feature is off; run: rig feature pwsh enable" }));
+    expect(shown(t.lastCard().markdown)).toStartWith(en.execOutcomeFailed({ error: "The pwsh feature is off; run: rig feature pwsh enable" }));
   });
 
   test("a failed start of a stale command ends it; a button of the old store finds nothing", async () => {
@@ -649,14 +653,14 @@ describe("a run that rig loses or that cannot be read", () => {
     for (let i = 0; i < FAILING_LONG_TICKS; i++) await t.tick();
     expect(t.execs.running()).toBe(1);
     expect(t.cards.some(c => c.final)).toBe(false);
-    expect(t.lastCard().markdown).toContain(en.execRigSilent({ reason: en.rigTimeout({ seconds: 30 }) }));
+    expect(shown(t.lastCard().markdown)).toContain(en.execRigSilent({ reason: en.rigTimeout({ seconds: 30 }) }));
     // rig answers again and reports its own end: the note goes, the run ends as rig says.
     t.fake.statusDown = undefined;
     t.fake.finish(runId, { kind: "lost", reason: "the supervisor died" });
     await t.until(() => t.cards.find(c => c.final), "final card");
     const final = must(t.cards.find(c => c.final), "final card");
-    expect(final.markdown).toStartWith(en.execOutcomeLost({ reason: "the supervisor died" }));
-    expect(final.markdown).not.toContain(en.execRigSilent({ reason: en.rigTimeout({ seconds: 30 }) }));
+    expect(shown(final.markdown)).toStartWith(en.execOutcomeLost({ reason: "the supervisor died" }));
+    expect(shown(final.markdown)).not.toContain(en.execRigSilent({ reason: en.rigTimeout({ seconds: 30 }) }));
     expect(t.execs.running()).toBe(0);
   });
 });
@@ -1300,6 +1304,26 @@ describe("exec texts", () => {
   test("a card with a tail fences it by more backticks than the tail holds", () => {
     expect(execCardText(rec, "a\nb", NOW, en, NAMES)).toBe("▶ Git Bash · 0 s\n`make`\n```\na\nb\n```");
     expect(execCardText(rec, "```x", NOW, en, NAMES)).toContain("\n````\n```x\n````");
+  });
+
+  const FOREIGN = ["C:\\projects\\_tmp\\a*b*c", "rig session <subcommand> [x]", "2*3*4", "tick ` here", "# a\n- b"];
+
+  test("every foreign reason shows verbatim on the card, whatever markup it holds", () => {
+    for (const x of FOREIGN) {
+
+      const running: ExecRun = { ...rec, stopFailure: x };
+      expect(shown(execCardText(running, "", NOW, en, NAMES, x))).toContain(`rig is not answering about this command (${x}); still waiting`);
+      expect(shown(execCardText(running, "", NOW, en, NAMES))).toContain(`The stop did not work: ${x}. Press Stop again`);
+      const failed: ExecRun = { ...rec, state: "ended", end: { kind: "failed", detail: x, at: NOW } };
+      expect(shown(execCardText(failed, "", NOW, en, NAMES))).toContain(`did not start: ${x}`);
+      const lost: ExecRun = { ...rec, state: "ended", end: { kind: "lost", reason: x, at: NOW } };
+      expect(shown(execCardText(lost, "", NOW, en, NAMES))).toContain(`interrupted: ${x}`);
+    }
+  });
+
+  test("the report to the agent keeps a foreign reason raw", () => {
+    const failed: ExecRun = { ...rec, state: "ended", end: { kind: "failed", detail: "2*3*4", at: NOW } };
+    expect(execReportText(failed, "", NAMES)).toContain("did not start: 2*3*4");
   });
 
   test("the report to the agent is English whatever the hub's language and names the full log by its run id", () => {

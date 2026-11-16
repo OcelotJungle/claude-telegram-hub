@@ -118,13 +118,14 @@ export class Outbox {
   }
 
   // Puts a loud notice in place of a piece, keeping its place in the queue.
-  replaceWithNotice(id: string, text: string): void {
+  replaceWithNotice(id: string, text: string, entities: Entity[] = []): void {
     const item = this.data.items.find(i => i.id === id);
     if (!item) return;
     item.text = text;
     item.silent = false;
     item.notice = true;
-    delete item.entities;
+    if (entities.length) item.entities = entities;
+    else delete item.entities;
     delete item.rich;
     delete item.files;
     delete item.buttons;

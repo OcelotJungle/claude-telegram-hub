@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { catalogOf } from "../src/shared/i18n/index.ts";
 import { infoText } from "../src/hub/info-text.ts";
+import { toTelegram } from "../src/shared/markdown.ts";
 import { tokens } from "../src/shared/tokens.ts";
 import { bareInfo, blockError, fullInfo, INFO_NOW, iso } from "./info-fixtures.ts";
 
@@ -30,6 +31,12 @@ describe("/info text", () => {
         "120/300k",
       ].join("\n"),
     );
+  });
+
+  test("the headers render as bold, with no Markdown marks left in the shown text", () => {
+    const out = toTelegram(infoText(fullInfo(), NOW, en));
+    expect(out.text).not.toContain("**");
+    expect(out.entities.map(e => e.type)).toEqual(["bold", "bold", "bold", "bold"]);
   });
 
   test("a block rig leaves out is not shown", () => {
@@ -104,7 +111,7 @@ describe("/info text", () => {
     );
     expect(text).toContain("5 hours: 99.5% (resets in 5 min)");
     expect(text).toContain("Week: 7%\n");
-    expect(text).toContain("spend_limit: 12%\n");
+    expect(text).toContain("spend\\_limit: 12%\n");
   });
 
   test("a block read over 5 minutes ago says how old it is, each by its own time", () => {

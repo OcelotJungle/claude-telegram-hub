@@ -1,6 +1,7 @@
 import type { Messages } from "../shared/i18n/index.ts";
 import type { InfoData } from "../shared/info-data.ts";
 
+import { literal } from "../shared/markdown.ts";
 import { isBlockError } from "../shared/info-data.ts";
 import { THOUSAND, tokens } from "../shared/tokens.ts";
 
@@ -36,7 +37,7 @@ export function infoText(d: InfoData, now: number, m: Messages): string {
   const resetLeft = (resetsAt: string | null) => (resetsAt === null ? NaN : Date.parse(resetsAt) - now);
   const resetIn = (left: number) => (left > 0 ? duration(left, m) : undefined);
   const order = (kind: string) => (LIMIT_ORDER.includes(kind) ? LIMIT_ORDER.indexOf(kind) : LIMIT_ORDER.length);
-  if (isBlockError(d.claude)) lines.push(d.claude.error.code === NO_DATA_CODE ? m.infoClaudeNoData : m.infoClaudeUnavailable({ reason: d.claude.error.message }));
+  if (isBlockError(d.claude)) lines.push(d.claude.error.code === NO_DATA_CODE ? m.infoClaudeNoData : m.infoClaudeUnavailable({ reason: literal(d.claude.error.message) }));
   else if (!d.claude.limits.length) lines.push(m.infoClaudeNoData);
   else {
     lines.push(m.infoClaudeLimits({ age: staleAge(d.claude.at) }));
@@ -45,7 +46,7 @@ export function infoText(d: InfoData, now: number, m: Messages): string {
     }
   }
   const codex = d.codex;
-  if (codex && isBlockError(codex)) lines.push("", m.infoCodexUnavailable({ reason: codex.error.message }));
+  if (codex && isBlockError(codex)) lines.push("", m.infoCodexUnavailable({ reason: literal(codex.error.message) }));
   else if (codex) {
     lines.push("", m.infoCodexLimits({ age: staleAge(codex.at) }));
     const named = codex.limits.map(l => ({ ...l, kind: codexKind(l.windowMinutes) }));
@@ -56,7 +57,7 @@ export function infoText(d: InfoData, now: number, m: Messages): string {
     }
   }
   const volunteers = d.volunteers;
-  if (volunteers && isBlockError(volunteers)) lines.push("", m.infoVolunteerUnavailable({ reason: volunteers.error.message }));
+  if (volunteers && isBlockError(volunteers)) lines.push("", m.infoVolunteerUnavailable({ reason: literal(volunteers.error.message) }));
   else if (volunteers) {
     lines.push("", m.infoVolunteerLimits({ age: staleAge(volunteers.at) }));
     const left = resetLeft(volunteers.resetsAt);
@@ -64,13 +65,13 @@ export function infoText(d: InfoData, now: number, m: Messages): string {
     else lines.push(m.infoVolunteerDay({ percent: 0, resetIn: undefined }));
     // A provider without a limit is not shown.
     for (const [name, p] of Object.entries(volunteers.providers)) {
-      if (p.cap !== null) lines.push(`${PROVIDER_NAMES[name] ?? name}: ${p.used}/${p.cap}`);
+      if (p.cap !== null) lines.push(`${literal(PROVIDER_NAMES[name] ?? name)}: ${p.used}/${p.cap}`);
     }
   }
   const c = d.context;
   // rig's context comes from its stored reading, so its age is shown like the limits'.
   lines.push("", m.infoContext({ age: isBlockError(c) ? undefined : staleAge(c.at) }));
-  if (isBlockError(c)) lines.push(c.error.code === NO_DATA_CODE ? m.infoNoData : m.infoContextUnavailable({ reason: c.error.message }));
+  if (isBlockError(c)) lines.push(c.error.code === NO_DATA_CODE ? m.infoNoData : m.infoContextUnavailable({ reason: literal(c.error.message) }));
   else {
     // rig marks the figure as a local estimate when the status line's is gone (after a compaction).
     const approx = c.estimated === true ? "≈" : "";
@@ -101,5 +102,5 @@ function limitName(kind: string, m: Messages): string {
   if (kind === "five_hour") return m.limitFiveHour;
   if (kind === "seven_day") return m.limitSevenDay;
   const minutes = MINUTES_KIND.exec(kind)?.[1];
-  return minutes === undefined ? kind : duration(Number(minutes) * MS_PER_MINUTE, m);
+  return minutes === undefined ? literal(kind) : duration(Number(minutes) * MS_PER_MINUTE, m);
 }

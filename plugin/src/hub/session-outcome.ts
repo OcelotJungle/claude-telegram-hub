@@ -3,6 +3,7 @@ import type { MessageKind } from "../shared/notification.ts";
 import type { RigError } from "./rig.ts";
 import type { RigAutocompact, RigCleanup, RigCompact, RigRename, RigStop } from "./rig-session.ts";
 
+import { literal } from "../shared/markdown.ts";
 import { tokens } from "../shared/tokens.ts";
 import { rigErrorText } from "./rig.ts";
 
@@ -13,8 +14,8 @@ export type SessionOutcome = { text: string; kind: MessageKind };
 const NO_MODULE_CODE = "session-no-module";
 
 function compactedLine(c: { tokensBefore: number; tokensAfter: number } | { skip: string } | { error: string }, m: Messages): SessionOutcome {
-  if ("skip" in c) return { text: m.compactSkipped({ reason: c.skip }), kind: "warning" };
-  if ("error" in c) return { text: m.compactFailed({ error: c.error }), kind: "warning" };
+  if ("skip" in c) return { text: m.compactSkipped({ reason: literal(c.skip) }), kind: "warning" };
+  if ("error" in c) return { text: m.compactFailed({ error: literal(c.error) }), kind: "warning" };
   return { text: m.compactDoneTokens({ before: tokens(c.tokensBefore), after: tokens(c.tokensAfter) }), kind: "info" };
 }
 
@@ -23,13 +24,13 @@ export function compactOutcome(value: RigCompact, m: Messages): SessionOutcome {
 }
 
 export function renameOutcome(value: RigRename, m: Messages): SessionOutcome {
-  return { text: m.renameDone({ name: value.name }), kind: "info" };
+  return { text: m.renameDone({ name: literal(value.name) }), kind: "info" };
 }
 
 // rig's own words when it said any, otherwise the window that was set.
 export function autocompactOutcome(value: RigAutocompact, m: Messages): SessionOutcome {
   const text = value.text?.trim();
-  return { text: text || m.autocompactDone({ window: String(value.window) }), kind: "info" };
+  return { text: text ? literal(text) : m.autocompactDone({ window: String(value.window) }), kind: "info" };
 }
 
 export function cleanupOutcome(value: RigCleanup, m: Messages): SessionOutcome {
@@ -47,7 +48,7 @@ export function stopOutcome(value: RigStop, m: Messages): SessionOutcome {
 
 // rig's own message goes as it is; a session without the module also learns what to do about it.
 export function failureOutcome(error: RigError, m: Messages): SessionOutcome {
-  const text = rigErrorText(error, m);
+  const text = literal(rigErrorText(error, m));
   const needsRestart = error.kind === "rig" && error.code === NO_MODULE_CODE;
   return { text: needsRestart ? `${text}\n${m.sessionRestartHint}` : text, kind: "error" };
 }

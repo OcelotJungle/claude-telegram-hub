@@ -3,6 +3,7 @@ import type { RigOutput } from "../src/hub/rig.ts";
 import { describe, expect, test } from "bun:test";
 import { findRig, Rig, rigAction, rigErrorText, rigInvocation, RIG_QUERY_LIMIT_MS, statusSchema, statusText } from "../src/hub/rig.ts";
 import { en } from "../src/shared/i18n/en.ts";
+import { literal, toTelegram } from "../src/shared/markdown.ts";
 import { platformFor } from "../src/shared/platform.ts";
 import { bareInfo, blockError, commandFailure, fullInfo } from "./info-fixtures.ts";
 import { manualClock } from "./manual-clock.ts";
@@ -101,7 +102,7 @@ describe("rig contract", () => {
     f.output({ code: 0, stdout: JSON.stringify({ ...STATUS, versions: { rig: "r", hub: null } }), stderr: "" });
     const result = await f.rig.status();
     expect(result.ok).toBe(true);
-    if (result.ok) expect(statusText(result.value, en).split("\n").slice(1, 3)).toEqual(["rig: 1.0.0 (r)", "hub: —"]);
+    if (result.ok) expect(toTelegram(statusText(result.value, en)).text.split("\n").slice(1, 3)).toEqual(["rig: 1.0.0 (r)", "hub: —"]);
     f.output({ code: 0, stdout: JSON.stringify(STATUS), stderr: "" });
     const bare = await f.rig.status();
     expect(bare.ok).toBe(true);
@@ -116,7 +117,7 @@ describe("rig contract", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.value.pendingHubRestart).toBe(pending);
-      expect(statusText(result.value, en)).toContain(en.statusPendingRestart({ text: pending }));
+      expect(statusText(result.value, en)).toContain(en.statusPendingRestart({ text: literal(pending) }));
     }
     f.output({ code: 0, stdout: JSON.stringify(STATUS), stderr: "" });
     expect((await f.rig.status()).ok).toBe(true);

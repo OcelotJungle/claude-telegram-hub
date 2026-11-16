@@ -20,6 +20,7 @@ import { loadRuns, saveRuns } from "./exec-runs.ts";
 import { isGone } from "./rig-exec.ts";
 import { rigErrorText } from "./rig.ts";
 import { catalogOf } from "../shared/i18n/index.ts";
+import { literal } from "../shared/markdown.ts";
 import { PLATFORM } from "../shared/platform.ts";
 import { renderRigLine, renderRigLines } from "./rig-output.ts";
 
@@ -764,21 +765,28 @@ function inlineCode(text: string): string {
 }
 
 // Why a run was lost, in the catalog's language; a reason that is not a known
-// code (rig's own text) is shown as it is.
-function lostReason(end: RunEnd, m: Messages): string {
+// code (rig's own text) is shown as it is, made by `foreign` fit for the text
+// it goes into.
+function lostReason(end: RunEnd, m: Messages, foreign: (text: string) => string): string {
   switch (end.reason) {
     case undefined:
     case LOST_PROCESS_GONE: return m.execLostProcessGone;
-    default: return end.reason;
+    default: return foreign(end.reason);
   }
 }
 
-function outcome(rec: ExecRun, m: Messages): string {
+function plain(text: string): string {
+  return text;
+}
+
+// foreign: makes a value from outside the catalog fit for the text it goes
+// into: literal() for the Markdown card, plain() for the report.
+function outcome(rec: ExecRun, m: Messages, foreign: (text: string) => string): string {
   const end = rec.end;
   if (!end) return "";
   if (end.kind === "stopped") return m.execOutcomeStopped;
-  if (end.kind === "failed") return m.execOutcomeFailed({ error: end.detail ?? "" });
-  if (end.kind === "lost") return m.execOutcomeLost({ reason: lostReason(end, m) });
+  if (end.kind === "failed") return m.execOutcomeFailed({ error: foreign(end.detail ?? "") });
+  if (end.kind === "lost") return m.execOutcomeLost({ reason: lostReason(end, m, foreign) });
   return end.code === 0 ? m.execOutcomeOk : m.execOutcomeCode({ code: end.code });
 }
 
@@ -795,11 +803,11 @@ export function execCardText(rec: ExecRun, tail: string, now: number, m: Message
   } else if (rec.state === "running") {
     head = `▶ ${shellName(rec, names)} · ${duration(now - (rec.startedAt ?? now), m)}`;
   } else {
-    head = `${outcome(rec, m)} · ${duration((rec.end?.at ?? now) - (rec.startedAt ?? now), m)}`;
+    head = `${outcome(rec, m, literal)} · ${duration((rec.end?.at ?? now) - (rec.startedAt ?? now), m)}`;
   }
   const lines = [head, inlineCode(rec.text)];
-  if (rec.state === "running" && silentReason !== undefined) lines.push(m.execRigSilent({ reason: silentReason }));
-  if (rec.state === "running" && rec.stopFailure !== undefined) lines.push(m.execStopFailed({ reason: rec.stopFailure }));
+  if (rec.state === "running" && silentReason !== undefined) lines.push(m.execRigSilent({ reason: literal(silentReason) }));
+  if (rec.state === "running" && rec.stopFailure !== undefined) lines.push(m.execStopFailed({ reason: literal(rec.stopFailure) }));
   if (tail) {
     const fence = "`".repeat(Math.max(MIN_FENCE, longestRun(tail, "`") + 1));
     lines.push(fence, tail, fence);
@@ -812,7 +820,7 @@ export function execReportText(rec: ExecRun, tail: string, names = PLATFORM.shel
   const m = catalogOf("en");
   const took = duration((rec.end?.at ?? 0) - (rec.startedAt ?? rec.end?.at ?? 0), m);
   return [
-    `The topic command has ended: ${outcome(rec, m)} in ${took}.`,
+    `The topic command has ended: ${outcome(rec, m, plain)} in ${took}.`,
     // A rig mutation runs in no folder of its own.
     rec.cwd === undefined ? `Shell: ${shellName(rec, names)}` : `Shell: ${shellName(rec, names)}, folder: ${rec.cwd}`,
     `Command: ${rec.text}`,

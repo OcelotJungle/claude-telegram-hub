@@ -30,7 +30,7 @@ import { notifies } from "../shared/notification.ts";
 import { isInside } from "../shared/config.ts";
 import { field } from "../shared/guards.ts";
 import { catalogOf, DEFAULT_LANGUAGE } from "../shared/i18n/index.ts";
-import { toTelegram } from "../shared/markdown.ts";
+import { literal, toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { hookBody, pluginToHub, questionBody, sendFilesMessage, sendMessage, turnEndBody } from "../shared/protocol-schema.ts";
@@ -413,7 +413,7 @@ export class Hub {
         send: async (event, sent, accepted) => {
           const group = opts.config().groupId;
           if (!group || !opts.api) return false;
-          const pieces = chunk(toTelegram(event.text));
+          const pieces = chunk(toTelegram(literal(event.text)));
           for (const [index, piece] of pieces.entries()) {
             if (index < sent) continue;
             await opts.api.sendMessage(group, undefined, piece.text, event.level === "info", piece.entities);
@@ -1576,7 +1576,7 @@ ${msg.text}`);
     if (item.notice) {
       this.outbox.remove(item.id);
       this.settled(item);
-    } else this.outbox.replaceWithNotice(item.id, this.m().telegramRejected({ reason }));
+    } else { const f = toTelegram(this.m().telegramRejected({ reason: literal(reason) })); this.outbox.replaceWithNotice(item.id, f.text, f.entities); }
   }
 
   private sleep(ms: number): Promise<void> {
@@ -2064,7 +2064,7 @@ ${msg.text}`);
         return this.spawn(this.rig.info(sessionId).then(result => {
           const m2 = this.m();
           if (result.ok) this.notice(sessionId, infoText(result.value, this.timers.now(), m2), "info");
-          else this.notice(sessionId, rigErrorText(result.error, m2), "warning");
+          else this.notice(sessionId, literal(rigErrorText(result.error, m2)), "warning");
         }));
       case "stop": {
         // Whatever comes for the session meanwhile is held until its window is gone.
@@ -2106,14 +2106,14 @@ ${msg.text}`);
   ): void {
     const id = randomUUID();
     const startId = `${id}.0`;
-    this.enqueue(sessionId, `cmd-${startId}`, startText, notifies("info"), false, undefined, true);
-    const waiting = () => this.enqueue(sessionId, `cmd-${id}.wait`, this.m().sessionWaiting, false, false, { id: startId, kind: "progress" });
+    this.enqueue(sessionId, `cmd-${startId}`, startText, notifies("info"), true, undefined, true);
+    const waiting = () => this.enqueue(sessionId, `cmd-${id}.wait`, this.m().sessionWaiting, false, true, { id: startId, kind: "progress" });
     this.spawn(call(waiting).then(result => {
       settle?.(result);
       const m = this.m();
       if (!result.ok && result.error.kind === "rig") this.log.warn(`session ${sessionId}: rig refused (${result.error.code}): ${result.error.message}`);
       const done = result.ok ? outcome(result.value, m) : failureOutcome(result.error, m);
-      this.enqueue(sessionId, `cmd-${id}.1`, done.text, notifies(done.kind), false, { id: startId, kind: done.kind === "info" ? "success" : "warning" });
+      this.enqueue(sessionId, `cmd-${id}.1`, done.text, notifies(done.kind), true, { id: startId, kind: done.kind === "info" ? "success" : "warning" });
     }));
   }
 
@@ -2186,10 +2186,10 @@ ${msg.text}`);
     const known = this.knownMode(sessionId);
     const current = known ?? this.currentMode(sessionId);
     const msg = this.m();
-    const label = current === undefined ? msg.modeUnknown : current;
+    const label = current === undefined ? msg.modeUnknown : literal(current);
     const buttons = PERMISSION_MODES.map(mode => [{ text: `${current === mode ? "✅ " : ""}${mode}`, data: `m:${sessionId}:${mode}` }]);
-    const text = known === undefined && current !== undefined ? msg.modeLastKnown({ mode: label }) : msg.modeCurrent({ mode: label });
-    if (this.outbox.add(`modes-${randomUUID()}`, sessionId, [{ text, silent: true, buttons }])) this.spawn(this.pump(sessionId));
+    const shown = toTelegram(known === undefined && current !== undefined ? msg.modeLastKnown({ mode: label }) : msg.modeCurrent({ mode: label }));
+    if (this.outbox.add(`modes-${randomUUID()}`, sessionId, [{ text: shown.text, silent: true, buttons, ...(shown.entities.length ? { entities: shown.entities } : {}) }])) this.spawn(this.pump(sessionId));
   }
 
   // The start or mode change of a session is over without a window: its timer stops, the start notice goes
@@ -2339,7 +2339,7 @@ ${msg.text}`);
     this.launches.set(sessionId, entry);
     this.capturePending(sessionId);
     this.launchEnds.delete(sessionId);
-    this.launchNotice(sessionId, this.m().launching({ account: chosen || undefined }));
+    this.launchNotice(sessionId, this.m().launching({ account: chosen ? literal(chosen) : undefined }));
     this.log.info(`starting session ${sessionId} with rig${chosen ? `, account ${chosen}` : ""}`);
     this.spawn(this.rig.run(sessionId, chosen ? { account: chosen } : {}, () => this.launchNotice(sessionId, this.m().sessionWaiting)).then(result => {
       if (!result.ok) {
@@ -2646,11 +2646,11 @@ ${msg.text}`);
       try {
         if (action.value.kind === "features") {
           const result = await this.rig.refresh();
-          answer(result.ok ? featureText(result.value, this.m()) : rigErrorText(result.error, this.m()), !result.ok);
+          answer(result.ok ? featureText(result.value, this.m()) : literal(rigErrorText(result.error, this.m())), !result.ok);
           if (this.opts.api) await this.registerCommands(this.opts.api);
         } else {
           const result = await this.rig.status();
-          answer(result.ok ? statusText(result.value, this.m()) : rigErrorText(result.error, this.m()), !result.ok);
+          answer(result.ok ? statusText(result.value, this.m()) : literal(rigErrorText(result.error, this.m())), !result.ok);
         }
       } finally { this.endMachineQuery(); }
     } else if (this.machineOutbox.handled(id)) return;
@@ -2670,7 +2670,7 @@ ${msg.text}`);
 
   private rigInvocationError(args: string[]): string {
     const invocation = this.rig.invocation(args);
-    return invocation.ok ? this.m().rigMissing : rigErrorText(invocation.error, this.m());
+    return invocation.ok ? this.m().rigMissing : literal(rigErrorText(invocation.error, this.m()));
   }
 
   // `sentAt` (ms) is set for a command run straight from the user's message; a confirmed one was age-checked at the press.
@@ -2679,7 +2679,7 @@ ${msg.text}`);
     if (this.machineOutbox.handled(id)) return;
     const invocation = this.rig.invocation(args);
     if (!invocation.ok || !this.execs) {
-      this.machineOutbox.post(`rig-error-${destination.chatId}-${message.message_id}`, destination, invocation.ok ? this.m().execNotSet : rigErrorText(invocation.error, this.m()), false);
+      this.machineOutbox.post(`rig-error-${destination.chatId}-${message.message_id}`, destination, invocation.ok ? this.m().execNotSet : literal(rigErrorText(invocation.error, this.m())), false);
       return;
     }
     this.execs.machine(args, `rig ${args.join(" ")}`, destination, message.message_id, sentAt);
@@ -2858,12 +2858,12 @@ ${msg.text}`);
 
   // The hub's own word in a session's topic, in order with the rest.
   private notice(sessionId: string, text: string, kind: MessageKind): void {
-    this.enqueue(sessionId, `hub-${randomUUID()}`, text, notifies(kind), false);
+    this.enqueue(sessionId, `hub-${randomUUID()}`, text, notifies(kind));
   }
 
   // A silent notice needed only until the session's agent starts working.
   private launchNotice(sessionId: string, text: string): void {
-    this.enqueue(sessionId, `${LAUNCH_NOTICE}${randomUUID()}`, text, notifies("info"), false);
+    this.enqueue(sessionId, `${LAUNCH_NOTICE}${randomUUID()}`, text, notifies("info"));
   }
 
   private launchNoticeSent(sessionId: string, messageId: number, text: string): void {
