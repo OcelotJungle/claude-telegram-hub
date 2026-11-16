@@ -15,6 +15,7 @@ import { platformFor } from "../src/shared/platform.ts";
 import { FakeExec } from "./fake-exec.ts";
 import { FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { memLogger, must, NO_PACE, offlineApi, tempDir, waitFor, wsClient } from "./helpers.ts";
+import { noAttemptTimeouts } from "./api-timers.ts";
 import { manualClock } from "./manual-clock.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
 
@@ -78,7 +79,7 @@ async function startHub(rig: FakeRig & { run(argv: string[]): RigOutput }, optio
     platform: platformFor("linux"), accountsAvailable: () => true, port: 0,
     sessionsFile: join(dir, "sessions.json"), outboxFile: join(dir, "outbox.json"), spoolDir: join(dir, "spool"), spoolScanMs: 50,
     filesDir: join(dir, "outbox-files"), inboxDir: join(dir, "inbox"), execRunsFile: join(dir, "exec-runs.json"), execClient: new FakeExec(),
-    api: new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, sendAttemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500, groupPace: NO_PACE }),
+    api: new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, networkRetryMs: 5, deadlineMs: 500, groupPace: NO_PACE, timers: noAttemptTimeouts }),
     config: () => ({ groupId: GROUP, allowFrom: [ME], turnEndChime: "" }),
     idleMs: 60_000, pollTimeoutSec: 1, pollRetryBaseMs: 10, sendRetryBaseMs: 10, sendRetryMaxMs: 50,
     defaultConfigDir: "/profile", defaultAccount: async () => undefined,

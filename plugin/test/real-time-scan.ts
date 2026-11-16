@@ -19,6 +19,26 @@ export function countMatches(text: string, pattern: RegExp): number {
   return count;
 }
 
+// A TelegramApi built in a test file: its options up to the first closing `})`.
+const API_CONSTRUCTION = /new TelegramApi\(\{[^]*?\}\)/g;
+
+// How many TelegramApi objects in `text` talk to the fake server without `timers`. Such an api times an
+// attempt out on the real clock, which races the fake's real I/O and aborts a healthy request under CPU load.
+export function apisWithoutTimers(text: string): number {
+  const code = text.split("\n").filter(line => !COMMENT_LINE.test(line)).join("\n");
+  return (code.match(API_CONSTRUCTION) ?? []).filter(api => api.includes("fake.url") && !/\btimers\b/.test(api)).length;
+}
+
+// Per test file the number of such apis; files with none are left out.
+export function scanApisWithoutTimers(dir: string): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const path of listTs(dir)) {
+    const count = apisWithoutTimers(readFileSync(path, "utf8"));
+    if (count > 0) counts[relative(dir, path).replaceAll("\\", "/")] = count;
+  }
+  return counts;
+}
+
 function listTs(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {

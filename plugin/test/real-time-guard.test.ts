@@ -4,7 +4,7 @@ import type { Allowed } from "./real-time-scan.ts";
 
 import { expect, test } from "bun:test";
 import { join } from "path";
-import { counts, countMatches, mismatches, scanCounts, SRC_CLOCK, TEST_WAIT } from "./real-time-scan.ts";
+import { apisWithoutTimers, counts, countMatches, mismatches, scanApisWithoutTimers, scanCounts, SRC_CLOCK, TEST_WAIT } from "./real-time-scan.ts";
 
 const TEST_DIR = import.meta.dir;
 const SRC_DIR = join(import.meta.dir, "..", "src");
@@ -14,6 +14,7 @@ const TEST_ALLOWED: Record<string, Allowed> = {
   "helpers.ts": { count: 1, reason: "waitFor, the polling primitive of every wait for a condition" },
   "fake-telegram.ts": { count: 2, reason: "the fake server's own latency: a long-poll that waits for updates, and delayNext" },
   "manual-clock.ts": { count: 1, reason: "makes a unique timer handle and cancels it at once; nothing waits" },
+  "api-timers.ts": { count: 1, reason: "makes a unique timer handle and cancels it at once; nothing waits" },
   "election.test.ts": { count: 1, reason: "a real hub process must outlive its own idle limit with plugins connected; its timer is in another process" },
   "packaging.test.ts": { count: 2, reason: "a slow reader against a real OS pipe, and a child process that stays alive in the packaged-hook scenario" },
 };
@@ -49,6 +50,21 @@ test("no test file waits on real time except the allowed ones and the files stil
 
 test("a file is either allowed or to convert, never both", () => {
   expect(Object.keys(TO_CONVERT).filter(file => file in TEST_ALLOWED)).toEqual([]);
+});
+
+test("every TelegramApi aimed at the fake server carries timers, so no attempt times out on the real clock", () => {
+  expect(scanApisWithoutTimers(TEST_DIR)).toEqual({});
+});
+
+test("the api scan finds an api for the fake without timers and ignores the ones with timers", () => {
+  // Split so that this file does not contain the text the scan looks for.
+  const make = "new TelegramApi" + "(";
+  const bare = `${make}{ token: t, base: fake.url, groupPace: { count: 2, perMs: 5 } });`;
+  const clocked = `${make}{ token: t, base: fake.url, timers: clock });`;
+  const shorthand = `${make}{ token: t, base: fake.url, timers });`;
+  const offline = `${make}{ token: t, base: "http://127.0.0.1:1" });`;
+  expect(apisWithoutTimers(`${bare}\n${clocked}\n${shorthand}\n${offline}\n// ${bare}`)).toBe(1);
+  expect(apisWithoutTimers(`const a = ${make}{\n  token: t,\n  base: fake.url,\n});`)).toBe(1);
 });
 
 test("the source reaches the clock only through Timers, apart from the allowed sites", () => {

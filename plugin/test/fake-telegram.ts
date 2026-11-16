@@ -1,7 +1,7 @@
 // In-process fake of the Telegram Bot API, enough for the hub: long-poll
 // getUpdates (with the real "terminated by other getUpdates request" conflict),
 // sendMessage, sendRichMessage, media uploads (multipart), forum topics, getFile and file download.
-import type { Server } from "bun";
+import type { Server, TCPSocketListener } from "bun";
 import type { Update } from "../src/hub/telegram.ts";
 
 import { z } from "zod";
@@ -34,6 +34,9 @@ export class FakeTelegram {
   private activePoll: { abort: (r: Response) => void } | undefined;
   private failures = new Map<string, Failure[]>();
   private hangs = new Map<string, number>();
+  private drops = new Map<string, number>();
+  // A TCP port that closes every connection at once; a dropped call is redirected to it.
+  private blackHole: TCPSocketListener<undefined>;
   private delays = new Map<string, number>();
   private holds = new Map<string, Promise<void>>();
   private deletedTopics = new Set<number>();
@@ -43,6 +46,7 @@ export class FakeTelegram {
   private hangDownloads = new Map<string, DownloadHang>();
 
   constructor() {
+    this.blackHole = Bun.listen<undefined>({ hostname: "127.0.0.1", port: 0, socket: { open: socket => socket.terminate(), data() {} } });
     this.server = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
@@ -57,6 +61,7 @@ export class FakeTelegram {
   stop(): void {
     this.waiting?.resolve();
     this.server.stop(true);
+    this.blackHole.stop(true);
   }
 
   pushUpdate(u: Update): Update {
@@ -88,6 +93,16 @@ export class FakeTelegram {
   // the network silently drops.
   hangNext(method: string, count = 1): void {
     this.hangs.set(method, (this.hangs.get(method) ?? 0) + count);
+  }
+
+  // The next `count` calls of `method` are received (and recorded) and the connection is closed at
+  // once, like a network that drops it. The client sees a network error without waiting for any timeout.
+  dropNext(method: string, count = 1): void {
+    this.drops.set(method, (this.drops.get(method) ?? 0) + count);
+  }
+
+  clearDrops(): void {
+    this.drops.clear();
   }
 
   // Downloads of the file at `path` never finish: the response headers (or, with "body", only the body) never arrive.
@@ -164,6 +179,12 @@ export class FakeTelegram {
     if (hang > 0) {
       this.hangs.set(method, hang - 1);
       return new Promise<Response>(() => {});
+    }
+    const drop = this.drops.get(method) ?? 0;
+    if (drop > 0) {
+      this.drops.set(method, drop - 1);
+      // fetch follows a 307 with the same method and body, and the black hole closes that connection.
+      return Response.redirect(`http://127.0.0.1:${this.blackHole.port}/`, 307);
     }
     const delay = this.delays.get(method);
     if (delay !== undefined) {

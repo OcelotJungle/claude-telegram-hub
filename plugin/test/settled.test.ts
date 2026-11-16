@@ -7,6 +7,7 @@ import { PROTOCOL_VERSION } from "../src/shared/protocol.ts";
 import { platformFor } from "../src/shared/platform.ts";
 import { FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { hubFetch, memLogger, NO_PACE, settled, tempDir, wsClient } from "./helpers.ts";
+import { noAttemptTimeouts } from "./api-timers.ts";
 import { manualClock, turn } from "./manual-clock.ts";
 
 const GROUP = "-1001";
@@ -34,7 +35,7 @@ function startHub(timers?: ReturnType<typeof manualClock>): void {
     filesDir: join(dir, "outbox-files"),
     inboxDir: join(dir, "inbox"),
     idleMs: IDLE_MS,
-    api: new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, sendAttemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500, groupPace: NO_PACE }),
+    api: new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, networkRetryMs: 5, deadlineMs: 500, groupPace: NO_PACE, timers: noAttemptTimeouts }),
     config: () => ({ groupId: GROUP, allowFrom: [ME], turnEndChime: "" }),
     pollTimeoutSec: 1,
     pollRetryBaseMs: 10,

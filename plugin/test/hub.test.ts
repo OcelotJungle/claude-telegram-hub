@@ -24,6 +24,7 @@ import { notifies } from "../src/shared/notification.ts";
 import { FakeExec } from "./fake-exec.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { hasFfmpeg, makeVideo, memLogger, must, NO_PACE, settled, tempDir, waitFor, wsClient } from "./helpers.ts";
+import { noAttemptTimeouts } from "./api-timers.ts";
 import { manualClock } from "./manual-clock.ts";
 import { commandFailure, fullInfo } from "./info-fixtures.ts";
 import { PLATFORM, platformFor } from "../src/shared/platform.ts";
@@ -132,7 +133,7 @@ async function startHub(o: StartOptions = {}): Promise<void> {
     inboxDir: join(dir, "inbox"),
     ...(o.videoTools ? { videoTools: o.videoTools } : {}),
     ...(o.pollOffsetFile ? { pollOffsetFile: o.pollOffsetFile } : {}),
-    api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === "string" ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, attemptTimeoutMs: 300, sendAttemptTimeoutMs: 300, networkRetryMs: 5, deadlineMs: 500, groupPace: NO_PACE }),
+    api: o.token === false ? undefined : new TelegramApi({ token: typeof o.token === "string" ? o.token : fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, networkRetryMs: 5, deadlineMs: 500, groupPace: NO_PACE, timers: noAttemptTimeouts }),
     config: () => config,
     idleMs: o.idleMs ?? 60_000,
     pollTimeoutSec: 1,
@@ -545,7 +546,7 @@ describe("inbound", () => {
   test("✍ comes off only after it went on, however slow Telegram is", async () => {
     await startHub();
     const a = await enabled("a");
-    fake.hangNext("setMessageReaction");
+    fake.dropNext("setMessageReaction");
     const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "\u043f\u0440\u0438\u0432\u0435\u0442" });
     fake.pushUpdate(u);
     await a.nextNew("inbound");
@@ -1112,7 +1113,7 @@ describe("delivery", () => {
   test("the plugin gets its ack once the text is on disk, before Telegram answers", async () => {
     await startHub();
     const a = await enabled("a");
-    fake.hangNext("sendMessage", 1000);
+    fake.dropNext("sendMessage", 1000);
     a.send({ type: "send", id: "x1", text: "kept safe", notify: false });
     await a.next("ack", m => m.id === "x1");
     expect(readFileSync(join(dir, "outbox.json"), "utf8")).toContain("kept safe");
@@ -1133,7 +1134,7 @@ describe("delivery", () => {
   test("a dead network is waited out", async () => {
     await startHub();
     const a = await enabled("a");
-    fake.hangNext("sendMessage", 6);
+    fake.dropNext("sendMessage", 6);
     a.send({ type: "send", id: "x1", text: "patience", notify: false });
     await waitFor(() => fake.texts().length === 7, 8000, "delivered after the hangs");
     await settle();
@@ -1143,7 +1144,7 @@ describe("delivery", () => {
   test("a restarted hub sends what the previous one had queued", async () => {
     await startHub();
     const a = await enabled("a");
-    fake.hangNext("sendMessage", 1000);
+    fake.dropNext("sendMessage", 1000);
     a.send({ type: "send", id: "x1", text: "survivor", notify: true });
     await a.next("ack", m => m.id === "x1");
     a.close();
@@ -1575,11 +1576,11 @@ describe("files", () => {
   test("a restarted hub sends the files the previous one had queued and tells the plugin", async () => {
     await startHub();
     const a = await enabled("a");
-    fake.hangNext("sendDocument", 100);
+    fake.dropNext("sendDocument", 100);
     sendFiles(a, "f1", [queued("f1", "a.txt")]);
     await a.next("ack", m => m.id === "f1");
     await hub.stop();
-    fake.clearHangs();
+    fake.clearDrops();
     await startHub();
     const b = await plugin("a");
     expect(await done(b, "f1")).toEqual({ type: "filesSent", id: "f1" });
@@ -1741,7 +1742,7 @@ describe("polling", () => {
   test("a hung getUpdates warms the connection up with getMe and polls again", async () => {
     await startHub();
     await waitFor(() => fake.callsOf("getUpdates").length > 0, 3000, "first poll");
-    fake.hangNext("getUpdates");
+    fake.dropNext("getUpdates");
     await waitFor(() => log.lines.some(l => l.includes("Telegram polling works again")), 5000, "recovery in log");
     expect(fake.callsOf("getMe").length).toBe(2);
     const polls = fake.callsOf("getUpdates").length;
@@ -1947,24 +1948,33 @@ describe("subagent cards", () => {
   });
 
   test("card edits wait while the session's text is being delivered", async () => {
-    await startHub();
+    const clock = newClock();
+    await startHub({ cardGapMs: CARD_GAP_MS, cardEditMs: CARD_EDIT_MS, timers: clock });
     const a = await enabled("a");
     a.send(card("x-0", "v1"));
     await waitFor(() => fake.texts().length === 1);
-    fake.hangNext("sendMessage", 3);
+    // The text's send is received and left unanswered until the test lets it go.
+    const release = fake.holdNext("sendMessage");
     a.send({ type: "send", id: "t1", sessionId: "a", text: "urgent", notify: false });
-    await waitFor(() => fake.callsOf("sendMessage").length === 2, WAIT_MS, "the first attempt of the text");
+    await waitFor(() => fake.callsOf("sendMessage").length === 2, WAIT_MS, "the text's send reached Telegram");
+    const taken = hub.intake().messages;
     a.send(card("x-0", "v2"));
-    // The card's own send and four attempts of the text.
-    await waitFor(() => fake.callsOf("sendMessage").length === 5 && fake.callsOf("editMessageText").length === 1, 5000);
-    const order = fake.calls.map(c => c.method);
-    expect(order.indexOf("editMessageText")).toBeGreaterThan(order.lastIndexOf("sendMessage"));
+    await waitFor(() => hub.intake().messages > taken, WAIT_MS, "the hub took the new card version");
+    await clock.advance(CARD_EDIT_MS + CARD_GAP_MS);
+    // The edit starts in the timer callback itself, so a started edit shows in busy() before its request reaches Telegram.
+    expect(hub.busy()).not.toContain("card edits");
+    expect(fake.callsOf("editMessageText")).toEqual([]);
+    release();
+    await waitFor(() => !hub.busy().includes("pumps"), WAIT_MS, "the text delivered");
+    await clock.advance(CARD_GAP_MS);
+    await waitFor(() => fake.callsOf("editMessageText").length === 1, WAIT_MS, "the edit after the text was delivered");
+    expect(fake.texts().map(t => t.text)).toEqual(["v1", "urgent"]);
   });
 
   test("a card changed while queued is sent as its latest version", async () => {
     await startHub();
     const a = await enabled("a");
-    fake.hangNext("sendMessage");
+    fake.dropNext("sendMessage");
     a.send({ type: "send", id: "t1", sessionId: "a", text: "before", notify: false });
     a.send(card("x-0", "v1"));
     a.send(card("x-0", "v2"));

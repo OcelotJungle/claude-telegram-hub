@@ -6,6 +6,7 @@ import { existsSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { DOWNLOAD_TIMEOUT_MS, isThreadNotFound, TelegramApi, TelegramError } from "../src/hub/telegram.ts";
 import { field } from "../src/shared/guards.ts";
+import { noAttemptTimeouts } from "./api-timers.ts";
 import { FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { tempDir, waitFor } from "./helpers.ts";
 import { manualClock, turn } from "./manual-clock.ts";
@@ -43,7 +44,7 @@ function clockedApi() {
 
 beforeEach(() => {
   fake = new FakeTelegram();
-  api = new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 3 });
+  api = new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 3, timers: noAttemptTimeouts });
 });
 afterEach(() => fake.stop());
 
@@ -105,7 +106,7 @@ describe("TelegramApi", () => {
   });
 
   test("failed attempts of a call do not use up the pace", async () => {
-    const paced = new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, groupPace: { count: 2, perMs: 60_000 } });
+    const paced = new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, groupPace: { count: 2, perMs: 60_000 }, timers: noAttemptTimeouts });
     fake.failNext("sendMessage", { code: 502, description: "Bad Gateway" });
     fake.failNext("sendMessage", { code: 502, description: "Bad Gateway" });
     await paced.sendMessage("-100", 7, "a", true);

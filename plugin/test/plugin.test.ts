@@ -15,6 +15,7 @@ import { platformFor } from "../src/shared/platform.ts";
 import { arr, field } from "../src/shared/guards.ts";
 import { TURN_DECISION_MS } from "../src/transcript/relay.ts";
 import { SETTLE_MS as SUBAGENT_SETTLE_MS } from "../src/transcript/subagents.ts";
+import { noAttemptTimeouts } from "./api-timers.ts";
 import { buttonPress, FakeTelegram, topicMsg } from "./fake-telegram.ts";
 import { manualClock } from "./manual-clock.ts";
 import { memLogger, NO_PACE, settled, tempDir, trackWindow, waitFor as waitForReal } from "./helpers.ts";
@@ -188,7 +189,7 @@ beforeEach(async () => {
     outboxFile: join(state, "outbox.json"),
     filesDir: join(state, "outbox-files"),
     inboxDir: join(state, "inbox"),
-    api: new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, groupPace: NO_PACE }),
+    api: new TelegramApi({ token: fake.token, base: fake.url, baseDelayMs: 1, maxAttempts: 2, groupPace: NO_PACE, timers: noAttemptTimeouts }),
     config: () => config,
     idleMs: 60_000,
     pollTimeoutSec: 1,
