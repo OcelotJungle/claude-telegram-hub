@@ -368,16 +368,17 @@ the sound of the results and the `/cleanup` texts are in `cleanup-design.md`. `/
 (`exec-design.md`).
 
 - Each call is shown as one message the result replaces in place: quiet "🗜 Compaction is running…" (`/compact`),
-  "🏷 Renaming…", "⏹ Ending the session…", "🧹 Cleanup is running…". While rig reports
-  `{"progress":{"code":"session-waiting"}}` on stderr (it waits for the turn to end) the message shows "⏳ Waiting for
-  the turn to end…". Success edits the message into the result ("✅ Compaction done: <before> → <after> tokens.",
+  "🏷 Renaming…", "⏹ Ending the session…", "🧹 Cleanup is running…". When rig reports
+  `{"progress":{"code":"session-waiting"}}` on stderr (the request waits behind a turn or an earlier request of the
+  window) the message shows "⏳ Waiting for the session to be free…"; `{"progress":{"code":"session-running"}}` (it runs
+  after that wait) puts the running text back. Rig reports each change once, nothing for a request that runs at once. Success edits the message into the result ("✅ Compaction done: <before> → <after> tokens.",
   "✅ Renamed: <name>", "⏹ Session ended" with the outcome of the compaction, the cleanup result). A rig error
   deletes the running message and sends rig's own `message` as a new loud one. `session-no-module` (the window has no rig
   module) adds the restart hint; the other codes (`session-ended`, `session-unknown`, `session-timeout`,
   `session-cleanup-not-compacted`, `launch-unavailable`) show rig's message verbatim. Rig missing: the missing-rig text.
 - `/compact <text>` passes the text to the compact as its instructions. `/compact <N>` (a token count: `120000`, `333k`, `1.5m`, any case)
   and `/compact auto` set the autocompact window through one `rig session autocompact <id> <N|auto>` call (same running
-  message, "waiting for the turn" text and verbatim rig errors as the other session actions). The count is rounded to an
+  message, waiting text and verbatim rig errors as the other session actions). The count is rounded to an
   integer matching `^[1-9][0-9]*$`; one that rounds to 0 (or is not an exact integer) is refused with a notice and no rig
   call. The reply is rig's `text` when it gave one, otherwise "✅ Autocompact window: <N|auto>". Any other text stays
   compaction instructions.

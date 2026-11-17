@@ -33,8 +33,10 @@ tokens), ends the Claude Code process, edits the transcript and leaves a backup;
 nor the transcript.
 
 - At once the hub writes the quiet "🧹 Cleanup is running…".
-- While rig reports `{"progress":{"code":"session-waiting"}}` on stderr (it waits for the current turn to end), the
-  hub edits that message into "⏳ Waiting for the turn to end…".
+- When rig reports `{"progress":{"code":"session-waiting"}}` on stderr (the request waits behind the current turn or
+  an earlier request of the window), the hub edits that message into "⏳ Waiting for the session to be free…"; on
+  `{"progress":{"code":"session-running"}}` (the request runs after that wait) it edits it back into "🧹 Cleanup is
+  running…". Rig (0.7.6 and later) reports each change once, and nothing for a request that runs at once.
 - On success the same message is edited into the result (silent by nature): "🧹 Cleanup done: <before> → <after>
   tokens." and, when skills were removed, "… tokens, skills removed: N.". The ended session gets its usual
   "⏹ Session ended" notification.

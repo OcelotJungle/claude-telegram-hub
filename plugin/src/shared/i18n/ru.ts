@@ -116,7 +116,7 @@ export const ru: Messages = {
   execPending: ({ minutes }) => `⏸ Команда пришла ${minutes} мин назад, пока хаб был выключен`,
 
   renameHint: "Напиши имя: /rename новое имя",
-  sessionWaiting: "⏳ Жду конца хода…",
+  sessionWaiting: "⏳ Жду, пока сессия освободится…",
   sessionRestartHint: "Перезапусти сессию, чтобы она загрузила модуль хуков, и повтори.",
   compactRunning: "🗜 Компакт выполняется…",
   autocompactRunning: "⚙️ Задаю окно автокомпакта…",

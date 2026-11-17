@@ -43,12 +43,20 @@ export function isPermissionMode(value: unknown): value is PermissionMode {
   return modeSchema.safeParse(value).success;
 }
 
-// JSON progress is a separate stderr protocol; unrelated stderr remains diagnostic text.
-export function isSessionWaiting(line: string): boolean {
+// Where a request to a session's window stands, as rig (0.7.6 and later) reports it on each change: waiting behind a
+// running turn or an earlier request, or running after such a wait. A request that runs at once reports nothing.
+const SESSION_PROGRESS = { "session-waiting": "waiting", "session-running": "running" } as const;
+const sessionProgressSchema = z.object({ progress: z.object({ code: z.enum(["session-waiting", "session-running"]) }) });
+
+export type SessionProgress = (typeof SESSION_PROGRESS)[keyof typeof SESSION_PROGRESS];
+
+// JSON progress is a separate stderr protocol; unrelated stderr remains diagnostic text. A result's error code of the
+// same words (`rig session run` refusing a running session) comes in the final JSON, never as a progress line.
+export function sessionProgress(line: string): SessionProgress | undefined {
   try {
-    const value: unknown = JSON.parse(line);
-    return z.object({ progress: z.object({ code: z.literal("session-waiting") }) }).safeParse(value).success;
+    const parsed = sessionProgressSchema.safeParse(JSON.parse(line));
+    return parsed.success ? SESSION_PROGRESS[parsed.data.progress.code] : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }

@@ -82,8 +82,9 @@ const LONG_CATCH_UP_MS = 2000;
 const TOKENS_BEFORE = 120_000;
 const TOKENS_AFTER = 30_000;
 const RIG_PID = 4242;
-// The line rig prints on stderr while a session command waits for the turn to end.
+// The lines rig prints on stderr when a session command starts waiting for the session, and when it runs after that.
 const WAITING_LINE = JSON.stringify({ progress: { code: "session-waiting" } });
+const RUNNING_LINE = JSON.stringify({ progress: { code: "session-running" } });
 // How long the hub waits for the window of a session rig has started.
 const CONNECT_WAIT_MS = 90_000;
 // Several times the longest wait the hub has (the 90 s start wait): a window that stays open this long after a stop still gets no held item.
@@ -2071,6 +2072,21 @@ function gatedAnswer(lines: string[], output: RigOutput) {
   return { answer, release: () => release() };
 }
 
+// A rig answer whose progress lines the test prints one at a time, then releases the result.
+function steppedAnswer(output: RigOutput) {
+  let progress: ((line: string) => void) | undefined;
+  let release = () => {};
+  const opened = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  const answer: RigAnswer = async gate => {
+    progress = gate.progress;
+    await opened;
+    return output;
+  };
+  return { answer, print: (line: string) => progress?.(line), release: () => release() };
+}
+
 describe("session commands", () => {
   const SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   const ACCOUNT = "2";
@@ -2271,6 +2287,26 @@ describe("session commands", () => {
       { chat_id: GROUP, message_id: startId, text: en.sessionWaiting },
       { chat_id: GROUP, message_id: startId, text: "✅ Compaction done: 120k → 30k tokens." },
     ]);
+  });
+
+  test("once rig reports the waiting request runs, the message says it runs again, and waits again if rig says so", async () => {
+    const stepped = steppedAnswer(rigOk({ session: SID, compacted: { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER }, backup: "backup", skillsRemoved: 0 }));
+    rig.answer("cleanup", stepped.answer);
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/cleanup"));
+    await startedAs(en.cleanupRunning);
+    const startId = fake.lastMessageId;
+    await waitFor(() => callsOf("cleanup").length === 1, WAIT_MS, "the call");
+    const shown = (n: number) => waitFor(() => edits().length === n, WAIT_MS, `edit ${n}`);
+    stepped.print(WAITING_LINE);
+    await shown(1);
+    stepped.print(RUNNING_LINE);
+    await shown(2);
+    stepped.print(WAITING_LINE);
+    await shown(3);
+    expect(fake.callsOf("editMessageText")).toEqual([en.sessionWaiting, en.cleanupRunning, en.sessionWaiting].map(text => ({ chat_id: GROUP, message_id: startId, text })));
+    stepped.release();
   });
 
   test("an unrelated line on rig's stderr shows nothing", async () => {
@@ -2480,6 +2516,62 @@ describe("session commands", () => {
     fake.pushUpdate(msg("/run"));
     await startedAs(en.sessionWaiting);
     gated.release();
+  });
+
+  test("a start's waiting notice is deleted once rig reports the request runs", async () => {
+    const stepped = steppedAnswer(rigOk({ session: SID, pid: RIG_PID, mode: null, account: null }));
+    rig.answer("run", stepped.answer);
+    closedSession();
+    await start();
+    fake.pushUpdate(msg("/run"));
+    await startedAs(en.launching({ account: ACCOUNT }));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the run call");
+    stepped.print(WAITING_LINE);
+    await startedAs(en.sessionWaiting);
+    const waitingId = fake.lastMessageId;
+    stepped.print(RUNNING_LINE);
+    await waitFor(() => fake.callsOf("deleteMessage").length === 1, WAIT_MS, "waiting notice deleted");
+    expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: waitingId }]);
+    stepped.release();
+  });
+
+  test("a start's waiting notice still queued when rig reports the request runs never reaches the topic", async () => {
+    const stepped = steppedAnswer(rigOk({ session: SID, pid: RIG_PID, mode: null, account: null }));
+    rig.answer("run", stepped.answer);
+    closedSession();
+    await start();
+    // The start notice stays in flight, so the waiting notice behind it is still queued.
+    const release = fake.holdNext("sendMessage");
+    fake.pushUpdate(msg("/run"));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the run call");
+    stepped.print(WAITING_LINE);
+    stepped.print(RUNNING_LINE);
+    release();
+    await startedAs(en.launching({ account: ACCOUNT }));
+    // A later notice marks that the queue behind the start notice has gone out.
+    fake.pushUpdate(msg("/run"));
+    await startedAs(en.sessionAlreadyStarting);
+    expect(texts()).not.toContain(en.sessionWaiting);
+    expect(fake.callsOf("deleteMessage")).toEqual([]);
+    stepped.release();
+  });
+
+  test("a start's waiting notice being sent when rig reports the request runs is deleted once sent", async () => {
+    const stepped = steppedAnswer(rigOk({ session: SID, pid: RIG_PID, mode: null, account: null }));
+    rig.answer("run", stepped.answer);
+    closedSession();
+    await start();
+    fake.pushUpdate(msg("/run"));
+    await startedAs(en.launching({ account: ACCOUNT }));
+    await waitFor(() => callsOf("run").length === 1, WAIT_MS, "the run call");
+    const release = fake.holdNext("sendMessage");
+    stepped.print(WAITING_LINE);
+    await waitFor(() => fake.callsOf("sendMessage").some(c => c.text === en.sessionWaiting), WAIT_MS, "the waiting notice in flight");
+    stepped.print(RUNNING_LINE);
+    release();
+    await waitFor(() => fake.callsOf("deleteMessage").length === 1, WAIT_MS, "waiting notice deleted");
+    expect(fake.callsOf("deleteMessage")).toEqual([{ chat_id: GROUP, message_id: fake.lastMessageId }]);
+    stepped.release();
   });
 
   test("a start whose window never comes is reported once the wait ends", async () => {

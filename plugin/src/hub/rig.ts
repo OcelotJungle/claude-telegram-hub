@@ -1,7 +1,7 @@
 import type { Language, Messages } from "../shared/i18n/index.ts";
 import type { InfoData } from "../shared/info-data.ts";
 import type { Platform } from "../shared/platform.ts";
-import type { PermissionMode, RigAutocompact, RigCleanup, RigCompact, RigMode, RigRename, RigRun, RigRunOptions, RigStop } from "./rig-session.ts";
+import type { PermissionMode, RigAutocompact, RigCleanup, RigCompact, RigMode, RigRename, RigRun, RigRunOptions, RigStop, SessionProgress } from "./rig-session.ts";
 
 import { spawn } from "child_process";
 import { homedir } from "os";
@@ -15,7 +15,7 @@ import { plainLines } from "./rig-output.ts";
 import { literal } from "../shared/markdown.ts";
 import { LANGUAGES } from "../shared/protocol.ts";
 import { PLATFORM } from "../shared/platform.ts";
-import { isPermissionMode, isSessionWaiting, RIG_SESSION_LIMIT_MS, rigAutocompactSchema, rigCleanupSchema, rigCompactSchema, rigModeSchema, rigRenameSchema, rigRunSchema, rigStopSchema } from "./rig-session.ts";
+import { isPermissionMode, RIG_SESSION_LIMIT_MS, rigAutocompactSchema, rigCleanupSchema, rigCompactSchema, rigModeSchema, rigRenameSchema, rigRunSchema, rigStopSchema, sessionProgress } from "./rig-session.ts";
 
 const MS_PER_SECOND = 1000;
 const FEATURE_NAME = /^[a-z][a-z0-9-]*$/;
@@ -236,16 +236,20 @@ export class Rig {
 
   status(): Promise<RigResult<RigStatus>> { return this.query(["status"], statusSchema); }
 
-  private async sessionQuery<T>(sessionId: string, args: string[], schema: z.ZodType<T>, onWaiting?: () => void): Promise<RigResult<T>> {
+  private async sessionQuery<T>(sessionId: string, args: string[], schema: z.ZodType<T>, onProgress?: (state: SessionProgress) => void): Promise<RigResult<T>> {
     if (!SESSION_ID.test(sessionId)) return { ok: false, error: { kind: "badSession" } };
     // cmd.exe cannot represent an embedded line break as an argv value. Refuse it
     // before constructing a command; POSIX passes multiline instructions directly.
     if (args.some(arg => arg.includes("\0") || (this.deps.platform.windows && /[\r\n]/.test(arg)))) {
       return { ok: false, error: { kind: "controlChar" } };
     }
-    let waiting = false;
+    // Rig reports each change once; a repeat of the current state is no change.
+    let current: SessionProgress | undefined;
     const progress = (line: string) => {
-      if (!waiting && isSessionWaiting(line)) { waiting = true; onWaiting?.(); }
+      const state = sessionProgress(line);
+      if (state === undefined || state === current) return;
+      current = state;
+      onProgress?.(state);
     };
     return this.query(["session", ...args.slice(0, 1), sessionId, ...args.slice(1)], schema, { limit: RIG_SESSION_LIMIT_MS, progress });
   }
@@ -253,36 +257,36 @@ export class Rig {
   // Free text goes after the fixed words rig's parser expects (src/commands/session-compact.ts and session-rename.ts in
   // agent-rig take the words after "--instructions" / after the id positionally and join them), so a text with a
   // leading "-" is a value there; a "--" or "--instructions=" form would be read by rig as part of the text.
-  compact(sessionId: string, instructions?: string, onWaiting?: () => void): Promise<RigResult<RigCompact>> {
-    return this.sessionQuery(sessionId, ["compact", ...(instructions ? ["--instructions", instructions] : [])], rigCompactSchema, onWaiting);
+  compact(sessionId: string, instructions?: string, onProgress?: (state: SessionProgress) => void): Promise<RigResult<RigCompact>> {
+    return this.sessionQuery(sessionId, ["compact", ...(instructions ? ["--instructions", instructions] : [])], rigCompactSchema, onProgress);
   }
 
   // `window` is an integer string matching ^[1-9][0-9]*$ or "auto" (rig 0.7.2 refuses anything else as usage).
-  autocompact(sessionId: string, window: string, onWaiting?: () => void): Promise<RigResult<RigAutocompact>> {
-    return this.sessionQuery(sessionId, ["autocompact", window], rigAutocompactSchema, onWaiting);
+  autocompact(sessionId: string, window: string, onProgress?: (state: SessionProgress) => void): Promise<RigResult<RigAutocompact>> {
+    return this.sessionQuery(sessionId, ["autocompact", window], rigAutocompactSchema, onProgress);
   }
 
-  rename(sessionId: string, name: string, onWaiting?: () => void): Promise<RigResult<RigRename>> {
-    return this.sessionQuery(sessionId, ["rename", name], rigRenameSchema, onWaiting);
+  rename(sessionId: string, name: string, onProgress?: (state: SessionProgress) => void): Promise<RigResult<RigRename>> {
+    return this.sessionQuery(sessionId, ["rename", name], rigRenameSchema, onProgress);
   }
 
-  stop(sessionId: string, onWaiting?: () => void): Promise<RigResult<RigStop>> {
-    return this.sessionQuery(sessionId, ["stop"], rigStopSchema, onWaiting);
+  stop(sessionId: string, onProgress?: (state: SessionProgress) => void): Promise<RigResult<RigStop>> {
+    return this.sessionQuery(sessionId, ["stop"], rigStopSchema, onProgress);
   }
 
-  cleanup(sessionId: string, onWaiting?: () => void): Promise<RigResult<RigCleanup>> {
-    return this.sessionQuery(sessionId, ["cleanup"], rigCleanupSchema, onWaiting);
+  cleanup(sessionId: string, onProgress?: (state: SessionProgress) => void): Promise<RigResult<RigCleanup>> {
+    return this.sessionQuery(sessionId, ["cleanup"], rigCleanupSchema, onProgress);
   }
 
-  run(sessionId: string, options: RigRunOptions = {}, onWaiting?: () => void): Promise<RigResult<RigRun>> {
+  run(sessionId: string, options: RigRunOptions = {}, onProgress?: (state: SessionProgress) => void): Promise<RigResult<RigRun>> {
     if (options.account !== undefined && !ACCOUNT.test(options.account)) return Promise.resolve({ ok: false, error: { kind: "badAccount" } });
     if (options.mode !== undefined && !isPermissionMode(options.mode)) return Promise.resolve({ ok: false, error: { kind: "badMode" } });
-    return this.sessionQuery(sessionId, ["run", ...(options.mode ? ["--mode", options.mode] : []), ...(options.account ? ["--account", options.account] : [])], rigRunSchema, onWaiting);
+    return this.sessionQuery(sessionId, ["run", ...(options.mode ? ["--mode", options.mode] : []), ...(options.account ? ["--account", options.account] : [])], rigRunSchema, onProgress);
   }
 
-  mode(sessionId: string, mode: PermissionMode, onWaiting?: () => void): Promise<RigResult<RigMode>> {
+  mode(sessionId: string, mode: PermissionMode, onProgress?: (state: SessionProgress) => void): Promise<RigResult<RigMode>> {
     if (!isPermissionMode(mode)) return Promise.resolve({ ok: false, error: { kind: "badMode" } });
-    return this.sessionQuery(sessionId, ["mode", mode], rigModeSchema, onWaiting);
+    return this.sessionQuery(sessionId, ["mode", mode], rigModeSchema, onProgress);
   }
 
   // What /info draws for one session; the id is checked here because it ends up in a command line.

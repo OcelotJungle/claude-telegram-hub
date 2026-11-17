@@ -5,7 +5,7 @@ import type { Entity, Formatted } from "../shared/markdown.ts";
 import type { OutFile } from "../shared/media.ts";
 import type { Language, Messages } from "../shared/i18n/index.ts";
 import type { AskQuestion, ChannelMeta, EnableResult, HookBody, HubToPlugin, PermissionBehavior, PluginToHub, QuestionDecision, ResolutionKind } from "../shared/protocol.ts";
-import type { PermissionMode } from "./rig-session.ts";
+import type { PermissionMode, SessionProgress } from "./rig-session.ts";
 import type { OutItem, Piece } from "./outbox.ts";
 import type { Poll } from "./questions.ts";
 import type { SessionRecord } from "./sessions.ts";
@@ -343,7 +343,7 @@ export class Hub {
   private replays = new Map<string, Replay>();
   // The start notices sent to a session's topic: Telegram message id and the
   // text it shows. They go once its agent starts working.
-  private launchNotices = new Map<string, { id: number; text: string }[]>();
+  private launchNotices = new Map<string, { id: number; text: string; item: string }[]>();
   // How the latest start of a session ended: the start notice then reads
   // "started", or leaves the topic as the loud failure notice comes.
   private launchEnds = new Map<string, "started" | "failed">();
@@ -1503,7 +1503,7 @@ ${msg.text}`);
       const { text } = item;
       const sent = await this.sendToTopic(api, groupId, sessionId, thread => api.sendMessage(groupId, thread, text, item.silent, item.entities, item.buttons));
       if (item.keepId) this.outbox.recordMessageId(item.id, sent.message_id);
-      if (item.id.startsWith(LAUNCH_NOTICE)) this.launchNoticeSent(sessionId, sent.message_id, text);
+      if (item.id.startsWith(LAUNCH_NOTICE)) this.launchNoticeSent(sessionId, item.id, sent.message_id, text);
       return;
     }
     const lost = queued.filter(f => !existsSync(f.path));
@@ -2069,13 +2069,13 @@ ${msg.text}`);
       case "stop": {
         // Whatever comes for the session meanwhile is held until its window is gone.
         const hold = this.beginEnding(sessionId);
-        return this.sessionAction(sessionId, msg.stopRunning, onWaiting => this.rig.stop(sessionId, onWaiting), stopOutcome,
+        return this.sessionAction(sessionId, msg.stopRunning, onProgress => this.rig.stop(sessionId, onProgress), stopOutcome,
           result => this.endingDone(sessionId, hold, !result.ok ? "failed" : result.value.stopped ? "ended" : "not-running"));
       }
       case "cleanup": {
         const hold = this.beginEnding(sessionId);
         // A cleanup ends the process whenever it succeeds; one that refuses (not compacted) touched nothing.
-        return this.sessionAction(sessionId, msg.cleanupRunning, onWaiting => this.rig.cleanup(sessionId, onWaiting), cleanupOutcome,
+        return this.sessionAction(sessionId, msg.cleanupRunning, onProgress => this.rig.cleanup(sessionId, onProgress), cleanupOutcome,
           result => this.endingDone(sessionId, hold, result.ok ? "ended" : "failed"));
       }
       case "compact": {
@@ -2083,32 +2083,36 @@ ${msg.text}`);
         if (autocompact && "refused" in autocompact) return this.notice(sessionId, msg.autocompactInvalid, "warning");
         if (autocompact) {
           const window = autocompact.window;
-          return this.sessionAction(sessionId, msg.autocompactRunning, onWaiting => this.rig.autocompact(sessionId, window, onWaiting), autocompactOutcome);
+          return this.sessionAction(sessionId, msg.autocompactRunning, onProgress => this.rig.autocompact(sessionId, window, onProgress), autocompactOutcome);
         }
-        return this.sessionAction(sessionId, msg.compactRunning, onWaiting => this.rig.compact(sessionId, cmd.args || undefined, onWaiting), compactOutcome);
+        return this.sessionAction(sessionId, msg.compactRunning, onProgress => this.rig.compact(sessionId, cmd.args || undefined, onProgress), compactOutcome);
       }
       case "rename": {
         const name = cmd.args.replace(/\s+/g, " ").trim();
         if (!name) return this.enqueue(sessionId, `hub-${randomUUID()}`, msg.renameHint, notifies("info"), false);
-        return this.sessionAction(sessionId, msg.renameRunning, onWaiting => this.rig.rename(sessionId, name, onWaiting), renameOutcome);
+        return this.sessionAction(sessionId, msg.renameRunning, onProgress => this.rig.rename(sessionId, name, onProgress), renameOutcome);
       }
     }
   }
 
-  // One start message that the result replaces in place: "running…" while rig works (and "waiting for the
-  // turn to end" while it reports that), then the outcome. A rig failure is shown as rig worded it.
+  // One start message that the result replaces in place: "running…" while rig works, "waiting" while rig reports the
+  // request waits for the session, "running…" again once it runs, then the outcome. A rig failure is shown as rig
+  // worded it.
   private sessionAction<T>(
     sessionId: string,
     startText: string,
-    call: (onWaiting: () => void) => Promise<RigResult<T>>,
+    call: (onProgress: (state: SessionProgress) => void) => Promise<RigResult<T>>,
     outcome: (value: T, m: Messages) => SessionOutcome,
     settle?: (result: RigResult<T>) => void,
   ): void {
     const id = randomUUID();
     const startId = `${id}.0`;
     this.enqueue(sessionId, `cmd-${startId}`, startText, notifies("info"), true, undefined, true);
-    const waiting = () => this.enqueue(sessionId, `cmd-${id}.wait`, this.m().sessionWaiting, false, true, { id: startId, kind: "progress" });
-    this.spawn(call(waiting).then(result => {
+    // Each change is its own queued edit: the outbox takes a source id once.
+    let changes = 0;
+    const progress = (state: SessionProgress) => this.enqueue(sessionId, `cmd-${id}.progress-${++changes}`,
+      state === "waiting" ? this.m().sessionWaiting : startText, false, true, { id: startId, kind: "progress" });
+    this.spawn(call(progress).then(result => {
       settle?.(result);
       const m = this.m();
       if (!result.ok && result.error.kind === "rig") this.log.warn(`session ${sessionId}: rig refused (${result.error.code}): ${result.error.message}`);
@@ -2138,7 +2142,7 @@ ${msg.text}`);
     // The mode record to look for later starts where the transcript is now.
     const transcript = this.transcriptOf(sessionId);
     const offset = transcript ? statSync(transcript).size : undefined;
-    this.spawn(this.rig.mode(sessionId, mode, () => this.launchNotice(sessionId, this.m().sessionWaiting)).then(result => {
+    this.spawn(this.rig.mode(sessionId, mode, this.launchProgress(sessionId)).then(result => {
       const m = this.m();
       if (!result.ok) {
         this.abandonLaunch(sessionId, entry);
@@ -2341,7 +2345,7 @@ ${msg.text}`);
     this.launchEnds.delete(sessionId);
     this.launchNotice(sessionId, this.m().launching({ account: chosen ? literal(chosen) : undefined }));
     this.log.info(`starting session ${sessionId} with rig${chosen ? `, account ${chosen}` : ""}`);
-    this.spawn(this.rig.run(sessionId, chosen ? { account: chosen } : {}, () => this.launchNotice(sessionId, this.m().sessionWaiting)).then(result => {
+    this.spawn(this.rig.run(sessionId, chosen ? { account: chosen } : {}, this.launchProgress(sessionId)).then(result => {
       if (!result.ok) {
         if (result.error.kind === "rig") this.log.warn(`session ${sessionId}: rig refused to start it (${result.error.code}): ${result.error.message}`);
         this.abandonLaunch(sessionId, entry);
@@ -2861,13 +2865,41 @@ ${msg.text}`);
     this.enqueue(sessionId, `hub-${randomUUID()}`, text, notifies(kind));
   }
 
-  // A silent notice needed only until the session's agent starts working.
-  private launchNotice(sessionId: string, text: string): void {
-    this.enqueue(sessionId, `${LAUNCH_NOTICE}${randomUUID()}`, text, notifies("info"));
+  // A silent notice needed only until the session's agent starts working; returns its source id.
+  private launchNotice(sessionId: string, text: string): string {
+    const source = `${LAUNCH_NOTICE}${randomUUID()}`;
+    this.enqueue(sessionId, source, text, notifies("info"));
+    return source;
   }
 
-  private launchNoticeSent(sessionId: string, messageId: number, text: string): void {
-    const notice = { id: messageId, text };
+  // A start whose rig request waits for the session (a turn of the window it restarts) says so in a notice of its
+  // own, taken away once rig reports the request runs.
+  private launchProgress(sessionId: string): (state: SessionProgress) => void {
+    let waiting: string | undefined;
+    return state => {
+      if (state === "waiting") waiting = this.launchNotice(sessionId, this.m().sessionWaiting);
+      else if (waiting !== undefined) {
+        this.retractLaunchNotice(sessionId, waiting);
+        waiting = undefined;
+      }
+    };
+  }
+
+  // A queued notice leaves the queue; one in the topic is deleted. One being sent right now has left the queue by
+  // the time it is sent, and launchNoticeSent deletes it then.
+  private retractLaunchNotice(sessionId: string, source: string): void {
+    const notices = this.launchNotices.get(sessionId) ?? [];
+    const sent = notices.filter(n => n.item.startsWith(`${source}#`));
+    for (const item of this.outbox.items().filter(i => i.id.startsWith(`${source}#`))) this.outbox.remove(item.id);
+    if (!sent.length) return;
+    this.launchNotices.set(sessionId, notices.filter(n => !sent.includes(n)));
+    for (const { id } of sent) this.deleteLaunchNotice(id);
+  }
+
+  private launchNoticeSent(sessionId: string, item: string, messageId: number, text: string): void {
+    // The pump removes an item after sending it, so one gone already was taken out of the queue while it was sent.
+    if (!this.outbox.items().some(i => i.id === item)) return this.deleteLaunchNotice(messageId);
+    const notice = { id: messageId, text, item };
     this.launchNotices.set(sessionId, [...(this.launchNotices.get(sessionId) ?? []), notice]);
     const end = this.launchEnds.get(sessionId);
     if (this.connOf(sessionId)?.data.busy || end === "failed") this.dropLaunchNotices(sessionId);
@@ -2897,11 +2929,16 @@ ${msg.text}`);
 
   private dropLaunchNotices(sessionId: string): void {
     const notices = this.launchNotices.get(sessionId);
+    if (!notices) return;
+    this.launchNotices.delete(sessionId);
+    for (const { id } of notices) this.deleteLaunchNotice(id);
+  }
+
+  private deleteLaunchNotice(messageId: number): void {
     const api = this.opts.api;
     const groupId = this.opts.config().groupId;
-    if (!notices || !api || !groupId) return;
-    this.launchNotices.delete(sessionId);
-    for (const { id } of notices) this.spawn(api.deleteMessage(groupId, id).catch(e => this.log.warn(`deleting start notice ${id} failed: ${e}`)));
+    if (!api || !groupId) return;
+    this.spawn(api.deleteMessage(groupId, messageId).catch(e => this.log.warn(`deleting start notice ${messageId} failed: ${e}`)));
   }
 
   // Photos inside are downloaded like a photo message; a photo that fails keeps

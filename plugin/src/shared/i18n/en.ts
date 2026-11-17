@@ -127,7 +127,7 @@ export const en = {
 
   // Session actions run by rig: what the topic sees while and after rig works.
   renameHint: "Write the name: /rename new name",
-  sessionWaiting: "⏳ Waiting for the turn to end…",
+  sessionWaiting: "⏳ Waiting for the session to be free…",
   sessionRestartHint: "Restart the session so that it loads the hooks module, then try again.",
   compactRunning: "🗜 Compaction is running…",
   autocompactRunning: "⚙️ Setting the autocompact window…",
