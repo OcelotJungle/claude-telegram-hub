@@ -21,7 +21,7 @@ import { BYTES_PER_MB, MAX_CAPTION, MAX_UPLOAD } from "../shared/media.ts";
 import { notifies } from "../shared/notification.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
 import { enableResult } from "../shared/protocol-schema.ts";
-import { transcriptPathFor } from "../transcript/locate.ts";
+import { sessionTranscriptPath, transcriptPathFor } from "../transcript/locate.ts";
 import { ModelVersions, recordModel } from "../transcript/model-versions.ts";
 import { parseRecord } from "../transcript/parse.ts";
 import { Relay } from "../transcript/relay.ts";
@@ -316,8 +316,9 @@ export class PluginCore {
 
   // /clear or /resume inside the window changed the session (from the
   // SessionStart hook, via the hub).
-  switchSession(sessionId: string, transcriptPath: string, cwd: string): void {
+  switchSession(sessionId: string, namedPath: string, cwd: string): void {
     this.tailer?.pollNow();
+    const transcriptPath = sessionTranscriptPath(sessionId, namedPath, this.opts.configDir);
     if (sessionId === this.sessionId) {
       // startup/compact: same session, maybe a differently spelled path.
       if (transcriptPath !== this.transcriptPath) this.follow(transcriptPath);

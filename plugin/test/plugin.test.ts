@@ -789,6 +789,17 @@ describe("PluginCore", () => {
     await waitFor(() => sent().length === 1, 3000, "message");
   });
 
+  test("a session resumed in another cwd keeps relaying the transcript it writes to, not the one the hook names", async () => {
+    const c = await enabledCore();
+    // Resumed in a worktree: the hook names a file under the worktree's project dir, which Claude Code never creates.
+    const named = join(configDir, "projects", "C--code-demo-app--worktrees-x", `${SID}.jsonl`);
+    c.switchSession(SID, named, "C:\\code\\demo-app\\.worktrees\\x");
+    append(assistantText("\u0438\u0437 \u0440\u0430\u0431\u043e\u0447\u0435\u0439 \u043a\u043e\u043f\u0438\u0438", "end_turn"), closed);
+    await stopHook(false);
+    await waitFor(() => sent().length === 1, 3000, "message");
+    expect(sent()).toEqual([{ text: "\u0438\u0437 \u0440\u0430\u0431\u043e\u0447\u0435\u0439 \u043a\u043e\u043f\u0438\u0438", silent: true, topic: 100 }]);
+  });
+
   test("enable without groupId returns the explanation", async () => {
     config = { allowFrom: [ME], turnEndChime: "" };
     const c = makeCore();

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { readSessionTitle, TranscriptTailer } from "../src/transcript/tail.ts";
-import { sanitizeCwd, transcriptPathFor } from "../src/transcript/locate.ts";
+import { sanitizeCwd, sessionTranscriptPath, transcriptPathFor } from "../src/transcript/locate.ts";
 import { tempDir } from "./helpers.ts";
 import { manualClock } from "./manual-clock.ts";
 
@@ -170,6 +170,26 @@ describe("locate", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "sid.jsonl"), "");
     expect(transcriptPathFor("sid", "C:\\a\\b", cfg)).toBe(join(dir, "sid.jsonl"));
+  });
+
+  test("a named transcript that does not exist gives way to the session's existing one", () => {
+    const cfg = tempDir();
+    const dir = join(cfg, "projects", "C--a");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "sid.jsonl"), "");
+    const named = join(cfg, "projects", "C--a-sub", "sid.jsonl");
+    expect(sessionTranscriptPath("sid", named, cfg)).toBe(join(dir, "sid.jsonl"));
+  });
+
+  test("a named transcript that exists, or a session with none yet, keeps the named path", () => {
+    const cfg = tempDir();
+    const named = join(cfg, "projects", "C--a-sub", "sid.jsonl");
+    expect(sessionTranscriptPath("sid", named, cfg)).toBe(named);
+    mkdirSync(join(cfg, "projects", "C--a"), { recursive: true });
+    writeFileSync(join(cfg, "projects", "C--a", "sid.jsonl"), "");
+    mkdirSync(join(cfg, "projects", "C--a-sub"), { recursive: true });
+    writeFileSync(named, "");
+    expect(sessionTranscriptPath("sid", named, cfg)).toBe(named);
   });
 
   test("returns the sanitized path when nothing exists yet", () => {

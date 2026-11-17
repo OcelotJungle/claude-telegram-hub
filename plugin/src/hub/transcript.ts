@@ -1,6 +1,7 @@
 import { closeSync, openSync, readdirSync, readSync, statSync } from "fs";
 import { join } from "path";
 import { field } from "../shared/guards.ts";
+import { findTranscript } from "../transcript/locate.ts";
 
 // Read-only lookups in a session's transcript. The hub never writes a transcript: rig does every action on a session.
 
@@ -80,25 +81,7 @@ export function sessionCwd(sessionId: string, projectsDir: string): string | und
 // The transcript file of a session: <projectsDir>/<project>/<sessionId>.jsonl.
 export function sessionTranscript(sessionId: string, projectsDir: string): string | undefined {
   if (!SESSION_ID.test(sessionId)) return undefined;
-  let dirs: string[];
-  try {
-    dirs = readdirSync(projectsDir);
-  } catch {
-    return undefined;
-  }
-  for (const dir of dirs) {
-    const path = join(projectsDir, dir, `${sessionId}.jsonl`);
-    if (isFile(path)) return path;
-  }
-  return undefined;
-}
-
-function isFile(path: string): boolean {
-  try {
-    return statSync(path).isFile();
-  } catch {
-    return false;
-  }
+  return findTranscript(sessionId, projectsDir);
 }
 
 function readHead(path: string): string | undefined {
