@@ -1,13 +1,15 @@
 import type { Logger } from "../shared/log.ts";
 import type { Timers, TimerHandle } from "../shared/timers.ts";
 
-import { closeSync, openSync, readFileSync, readSync, statSync } from "fs";
+import { closeSync, openSync, readSync, statSync } from "fs";
 import { nullLogger } from "../shared/log.ts";
 import { realTimers } from "../shared/timers.ts";
 import { parseRecord } from "./parse.ts";
 
 const NEWLINE = 0x0a;
 const POLL_INTERVAL_MS = 300;
+// Block size for scanning a whole transcript for titles: bounded memory whatever the file size.
+export const TITLE_BLOCK_BYTES =4 * 1024 * 1024;
 
 // Follows a transcript file by polling. Starts at the current end of an
 // existing file (history is never replayed) unless fromStart; a file that does
@@ -142,23 +144,47 @@ export function effectiveTitle(t: Titles): string | undefined {
   return t.custom ?? t.agent ?? t.ai;
 }
 
+// Read in blocks: a transcript can hold gigabytes, and memory stays at one block.
 export function readSessionTitles(path: string): Titles {
   const last: Titles = {};
-  let text: string;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch {
-    return last;
-  }
-  for (const l of text.split("\n")) {
-    if (!l.includes('-title"') && !l.includes('"agent-name"')) continue;
+  const take = (l: string) => {
+    if (!l.includes('-title"') && !l.includes('"agent-name"')) return;
     let rec: unknown;
     try {
       rec = JSON.parse(l);
     } catch {
-      continue;
+      return;
     }
     for (const ev of parseRecord(rec)) if (ev.kind === "title") last[ev.source] = ev.title;
+  };
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return last;
+  }
+  try {
+    const block = Buffer.alloc(TITLE_BLOCK_BYTES);
+    let rest: Buffer = Buffer.alloc(0);
+    let position = 0;
+    let read: number;
+    while ((read = readSync(fd, block, 0, block.length, position)) > 0) {
+      position += read;
+      const data = Buffer.concat([rest, block.subarray(0, read)]);
+      // Cut at the last newline, so no line or multibyte character is split.
+      const end = data.lastIndexOf(NEWLINE);
+      if (end < 0) {
+        rest = data;
+        continue;
+      }
+      for (const l of data.subarray(0, end).toString("utf8").split("\n")) take(l);
+      rest = Buffer.from(data.subarray(end + 1));
+    }
+    take(rest.toString("utf8"));
+  } catch {
+    return last;
+  } finally {
+    closeSync(fd);
   }
   return last;
 }

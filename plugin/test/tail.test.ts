@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
-import { readSessionTitle, TranscriptTailer } from "../src/transcript/tail.ts";
+import { readSessionTitle, readSessionTitles, TITLE_BLOCK_BYTES, TranscriptTailer } from "../src/transcript/tail.ts";
 import { sanitizeCwd, sessionTranscriptPath, transcriptPathFor } from "../src/transcript/locate.ts";
 import { tempDir } from "./helpers.ts";
 import { manualClock } from "./manual-clock.ts";
@@ -141,6 +141,16 @@ describe("readSessionTitle", () => {
     expect(readSessionTitle(path)).toBe("ag1");
     appendFileSync(path, line({ type: "custom-title", customTitle: "c1" }));
     expect(readSessionTitle(path)).toBe("c1");
+  });
+
+  test("a title written across the reading blocks of a large transcript is read whole", () => {
+    const path = join(tempDir(), "big.jsonl");
+    // Filler past the 4 MiB block, ending so that the title record starts just before the boundary; the title is
+    // Cyrillic, so a cut at the boundary would split a multibyte character.
+    const filler = line({ type: "user", pad: "x".repeat(TITLE_BLOCK_BYTES - 40) });
+    const title = "\u0421\u043e\u0446\u043d\u043e\u0432\u043e\u0441\u0442\u0438".repeat(4);
+    writeFileSync(path, filler + line({ type: "custom-title", customTitle: title }) + filler + line({ type: "ai-title", aiTitle: "tail" }));
+    expect(readSessionTitles(path)).toEqual({ custom: title, ai: "tail" });
   });
 
   test("missing file or no titles gives undefined", () => {
