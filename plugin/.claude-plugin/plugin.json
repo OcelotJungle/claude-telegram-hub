@@ -1,6 +1,6 @@
 {
   "name": "telegram-hub",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "One Telegram bot for every Claude Code window: a forum topic per session, routed through a shared local hub.",
   "keywords": [
     "telegram",
@@ -9,5 +9,11 @@
   ],
   "author": {
     "name": "OcelotJungle"
+  },
+  "mcpServers": {
+    "telegram-hub": {
+      "command": "bun",
+      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--shell=bun", "--silent", "start"]
+    }
   }
 }

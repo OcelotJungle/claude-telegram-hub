@@ -336,8 +336,7 @@ describe("AskUserQuestion hook", () => {
 describe("plugin packaging", () => {
   // The parts of the manifests the tests read.
   const marketplace = z.object({ name: z.string(), plugins: z.array(z.object({ name: z.string(), source: z.string() })) });
-  const manifest = z.object({ name: z.string() });
-  const mcpConfig = z.object({ mcpServers: z.record(z.string(), z.object({ command: z.string() })) });
+  const manifest = z.object({ name: z.string(), mcpServers: z.record(z.string(), z.object({ command: z.string() })) });
   const pkgJson = z.object({ scripts: z.record(z.string(), z.string()) });
   const hooksJson = z.object({
     hooks: z.record(z.string(), z.array(z.object({ matcher: z.string().optional(), hooks: z.array(z.looseObject({ command: z.string().optional() })) }))),
@@ -352,9 +351,12 @@ describe("plugin packaging", () => {
   });
 
   test("plugin manifest, MCP server and hook point at real files", () => {
-    expect(json(join(PLUGIN, ".claude-plugin", "plugin.json"), manifest).name).toBe("telegram-hub");
-    const mcp = json(join(PLUGIN, ".mcp.json"), mcpConfig);
-    expect(mcp.mcpServers["telegram-hub"].command).toBe("bun");
+    const plugin = json(join(PLUGIN, ".claude-plugin", "plugin.json"), manifest);
+    expect(plugin.name).toBe("telegram-hub");
+    expect(plugin.mcpServers["telegram-hub"].command).toBe("bun");
+    // The MCP server lives in the manifest: a .mcp.json in the plugin directory is also a project MCP server for a
+    // session working there, which asks for approval at launch and then fails (CLAUDE_PLUGIN_ROOT is unset there).
+    expect(existsSync(join(PLUGIN, ".mcp.json"))).toBe(false);
     const pkg = json(join(PLUGIN, "package.json"), pkgJson);
     expect(pkg.scripts.start).toContain("src/plugin/main.ts");
     expect(existsSync(join(PLUGIN, "src", "plugin", "main.ts"))).toBe(true);
