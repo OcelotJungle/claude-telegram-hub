@@ -111,6 +111,7 @@ This rule does not change the sound of the agent's text or of the end of its tur
   for an answer to a question, or it is interrupted (Esc).
 - A message that starts with `!` interrupts a working agent, like Esc in the terminal, and
   arrives instead of its turn, already without the `!`. The hub removes the sign and marks the message as an interruption.
+  A lone `!` always stops the agent: it gets a direct order to stop and wait, not an empty message.
   The plugin puts it into the window's inbox (socket
   `CLAUDE_CODE_MESSAGING_SOCKET`) with priority `now`. In the terminal it looks like a message from
   another session with the telegram-hub label. For an agent that is doing nothing, such a message arrives as a

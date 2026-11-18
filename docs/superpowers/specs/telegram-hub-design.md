@@ -177,7 +177,10 @@ goes into the topic name when it is created.
   only if the flag is present and the agent is working. The agent counts as working through its turn, except while it
   waits for the answer to a poll; any tool result in the transcript, the poll's answer included, makes it working
   again. Text starting with `!` without the flag (for example, a pasted document)
-  arrives as a normal message. A lone `!` gives an interrupt with an empty message. The hub makes its own checks for
+  arrives as a normal message. A lone `!` (nothing left after the hub strips it: no text, file or reply) is a stop
+  order: the plugin interrupts the agent whether it counts as working or not, and instead of an empty message the
+  agent gets a direct order to stop the work, start nothing new, say in one line that it stopped and wait; if the
+  interrupt fails, the same order comes as a channel message. The hub makes its own checks for
   `!` (straight to the window during `/cleanup`, a new batch) on the original text from Telegram.
   After updating to this scheme, both the hub and the windows must be restarted: an old window does not know the flag and does not
   interrupt;
@@ -533,7 +536,8 @@ Automated tests (`bun test`):
   the original, the topic root, a reply from another chat, each kind of forward source;
 - interrupt: the hub removes `!` and sets the flag, a lone `!` is an empty message with the flag, a forward starting with
   `!` gets no flag; the plugin interrupts a working agent by the flag, text starting with `!` without the flag does not
-  interrupt, and an idle agent gets the message as a normal one;
+  interrupt, and an idle agent gets the message as a normal one; a lone `!` interrupts an idle agent too, with the stop
+  order, and a failed interrupt delivers the stop order, never an empty message;
 - batches: an album of three photos is one notification with three paths; forwards and the text after them are one
   notification; a message after a quiet window is separate; a stream without pauses goes out at the limit; a command
   sends the waiting batch at once; `!` starts its own batch; "seen" of the first removes ✍ from all;

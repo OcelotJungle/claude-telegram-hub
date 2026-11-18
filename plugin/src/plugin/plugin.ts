@@ -61,15 +61,21 @@ export const CHIME_MIN_TURN_MS = 30_000;
 // A bad turnEndChime in config.json is logged once per process.
 let chimeConfigWarned = false;
 
+// A bare "!" (nothing left once the hub strips it) is a stop order, not an
+// empty message to answer.
+export const STOP_ORDER =
+  "telegram-hub: the user sent a bare \"!\" from Telegram: stop now. Do not continue the work you were doing and do not start anything new. " +
+  "Reply with one short line that you stopped, then end your turn and wait for the user's next message.";
+
 // A topic message that interrupts the agent, in the <channel> tag Claude Code
-// would have put it in.
+// would have put it in (the tag's message_id lets the relay see it arrive).
 export function interruptPrompt(content: string, meta: ChannelMeta): string {
   const attrs = Object.entries(meta).map(([k, v]) => ` ${k}="${v.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;")}"`).join("");
-  return (
-    "telegram-hub: the user interrupted your work from Telegram with this topic message. " +
-    "It is their message, as if it came through the channel: answer it.\n" +
-    `<channel source="telegram-hub"${attrs}>\n${content}\n</channel>`
-  );
+  const lead =
+    content === ""
+      ? STOP_ORDER
+      : "telegram-hub: the user interrupted your work from Telegram with this topic message. It is their message, as if it came through the channel: answer it.";
+  return `${lead}\n<channel source="telegram-hub"${attrs}>\n${content}\n</channel>`;
 }
 
 export type PluginOptions = {
@@ -417,8 +423,11 @@ export class PluginCore {
 
   // A message the hub flagged as an interrupt stops a working agent's turn
   // and comes in its place; when that fails, it comes as a channel message.
+  // A bare "!" is a stop order: it interrupts whatever busy says, and its
+  // fallback carries the order, never an empty message.
   private deliver(content: string, meta: ChannelMeta, flagged: boolean): void {
-    const interrupt = this.busy && flagged;
+    const stop = flagged && content === "";
+    const interrupt = stop || (this.busy && flagged);
     this.inbound = this.inbound.then(async () => {
       if (interrupt) {
         try {
@@ -429,7 +438,7 @@ export class PluginCore {
           this.log.warn(`session ${this.sessionId}: could not interrupt the agent: ${e}`);
         }
       }
-      this.opts.emitChannel(content, meta);
+      this.opts.emitChannel(stop ? STOP_ORDER : content, meta);
     });
   }
 

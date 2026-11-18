@@ -7,7 +7,7 @@ import { join } from "path";
 import { Hub } from "../src/hub/hub.ts";
 import { SessionStore } from "../src/hub/sessions.ts";
 import { TelegramApi } from "../src/hub/telegram.ts";
-import { CHIME_MIN_TURN_MS, CONTINUE_PROMPT, cutLimitNote, filesRejectedPrompt, interruptPrompt, MAX_AUTO_CONTINUES, playConfiguredChime, PluginCore } from "../src/plugin/plugin.ts";
+import { CHIME_MIN_TURN_MS, CONTINUE_PROMPT, cutLimitNote, filesRejectedPrompt, interruptPrompt, MAX_AUTO_CONTINUES, playConfiguredChime, PluginCore, STOP_ORDER } from "../src/plugin/plugin.ts";
 import { defaultTurnEndChime } from "../src/shared/chime.ts";
 import { catalogOf } from "../src/shared/i18n/index.ts";
 import { ru } from "../src/shared/i18n/ru.ts";
@@ -532,6 +532,26 @@ describe("PluginCore", () => {
     expect(channel.map(m => m.content)).toEqual(["\u043f\u0440\u0438\u0432\u0435\u0442"]);
   });
 
+  test("a bare \"!\" stops the agent even when it looks idle", async () => {
+    await enabledCore();
+    const u = topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: " ! " });
+    fake.pushUpdate(u);
+    await waitFor(() => interrupts.length === 1, 3000, "stop order");
+    await settled(hub, { fake });
+    expect(channel).toEqual([]);
+    expect(interrupts[0].prompt).toStartWith(`${STOP_ORDER}\n<channel `);
+    expect(interrupts[0].prompt).toContain(`message_id="${u.message?.message_id}"`);
+  });
+
+  test("a bare \"!\" whose interrupt fails still arrives as the stop order", async () => {
+    await enabledCore();
+    interruptFails = true;
+    fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!" }));
+    await waitFor(() => channel.length === 1, 3000, "channel message");
+    expect(interrupts.length).toBe(1);
+    expect(channel.map(m => m.content)).toEqual([STOP_ORDER]);
+  });
+
   test("content starting with \"!\" without the hub's flag does not interrupt", async () => {
     await enabledCore();
     append(assistantText("\u0421\u043c\u043e\u0442\u0440\u044e", "tool_use", "i4"), assistantTool("Bash", "i4"));
@@ -590,7 +610,7 @@ describe("PluginCore", () => {
     expect(typing()).toBe(ended);
   });
 
-  test("a tool result resumes busy state and a lone ! interrupts with empty content", async () => {
+  test("a tool result resumes busy state and a lone ! interrupts with the stop order", async () => {
     await enabledCore();
     const typing = () => fake.callsOf("sendChatAction").length;
     append(assistantTool("Bash", "q1"));
@@ -619,6 +639,7 @@ describe("PluginCore", () => {
     fake.pushUpdate(topicMsg({ chatId: GROUP, threadId: 100, fromId: ME, text: "!" }));
     await waitFor(() => interrupts.length === 1, 3000, "interrupt after the answer");
     expect(channel).toEqual([]);
+    expect(interrupts[0].prompt).toStartWith(`${STOP_ORDER}\n<channel `);
     expect(interrupts[0].prompt).toEndWith(">\n\n</channel>");
 
     append(assistantText("Finished", "end_turn", "q3"), closed);
