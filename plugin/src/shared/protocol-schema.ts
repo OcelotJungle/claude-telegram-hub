@@ -1,7 +1,7 @@
 // Runtime checks of the protocol messages, typed against protocol.ts: a
 // message type changed on one side and not here fails the type check.
 // protocol.ts itself has no value imports, so hooks can use it.
-import type { AskQuestion, EnableResult, HookBody, HubToPlugin, PluginToHub, QuestionBody, QuestionDecision, QueuedFile, TurnEndBody } from "./protocol.ts";
+import type { AskQuestion, EnableResult, HookBody, HubToPlugin, PluginToHub, QuestionBody, QuestionDecision, QueuedFile, TurnEndBody, TurnFailedBody } from "./protocol.ts";
 
 import { z } from "zod";
 import { entitySchema } from "./markdown.ts";
@@ -46,6 +46,7 @@ export const hubToPlugin: z.ZodType<HubToPlugin> = z.union([
   z.object({ type: z.literal("switchSession"), sessionId: z.string(), transcriptPath: z.string(), cwd: z.string() }),
   z.object({ type: z.literal("permissionReply"), requestId: z.string(), behavior: z.enum(["allow", "deny"]) }),
   z.object({ type: z.literal("turnEnd"), final: z.boolean(), kind: z.enum(["ask", "done"]).optional() }),
+  z.object({ type: z.literal("turnFailed") }),
   z.object({ type: z.literal("catchUp"), id: z.string() }),
   z.object({ type: z.literal("language"), language: z.enum(LANGUAGES) }),
 ]);
@@ -65,6 +66,11 @@ export const turnEndBody: z.ZodType<TurnEndBody> = z.object({
   session_id: z.string(),
   final: z.boolean(),
   kind: z.enum(["ask", "done"]).optional(),
+});
+
+export const turnFailedBody: z.ZodType<TurnFailedBody> = z.object({
+  messagingSocket: z.string(),
+  session_id: z.string(),
 });
 
 const askQuestion: z.ZodType<AskQuestion> = z.object({

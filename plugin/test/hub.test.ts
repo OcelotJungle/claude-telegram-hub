@@ -1616,6 +1616,18 @@ describe("hooks and transport", () => {
     expect(a.messages.some(m => m.type === "turnEnd")).toBe(false);
   });
 
+  test("a failed turn goes to the window with the same messaging socket; unknown window 404, bad body 400", async () => {
+    await startHub();
+    const a = await plugin("a", "pipe-A");
+    const b = await plugin("b", "pipe-B");
+    const post = (body: unknown) => fetch(`http://127.0.0.1:${port}/turn-failed`, { method: "POST", body: JSON.stringify(body) });
+    expect((await post({ messagingSocket: "pipe-B", session_id: "b" })).status).toBe(200);
+    expect(await b.next("turnFailed")).toEqual({ type: "turnFailed" });
+    expect(a.messages.some(m => m.type === "turnFailed")).toBe(false);
+    expect((await post({ messagingSocket: "pipe-X", session_id: "x" })).status).toBe(404);
+    expect((await post({ messagingSocket: "pipe-A" })).status).toBe(400);
+  });
+
   test("a turn-end decision for an unknown window is 404, a bad body is 400", async () => {
     await startHub();
     await plugin("a", "pipe-A");

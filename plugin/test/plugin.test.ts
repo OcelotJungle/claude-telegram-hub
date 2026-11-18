@@ -109,7 +109,15 @@ async function stopHook(final: boolean, kind?: ChimeKind) {
   expect(res.status).toBe(200);
 }
 
-const line = (o: object) => JSON.stringify(o) + "\n";
+async function stopFailureHook() {
+  const res = await fetch(`http://127.0.0.1:${port}/turn-failed`, {
+    method: "POST",
+    body: JSON.stringify({ messagingSocket: "pipe-1", session_id: SID }),
+  });
+  expect(res.status).toBe(200);
+}
+
+const line =(o: object) => JSON.stringify(o) + "\n";
 const append = (...recs: object[]) => appendFileSync(transcript, recs.map(line).join(""));
 let msgN = 0;
 const assistantText = (text: string, stop: "tool_use" | "end_turn" | "stop_sequence", id = `m${++msgN}`) => ({
@@ -844,6 +852,42 @@ describe("a turn ended by a failed connection to the API", () => {
     expect(sent()).toEqual([
       { text: "\u041f\u0440\u0430\u0432\u043b\u044e \u0442\u0435\u0441\u0442", silent: true, topic: 100 },
     ]);
+  });
+
+  // Claude Code 2.1.327: the connection broke mid-response, the error record
+  // came and no turn_duration after it; only the StopFailure hook ran.
+  test("a cut with no turn_duration ends on the StopFailure hook", async () => {
+    await enabledCore();
+    append(assistantText("\u041d\u0430\u0448\u0451\u043b \u043f\u0440\u0438\u0447\u0438\u043d\u0443", "end_turn", "r1"), apiError());
+    await flushed();
+    expect(channel).toEqual([]);
+    await stopFailureHook();
+    await waitFor(() => channel.length === 1, 3000, "continue prompt");
+    expect(channel[0]).toEqual({ content: CONTINUE_PROMPT, meta: { user: "telegram-hub", reason: "response_cut" } });
+    await waitFor(() => sent().length === 1, 3000, "relayed answer");
+    expect(sent()[0]?.text).toBe("\u041d\u0430\u0448\u0451\u043b \u043f\u0440\u0438\u0447\u0438\u043d\u0443");
+  });
+
+  test("the hook and a turn_duration closing one error continue it once, in either order", async () => {
+    await enabledCore();
+    append(...cut());
+    await waitFor(() => channel.length === 1, 3000, "continue after turn_duration");
+    await stopFailureHook();
+    append(apiError());
+    await flushed();
+    await stopFailureHook();
+    await waitFor(() => channel.length === 2, 3000, "continue after the hook");
+    append(closed);
+    await flushed();
+    expect(channel.length).toBe(2);
+  });
+
+  test("a StopFailure hook with no error record waiting does nothing", async () => {
+    await enabledCore();
+    append(assistantText("\u0413\u043e\u0442\u043e\u0432\u043e", "end_turn"), closed);
+    await stopFailureHook();
+    await flushed();
+    expect(channel).toEqual([]);
   });
 
   test("a request that never reached the API is continued too", async () => {

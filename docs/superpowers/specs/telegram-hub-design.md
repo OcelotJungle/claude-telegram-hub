@@ -241,10 +241,15 @@ one of these:
   Connection refused — a firewall or proxy may be blocking it…" — the request did not reach the API.
 Such a record is not yet the end of a turn. Claude Code also writes it when only the auto mode classifier's answer
 for a tool call was cut off (the call gets the result "classifier gave no verdict" and the turn goes
-on), and before it retries the request itself. The turn ended on it only if, right after it, before the
-next assistant record, there is a `system` record with `subtype: "turn_duration"` — this is how Claude Code closes
-a turn when its attempts have run out (checked against all available transcripts: closed turns and continued ones
-are told apart this way without exceptions). The error text is not the agent's and does not go to the topic. If the turn ended on a failure and the mode
+on), and before it retries the request itself. The turn ended on it only if, before the next assistant record,
+Claude Code closes the turn, by either of two signs, whichever comes first (the other is then ignored):
+- a `system` record with `subtype: "turn_duration"` right after the error — how older Claude Code versions closed such a turn;
+- its `StopFailure` hook (`src/hook/stop-failure.ts` → hub `/turn-failed` → `turnFailed` to the window), which runs
+  when a turn ends on an API error. Claude Code 2.1.327 writes `turn_duration` only after a turn that completed, so
+  after a cut the hook is the only sign (seen live: the response was cut, no `turn_duration` came, and without the
+  hook the turn stayed open: no continuation, the text before the error never reached the topic).
+A `StopFailure` with no error record waiting (a limit, an auth error) changes nothing. The error text is not the
+agent's and does not go to the topic. If the turn ended on a failure and the mode
 is on, the plugin continues for the human:
 - to the agent through the channel (`meta`: `user: telegram-hub`, `reason: response_cut`) — in English: "telegram-hub: your
   last turn ended with an API connection error (…), so your last response may be missing or
@@ -574,7 +579,9 @@ Automated tests (`bun test`):
 - input in the terminal, including in the middle of a turn, does not turn the mode off and agent text keeps going to the topic;
   `task-notification`, `channel` and `peer` prompts do not change the mode either;
 - a cut-off response: recognizing the record, the continuation and the note in the topic after the error text, silence with
-  the mode off, the limit of 10 in a row and the reset by a normal turn end, a cut-off before the window started.
+  the mode off, the limit of 10 in a row and the reset by a normal turn end, a cut-off before the window started; a cut
+  closed only by the `StopFailure` hook, one continuation when both the hook and `turn_duration` close it, a hook with
+  no error waiting does nothing.
 
 Manual check on a real group: two windows on different accounts; closing the window that started the hub;
 `--resume`; a reply into the topic of a closed session; input in the terminal does not turn the mode off, a message in the topic turns it on;

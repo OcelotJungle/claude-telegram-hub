@@ -30,6 +30,7 @@ const SRC_ALLOWED: Record<string, Allowed> = {
   "hook/question.ts": { count: 2, reason: "a hook process that is its own composition root: a deadline and a heartbeat" },
   "hook/session-start.ts": { count: 1, reason: "a hook process that is its own composition root: its deadline against a hung hub; no test drives it" },
   "hook/stop.ts": { count: 1, reason: "a hook process that is its own composition root: its deadline against a hung hub; no test drives it" },
+  "hook/stop-failure.ts": { count: 1, reason: "a hook process that is its own composition root: its deadline against a hung hub; no test drives it" },
   "plugin/main.ts": { count: 2, reason: "the plugin process entry: shutdown deadline and its interval" },
   "hub/cards.ts": { count: 1, reason: "file-name suffix of a corrupt file set aside, not timing" },
   "hub/exec-runs.ts": { count: 1, reason: "file-name suffix of a corrupt file set aside, not timing" },

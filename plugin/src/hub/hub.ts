@@ -33,7 +33,7 @@ import { catalogOf, DEFAULT_LANGUAGE } from "../shared/i18n/index.ts";
 import { literal, toTelegram } from "../shared/markdown.ts";
 import { albums, kindOf } from "../shared/media.ts";
 import { PROTOCOL_VERSION } from "../shared/protocol.ts";
-import { hookBody, pluginToHub, questionBody, sendFilesMessage, sendMessage, turnEndBody } from "../shared/protocol-schema.ts";
+import { hookBody, pluginToHub, questionBody, sendFilesMessage, sendMessage, turnEndBody, turnFailedBody } from "../shared/protocol-schema.ts";
 import { loadCards, saveCards } from "./cards.ts";
 import { loadPollOffset, savePollOffset } from "./poll-offset.ts";
 import { DEFAULT_CONFIG_DIR, defaultLoginAccount, isDefaultConfigDir } from "./default-account.ts";
@@ -581,6 +581,17 @@ export class Hub {
       if (!target) return new Response("no window", { status: 404 });
       this.log.info(`turn end of ${sessionId}: ${final ? `final ${kind ?? "done"}` : "intermediate"}`);
       this.send(target, { type: "turnEnd", final, ...(kind ? { kind } : {}) });
+      return new Response("ok");
+    }
+    if (url.pathname === "/turn-failed" && req.method === "POST") {
+      const body = turnFailedBody.safeParse(await req.json().catch(() => undefined));
+      if (!body.success) return new Response("bad turn-failed body", { status: 400 });
+      const { messagingSocket, session_id: sessionId } = body.data;
+      let target: WS | undefined;
+      for (const ws of this.conns) if (ws.data.windowKey === messagingSocket) target = ws;
+      if (!target) return new Response("no window", { status: 404 });
+      this.log.info(`turn of ${sessionId} ended on an API error`);
+      this.send(target, { type: "turnFailed" });
       return new Response("ok");
     }
     if (url.pathname === "/question" && req.method === "POST") {

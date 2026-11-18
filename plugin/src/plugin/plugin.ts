@@ -374,32 +374,35 @@ export class PluginCore {
     // The session's own answers tell a new model version as well.
     const answered = recordModel(rec);
     if (answered) this.versions.see(answered.model);
-    for (const ev of parseRecord(rec).flatMap(e => this.settleApiError(e))) {
-      this.flush(this.relay.feed(ev));
-      if (ev.kind === "terminal_input") this.lastInputAt = this.timers.now();
-      if (ev.kind === "unknown_thinking" && !this.reportedKinds.has(ev.blockKind)) {
-        this.reportedKinds.add(ev.blockKind);
-        this.log.warn(`transcript: thinking block of unknown kind "${ev.blockKind}" with text — not relayed; the transcript format may have changed`);
-      } else if (ev.kind === "title") {
-        const before = effectiveTitle(this.titles);
-        this.titles[ev.source] = ev.title;
-        const after = effectiveTitle(this.titles);
-        if (after && after !== before) this.client.send({ type: "title", title: after });
-      } else if (ev.kind === "task_status") {
-        this.subagents?.taskStatus(ev.taskId, ev.status);
-      } else if (ev.kind === "channel_seen") {
-        this.client.send({ type: "seen", messageIds: ev.messageIds });
-      } else if (ev.kind === "turn_end") {
-        if (ev.cut) this.responseCut();
-        else this.cuts = 0;
-      }
-      const busy = busyAfter(ev);
-      if (busy !== undefined) this.setBusy(busy);
+    for (const ev of parseRecord(rec).flatMap(e => this.settleApiError(e))) this.handle(ev);
+  }
+
+  private handle(ev: TranscriptEvent): void {
+    this.flush(this.relay.feed(ev));
+    if (ev.kind === "terminal_input") this.lastInputAt = this.timers.now();
+    if (ev.kind === "unknown_thinking" && !this.reportedKinds.has(ev.blockKind)) {
+      this.reportedKinds.add(ev.blockKind);
+      this.log.warn(`transcript: thinking block of unknown kind "${ev.blockKind}" with text — not relayed; the transcript format may have changed`);
+    } else if (ev.kind === "title") {
+      const before = effectiveTitle(this.titles);
+      this.titles[ev.source] = ev.title;
+      const after = effectiveTitle(this.titles);
+      if (after && after !== before) this.client.send({ type: "title", title: after });
+    } else if (ev.kind === "task_status") {
+      this.subagents?.taskStatus(ev.taskId, ev.status);
+    } else if (ev.kind === "channel_seen") {
+      this.client.send({ type: "seen", messageIds: ev.messageIds });
+    } else if (ev.kind === "turn_end") {
+      if (ev.cut) this.responseCut();
+      else this.cuts = 0;
     }
+    const busy = busyAfter(ev);
+    if (busy !== undefined) this.setBusy(busy);
   }
 
   // An API error record ends the turn, cut, only if Claude Code closes the
-  // turn before the agent goes on.
+  // turn before the agent goes on: by a turn_duration record, or by the
+  // StopFailure hook (onTurnFailed), whichever comes first.
   private settleApiError(ev: TranscriptEvent): TranscriptEvent[] {
     if (ev.kind === "api_error") {
       this.apiError = ev.messageId;
@@ -440,6 +443,18 @@ export class PluginCore {
       }
       this.opts.emitChannel(stop ? STOP_ORDER : content, meta);
     });
+  }
+
+  // The StopFailure hook: the turn ended on an API error. Claude Code writes
+  // no turn_duration after such a turn, so this closes a pending error. The
+  // transcript is read first: the hook may come before the tailer has seen
+  // the error record.
+  private onTurnFailed(): void {
+    this.tailer?.pollNow();
+    const pending = this.apiError;
+    if (pending === undefined) return;
+    this.apiError = undefined;
+    this.handle({ kind: "turn_end", messageId: pending, cut: true });
   }
 
   private responseCut(): void {
@@ -510,6 +525,9 @@ export class PluginCore {
         return;
       case "turnEnd":
         this.onTurnEnd(m.final, m.kind);
+        return;
+      case "turnFailed":
+        this.onTurnFailed();
         return;
       // A question is coming: the text before it goes first, as with files.
       case "catchUp":

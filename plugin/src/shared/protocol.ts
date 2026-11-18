@@ -66,6 +66,8 @@ export type HubToPlugin =
   | { type: "permissionReply"; requestId: string; behavior: PermissionBehavior }
   // The Stop hook's decision on how the turn ended; kind only when final.
   | { type: "turnEnd"; final: boolean; kind?: TurnEndKind }
+  // The StopFailure hook: Claude Code ended the turn on an API error.
+  | { type: "turnFailed" }
   // The hub is about to show a question: relay the text the agent wrote
   // before the tool call, then answer caughtUp with the same id.
   | { type: "catchUp"; id: string }
@@ -82,6 +84,12 @@ export type TurnEndBody = {
   session_id: string;
   final: boolean;
   kind?: TurnEndKind;
+};
+
+// Body the StopFailure hook POSTs to /turn-failed.
+export type TurnFailedBody = {
+  messagingSocket: string;
+  session_id: string;
 };
 
 // One question of an AskUserQuestion call, as the tool input carries it.

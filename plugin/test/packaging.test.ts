@@ -14,7 +14,8 @@ const PLUGIN = resolve(import.meta.dir, "..");
 const REPO = resolve(PLUGIN, "..");
 const HOOK = join(PLUGIN, "src", "hook", "session-start.ts");
 const STOP_HOOK = join(PLUGIN, "src", "hook", "stop.ts");
-const QUESTION_HOOK = join(PLUGIN, "src", "hook", "question.ts");
+const STOP_FAILURE_HOOK = join(PLUGIN, "src", "hook", "stop-failure.ts");
+const QUESTION_HOOK =join(PLUGIN, "src", "hook", "question.ts");
 const SLOW_READER_MS = 500;
 const TEST_DEADLINE_MS = 300;
 const MS_PER_SECOND = 1000;
@@ -127,6 +128,25 @@ describe("Stop hook", () => {
     }
     await waitFor(() => chimes().length > 0, 5000, "chime");
     expect(chimes()).toEqual(["done"]);
+  });
+
+  test("the StopFailure hook tells the window its turn ended on an API error", async () => {
+    const dir = tempDir();
+    hub = new Hub({ port: 0, sessionsFile: join(dir, "s.json"), outboxFile: join(dir, "o.json"), filesDir: join(dir, "files"), inboxDir: dir, api: undefined, config: () => ({ allowFrom: [], turnEndChime: "" }), idleMs: 60_000, log: memLogger(), onExit() {} });
+    hub.start();
+    const port = hub.port;
+    const c = await wsClient(port, { type: "hello", v: PROTOCOL_VERSION, windowKey: "pipe-F", sessionId: "s", cwd: "C:\\p" });
+    clients.push(c);
+    const input = { session_id: "s", hook_event_name: "StopFailure", error: "server_error", last_assistant_message: "API Error: Connection lost mid-response." };
+    const proc = Bun.spawn([process.execPath, STOP_FAILURE_HOOK], {
+      stdin: new Blob([JSON.stringify(input)]),
+      stdout: "pipe",
+      env: { ...process.env, TELEGRAM_HUB_PORT: String(port), CLAUDE_CODE_MESSAGING_SOCKET: "pipe-F" },
+      windowsHide: true,
+    });
+    expect(await new Response(proc.stdout).text()).toBe("");
+    expect(await proc.exited).toBe(0);
+    expect(await c.next("turnFailed")).toEqual({ type: "turnFailed" });
   });
 
   test("with no hub a final turn plays the chime itself, an intermediate one does not", async () => {
@@ -366,6 +386,8 @@ describe("plugin packaging", () => {
     expect(existsSync(HOOK)).toBe(true);
     expect(hooks.hooks.Stop[0].hooks[0].command).toContain("src/hook/stop.ts");
     expect(existsSync(STOP_HOOK)).toBe(true);
+    expect(hooks.hooks.StopFailure[0].hooks[0].command).toContain("src/hook/stop-failure.ts");
+    expect(existsSync(STOP_FAILURE_HOOK)).toBe(true);
     // The questions hook waits as long as a poll may stay open: 24 hours.
     const question = hooks.hooks.PreToolUse[0];
     expect(question.matcher).toBe("AskUserQuestion");
