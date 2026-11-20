@@ -85,6 +85,8 @@ const RIG_PID = 4242;
 // The lines rig prints on stderr when a session command starts waiting for the session, and when it runs after that.
 const WAITING_LINE = JSON.stringify({ progress: { code: "session-waiting" } });
 const RUNNING_LINE = JSON.stringify({ progress: { code: "session-running" } });
+const COMPACTING_LINE = JSON.stringify({ progress: { code: "session-compacting" } });
+const TERMINATING_LINE = JSON.stringify({ progress: { code: "session-terminating" } });
 // How long the hub waits for the window of a session rig has started.
 const CONNECT_WAIT_MS = 90_000;
 // Several times the longest wait the hub has (the 90 s start wait): a window that stays open this long after a stop still gets no held item.
@@ -2250,6 +2252,15 @@ describe("session commands", () => {
     await waitFor(() => edits().includes(en.sessionNotRunning), WAIT_MS, "the notice");
   });
 
+  test("a stop interrupted during compaction reports the ended session and the compaction warning", async () => {
+    rig.answer("stop", rigOk({ session: SID, stopped: false, reason: "not-running", compacted: { error: "the model refused" } }));
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/stop"));
+    const warning = await startedAs(`${en.sessionEnded}\n${en.compactFailed({ error: "the model refused" })}`);
+    expect(warning.disable_notification).toBe(false);
+  });
+
   test("a cleanup that removed skills says how many", async () => {
     rig.answer("cleanup", rigOk({ session: SID, compacted: { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER }, backup: "backup.jsonl", skillsRemoved: 3 }));
     await start();
@@ -2283,6 +2294,50 @@ describe("session commands", () => {
     await clock.advance(1);
     await startedAs(en.rigTimeout({ seconds: RIG_SESSION_LIMIT_MS / MS_PER_S }));
     expect(seen?.aborted).toBe(true);
+  });
+
+  test("a stop shows compaction, waiting, running and termination in order before its outcome", async () => {
+    const stepped = steppedAnswer(rigOk({ session: SID, stopped: true, compacted: { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER } }));
+    rig.answer("stop", stepped.answer);
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/stop"));
+    await startedAs(en.stopRunning);
+    const startId = fake.lastMessageId;
+    await waitFor(() => callsOf("stop").length === 1, WAIT_MS, "the call");
+    const states = [
+      { line: COMPACTING_LINE, text: en.sessionCompacting },
+      { line: WAITING_LINE, text: en.sessionWaiting },
+      { line: RUNNING_LINE, text: en.stopRunning },
+      { line: TERMINATING_LINE, text: en.sessionTerminating },
+    ];
+    for (const [index, state] of states.entries()) {
+      stepped.print(state.line);
+      await waitFor(() => edits().length === index + 1, WAIT_MS, `edit ${index + 1}`);
+    }
+    stepped.release();
+    const done = `${en.sessionEnded}\n${en.compactDoneTokens({ before: "120k", after: "30k" })}`;
+    await waitFor(() => edits().includes(done), WAIT_MS, "the outcome");
+    expect(fake.callsOf("editMessageText")).toEqual([...states.map(state => state.text), done].map(text => ({ chat_id: GROUP, message_id: startId, text })));
+  });
+
+  test("a cleanup shows compaction and termination before its outcome", async () => {
+    const stepped = steppedAnswer(rigOk({ session: SID, compacted: { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER }, backup: "backup", skillsRemoved: 0 }));
+    rig.answer("cleanup", stepped.answer);
+    await start();
+    await enabled(SID);
+    fake.pushUpdate(msg("/cleanup"));
+    await startedAs(en.cleanupRunning);
+    const startId = fake.lastMessageId;
+    await waitFor(() => callsOf("cleanup").length === 1, WAIT_MS, "the call");
+    stepped.print(COMPACTING_LINE);
+    await waitFor(() => edits().length === 1, WAIT_MS, "compacting edit");
+    stepped.print(TERMINATING_LINE);
+    await waitFor(() => edits().length === 2, WAIT_MS, "terminating edit");
+    stepped.release();
+    const done = en.cleanupDone({ before: "120k", after: "30k" });
+    await waitFor(() => edits().includes(done), WAIT_MS, "the outcome");
+    expect(fake.callsOf("editMessageText")).toEqual([en.sessionCompacting, en.sessionTerminating, done].map(text => ({ chat_id: GROUP, message_id: startId, text })));
   });
 
   test("while rig waits for the turn to end the running message says so, once", async () => {

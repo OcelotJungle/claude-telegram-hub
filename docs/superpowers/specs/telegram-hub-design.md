@@ -379,7 +379,10 @@ the sound of the results and the `/cleanup` texts are in `cleanup-design.md`. `/
   "🏷 Renaming…", "⏹ Ending the session…", "🧹 Cleanup is running…". When rig reports
   `{"progress":{"code":"session-waiting"}}` on stderr (the request waits behind a turn or an earlier request of the
   window) the message shows "⏳ Waiting for the session to be free…"; `{"progress":{"code":"session-running"}}` (it runs
-  after that wait) puts the running text back. Rig reports each change once, nothing for a request that runs at once. Success edits the message into the result ("✅ Compaction done: <before> → <after> tokens.",
+  after that wait) puts the running text back. For `/stop` and `/cleanup`, `session-compacting` shows "🗜 Compacting before the session ends…"
+  before requesting compaction and `session-terminating` shows "⏹ Ending the session's process…" before the first kill.
+  A compacting stop can report waiting and running between those states; a stop below the threshold or one intercepting
+  an ending reports only termination, and a stop with nothing to kill reports neither. Success edits the message into the result ("✅ Compaction done: <before> → <after> tokens.",
   "✅ Renamed: <name>", "⏹ Session ended" with the outcome of the compaction, the cleanup result). A rig error
   deletes the running message and sends rig's own `message` as a new loud one. `session-no-module` (the window has no rig
   module) adds the restart hint; the other codes (`session-ended`, `session-unknown`, `session-timeout`,
@@ -393,8 +396,11 @@ the sound of the results and the `/cleanup` texts are in `cleanup-design.md`. `/
 - `/rename <name>`: the name is trimmed and its spaces collapsed; without a name — "Write the name: /rename new name"
   and no call. The topic changes its name when Claude Code writes the new name into the transcript — by the same path
   as any session name change (`retitle`).
-- `/stop` of a session rig finds not running: "Session is not running"; what the hub kept for it is released like a
-  new message (the session is not being ended).
+- A second `/stop` makes the same `rig session stop` call; when an ending is already running, rig ends the session at
+  once without compaction. A stop that finds the session not running says "Session is not running" unless its result
+  includes compaction: that means another stop ended the session during its compaction, so it shows "⏹ Session ended"
+  and the compaction outcome, with the outcome's notification kind. When no concurrent ending stopped the session,
+  what the hub kept for a not-running result is released like a new message.
 - **Holding while a session is being stopped, cleaned, switched or started.** One mechanism serves `/stop`, `/cleanup`,
   `/mode` (and the mode buttons) and `/run`, and every autolaunch (a message, `/cleanup`, an exec result), because all of
   them are a `rig session …` call. From the moment the call starts, whatever arrives for the session is held, in order of
@@ -422,10 +428,10 @@ the sound of the results and the `/cleanup` texts are in `cleanup-design.md`. `/
   that changed nothing (`changed: false`) and `/stop` that found nothing running. An open decision: whether a refused stop
   with the window open should keep the items for the next start instead.
 - A button press that is stale (its message no longer current), malformed or from a user who is not authorised never
-  reaches `rig session stop|run|mode`: it is answered and ignored. A second `/run`, `/mode`, a mode button or `/stop` while
-  one of these actions is in progress answers "Session is already starting" (a start or a mode change) or "Session is
-  being stopped or cleaned up" (a stop or a cleanup) and makes no second call; none of them waits behind the action. `/compact` and
-  `/rename` do not hold.
+  reaches `rig session stop|run|mode`: it is answered and ignored. `/run`, `/mode` and a mode button while an action is
+  in progress answer "Session is already starting" (a start or a mode change) or "Session is being stopped or cleaned up"
+  (a stop or a cleanup) and make no second call. `/stop` and `/cleanup` each make their own rig call while another action
+  is in progress; rig reports `session-ending` if cleanup arrives during an ending. `/compact` and `/rename` do not hold.
 - `/info` draws what `rig info --session <id>` returns (`InfoData`: `session`, `account`, `claude`, optional `codex`,
   optional `volunteers`, `context`; the type is in `plugin/src/shared/info-data.ts`) through `infoText`
   (`plugin/src/hub/info-text.ts`); the hub collects no limits itself. The id must be a plain id, `[A-Za-z0-9-]`, up to

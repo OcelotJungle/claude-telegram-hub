@@ -2106,9 +2106,8 @@ ${msg.text}`);
     }
   }
 
-  // One start message that the result replaces in place: "running…" while rig works, "waiting" while rig reports the
-  // request waits for the session, "running…" again once it runs, then the outcome. A rig failure is shown as rig
-  // worded it.
+  // One start message follows rig's waiting, running, compacting and terminating progress, then shows the outcome.
+  // A rig failure is shown as rig worded it.
   private sessionAction<T>(
     sessionId: string,
     startText: string,
@@ -2121,8 +2120,11 @@ ${msg.text}`);
     this.enqueue(sessionId, `cmd-${startId}`, startText, notifies("info"), true, undefined, true);
     // Each change is its own queued edit: the outbox takes a source id once.
     let changes = 0;
-    const progress = (state: SessionProgress) => this.enqueue(sessionId, `cmd-${id}.progress-${++changes}`,
-      state === "waiting" ? this.m().sessionWaiting : startText, false, true, { id: startId, kind: "progress" });
+    const progress = (state: SessionProgress) => {
+      const m = this.m();
+      const text = { waiting: m.sessionWaiting, running: startText, compacting: m.sessionCompacting, terminating: m.sessionTerminating }[state];
+      this.enqueue(sessionId, `cmd-${id}.progress-${++changes}`, text, false, true, { id: startId, kind: "progress" });
+    };
     this.spawn(call(progress).then(result => {
       settle?.(result);
       const m = this.m();
@@ -2884,7 +2886,7 @@ ${msg.text}`);
   }
 
   // A start whose rig request waits for the session (a turn of the window it restarts) says so in a notice of its
-  // own, taken away once rig reports the request runs.
+  // own, taken away once rig reports any subsequent non-waiting state.
   private launchProgress(sessionId: string): (state: SessionProgress) => void {
     let waiting: string | undefined;
     return state => {

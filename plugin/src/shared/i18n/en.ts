@@ -140,6 +140,8 @@ export const en = {
   renameDone: ({ name }: { name: string }) => `✅ Renamed: ${name}`,
   cleanupRunning: "🧹 Cleanup is running…",
   stopRunning: "⏹ Ending the session…",
+  sessionCompacting: "🗜 Compacting before the session ends…",
+  sessionTerminating: "⏹ Ending the session's process…",
   limitFiveHour: "5 hours",
   limitSevenDay: "Week",
   infoClaudeNoData: "Claude limits: no data, they appear after the model's first reply",

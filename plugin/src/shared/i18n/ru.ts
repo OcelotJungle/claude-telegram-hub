@@ -129,6 +129,8 @@ export const ru: Messages = {
   renameDone: ({ name }) => `✅ Переименовано: ${name}`,
   cleanupRunning: "🧹 Уборка выполняется…",
   stopRunning: "⏹ Завершаю сессию…",
+  sessionCompacting: "🗜 Компакт перед завершением…",
+  sessionTerminating: "⏹ Закрываю процесс сессии…",
   limitFiveHour: "5 часов",
   limitSevenDay: "Неделя",
   infoClaudeNoData: "Лимиты Claude: нет данных — появятся после первого ответа модели",

@@ -38,10 +38,10 @@ export function cleanupOutcome(value: RigCleanup, m: Messages): SessionOutcome {
   return { text: value.skillsRemoved > 0 ? m.cleanupDoneSkills({ ...sizes, skills: value.skillsRemoved }) : m.cleanupDone(sizes), kind: "info" };
 }
 
-// A stop that found nothing running says so; one that stopped the session adds how its compaction ended.
+// A stop reports its compaction even when another stop ended the session while it was compacting.
 export function stopOutcome(value: RigStop, m: Messages): SessionOutcome {
-  if (!value.stopped) return { text: m.sessionNotRunning, kind: "info" };
-  if (value.compacted === null) return { text: m.sessionEnded, kind: "info" };
+  if (!value.stopped && value.compacted === undefined) return { text: m.sessionNotRunning, kind: "info" };
+  if (value.compacted === null || value.compacted === undefined) return { text: m.sessionEnded, kind: "info" };
   const compacted = compactedLine(value.compacted, m);
   return { text: `${m.sessionEnded}\n${compacted.text}`, kind: compacted.kind };
 }

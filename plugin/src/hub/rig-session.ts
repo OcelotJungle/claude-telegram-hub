@@ -19,7 +19,7 @@ export const rigCompactSchema = z.union([z.strictObject({ session, ...tokens }),
 export const rigRenameSchema = z.strictObject({ session, name: z.string() });
 export const rigAutocompactSchema = z.strictObject({ session, window: z.union([z.number().int().positive(), z.literal("auto")]), text: z.string().optional() });
 export const rigStopSchema = z.union([
-  z.strictObject({ session, stopped: z.literal(false), reason: z.literal("not-running") }),
+  z.strictObject({ session, stopped: z.literal(false), reason: z.literal("not-running"), compacted: z.union([compacted, skipped, compactError]).optional() }),
   z.strictObject({ session, stopped: z.literal(true), compacted: z.union([compacted, skipped, compactError]).nullable() }),
 ]);
 export const rigCleanupSchema = z.strictObject({ session, compacted, backup: z.string(), skillsRemoved: z.number().int().nonnegative() });
@@ -43,10 +43,9 @@ export function isPermissionMode(value: unknown): value is PermissionMode {
   return modeSchema.safeParse(value).success;
 }
 
-// Where a request to a session's window stands, as rig (0.7.6 and later) reports it on each change: waiting behind a
-// running turn or an earlier request, or running after such a wait. A request that runs at once reports nothing.
-const SESSION_PROGRESS = { "session-waiting": "waiting", "session-running": "running" } as const;
-const sessionProgressSchema = z.object({ progress: z.object({ code: z.enum(["session-waiting", "session-running"]) }) });
+// Rig reports window requests waiting and running, and stop or cleanup beginning compaction and termination.
+const SESSION_PROGRESS = { "session-waiting": "waiting", "session-running": "running", "session-compacting": "compacting", "session-terminating": "terminating" } as const;
+const sessionProgressSchema = z.object({ progress: z.object({ code: z.enum(["session-waiting", "session-running", "session-compacting", "session-terminating"]) }) });
 
 export type SessionProgress = (typeof SESSION_PROGRESS)[keyof typeof SESSION_PROGRESS];
 
